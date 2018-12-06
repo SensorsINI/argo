@@ -1,5 +1,6 @@
 #include "ros/ros.h"
 #include "std_msgs/String.h"
+#include "std_msgs/Float64MultiArray.h"
 
 #include <sstream>
 #include "RTIMULib.h"
@@ -11,11 +12,13 @@ int main(int argc, char **argv)
 	/*
 	*for initializing and setting up ROS
 	*/
-	ros::init(argc, argv, "imu_data");
+	ros::init(argc, argv, "imu");
 	ros::NodeHandle n;
-	ros::Publisher chatter_pub = n.advertise<std_msgs::String>("imu_data", 1000);
+	ros::Publisher pose = n.advertise<std_msgs::String>("pose", 1000);
+	ros::Publisher acceleration = n.advertise<std_msgs::Float64MultiArray>("acceleration", 1000);
+	ros::Publisher compass = n.advertise<std_msgs::Float64MultiArray>("compass", 1000);
 	ros::Rate loop_rate(10);
-	
+
 	/*
 	*for IMU
 	*/
@@ -58,6 +61,10 @@ int main(int argc, char **argv)
 
     	rateTimer = displayTimer = RTMath::currentUSecsSinceEpoch();
 
+	std_msgs::String pose_data;
+	std_msgs::Float64MultiArray acceleration_data;
+	std_msgs::Float64MultiArray compass_data;
+
 	while (ros::ok())
 	{
 
@@ -74,11 +81,20 @@ int main(int argc, char **argv)
             		//  display 10 times per second
 
             		if ((now - displayTimer) > 100000) {
+
                 		ROS_INFO("Sample rate %d\n", sampleRate); //Sample rate
                 		ROS_INFO("Pose: %s\n", RTMath::displayDegrees("", imuData.fusionPose)); //pose
                 		ROS_INFO("Acceleration: %f, %f, %f\n", imuData.accel.x(), imuData.accel.y(), imuData.accel.z()); //acceleration
                 		ROS_INFO("Compass: %f, %f, %f\r", imuData.compass.x(), imuData.compass.y(), imuData.compass.z()); //compass
 				//ROS_INFO("Pose from accel and mag: %s\n", RTMath::displayDegrees("", RTMath::poseFromAccelMag(imuData.accel,imuData.compass)));
+
+				pose_data.data=RTMath::displayDegrees("",imuData.fusionPose);
+				acceleration_data.data={imuData.accel.x(),imuData.accel.y(),imuData.accel.z()};
+				compass_data.data={imuData.compass.x(), imuData.compass.y(), imuData.compass.z()};
+
+				pose.publish(pose_data);
+				acceleration.publish(acceleration_data);
+				compass.publish(compass_data);
 
                 		displayTimer = now;
             		}
@@ -99,7 +115,7 @@ int main(int argc, char **argv)
 
     		//ROS_INFO("%s", msg.data.c_str());
 		//chatter_pub.publish(msg);
-		 
+
     		ros::spinOnce();
 
     		loop_rate.sleep();
