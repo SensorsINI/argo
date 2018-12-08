@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import rospy
-from std_msgs.msg import Float32
+from std_msgs.msg import Float64
 import serial
 import RPi.GPIO as GPIO
 import time
@@ -10,11 +10,12 @@ import numpy as np
 def getTimex():
 	return time.time()
 
-pub = rospy.Publisher('pwm_data', Float32, queue_size=10)
+channel1 = rospy.Publisher('pwm_data1', Float64, queue_size=10)
+channel2 = rospy.Publisher('pwm_data2', Float64, queue_size=10)
 rospy.init_node('pwm', anonymous=True)
 rate = rospy.Rate(3) # 3hz
 
-inPINS=[18,23,24,25] #pinnumbers that are used(BCM nameingconvention)
+inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
 smoothingWindowLength=4
 
 
@@ -38,10 +39,10 @@ def my_callback1(channel):
 
 
 
-GPIO.add_event_detect(inPINS[0], GPIO.BOTH, callback=my_callback1)
-GPIO.add_event_detect(inPINS[1], GPIO.BOTH, callback=my_callback1)
-GPIO.add_event_detect(inPINS[2], GPIO.BOTH, callback=my_callback1)
-GPIO.add_event_detect(inPINS[3], GPIO.BOTH, callback=my_callback1)
+GPIO.add_event_detect(inPINS[0], GPIO.BOTH, callback=my_callback1)	#channel 1
+GPIO.add_event_detect(inPINS[1], GPIO.BOTH, callback=my_callback1)	#channel 2
+#GPIO.add_event_detect(inPINS[2], GPIO.BOTH, callback=my_callback1)	#channel 3
+#GPIO.add_event_detect(inPINS[3], GPIO.BOTH, callback=my_callback1)	#channel 4
 
 rospy.loginfo("Initialization completed")
 
@@ -49,19 +50,23 @@ def pwm():
 	try:
 		while not rospy.is_shutdown():
 
-			ovl1 = deltaTimes[0][-smoothingWindowLength:] # output first pin PWM
-			ov1 = sorted(ovl1)[len(ovl1) // 2] #ov = np.mean(ovl)
+			ovl1 = deltaTimes[0][-smoothingWindowLength:]
+			ov1 = sorted(ovl1)[len(ovl1) // 2]
+
 			ovl2 = deltaTimes[1][-smoothingWindowLength:]
 			ov2 = sorted(ovl2)[len(ovl2) // 2]
-			ovl3 = deltaTimes[2][-smoothingWindowLength:]
-			ov3 = sorted(ovl3)[len(ovl3) // 2]
-			ovl4 = deltaTimes[3][-smoothingWindowLength:]
-			ov4 = sorted(ovl4)[len(ovl4) // 2]
-        		#print('channel1:',ov1,' channel2:',ov2,'channel3:',ov3,'channel4:',ov4)
+
+			#ovl3 = deltaTimes[2][-smoothingWindowLength:]
+			#ov3 = sorted(ovl3)[len(ovl3) // 2]
+
+			#ovl4 = deltaTimes[3][-smoothingWindowLength:]
+			#ov4 = sorted(ovl4)[len(ovl4) // 2]
 			time.sleep(0.1)
-        		#data=serialport.readline()
-			rospy.loginfo("channel1: %f, channel2: %f, channel3: %f, channel4: %f",ov1,ov2,ov3,ov4)
-			pub.publish(ov1)
+			rospy.loginfo("channel1: %f, channel2: %f",ov1,ov2)
+
+			channel1.publish(ov1)
+			channel2.publish(ov2)
+
 			rate.sleep()
 	except KeyboardInterrupt:
 		GPIO.cleanup()
