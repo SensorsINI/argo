@@ -1,0 +1,7 @@
+<launch>
+
+	<node name="pwm" pkg="SAIL" type="pwm.py" output="screen" />
+	<node name="gps" pkg="SAIL" type="gps.py" output="screen" />
+	<node name="imu" pkg="SAIL" type="imu" output="screen" />
+
+</launch>
