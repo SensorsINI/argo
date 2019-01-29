@@ -197,7 +197,7 @@ include_directories(
 
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
-add_executable(imu src/imu.cpp)
+add_executable(imu src/RTEllipsoidFit/imu.cpp)
 add_library(RTMath src/RTMath.cpp)
 add_library(RTIMUSettings src/RTIMUSettings.cpp)
 add_library(RTIMU src/RTIMU.cpp)
