@@ -1,4 +1,4 @@
-# SAIL
+# argo (formerly called SAIL)
 
 Autonomous sail boat
 
