@@ -47,18 +47,18 @@ channel2 = rospy.Publisher('anem_data3', Float64, queue_size=10)
 rospy.init_node('anem', anonymous=True)
 rate = rospy.Rate(3) # 3hz
 
-rospy.loginfo 'Opening i2c SMBus'
+rospy.loginfo('Opening i2c SMBus')
 bus=smbus.SMBus(1) #The default i2c bus
 i2cAddr=(0x21,0x22,0x23)
 
-rospy.loginfo 'Stopping existing continuous measurements'
+rospy.loginfo('Stopping existing continuous measurements')
 for a in i2cAddr:
     bus.write_i2c_block_data(a, 0x3F, [0xF9]) #Stop any cont measurement of the sensor
 
 time.sleep(0.8)
 
 #Start Continuous Measurement (5.3.1 in Data sheet)
-rospy.loginfo 'Starting continuous measurement (5.3.1 in Data sheet)'
+rospy.loginfo('Starting continuous measurement (5.3.1 in Data sheet)')
 
 ##Command code (Hex)        Temperature compensation            Averaging
 ##0x3603                    Mass flow                           Average  till read
