@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 #Reading the Sensirion SDP32 sensor
 #Dev by JJ SlabbertSDP810_example / modified by tobi
 #Code tested with Python 2.7
@@ -5,6 +7,8 @@
 #Check the datasheet at https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/0_Datasheets/Differential_Pressure/Sensirion_Differential_Pressure_Sensors_SDP8xx_Digital_Datasheet.pdf
 #The sensor i2c address is 0x21 to 0x23 (Not user Programable).
 
+import rospy
+from std_msgs.msg import Float64
 import smbus
 import time
 #import numpy as np
@@ -37,18 +41,24 @@ def windspeedFromDiffPressure(dp) :
 
 #np.set_printoptions(precision=4)
 
-print 'opening i2c SMBus'
+channel1 = rospy.Publisher('anem_data1', Float64, queue_size=10)
+channel2 = rospy.Publisher('anem_data2', Float64, queue_size=10)
+channel2 = rospy.Publisher('anem_data3', Float64, queue_size=10)
+rospy.init_node('anem', anonymous=True)
+rate = rospy.Rate(3) # 3hz
+
+rospy.loginfo 'Opening i2c SMBus'
 bus=smbus.SMBus(1) #The default i2c bus
 i2cAddr=(0x21,0x22,0x23)
 
-print 'stopping existing continuous measurements'
+rospy.loginfo 'Stopping existing continuous measurements'
 for a in i2cAddr:
     bus.write_i2c_block_data(a, 0x3F, [0xF9]) #Stop any cont measurement of the sensor
 
 time.sleep(0.8)
 
 #Start Continuous Measurement (5.3.1 in Data sheet)
-print 'starting continuous measurement (5.3.1 in Data sheet)'
+rospy.loginfo 'Starting continuous measurement (5.3.1 in Data sheet)'
 
 ##Command code (Hex)        Temperature compensation            Averaging
 ##0x3603                    Mass flow                           Average  till read
@@ -61,14 +71,29 @@ for a in i2cAddr:
 
 time.sleep(.1)
 
-dp=list()
-while True:
-    i=0
-    del dp[:]
-    for a in i2cAddr:
-        b=bus.read_i2c_block_data(a,0,9)
-	v=int_from_bytes([b[0],b[1]])
-	#print(b,v)
+rospy.loginfo("Initialization completed")
+
+
+def anem():
+    dp=list()
+    try:
+        i=0
+        del dp[:]
+        for a in i2cAddr:
+            b=bus.read_i2c_block_data(a,0,9)
+    	v=int_from_bytes([b[0],b[1]])
+    	#print(b,v)
         dp.append(v/240.)
-    print [" %8.4f" % v for v in dp]
-    time.sleep(.1)
+        rospy.loginfo("ch1: %f, ch2: %f, ch3: %f",dp(0),dp(1),dp(2))
+        # print [" %8.4f" % v for v in dp]
+        channel1.publish(dp(0))
+        channel2.publish(dp(1))
+        channel3.publish(dp(2))
+    except KeyboardInterrupt:
+        GPIO.cleanup()
+
+if __name__ == '__main__':
+    try:
+        anem()
+    except rospy.ROSInterruptException:
+        pass
