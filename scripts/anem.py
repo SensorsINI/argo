@@ -83,7 +83,7 @@ def anem():
                 b=bus.read_i2c_block_data(a,0,9)
                 v=int_from_bytes([b[0],b[1]])
                 dp.append(v/240.)
-            rospy.loginfo("ch1: %f, ch2: %f, ch3: %f",dp[0],dp[1],dp[2])
+            rospy.loginfo("Anemometer: ch1: %.4f, ch2: %.4f, ch3: %.4f",dp[0],dp[1],dp[2])
             # print [" %8.4f" % v for v in dp]
             channel1.publish(dp[0])
             channel2.publish(dp[1])
