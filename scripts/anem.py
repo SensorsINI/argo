@@ -5,10 +5,11 @@
 #Code tested with Python 2.7
 #Run sudo i2cdetect -y 1 in the terminal, to see if the sensor is connected. it will show address 25
 #Check the datasheet at https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/0_Datasheets/Differential_Pressure/Sensirion_Differential_Pressure_Sensors_SDP8xx_Digital_Datasheet.pdf
-#The sensor i2c address is 0x21 to 0x23 (Not user Programable).
+#The sensor i2c address is 0x21 to 0x23 (Not user programable).
 
 import rospy
-from std_msgs.msg import Float64
+#import roslib
+from  geometry_msgs.msg import Vector3
 import smbus
 import time
 #import numpy as np
@@ -37,29 +38,28 @@ def windspeedFromDiffPressure(dp) :
     rho=1.1289 # density at calib pressure
     p0=966 # mbar calib pressure
     t0=298.15 # calib temperature
+    # to be completed, just started now.... need to work from datasheet
  
 def anem():
 
     #np.set_printoptions(precision=4)
 
-    channel1 = rospy.Publisher('anem_data1', Float64, queue_size=10)
-    channel2 = rospy.Publisher('anem_data2', Float64, queue_size=10)
-    channel3 = rospy.Publisher('anem_data3', Float64, queue_size=10)
+    publisher = rospy.Publisher('anem_diffpressures', Vector3, queue_size=10)
     rospy.init_node('anem', anonymous=True)
-    rate = rospy.Rate(3) # 3hz
+    rate = rospy.Rate(10) # 3hz
 
-    rospy.loginfo('Opening i2c SMBus')
+    rospy.loginfo('anem: Opening i2c SMBus')
     bus=smbus.SMBus(1) #The default i2c bus
     i2cAddr=(0x21,0x22,0x23)
 
-    rospy.loginfo('Stopping existing continuous measurements')
+    rospy.loginfo('anem: Stopping existing continuous measurements')
     for a in i2cAddr:
         bus.write_i2c_block_data(a, 0x3F, [0xF9]) #Stop any cont measurement of the sensor
 
     time.sleep(0.8)
 
     #Start Continuous Measurement (5.3.1 in Data sheet)
-    rospy.loginfo('Starting continuous measurement (5.3.1 in Data sheet)')
+    rospy.loginfo('anem: Starting continuous measurement (5.3.1 in Data sheet)')
 
     ##Command code (Hex)        Temperature compensation            Averaging
     ##0x3603                    Mass flow                           Average  till read
@@ -72,7 +72,7 @@ def anem():
 
     time.sleep(.1)
 
-    rospy.loginfo("Initialization of anem wind sensor completed")
+    rospy.loginfo("anem: Initialization of anem wind sensor completed")
 
     dp=list()
 
@@ -85,9 +85,7 @@ def anem():
                 dp.append(v/240.) # convert to Pascals diff pressure
             rospy.loginfo("Anemometer: ch1: %.4f, ch2: %.4f, ch3: %.4f pascal",dp[0],dp[1],dp[2])
             # print [" %8.4f" % v for v in dp]
-            channel1.publish(dp[0])
-            channel2.publish(dp[1])
-            channel3.publish(dp[2])
+            publisher.publish(Vector3(dp[0],dp[1],dp[2]))
             rate.sleep()
     except KeyboardInterrupt:
             rospy.loginfo('Stopping existing continuous measurements')
