@@ -83,13 +83,13 @@ def anem():
 
     #np.set_printoptions(precision=4)
 
-    pub_diff_pressure = rospy.Publisher('anem_diffpressure', Vector3, queue_size=10)
-    pub_wind_temp = rospy.Publisher('anem_speed_angle_temp', Vector3, queue_size=10)
+    pub_diff_pressure = rospy.Publisher('anem_diffpressure', Vector3, queue_size=100)
+    pub_wind_temp = rospy.Publisher('anem_speed_angle_temp', Vector3, queue_size=100)
     # x is speed in m/s
     # y is angle in deg
     # z is temperature in celsius
-    rospy.init_node('anem', anonymous=True)
-    rate = rospy.Rate(10) # Hz
+    rospy.init_node('anem', anonymous=True,log_level=rospy.INFO)
+    rate = rospy.Rate(50) # Hz
 
     rospy.loginfo('anem: Opening i2c SMBus')
     bus=smbus.SMBus(1) #The default i2c bus
@@ -136,7 +136,7 @@ def anem():
             speed_mps=calculate_speed_mps(dp[0],dp[1],dp[2])
             temp_celsius=(temps[0]+temps[1]+temps[2])/3;
             pub_wind_temp.publish(Vector3(speed_mps,angle_deg,temp_celsius))
-            rospy.loginfo("Anemometer: speed(m/s)=%.2f angle(deg)=%.1f temp(C)=%.1f dp(pascal)=(%.4f, %.4f, %.4f)",speed_mps,angle_deg,temp_celsius, dp[0],dp[1],dp[2])
+            rospy.logdebug("Anemometer: speed(m/s)=%.2f angle(deg)=%.1f temp(C)=%.1f dp(pascal)=(%.4f, %.4f, %.4f)",speed_mps,angle_deg,temp_celsius, dp[0],dp[1],dp[2])
 
             rate.sleep()
     except KeyboardInterrupt:
