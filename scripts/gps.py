@@ -8,7 +8,7 @@ import sys
 
 def gps():
     pub = rospy.Publisher('gps_data', String, queue_size=10)
-    rospy.init_node('gps', anonymous=True)
+    rospy.init_node('gps', anonymous=True,log_level=rospy.INFO)
     rate = rospy.Rate(1) # 1hz
     serialport=serial.Serial('/dev/ttyAMA0', baudrate=4800,
 				parity=serial.PARITY_NONE,
@@ -140,18 +140,18 @@ def gps():
 			numSatelites_inuse=data.strip().split(',')[7]
 			altitude=data.strip().split(',')[9]
 
-		print("*******************************************************************\n")
-		print("Track made good true: %s" % track_made_good_true)
-		print("Track made good magnetic: %s" % track_made_good_magnetic)
-		print("Speed over ground[km/h]: %s" % speed_over_ground)
-		print("Mode: %s" % mode_indicator)
-		print("Satelites in view: %s" % numSatelites_inview)
-		print("UTC: %s" % utc)
-		print("Latitude: %s" % latitude)
-		print("Longitude: %s" % longitude)
-		print("GPS quality: %s" % gps_quality)
-		print("Satelites in use: %s" % numSatelites_inuse)
-		print("Altitude: %s" % altitude)
+		rospy.logdebug("*******************************************************************\n")
+		rospy.logdebug("Track made good true: %s" % track_made_good_true)
+		rospy.logdebug("Track made good magnetic: %s" % track_made_good_magnetic)
+		rospy.logdebug("Speed over ground[km/h]: %s" % speed_over_ground)
+		rospy.logdebug("Mode: %s" % mode_indicator)
+		rospy.logdebug("Satelites in view: %s" % numSatelites_inview)
+		rospy.logdebug("UTC: %s" % utc)
+		rospy.logdebug("Latitude: %s" % latitude)
+		rospy.logdebug("Longitude: %s" % longitude)
+		rospy.logdebug("GPS quality: %s" % gps_quality)
+		rospy.logdebug("Satelites in use: %s" % numSatelites_inuse)
+		rospy.logdebug("Altitude: %s" % altitude)
 
         	rate.sleep()
 

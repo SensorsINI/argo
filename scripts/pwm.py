@@ -12,7 +12,7 @@ def getTimex():
 
 channel1 = rospy.Publisher('pwm_data1', Float64, queue_size=10)
 channel2 = rospy.Publisher('pwm_data2', Float64, queue_size=10)
-rospy.init_node('pwm', anonymous=True)
+rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
 rate = rospy.Rate(3) # 3hz
 
 inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
@@ -62,7 +62,7 @@ def pwm():
 			#ovl4 = deltaTimes[3][-smoothingWindowLength:]
 			#ov4 = sorted(ovl4)[len(ovl4) // 2]
 			time.sleep(0.1)
-			rospy.loginfo("channel1: %f, channel2: %f",ov1,ov2)
+			rospy.logdebug("channel1: %f, channel2: %f",ov1,ov2)
 
 			channel1.publish(ov1)
 			channel2.publish(ov2)
