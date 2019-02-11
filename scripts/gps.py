@@ -2,7 +2,8 @@
 
 import rospy
 from std_msgs.msg import String
-#import nmea_navsat_driver
+import libnmea_navsat_driver.driver
+#from libnmea_navsat_driver import parser as parser
 import serial
 import numpy as np
 import sys
@@ -90,7 +91,8 @@ def gps():
     	rospy.loginfo(data)
 
 	serialport.reset_input_buffer()
-        serialport.write("$PTNLSNM,000D,01*23\r\n".encode()) # set automatic message output to 0xf=1111=GGA,GLL,VTGGSV every 1 second
+        serialport.write("$PTNLSNM,0005,01\r\n".encode()) # set automatic message output to 0x7=0111=GGA,VTG every 1 second
+        #serialport.write("$PTNLSNM,000D,01*23\r\n".encode()) # set automatic message output to 0xf=1111=GGA,GLL,VTG, GSV every 1 second
         rate.sleep()
         data=serialport.readline()
         rospy.loginfo(data)
@@ -114,12 +116,22 @@ def gps():
     gps_quality=0
     numSatelites_inuse=0
     altitude=0
+    # make driver to parse the sentences as they come from Copernicus II, then publish them
+    driver = libnmea_navsat_driver.driver.RosNMEADriver()
+    gps_frame_id = "argo_gps"
+
+    # main loop
     while not rospy.is_shutdown():
 
 	if serialport.inWaiting():
 		data=serialport.readline()
 		rospy.logdebug(data)
         	pub.publish(data)
+                try:
+                    # parse NMEA sentence and publish to other topic
+                    driver.add_sentence(data.strip(),gps_frame_id,rospy.get_rostime())
+                except ValueError as e:
+                    rospy.logwarn("Value error, likely due to missing NMEA fields in messge. Error was %s." % e)
 		if data.startswith('$GPVTG'):
 			track_made_good_true=data.strip().split(',')[1]
 			track_made_good_magnetic=data.strip().split(',')[3]
