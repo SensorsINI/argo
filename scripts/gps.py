@@ -8,6 +8,14 @@ import serial
 import numpy as np
 import sys
 
+def sendcmd(serialport, rate, msg):
+    serialport.reset_input_buffer()
+    serialport.write(msg.encode()) # reset
+    rate.sleep()
+    data=serialport.readline()
+    rospy.loginfo(data)
+
+
 def gps():
     pub = rospy.Publisher('gps_data', String, queue_size=10)
     rospy.init_node('gps', anonymous=True,log_level=rospy.DEBUG)
@@ -23,86 +31,21 @@ def gps():
     rate.sleep()
     rate.sleep()
     if serialport.inWaiting():
-	serialport.reset_input_buffer()
-        serialport.write("$PTNLSRT,H*37\r\n".encode()) # reset
-        rate.sleep()
-        data=serialport.readline()
-        rospy.loginfo(data)
-
-        serialport.reset_input_buffer()
-        serialport.write("$PTNLQVR,H*37\r\n".encode()) # query hardware version info
-        rate.sleep()
-        data=serialport.readline()
-        rospy.loginfo(data)
-
-        serialport.reset_input_buffer()
-        serialport.write("$PTNLQVR,S*2C\r\n".encode())  # query software version
-        rate.sleep()
-        data=serialport.readline()
-        rospy.loginfo(data)
-
-        serialport.reset_input_buffer()
-        serialport.write("$PTNLQVR,N*31\r\n".encode()) # query nav version
-        rate.sleep()
-        data=serialport.readline()
-        rospy.loginfo(data)
-
-	serialport.reset_input_buffer()
-        serialport.write("$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1*74\r\n".encode()) # config reciever: 
-	rate.sleep()
-    	data=serialport.readline()
-    	rospy.loginfo(data)
-
-	serialport.reset_input_buffer()
-    	serialport.write("$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0*42\r\n".encode())# command not in user guide
-    	rate.sleep()
-    	data=serialport.readline()
-    	rospy.loginfo(data)
-
-	rospy.loginfo("Setting aquisition ensitivity to standard for faster satellite aquisition outdoors...")
-	serialport.reset_input_buffer()
-    	serialport.write("$PTNLSFS,S,0\r\n".encode())
-    	rate.sleep()
-    	data=serialport.readline()
-    	rospy.loginfo(data)
-
-	serialport.reset_input_buffer()
-    	serialport.write("$PTNLQCR*46\r\n".encode()) # query receiver config
-    	rate.sleep()
-    	data=serialport.readline()
-    	rospy.loginfo(data)
-
-	serialport.reset_input_buffer()
-    	serialport.write("$PTNLQDM*5E\r\n".encode()) # unknown command
-    	rate.sleep()
-    	data=serialport.readline()
-    	rospy.loginfo(data)
-
-	serialport.reset_input_buffer()
-    	serialport.write("$PTNLQFS*42\r\n".encode()) # query aquistion sensotivity mode
-    	rate.sleep()
-    	data=serialport.readline()
-    	rospy.loginfo(data)
-
-	serialport.reset_input_buffer()
-    	serialport.write("$PTNLQTF*45\r\n".encode()) # query status and position fix
-    	rate.sleep()
-    	data=serialport.readline()
-    	rospy.loginfo(data)
-
-	serialport.reset_input_buffer()
-        serialport.write("$PTNLSNM,0005,01\r\n".encode()) # set automatic message output to 0x7=0111=GGA,VTG every 1 second
+        sendcmd(serialport, rate,"$PTNLSRT,H*37\r\n") # reset
+        sendcmd(serialport,rate,"$PTNLQVR,H*37\r\n") # query hardware version info
+        sendcmd(serialport,rate,"$PTNLQVR,S*2C\r\n")  # query software version
+        sendcmd(serialport,rate,"$PTNLQVR,N*31\r\n".encode()) # query nav version
+        sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1*74\r\n".encode()) # config reciever: 
+    	sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0*42\r\n".encode())# command not in user guide
+	#rospy.loginfo("Setting aquisition ensitivity to standard for faster satellite aquisition outdoors...")
+    	sendcmd(serialport,rate,"$PTNLSFS,S,0\r\n")
+    	sendcmd(serialport,rate,"$PTNLQCR*46\r\n") # query receiver config
+    	sendcmd(serialport,rate,"$PTNLQDM*5E\r\n") # unknown command
+    	sendcmd(serialport,rate,"$PTNLQFS*42\r\n") # query aquistion sensotivity mode
+    	sendcmd(serialport,rate,"$PTNLQTF*45\r\n") # query status and position fix
+        sendcmd(serialport,rate,"$PTNLSNM,0005,01\r\n") # set automatic message output to 0x7=0111=GGA,VTG every 1 second
         #serialport.write("$PTNLSNM,000D,01*23\r\n".encode()) # set automatic message output to 0xf=1111=GGA,GLL,VTG, GSV every 1 second
-        rate.sleep()
-        data=serialport.readline()
-        rospy.loginfo(data)
-
-
-	serialport.reset_input_buffer()
-        serialport.write("$PTNLQNM*54\r\n".encode()) # query automatic reporting
-        rate.sleep()
-        data=serialport.readline()
-        rospy.loginfo(data)
+        sendcmd(serialport,rate,"$PTNLQNM*54\r\n") # query automatic reporting
 	rospy.loginfo("Set up completed")
 
     track_made_good_true=0
