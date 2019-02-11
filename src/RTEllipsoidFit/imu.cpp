@@ -40,7 +40,7 @@ int main(int argc, char **argv)
     	RTIMU *imu = RTIMU::createIMU(settings);
 
     	if ((imu == NULL) || (imu->IMUType() == RTIMU_TYPE_NULL)) {
-        	ROS_INFO("No IMU found\n");
+        	ROS_WARN("No IMU found\n");
         	exit(1);
     	}
 
@@ -82,10 +82,10 @@ int main(int argc, char **argv)
 
             		if ((now - displayTimer) > 100000) {
 
-                		ROS_INFO("Sample rate %d\n", sampleRate); //Sample rate
-                		ROS_INFO("Pose: %s\n", RTMath::displayDegrees("", imuData.fusionPose)); //pose
-                		ROS_INFO("Acceleration: %f, %f, %f\n", imuData.accel.x(), imuData.accel.y(), imuData.accel.z()); //acceleration
-                		ROS_INFO("Compass: %f, %f, %f\r", imuData.compass.x(), imuData.compass.y(), imuData.compass.z()); //compass
+                		ROS_DEBUG("Sample rate %d\n", sampleRate); //Sample rate
+                		ROS_DEBUG("Pose: %s\n", RTMath::displayDegrees("", imuData.fusionPose)); //pose
+                		ROS_DEBUG("Acceleration: %f, %f, %f\n", imuData.accel.x(), imuData.accel.y(), imuData.accel.z()); //acceleration
+                		ROS_DEBUG("Compass: %f, %f, %f\r", imuData.compass.x(), imuData.compass.y(), imuData.compass.z()); //compass
 				//ROS_INFO("Pose from accel and mag: %s\n", RTMath::displayDegrees("", RTMath::poseFromAccelMag(imuData.accel,imuData.compass)));
 
 				pose_data.data=RTMath::displayDegrees("",imuData.fusionPose);
