@@ -11,9 +11,9 @@ import sys
 def sendcmd(serialport, rate, msg):
     serialport.reset_input_buffer()
     serialport.write(msg.encode()) # reset
-    rate.sleep()
+    rospy.sleep(1)
     data=serialport.readline()
-    rospy.loginfo(data)
+    rospy.loginfo(data.strip())
 
 
 def gps():
@@ -28,25 +28,23 @@ def gps():
     rospy.loginfo("Serial connection established.")
     rospy.loginfo("Starting GPS...")
 
-    rate.sleep()
-    rate.sleep()
-    if serialport.inWaiting():
-        sendcmd(serialport, rate,"$PTNLSRT,H*37\r\n") # reset
-        sendcmd(serialport,rate,"$PTNLQVR,H*37\r\n") # query hardware version info
-        sendcmd(serialport,rate,"$PTNLQVR,S*2C\r\n")  # query software version
-        sendcmd(serialport,rate,"$PTNLQVR,N*31\r\n".encode()) # query nav version
-        sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1*74\r\n".encode()) # config reciever: 
-    	sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0*42\r\n".encode())# command not in user guide
-	#rospy.loginfo("Setting aquisition ensitivity to standard for faster satellite aquisition outdoors...")
-    	sendcmd(serialport,rate,"$PTNLSFS,H,0\r\n") # H = high sensitivity aquisition mode, but slower (S=standard)
-    	sendcmd(serialport,rate,"$PTNLQCR*46\r\n") # query receiver config
-    	sendcmd(serialport,rate,"$PTNLQDM*5E\r\n") # unknown command
-    	sendcmd(serialport,rate,"$PTNLQFS*42\r\n") # query aquistion sensotivity mode
-    	sendcmd(serialport,rate,"$PTNLQTF*45\r\n") # query status and position fix
-        sendcmd(serialport,rate,"$PTNLSNM,0105,01\r\n") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
-        #serialport.write("$PTNLSNM,010D,01*23\r\n".encode()) # set automatic message output to 0xf=1111=GGA,GLL,VTG, GSV every 1 second
-        sendcmd(serialport,rate,"$PTNLQNM*54\r\n") # query automatic reporting
-	rospy.loginfo("Set up completed")
+    rospy.sleep(3)
+    sendcmd(serialport, rate,"$PTNLSRT,H*37\r\n") # reset
+    sendcmd(serialport,rate,"$PTNLQVR,H*37\r\n") # query hardware version info
+    sendcmd(serialport,rate,"$PTNLQVR,S*2C\r\n")  # query software version
+    sendcmd(serialport,rate,"$PTNLQVR,N*31\r\n".encode()) # query nav version
+    sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1*74\r\n".encode()) # config reciever: 
+    sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0*42\r\n".encode())# command not in user guide
+    #rospy.loginfo("Setting aquisition ensitivity to standard for faster satellite aquisition outdoors...")
+    sendcmd(serialport,rate,"$PTNLSFS,H,0\r\n") # H = high sensitivity aquisition mode, but slower (S=standard)
+    sendcmd(serialport,rate,"$PTNLQCR*46\r\n") # query receiver config
+    sendcmd(serialport,rate,"$PTNLQDM*5E\r\n") # unknown command
+    sendcmd(serialport,rate,"$PTNLQFS*42\r\n") # query aquistion sensotivity mode
+    sendcmd(serialport,rate,"$PTNLQTF*45\r\n") # query status and position fix
+    sendcmd(serialport,rate,"$PTNLSNM,0105,01\r\n") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
+    #serialport.write("$PTNLSNM,010D,01*23\r\n".encode()) # set automatic message output to 0xf=1111=GGA,GLL,VTG, GSV every 1 second
+    sendcmd(serialport,rate,"$PTNLQNM*54\r\n") # query automatic reporting
+    rospy.loginfo("Set up completed")
 
     track_made_good_true=0
     track_made_good_magnetic=0
@@ -123,8 +121,15 @@ def gps():
 
         	rate.sleep()
 
+    # shutdown storing data to flash to enable faster startup next time
+    rospy.loginfo("rospy is shutdown, gracefully shutting down GPS");
+    sendcmd(serialport, rate,"$PTNLSRT,S,2,3\r\n") # shutdown, store data to flash, wakeup on next serial port on A or B ports
+
+
 if __name__ == '__main__':
     try:
         gps()
     except rospy.ROSInterruptException:
+        rospy.loginfo("rospy is interrupted, gracefully shutting down GPS");
+        sendcmd(serialport, rate,"$PTNLSRT,S,2,3\r\n") # shutdown, store data to flash, wakeup on next serial port on A or B ports
         pass
