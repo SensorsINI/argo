@@ -29,7 +29,7 @@ def gps():
     rospy.loginfo("Starting GPS...")
 
     rospy.sleep(3)
-    sendcmd(serialport, rate,"$PTNLSRT,H*37\r\n") # reset
+    sendcmd(serialport,rate,"$PTNLSRT,H*37\r\n") # reset, hot start, uses SRAM data that was loaded from flash
     sendcmd(serialport,rate,"$PTNLQVR,H*37\r\n") # query hardware version info
     sendcmd(serialport,rate,"$PTNLQVR,S*2C\r\n")  # query software version
     sendcmd(serialport,rate,"$PTNLQVR,N*31\r\n".encode()) # query nav version
