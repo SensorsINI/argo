@@ -11,24 +11,26 @@ import operator
 from functools import reduce
 
 def checksum(sentence):
-    sentence = sentence.strip('\n')
-    nmeadata,cksum = sentence.split('*', 1)
+    sentence = sentence.strip('\n').replace('$','')
+    if '*' in sentence:
+        nmeadata,cksum = sentence.split('*', 1)
+    else:
+        nmeadata=sentence
     calc_cksum = reduce(operator.xor, (ord(s) for s in nmeadata), 0)
 
-    return nmeadata,int(cksum,16),calc_cksum
+    return calc_cksum
     
-#nmeadata,cksum,calc_cksum=checksum('GPGLL,5057.970,N,00146,110,E,142451,A*27') # example in Copernicus II manual is incorrect
-#print(nmeadata+' '+format(cksum,'02x')+' '+format(calc_cksum,'02x'))
-#nmeadata,cksum,calc_cksum=checksum('GPVTG,089,0,T,,,15,2,N,,*7F')
-#print(nmeadata+' '+format(cksum,'02x')+' '+format(calc_cksum,'02x'))
-# see this online calculator http://www.hhhh.org/wiml/proj/nmeaxor.html
-
 def sendcmd(serialport, rate, msg):
+    if not '*' in msg: # add checksum
+        cs=checksum(msg)
+        msg=msg+'*'+'%02X'%cs
+    if not msg.endswith('\r\n'):
+        msg=msg+'\r\n'
     serialport.reset_input_buffer()
     serialport.write(msg.encode()) # reset
     rospy.sleep(1)
     data=serialport.readline()
-    rospy.loginfo(data.strip())
+    rospy.loginfo('Sent: '+msg.strip()+' Recieved: '+data.strip())
 
 
 def gps():
@@ -40,25 +42,22 @@ def gps():
 				stopbits=serial.STOPBITS_ONE,
 				bytesize=serial.EIGHTBITS
 				)
-    rospy.loginfo("Serial connection established.")
-    rospy.loginfo("Starting GPS...")
-
-    rospy.sleep(3)
-    sendcmd(serialport,rate,"$PTNLSRT,H*37\r\n") # reset, hot start, uses SRAM data that was loaded from flash
-    sendcmd(serialport,rate,"$PTNLQVR,H*37\r\n") # query hardware version info
-    sendcmd(serialport,rate,"$PTNLQVR,S*2C\r\n")  # query software version
-    sendcmd(serialport,rate,"$PTNLQVR,N*31\r\n".encode()) # query nav version
-    sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1*74\r\n".encode()) # config reciever: 
-    sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0*42\r\n".encode())# command not in user guide
-    #rospy.loginfo("Setting aquisition ensitivity to standard for faster satellite aquisition outdoors...")
-    sendcmd(serialport,rate,"$PTNLSFS,H,0\r\n") # H = high sensitivity aquisition mode, but slower (S=standard)
-    sendcmd(serialport,rate,"$PTNLQCR*46\r\n") # query receiver config
-    sendcmd(serialport,rate,"$PTNLQDM*5E\r\n") # unknown command
-    sendcmd(serialport,rate,"$PTNLQFS*42\r\n") # query aquistion sensotivity mode
-    sendcmd(serialport,rate,"$PTNLQTF*45\r\n") # query status and position fix
-    sendcmd(serialport,rate,"$PTNLSNM,0105,01\r\n") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
-    #serialport.write("$PTNLSNM,010D,01*23\r\n".encode()) # set automatic message output to 0xf=1111=GGA,GLL,VTG, GSV every 1 second
-    sendcmd(serialport,rate,"$PTNLQNM*54\r\n") # query automatic reporting
+    rospy.loginfo("Serial connection established; starting GPS...sleeping a bit")
+    rospy.sleep(1)
+    rospy.loginfo("Sending initialization commands")
+    sendcmd(serialport,rate,"$PTNLSRT,H") # reset, hot start, uses SRAM data that was loaded from flash
+    sendcmd(serialport,rate,"$PTNLQVR,H") # query hardware version info
+    sendcmd(serialport,rate,"$PTNLQVR,S")  # query software version
+    sendcmd(serialport,rate,"$PTNLQVR,Nn") # query nav version
+    sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1") # config reciever: 
+    sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0")# command not in user guide
+    sendcmd(serialport,rate,"$PTNLSFS,H,0") # H = high sensitivity aquisition mode, but slower (S=standard)
+    sendcmd(serialport,rate,"$PTNLQCR") # query receiver config
+    sendcmd(serialport,rate,"$PTNLQDM") # unknown command
+    sendcmd(serialport,rate,"$PTNLQFS") # query aquistion sensotivity mode
+    sendcmd(serialport,rate,"$PTNLQTF") # query status and position fix
+    sendcmd(serialport,rate,"$PTNLSNM,0105,01") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
+    sendcmd(serialport,rate,"$PTNLQNM") # query automatic reporting
     rospy.loginfo("Set up completed")
 
     track_made_good_true=0
