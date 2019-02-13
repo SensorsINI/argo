@@ -7,6 +7,21 @@ import libnmea_navsat_driver.driver
 import serial
 import numpy as np
 import sys
+import operator
+from functools import reduce
+
+def checksum(sentence):
+    sentence = sentence.strip('\n')
+    nmeadata,cksum = sentence.split('*', 1)
+    calc_cksum = reduce(operator.xor, (ord(s) for s in nmeadata), 0)
+
+    return nmeadata,int(cksum,16),calc_cksum
+    
+#nmeadata,cksum,calc_cksum=checksum('GPGLL,5057.970,N,00146,110,E,142451,A*27') # example in Copernicus II manual is incorrect
+#print(nmeadata+' '+format(cksum,'02x')+' '+format(calc_cksum,'02x'))
+#nmeadata,cksum,calc_cksum=checksum('GPVTG,089,0,T,,,15,2,N,,*7F')
+#print(nmeadata+' '+format(cksum,'02x')+' '+format(calc_cksum,'02x'))
+# see this online calculator http://www.hhhh.org/wiml/proj/nmeaxor.html
 
 def sendcmd(serialport, rate, msg):
     serialport.reset_input_buffer()
