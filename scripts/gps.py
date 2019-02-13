@@ -56,7 +56,7 @@ def gps():
     sendcmd(serialport,rate,"$PTNLQDM") # unknown command
     sendcmd(serialport,rate,"$PTNLQFS") # query aquistion sensotivity mode
     sendcmd(serialport,rate,"$PTNLQTF") # query status and position fix
-    sendcmd(serialport,rate,"$PTNLSNM,0105,01") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
+    sendcmd(serialport,rate,"$PTNLSNM,010D,01") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
     sendcmd(serialport,rate,"$PTNLQNM") # query automatic reporting
     rospy.loginfo("Set up completed")
 
@@ -96,9 +96,14 @@ def gps():
 			track_made_good_magnetic=data.strip().split(',')[3]
 			speed_over_ground=data.strip().split(',')[7]
 			mode_indicator=data.strip().split(',')[9]
+                        rospy.logdebug("Track made good true: %s" % track_made_good_true)
+                        rospy.logdebug("Track made good magnetic: %s" % track_made_good_magnetic)
+                        rospy.logdebug("Speed over ground[km/h]: %s" % speed_over_ground)
+                        rospy.logdebug("Mode: %s" % mode_indicator)
 
 		if data.startswith('$GPGSV'):
 			numSatelites_inview=data.strip().split(',')[3]
+                        rospy.logdebug("Satelites in view: %s" % numSatelites_inview)
 
 		if data.startswith('$GPGGA'):
 			utc=data.strip().split(',')[1]
@@ -107,31 +112,33 @@ def gps():
 			gps_quality=data.strip().split(',')[6]
 			numSatelites_inuse=data.strip().split(',')[7]
 			altitude=data.strip().split(',')[9]
+                        rospy.logdebug("UTC: %s" % utc)
+                        rospy.logdebug("Latitude: %s" % latitude)
+                        rospy.logdebug("Longitude: %s" % longitude)
+                        rospy.logdebug("GPS quality: %s" % gps_quality)
+                        rospy.logdebug("Satelites in use: %s" % numSatelites_inuse)
+                        rospy.logdebug("Altitude: %s" % altitude)
 
 		if data.startswith('$GPRMC'):
 			utc=data.strip().split(',')[1]
 			valid=data.strip().split(',')[2]
-			latitude=data.strip().split(',')[3]
-			longitude=data.strip().split(',')[4]
-			speed_over_ground=data.strip().split(',')[5]
-			track_made_good_true=data.strip().split(',')[6]
-			gps_quality=data.strip().split(',')[6]
-			magnetic_variation_deg=data.strip().split(',')[7]
-			position_system_mode_indicator=data.strip().split(',')[8]
-
-		rospy.logdebug("Track made good true: %s" % track_made_good_true)
-		rospy.logdebug("Track made good magnetic: %s" % track_made_good_magnetic)
-		rospy.logdebug("Speed over ground[km/h]: %s" % speed_over_ground)
-		rospy.logdebug("Mode: %s" % mode_indicator)
-		rospy.logdebug("Satelites in view: %s" % numSatelites_inview)
-		rospy.logdebug("UTC: %s" % utc)
-		rospy.logdebug("Latitude: %s" % latitude)
-		rospy.logdebug("Longitude: %s" % longitude)
-		rospy.logdebug("GPS quality: %s" % gps_quality)
-		rospy.logdebug("Satelites in use: %s" % numSatelites_inuse)
-		rospy.logdebug("Altitude: %s" % altitude)
-		rospy.logdebug("GPS quality: %s" % gps_quality)
-		rospy.logdebug("Position system mode indicator: %s" % position_system_mode_indicator)
+                        latitude=data.strip().split(',')[3:4]
+                        latitude=' '.join(latitude)
+                        longitude=data.strip().split(',')[5:6]
+                        longitude=' '.join(longitude)
+                        speed_over_ground=data.strip().split(',')[7]
+			track_made_good_true=data.strip().split(',')[8]
+                        magnetic_variation_deg=data.strip().split(',')[10:11]
+                        magnetic_variation_deg=' '.join(magnetic_variation_deg)
+			position_system_mode_indicator=data.strip().split(',')[12]
+                        rospy.logdebug("UTC: %s" % utc)
+                        rospy.logdebug("Valid: %s" % valid)
+                        rospy.logdebug("Latitude: %s" % latitude)
+                        rospy.logdebug("Longitude: %s" % longitude)
+                        rospy.logdebug("Speed over ground [km/h]: %s" % speed_over_ground)
+                        rospy.logdebug("Track made good true (deg): %s" % track_made_good_true)
+                        rospy.logdebug("Magnetic variation (deg): %s" % magnetic_variation_deg)
+                        rospy.logdebug("Position system mode indicator: %s" % position_system_mode_indicator)
 
         	rate.sleep()
 
