@@ -2,6 +2,10 @@
 # captures and publishes the rudder and sail winch servo positions as pulse width in ms
 # (used to be duty cycle which doesn't make sense for a servo)
 
+# topics
+# /rudder rudder pulse width in ms, right/starboard is smaller value, left/port is higher value
+# /sail position, in smaller, out larger
+
 import rospy
 from std_msgs.msg import Float64
 import serial
@@ -12,8 +16,8 @@ import numpy as np
 def getTimex():
 	return time.time()
 
-channel1 = rospy.Publisher('pwm_data1', Float64, queue_size=10)
-channel2 = rospy.Publisher('pwm_data2', Float64, queue_size=10)
+channel1 = rospy.Publisher('sail', Float64, queue_size=10)
+channel2 = rospy.Publisher('rudder', Float64, queue_size=10)
 rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
 rate = rospy.Rate(10) # sample rate in Hz
 
@@ -64,7 +68,7 @@ def pwm():
 			#ovl4 = deltaTimes[3][-smoothingWindowLength:]
 			#ov4 = sorted(ovl4)[len(ovl4) // 2]
 			#time.sleep(0.1)
-                        rospy.logdebug("pulse widths: channel1: %.3f ms, channel2: %.3f ms",ov1,ov2)
+                        rospy.logdebug("pulse widths: sail: %.3f ms, rudder: %.3f ms",ov1,ov2)
 
 			channel1.publish(ov1)
 			channel2.publish(ov2)
