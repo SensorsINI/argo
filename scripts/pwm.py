@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# captures and publishes the rudder and sail winch servo positions as pulse width in ms
+# (used to be duty cycle which doesn't make sense for a servo)
 
 import rospy
 from std_msgs.msg import Float64
@@ -13,10 +15,10 @@ def getTimex():
 channel1 = rospy.Publisher('pwm_data1', Float64, queue_size=10)
 channel2 = rospy.Publisher('pwm_data2', Float64, queue_size=10)
 rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
-rate = rospy.Rate(3) # 3hz
+rate = rospy.Rate(10) # sample rate in Hz
 
 inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
-smoothingWindowLength=4
+smoothingWindowLength=1 # number of samples to box filter over
 
 
 GPIO.setmode(GPIO.BCM)
@@ -28,13 +30,13 @@ deltaTimes = [[0] for i in range(len(inPINS))]
 def my_callback1(channel):
 	i=inPINS.index(channel)
 	v=GPIO.input(inPINS[i])
-	if (v==0):
+	if (v==0): # falling edge
 		downTimes[i].append(getTimex())
 		if len(downTimes[i])>smoothingWindowLength: del downTimes[i][0]
-	else:
+                deltaTimes[i].append(1e3*(downTimes[i][-1]-upTimes[i][-1])) # delta time in seconds
+	else: # rising edge
 		upTimes[i].append(getTimex())
 		if len(upTimes[i])>smoothingWindowLength: del upTimes[i][0]
-	deltaTimes[i].append( (downTimes[i][-1]-upTimes[i][-2])/(upTimes[i][-1]-downTimes[i][-1]))
 	if len(deltaTimes[i])>smoothingWindowLength: del deltaTimes[i][0]
 
 
@@ -61,8 +63,8 @@ def pwm():
 
 			#ovl4 = deltaTimes[3][-smoothingWindowLength:]
 			#ov4 = sorted(ovl4)[len(ovl4) // 2]
-			time.sleep(0.1)
-			rospy.logdebug("channel1: %f, channel2: %f",ov1,ov2)
+			#time.sleep(0.1)
+                        rospy.logdebug("pulse widths: channel1: %.3f ms, channel2: %.3f ms",ov1,ov2)
 
 			channel1.publish(ov1)
 			channel2.publish(ov2)
