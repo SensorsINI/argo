@@ -35,7 +35,7 @@ def sendcmd(serialport, rate, msg):
 
 def gps():
     pub = rospy.Publisher('gps_data', String, queue_size=10)
-    rospy.init_node('gps', anonymous=True,log_level=rospy.DEBUG)
+    rospy.init_node('gps', anonymous=True,log_level=rospy.INFO)
     rate = rospy.Rate(1) # 1hz
     serialport=serial.Serial('/dev/ttyAMA0', baudrate=4800,
 				parity=serial.PARITY_NONE,
