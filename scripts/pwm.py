@@ -16,8 +16,8 @@ import numpy as np
 def getTimex():
 	return time.time()
 
-channel1 = rospy.Publisher('sail', Float64, queue_size=10)
-channel2 = rospy.Publisher('rudder', Float64, queue_size=10)
+channel1 = rospy.Publisher('sail', Float64, queue_size=100)
+channel2 = rospy.Publisher('rudder', Float64, queue_size=100)
 rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
 rate = rospy.Rate(10) # sample rate in Hz
 

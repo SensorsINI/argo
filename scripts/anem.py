@@ -89,7 +89,7 @@ def anem():
     # y is angle in deg
     # z is temperature in celsius
     rospy.init_node('anem', anonymous=True,log_level=rospy.INFO)
-    rate = rospy.Rate(50) # Hz
+    rate = rospy.Rate(10) # Hz
 
     rospy.loginfo('anem: Opening i2c SMBus')
     bus=smbus.SMBus(1) #The default i2c bus
