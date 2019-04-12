@@ -19,10 +19,10 @@ def getTimex():
 channel1 = rospy.Publisher('sail', Float64, queue_size=100)
 channel2 = rospy.Publisher('rudder', Float64, queue_size=100)
 rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
-rate = rospy.Rate(10) # sample rate in Hz
+rate = rospy.Rate(30) # sample rate in Hz
 
 inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
-smoothingWindowLength=1 # number of samples to box filter over
+smoothingWindowLength=5 # number of samples to median filter over; should be odd number
 
 
 GPIO.setmode(GPIO.BCM)
@@ -37,7 +37,7 @@ def my_callback1(channel):
 	if (v==0): # falling edge
 		downTimes[i].append(getTimex())
 		if len(downTimes[i])>smoothingWindowLength: del downTimes[i][0]
-                deltaTimes[i].append(1e3*(downTimes[i][-1]-upTimes[i][-1])) # delta time in seconds
+                deltaTimes[i].append(1e3*(downTimes[i][-1]-upTimes[i][-1])) # delta time in ms
 	else: # rising edge
 		upTimes[i].append(getTimex())
 		if len(upTimes[i])>smoothingWindowLength: del upTimes[i][0]
@@ -57,7 +57,7 @@ def pwm():
 		while not rospy.is_shutdown():
 
 			ovl1 = deltaTimes[0][-smoothingWindowLength:]
-			ov1 = sorted(ovl1)[len(ovl1) // 2]
+			ov1 = sorted(ovl1)[len(ovl1) // 2] # get median value of last smoothingWinddowSize samples
 
 			ovl2 = deltaTimes[1][-smoothingWindowLength:]
 			ov2 = sorted(ovl2)[len(ovl2) // 2]
