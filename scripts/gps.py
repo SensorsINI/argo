@@ -29,8 +29,9 @@ def sendcmd(serialport, rate, msg):
     serialport.reset_input_buffer()
     serialport.write(msg.encode()) # reset
     rospy.sleep(1)
-    data=serialport.readline()
-    rospy.loginfo('Sent: '+msg.strip()+' Recieved: '+data.strip())
+    reply=serialport.readline()
+    rospy.loginfo('Sent: '+msg.strip()+' Recieved: '+reply.strip())
+    return reply
 
 
 def gps():
@@ -46,18 +47,21 @@ def gps():
     rospy.sleep(1)
     rospy.loginfo("Sending initialization commands")
     sendcmd(serialport,rate,"$PTNLSRT,H") # reset, hot start, uses SRAM data that was loaded from flash
-    sendcmd(serialport,rate,"$PTNLQVR,H") # query hardware version info
-    sendcmd(serialport,rate,"$PTNLQVR,S")  # query software version
-    sendcmd(serialport,rate,"$PTNLQVR,Nn") # query nav version
-    sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1") # config reciever: 
-    sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0")# command not in user guide
-    sendcmd(serialport,rate,"$PTNLSFS,H,0") # H = high sensitivity aquisition mode, but slower (S=standard)
-    sendcmd(serialport,rate,"$PTNLQCR") # query receiver config
-    sendcmd(serialport,rate,"$PTNLQDM") # unknown command
-    sendcmd(serialport,rate,"$PTNLQFS") # query aquistion sensotivity mode
-    sendcmd(serialport,rate,"$PTNLQTF") # query status and position fix
+
+    hwVersion=sendcmd(serialport,rate,"$PTNLQVR,H") # query hardware version info
+    swVersion=sendcmd(serialport,rate,"$PTNLQVR,S")  # query software version
+    navVersion=sendcmd(serialport,rate,"$PTNLQVR,Nn") # query nav version
+    rospy.loginfo("GPS version info: HW=" +hwVersion+" SW="+swVersion+" NAV="+navVersion)
+
+    sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1") # config reciever 
+    #sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0")# command not in user guide
+    sendcmd(serialport,rate,"$PTNLSFS,S,0") # H = high sensitivity aquisition mode, but slower (S=standard)
+    #sendcmd(serialport,rate,"$PTNLQCR") # query receiver config
+    #sendcmd(serialport,rate,"$PTNLQDM") # unknown command
+    #sendcmd(serialport,rate,"$PTNLQFS") # query aquistion sensotivity mode
+    #sendcmd(serialport,rate,"$PTNLQTF") # query status and position fix
     sendcmd(serialport,rate,"$PTNLSNM,010D,01") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
-    sendcmd(serialport,rate,"$PTNLQNM") # query automatic reporting
+    #sendcmd(serialport,rate,"$PTNLQNM") # query automatic reporting
     rospy.loginfo("Set up completed")
 
     track_made_good_true=0
