@@ -19,11 +19,11 @@ def getTimex():
 
 channel1 = rospy.Publisher('sail', Float64, queue_size=100)
 channel2 = rospy.Publisher('rudder', Float64, queue_size=100)
-rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
-#rospy.init_node('pwm', anonymous=True,log_level=rospy.DEBUG)
-rate = rospy.Rate(30) # sample rate in Hz
+#rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
+rospy.init_node('pwm', anonymous=True,log_level=rospy.DEBUG)
+rate = rospy.Rate(10) # sample rate in Hz
 
-smoothingWindowLength=5 # number of samples to median filter over; should be odd number
+smoothingWindowLength=3 # number of samples to median filter over; should be odd number
 
 inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
 
@@ -40,11 +40,16 @@ def gpio_callback(gpio,level,tick):
 	i=inPINS.index(gpio)
 	v=level
 	if (v==0): # falling edge
-		downTimes[i].append(getTimex())
+		downTimes[i].append(tick) # tick is in us since boot, wraps every 72m
 		if len(downTimes[i])>smoothingWindowLength: del downTimes[i][0]
-                deltaTimes[i].append(1e3*(downTimes[i][-1]-upTimes[i][-1])) # delta time in ms
+                dtMs=1e-3*(downTimes[i][-1]-upTimes[i][-1])
+                if(dtMs>0):
+                    deltaTimes[i].append(dtMs) # delta time in ms
+                else:
+                    rospy.loginfo("tick wrapped around, got negative dtMs")
+
 	else: # rising edge
-		upTimes[i].append(getTimex())
+		upTimes[i].append(tick)
 		if len(upTimes[i])>smoothingWindowLength: del upTimes[i][0]
 	if len(deltaTimes[i])>smoothingWindowLength: del deltaTimes[i][0]
 
