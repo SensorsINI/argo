@@ -9,7 +9,8 @@
 import rospy
 from std_msgs.msg import Float64
 import serial
-import RPi.GPIO as GPIO
+#import RPi.gpio as gpio
+import pigpio
 import time
 import numpy as np
 
@@ -19,21 +20,25 @@ def getTimex():
 channel1 = rospy.Publisher('sail', Float64, queue_size=100)
 channel2 = rospy.Publisher('rudder', Float64, queue_size=100)
 rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
+#rospy.init_node('pwm', anonymous=True,log_level=rospy.DEBUG)
 rate = rospy.Rate(30) # sample rate in Hz
 
-inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
 smoothingWindowLength=5 # number of samples to median filter over; should be odd number
 
+inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(inPINS, GPIO.IN)
+gpio=pigpio.pi()
+
+gpio.set_mode(inPINS[0],pigpio.INPUT)
+gpio.set_mode(inPINS[1],pigpio.INPUT)
+
 upTimes = [[0] for i in range(len(inPINS))]
 downTimes = [[0] for i in range(len(inPINS))]
 deltaTimes = [[0] for i in range(len(inPINS))]
 
-def my_callback1(channel):
-	i=inPINS.index(channel)
-	v=GPIO.input(inPINS[i])
+def gpio_callback(gpio,level,tick):
+	i=inPINS.index(gpio)
+	v=level
 	if (v==0): # falling edge
 		downTimes[i].append(getTimex())
 		if len(downTimes[i])>smoothingWindowLength: del downTimes[i][0]
@@ -43,39 +48,36 @@ def my_callback1(channel):
 		if len(upTimes[i])>smoothingWindowLength: del upTimes[i][0]
 	if len(deltaTimes[i])>smoothingWindowLength: del deltaTimes[i][0]
 
+gpio.callback(inPINS[0],pigpio.EITHER_EDGE,gpio_callback)
+gpio.callback(inPINS[1],pigpio.EITHER_EDGE,gpio_callback)
 
-
-GPIO.add_event_detect(inPINS[0], GPIO.BOTH, callback=my_callback1)	#channel 1
-GPIO.add_event_detect(inPINS[1], GPIO.BOTH, callback=my_callback1)	#channel 2
-#GPIO.add_event_detect(inPINS[2], GPIO.BOTH, callback=my_callback1)	#channel 3
-#GPIO.add_event_detect(inPINS[3], GPIO.BOTH, callback=my_callback1)	#channel 4
-
-rospy.loginfo("Initialization completed")
+rospy.loginfo("PWM initialization completed")
 
 def pwm():
 	try:
 		while not rospy.is_shutdown():
 
-			ovl1 = deltaTimes[0][-smoothingWindowLength:]
-			ov1 = sorted(ovl1)[len(ovl1) // 2] # get median value of last smoothingWinddowSize samples
+                        ov1=np.median(deltaTimes[0])
 
-			ovl2 = deltaTimes[1][-smoothingWindowLength:]
-			ov2 = sorted(ovl2)[len(ovl2) // 2]
+                        ov2=np.median(deltaTimes[1])
 
-			#ovl3 = deltaTimes[2][-smoothingWindowLength:]
-			#ov3 = sorted(ovl3)[len(ovl3) // 2]
-
-			#ovl4 = deltaTimes[3][-smoothingWindowLength:]
-			#ov4 = sorted(ovl4)[len(ovl4) // 2]
-			#time.sleep(0.1)
-                        rospy.logdebug("pulse widths: sail: %.3f ms, rudder: %.3f ms",ov1,ov2)
+                        # debug, can comment out later
+                        if ov1>.5 and ov1 <2.5 and ov2 >.5 and ov2<2.5:
+                            outlier=''
+                        else:
+                            outlier='**** outlier'
+                        rospy.logdebug("pulse widths: sail: %.3f ms, rudder: %.3f ms %s",ov1,ov2,outlier)
 
 			channel1.publish(ov1)
 			channel2.publish(ov2)
 
 			rate.sleep()
-	except KeyboardInterrupt:
-		GPIO.cleanup()
+                gpio.stop()
+
+        except KeyboardInterrupt:
+		gpio.stop()
+
+
 if __name__ == '__main__':
     try:
         pwm()
