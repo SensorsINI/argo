@@ -34,7 +34,7 @@ def sendcmd(serialport, rate, msg):
         rospy.loginfo('Sent: '+msg.strip()+' Recieved: '+reply.strip())
         return reply
     except Exception as e:
-	rospy.logwarn('GPS serial port exception: '+str(e))
+        rospy.logwarn('GPS serial port exception: '+str(e))
 	return None
 
 def gps():
@@ -48,18 +48,21 @@ def gps():
 				)
     rospy.loginfo("Serial connection established; starting GPS...sleeping a bit")
     rospy.sleep(1)
-    rospy.loginfo("Sending initialization commands")
+    rospy.logdebug("Sending initialization commands")
     sendcmd(serialport,rate,"$PTNLSRT,H") # reset, hot start, uses SRAM data that was loaded from flash
     rospy.sleep(1)
 
+    rospy.logdebug("Getting version info")
     hwVersion=sendcmd(serialport,rate,"$PTNLQVR,H") # query hardware version info
     swVersion=sendcmd(serialport,rate,"$PTNLQVR,S")  # query software version
     navVersion=sendcmd(serialport,rate,"$PTNLQVR,Nn") # query nav version
     if hwVersion is None or swVersion is None or navVersion is None:
-	rospy.logwarn('could not get all version information')
+        rospy.logwarn('could not get all version information')
     else:
-	rospy.loginfo("GPS version info: HW=" +hwVersion+" SW="+swVersion+" NAV="+navVersion)
+        rospy.loginfo("GPS version info: HW=" +hwVersion+" SW="+swVersion+" NAV="+navVersion)
 
+
+    rospy.logdebug("Setting up GPS output")
     sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1") # config reciever 
     #sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0")# command not in user guide
     sendcmd(serialport,rate,"$PTNLSFS,S,0") # H = high sensitivity aquisition mode, but slower (S=standard)

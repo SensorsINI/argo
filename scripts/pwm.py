@@ -1,4 +1,4 @@
-# /usr/bin/env python
+#!/usr/bin/env python
 # captures and publishes the rudder and sail winch servo positions as pulse width in ms
 # (used to be duty cycle which doesn't make sense for a servo)
 
@@ -9,8 +9,8 @@
 import rospy
 from std_msgs.msg import Float64
 import serial
-# import RPi.gpio as gpio
-import pigpio
+# import RPi.GPIO as GPIO # standard GPIO library for low level pin control
+import pigpio # daemon-based PWM controller with good precision
 import time
 import numpy as np
 
@@ -21,7 +21,7 @@ def getTimex():
 
 pub_sail = rospy.Publisher('sail', Float64, queue_size=100)
 pub_rudder = rospy.Publisher('rudder', Float64, queue_size=100)
-# rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             # rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
 rospy.init_node('pwm', anonymous=True, log_level=rospy.DEBUG)
 rate = rospy.Rate(10)  # sample rate in Hz
 
@@ -42,23 +42,33 @@ inPINS = [GPIO_RUDDER_RADIO, GPIO_SAIL_RADIO]
 # was [18,23] #pinnumbers that are used(BCM nameingconvention)
 outPINS = [GPIO_RUDDER_SERVO, GPIO_SAIL_SERVO]
 
-gpio = pigpio.pi()
-if not gpio.connected:
+# GPIO.setmode(GPIO.BCM) # use broadcom GPIO (not pin numbers) with GPIO. pigpio always uses GPIO numbers.
+
+ppio = pigpio.pi()
+rospy.loginfo("pigpio.get_pigpio_version()=%s"% ppio.get_pigpio_version())
+if not ppio.connected:
     rospy.logerror('pigpiod is not running')
     quit(1)
 else:
     rospy.loginfo('pigpiod is running')
 
-gpio.set_mode(GPIO_RUDDER_RADIO, pigpio.INPUT)
-gpio.set_mode(GPIO_SAIL_RADIO, pigpio.INPUT)
+
+rospy.loginfo('setting up GPIO radio pins as inputs and servo pin with pull up/down disabled')
+ppio.set_mode(GPIO_RUDDER_RADIO, pigpio.INPUT)
+ppio.set_mode(GPIO_SAIL_RADIO, pigpio.INPUT)
+ppio.set_pull_up_down(GPIO_RUDDER_SERVO,pigpio.PUD_OFF)
+ppio.set_pull_up_down(GPIO_SAIL_SERVO,pigpio.PUD_OFF)
+
 if MIRROR_RADIO_TO_SERVO:
-    gpio.set_mode(GPIO_RUDDER_SERVO, pigpio.OUTPUT)
-    gpio.set_mode(GPIO_SAIL_SERVO, pigpio.OUTPUT)
+    rospy.loginfo('setting servo GPIO as outputs')
+    ppio.set_mode(GPIO_RUDDER_SERVO, pigpio.OUTPUT)
+    ppio.set_mode(GPIO_SAIL_SERVO, pigpio.OUTPUT)
+    ppio.set_pad_strength(0,14) # set all GPIO 0-27 with strength 14mA to drive the servos overriding radio
 
-    gpio.set_PWM_frequency(GPIO_RUDDER_SERVO,50)
-    gpio.set_PWM_frequency(GPIO_SAIL_SERVO,50)
+    ppio.set_PWM_frequency(GPIO_RUDDER_SERVO,50)
+    ppio.set_PWM_frequency(GPIO_SAIL_SERVO,50)
 
-    pwm_sail_freq_actual=gpio.get_PWM_frequency(GPIO_SAIL_SERVO)
+    pwm_sail_freq_actual=ppio.get_PWM_frequency(GPIO_SAIL_SERVO)
     rospy.loginfo('servo PWM frequency is %.3f',pwm_sail_freq_actual)
 else:
     rospy.logwarn('radio PWM is *not* being mirrored to servos')
@@ -68,8 +78,8 @@ downTimes = [[0] for i in range(len(inPINS))]
 deltaTimes = [[0] for i in range(len(inPINS))]
 
 
-def gpio_callback(gpio, level, tick):
-    i = inPINS.index(gpio)
+def gpio_callback(ppio, level, tick):
+    i = inPINS.index(ppio)
     v = level
     if (v == 0):  # falling edge
         downTimes[i].append(tick)  # tick is in us since boot, wraps every 72m
@@ -86,8 +96,8 @@ def gpio_callback(gpio, level, tick):
     if len(deltaTimes[i]) > smoothingWindowLength: del deltaTimes[i][0]
 
 
-gpio.callback(inPINS[0], pigpio.EITHER_EDGE, gpio_callback)
-gpio.callback(inPINS[1], pigpio.EITHER_EDGE, gpio_callback)
+ppio.callback(inPINS[0], pigpio.EITHER_EDGE, gpio_callback)
+ppio.callback(inPINS[1], pigpio.EITHER_EDGE, gpio_callback)
 
 rospy.loginfo("PWM initialization completed")
 
@@ -106,20 +116,31 @@ def pwm():
             pub_rudder.publish(radio_pwm_rudder_ms)
             mirrored=''
             if MIRROR_RADIO_TO_SERVO and outlier=='':
-                gpio.set_servo_pulsewidth(GPIO_RUDDER_SERVO,int(radio_pwm_sail_ms*1000))
-                gpio.set_servo_pulsewidth(GPIO_SAIL_SERVO,int(radio_pwm_rudder_ms*1000))
+                ppio.set_servo_pulsewidth(GPIO_RUDDER_SERVO,int(radio_pwm_sail_ms*1000))
+                ppio.set_servo_pulsewidth(GPIO_SAIL_SERVO,int(radio_pwm_rudder_ms*1000))
                 mirrored='mirrored'
             rospy.logdebug("pulse widths: sail: %.3f ms, rudder: %.3f ms %s %s",
                 radio_pwm_sail_ms,radio_pwm_rudder_ms,outlier,mirrored)
             rate.sleep()
-    except KeyboardInterrupt:
-        rospy.loginfo('KeyboardInterrupt: stopping gpio')
-        gpio.stop()
-
+    finally:
+        rospy.loginfo('Finally: stopping ppio and setting servo GPIOs to inputs')
+        # if MIRROR_RADIO_TO_SERVO and outlier=='':
+        #     ppio.set_servo_pulsewidth(GPIO_RUDDER_SERVO,0)
+        #     ppio.set_servo_pulsewidth(GPIO_SAIL_SERVO,0)
+        ppio.set_mode(GPIO_RUDDER_SERVO, pigpio.INPUT)
+        ppio.set_mode(GPIO_SAIL_SERVO, pigpio.INPUT)
+        # ppio.set_pull_up_down(GPIO_RUDDER_SERVO,pigpio.PUD_UP)
+        # ppio.set_pull_up_down(GPIO_SAIL_SERVO,pigpio.PUD_UP)
+        ppio.stop()
+        # GPIO.setup(GPIO_SAIL_SERVO, GPIO.IN)
+        # GPIO.setup(GPIO_RUDDER_SERVO, GPIO.IN)
+        # GPIO.setup(GPIO_SAIL_SERVO, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
+        # GPIO.setup(GPIO_RUDDER_SERVO, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
+        # GPIO.cleanup()
 
 if __name__ == '__main__':
     try:
         pwm()
     except rospy.ROSInterruptException:
-        rospy.loginfo('Interrupt: stopping gpio')
-        gpio.stop()
+        rospy.loginfo('Interrupt: stopping ppio')
+        ppio.stop()

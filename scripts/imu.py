@@ -19,6 +19,7 @@ import math
  
 def imu():
 
+    rospy.init_node('imu', anonymous=True,log_level=rospy.DEBUG)
     #np.set_printoptions(precision=4)
 
     SETTINGS_FILE = "RTIMULib"
@@ -33,8 +34,8 @@ def imu():
     rospy.loginfo("IMU Name: " + imu.IMUName())
 
     if (not imu.IMUInit()):
-        rospy.logerror("IMU Init Failed")
-        sys.exit(1)
+        rospy.logerr("IMU Init Failed")
+        quit(1)
     else:
         rospy.loginfo("IMU Init Succeeded")
 
@@ -52,7 +53,6 @@ def imu():
     # x is speed in m/s
     # y is angle in deg
     # z is temperature in celsius
-    rospy.init_node('imu', anonymous=True,log_level=rospy.DEBUG)
     rate = rospy.Rate(10) # Hz
 
     try:
