@@ -3,6 +3,6 @@
 	<node name="anem" pkg="argo" type="anem.py" output="screen" />
 	<node name="pwm" pkg="argo" type="pwm.py" output="screen" />
 	<node name="gps" pkg="argo" type="gps.py" output="screen" respawn="true"/>
-	<node name="imu" pkg="argo" type="imu" output="screen" />
+	<node name="imu" pkg="argo" type="imu.py" output="screen" />
 
 </launch>
