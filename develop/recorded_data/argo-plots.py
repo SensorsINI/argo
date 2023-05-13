@@ -162,3 +162,30 @@ plt.xlabel('time (m)')
 plt.ylabel('servo PWM')
 plt.ylim(-1,1)
 plt.show()
+
+#%% plot the boat pose from acceleration sensor
+# TODO fix the publisher for pose to publish as 3 vectors
+# the pose is unfortunately returned as strings like ": roll:177.600409, pitch:-10.851735, yaw:48.976230"
+pose_msg=bag.message_by_topic('/pose')
+pose_data=pd.read_csv(pose_msg)
+pose_t=pose_data.Time.to_numpy()
+pose_t=pose_t-pose_t[0]
+pose_arr=pose_data.to_numpy()
+import re
+rpy=np.zeros((len(pose_arr),4))
+for i in range(len(pose_arr)):
+    d=re.split(':|,',pose_arr[i,1])
+    r = float(d[2])
+    p = float(d[4])
+    y = float(d[6])
+    rpy[i,0]=pose_t[i]/60 # minutes
+    rpy[i,1]=r
+    rpy[i,2]=p
+    rpy[i,3]=y
+print('loaded pose')
+
+plt.plot(rpy[:,0],rpy[:,1],rpy[:,0],rpy[:,2],rpy[:,0],rpy[:,3])
+plt.xlabel('time (m)')
+plt.ylabel('deg')
+plt.legend(['roll','pitch','yaw'])
+plt.show()
