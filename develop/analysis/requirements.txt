@@ -1,0 +1,6 @@
+
+
+pyprefs
+bagpy
+easygui
+matplotlib

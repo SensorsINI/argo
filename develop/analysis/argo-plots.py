@@ -1,11 +1,19 @@
+# plot data from recorded argo bag file
+# tobi CCNW 2023
+
 import bagpy
 from bagpy import bagreader # https://stackoverflow.com/questions/59794328/importing-rosbag-in-python-3
 from easygui import fileopenbox
 import matplotlib
 matplotlib.rcParams.update({'font.size': 16})
+from develop.analysis.prefs import MyPreferences
+prefs=MyPreferences()
 
+lastbagfile=prefs.get('lastbagfile','')
 
-bagfilename=fileopenbox(msg='select bag file')
+bagfilename=fileopenbox(msg='select bag file', default=lastbagfile)
+if not bagfilename is None:
+    prefs.put('lastbagfile', bagfilename)
 
 bag=bagpy.bagreader(bagfilename)
 
@@ -31,6 +39,21 @@ print(bag.topic_table)
 # 9         /rosbridge_ws/client_count  ...           NaN
 # 10   /rosbridge_ws/connected_clients  ...           NaN
 # 11       /rosbridge_wss/client_count  ...           NaN
+# 12  /rosbridge_wss/connected_clients  ...           NaN
+# 13                           /rosout  ...  13530.012903
+# 14                       /rosout_agg  ...   9962.717340
+# 15                           /rudder  ...      9.998770
+# 16                             /sail  ...      9.999509
+# 17                       /statistics  ...     20.887344
+# 18                               /tf  ...      9.999628
+# 19       /tf2_web_republisher/status  ...      4.999957
+# 20                        /tf_static  ...           NaN
+# 21                   /time_reference  ...      1.001502
+# 22                              /vel  ...      1.805956
+
+print(f'loaded {bagfilename}')
+
+#%% load fix data from GPS
 
 import matplotlib.pyplot as plt
 import seaborn as sea
@@ -43,6 +66,8 @@ fix_data=pd.read_csv(fix_msg)
 
 print('loaded fix data')
 # fix_data.lat and fix_data.long
+
+
 #%% plot GPS
 lats=fix_data.latitude.array.to_numpy()
 lngs=fix_data.longitude.to_numpy()
@@ -70,19 +95,9 @@ gmap.draw(gmap_filename)
 print(f'wrote {gmap_filename}')
 
 #%% animate the path
-"""
-=========================
-Simple animation examples
-=========================
-
-This example contains two animations. The first is a random walk plot. The
-second is an image animation.
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-
 
 def update_line(num, data, line):
     line.set_data(data[..., :num])
@@ -133,13 +148,18 @@ plt.ylabel('angle (deg)')
 compass_msg=bag.message_by_topic('/compass')
 compass_data=pd.read_csv(compass_msg)
 compass_t=compass_data.Time.to_numpy()
-compass_t=compass_t-anem_t[0]
+compass_t=(compass_t-compass_t[0])/60
 
 compasss_data_0=compass_data.data_0.to_numpy()
 compasss_data_1=compass_data.data_1.to_numpy()
 compasss_data_2=compass_data.data_2.to_numpy()
 print('loaded compass data')
 
+plt.plot(compass_t, compasss_data_0, compass_t, compasss_data_1, compass_t, compasss_data_2)
+plt.xlabel('time (m)')
+plt.xlim([5,25])
+plt.legend(['0','1','2'])
+plt.show()
 #%% plot the rudder and sail servo values
 rudder_msg=bag.message_by_topic('/rudder')
 sail_msg=bag.message_by_topic('/sail')
