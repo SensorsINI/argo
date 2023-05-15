@@ -17,6 +17,8 @@ if not bagfilename is None:
     prefs.put('lastbagfile', bagfilename)
 
 bag=bagpy.bagreader(bagfilename)
+from pathlib import Path
+bagfilepath=Path(bagfilename)
 
 # print topics
 print(bag.topic_table)
@@ -69,7 +71,7 @@ print('loaded fix data')
 # fix_data.lat and fix_data.long
 
 
-#%% plot GPS
+#%% compute fix arrays from GPS fix
 fix_t_m=fix_data.Time.to_numpy()/60 # minutes
 lats=fix_data.latitude.array.to_numpy()
 lngs=fix_data.longitude.to_numpy()
@@ -85,18 +87,17 @@ min_lat, max_lat, min_lon, max_lon = \
 min(lats), max(lats), \
 min(lngs), max(lngs)
 
+#%% create HTML map
 # Create the map plotter:
 import gmplot
 apikey = 'AIzaSyBLmSEqZnv2Fl8-PDCnRmC6VKPd49mfK0c' # ccnw2023
 gmap = gmplot.GoogleMapPlotter(np.nanmean(lats), np.nanmean(lngs), zoom=19, apikey=apikey) # zoom is about 19 for our sailing
 
 gmap.plot(lats,lngs,color='red')
-from pathlib import Path
-p=Path(bagfilename)
-gmap_filename='argo-path-'+p.stem+'.html'
+gmap_filename='argo-path-' + bagfilepath.stem + '.html'
 gmap.draw(gmap_filename)
-p=Path(gmap_filename)
-print(f'wrote {p.absolute()}')
+bagfilepath=Path(gmap_filename)
+print(f'wrote {bagfilepath.absolute()}')
 
 #%% animate the path, set pycharm to show plots externally in Settings/Tools/Python Scientific
 import numpy as np
@@ -107,16 +108,22 @@ start_time_m=10 # no data before this
 
 
 def update_line(num, data, time, line,txt):
-    if time[num]<start_time_m:
-        return line, txt
     line.set_data(data[..., :num])
     txt.set_text(f't={time[num]:.2f}m')
     print('.', end='')
+    if num%80==0:
+        print('')
     return line,txt
 
 fig1 = plt.figure()
 
-data = np.row_stack((lngs,lats))
+def chop_arr(t,t0, arr):
+    return arr[np.where(t>=t0)]
+fix_t=chop_arr(fix_t_m, start_time_m, fix_t_m)
+lt=chop_arr(fix_t_m,start_time_m,lats)
+lg=chop_arr(fix_t_m,start_time_m,lngs)
+fix_anim_data = np.row_stack((lg, lt))
+
 l, = plt.plot([], [], 'r-')
 txt=plt.text(min_lon, min_lat,'time')
 plt.xlim(min_lon, max_lon)
@@ -124,13 +131,13 @@ plt.ylim(min_lat, max_lat)
 plt.xlabel('x')
 plt.title('argo path')
 print('starting animation')
-line_ani = animation.FuncAnimation(fig1, update_line, len(lngs), fargs=(data, fix_t_m, l,txt),
+line_ani = animation.FuncAnimation(fig1, update_line, len(fix_t), fargs=(fix_anim_data, fix_t, l, txt),
                                    interval=10, blit=True)
 
 # To save the animation, use the command: line_ani.save('lines.mp4')
 plt.show()
 print('saving animation')
-line_ani.save('argo_path-'+p.stem+'.avi')
+line_ani.save('argo_path-' + bagfilepath.stem + '.avi')
 print('done saving, but wait for plot to show animation')
 
 #%% plot anem
@@ -208,11 +215,11 @@ rpy=np.zeros((len(pose_arr),4))
 for i in range(len(pose_arr)):
     d=re.split(':|,',pose_arr[i,1])
     r = float(d[2])
-    p = float(d[4])
+    bagfilepath = float(d[4])
     y = float(d[6])
     rpy[i,0]=pose_t[i]/60 # minutes
     rpy[i,1]=r
-    rpy[i,2]=p
+    rpy[i,2]=bagfilepath
     rpy[i,3]=y
 print('loaded pose')
 
