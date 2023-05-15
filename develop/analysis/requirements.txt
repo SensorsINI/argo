@@ -1,6 +1,9 @@
 
 
-pyprefs
+pypref
 bagpy
 easygui
 matplotlib
+gmplot
+numpy
+pandas

@@ -1,5 +1,6 @@
 # plot data from recorded argo bag file
 # tobi CCNW 2023
+#@@ import data
 
 import bagpy
 from bagpy import bagreader # https://stackoverflow.com/questions/59794328/importing-rosbag-in-python-3
@@ -69,8 +70,11 @@ print('loaded fix data')
 
 
 #%% plot GPS
+fix_t_m=fix_data.Time.to_numpy()/60 # minutes
 lats=fix_data.latitude.array.to_numpy()
 lngs=fix_data.longitude.to_numpy()
+fix_t_m=fix_t_m[~np.isnan(lats)]
+fix_t_m=fix_t_m-fix_t_m[0]
 lats=lats[~np.isnan(lats)]
 lngs=lngs[~np.isnan(lngs)]
 
@@ -83,7 +87,6 @@ min(lngs), max(lngs)
 
 # Create the map plotter:
 import gmplot
-apikey = 'AIzaSyBLmSEqZnv2Fl8-PDCnRmC6VKPd49mfK0c' # old key, 2020
 apikey = 'AIzaSyBLmSEqZnv2Fl8-PDCnRmC6VKPd49mfK0c' # ccnw2023
 gmap = gmplot.GoogleMapPlotter(np.nanmean(lats), np.nanmean(lngs), zoom=19, apikey=apikey) # zoom is about 19 for our sailing
 
@@ -92,33 +95,42 @@ from pathlib import Path
 p=Path(bagfilename)
 gmap_filename='argo-path-'+p.stem+'.html'
 gmap.draw(gmap_filename)
-print(f'wrote {gmap_filename}')
+p=Path(gmap_filename)
+print(f'wrote {p.absolute()}')
 
-#%% animate the path
+#%% animate the path, set pycharm to show plots externally in Settings/Tools/Python Scientific
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-def update_line(num, data, line):
+start_time_m=10 # no data before this
+
+
+def update_line(num, data, time, line,txt):
+    if time[num]<start_time_m:
+        return line, txt
     line.set_data(data[..., :num])
-    return line,
+    txt.set_text(f't={time[num]:.2f}m')
+    print('.', end='')
+    return line,txt
 
 fig1 = plt.figure()
 
 data = np.row_stack((lngs,lats))
 l, = plt.plot([], [], 'r-')
+txt=plt.text(min_lon, min_lat,'time')
 plt.xlim(min_lon, max_lon)
 plt.ylim(min_lat, max_lat)
 plt.xlabel('x')
 plt.title('argo path')
 print('starting animation')
-line_ani = animation.FuncAnimation(fig1, update_line, len(lngs), fargs=(data, l),
+line_ani = animation.FuncAnimation(fig1, update_line, len(lngs), fargs=(data, fix_t_m, l,txt),
                                    interval=10, blit=True)
 
 # To save the animation, use the command: line_ani.save('lines.mp4')
 plt.show()
 print('saving animation')
-line_ani.save('argo_path-'+p.stem+'.mp4')
+line_ani.save('argo_path-'+p.stem+'.avi')
 print('done saving, but wait for plot to show animation')
 
 #%% plot anem
