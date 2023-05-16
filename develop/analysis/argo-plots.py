@@ -6,6 +6,8 @@ import bagpy
 from bagpy import bagreader # https://stackoverflow.com/questions/59794328/importing-rosbag-in-python-3
 from easygui import fileopenbox
 import matplotlib
+matplotlib.use("tkagg")
+import matplotlib.pyplot as plt
 matplotlib.rcParams.update({'font.size': 16})
 from develop.analysis.prefs import MyPreferences
 prefs=MyPreferences()
@@ -67,11 +69,10 @@ import numpy as np
 fix_msg=bag.message_by_topic('/fix')
 fix_data=pd.read_csv(fix_msg)
 
-print('loaded fix data')
 # fix_data.lat and fix_data.long
 
 
-#%% compute fix arrays from GPS fix
+# compute fix arrays from GPS fix
 fix_t_m=fix_data.Time.to_numpy()/60 # minutes
 lats=fix_data.latitude.array.to_numpy()
 lngs=fix_data.longitude.to_numpy()
@@ -86,6 +87,7 @@ from numpy import max as max
 min_lat, max_lat, min_lon, max_lon = \
 min(lats), max(lats), \
 min(lngs), max(lngs)
+print('loaded fix data')
 
 #%% create HTML map
 # Create the map plotter:
@@ -100,35 +102,39 @@ bagfilepath=Path(gmap_filename)
 print(f'wrote {bagfilepath.absolute()}')
 
 #%% animate the path, set pycharm to show plots externally in Settings/Tools/Python Scientific
+start_time_m=10 # no data before this
+
+def chop_arr(t,t0, arr):
+    return arr[np.where(t>=t0)]
+fix_t=chop_arr(fix_t_m, start_time_m, fix_t_m)
+lt_m=chop_arr(fix_t_m, start_time_m, lats)
+lg_m=chop_arr(fix_t_m, start_time_m, lngs)
+# compute in meters https://stackoverflow.com/questions/639695/how-to-convert-latitude-or-longitude-to-meters
+lt_m=111.32e3*(lt_m-min_lat)
+mean_lgn=np.mean(lngs)
+lg_m=(40075e3/360)*np.cos(mean_lgn*np.pi/180)*(lg_m-min_lon)
+fix_anim_data = np.row_stack((lg_m, lt_m)) # to match [],[] signature of function update_line
+
+#%% make animation
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-
-start_time_m=10 # no data before this
-
 
 def update_line(num, data, time, line,txt):
     line.set_data(data[..., :num])
     txt.set_text(f't={time[num]:.2f}m')
     print('.', end='')
     if num%80==0:
-        print('')
+        print(f' t={time[num]:.2f}')
     return line,txt
 
 fig1 = plt.figure()
-
-def chop_arr(t,t0, arr):
-    return arr[np.where(t>=t0)]
-fix_t=chop_arr(fix_t_m, start_time_m, fix_t_m)
-lt=chop_arr(fix_t_m,start_time_m,lats)
-lg=chop_arr(fix_t_m,start_time_m,lngs)
-fix_anim_data = np.row_stack((lg, lt))
-
 l, = plt.plot([], [], 'r-')
 txt=plt.text(min_lon, min_lat,'time')
-plt.xlim(min_lon, max_lon)
-plt.ylim(min_lat, max_lat)
-plt.xlabel('x')
+plt.xlim(np.min(lg_m), np.max(lg_m))
+plt.ylim(np.min(lt_m), np.max(lt_m))
+plt.xlabel('longitude (m)')
+plt.ylabel('latitude (m)')
 plt.title('argo path')
 print('starting animation')
 line_ani = animation.FuncAnimation(fig1, update_line, len(fix_t), fargs=(fix_anim_data, fix_t, l, txt),
