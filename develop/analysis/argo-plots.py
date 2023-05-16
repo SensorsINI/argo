@@ -1,14 +1,14 @@
 # plot data from recorded argo bag file
 # tobi CCNW 2023
 #@@ import data
+import matplotlib
+matplotlib.use("tkagg")
+matplotlib.rcParams.update({'font.size': 16})
+import matplotlib.pyplot as plt
 
 import bagpy
 from bagpy import bagreader # https://stackoverflow.com/questions/59794328/importing-rosbag-in-python-3
 from easygui import fileopenbox
-import matplotlib
-matplotlib.use("tkagg")
-import matplotlib.pyplot as plt
-matplotlib.rcParams.update({'font.size': 16})
 from develop.analysis.prefs import MyPreferences
 prefs=MyPreferences()
 
@@ -101,7 +101,7 @@ gmap.draw(gmap_filename)
 bagfilepath=Path(gmap_filename)
 print(f'wrote {bagfilepath.absolute()}')
 
-#%% animate the path, set pycharm to show plots externally in Settings/Tools/Python Scientific
+#%%  make animation data
 start_time_m=10 # no data before this
 
 def chop_arr(t,t0, arr):
@@ -115,7 +115,7 @@ mean_lgn=np.mean(lngs)
 lg_m=(40075e3/360)*np.cos(mean_lgn*np.pi/180)*(lg_m-min_lon)
 fix_anim_data = np.row_stack((lg_m, lt_m)) # to match [],[] signature of function update_line
 
-#%% make animation
+#%% animate the path, set pycharm to show plots externally in Settings/Tools/Python Scientific
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -130,7 +130,7 @@ def update_line(num, data, time, line,txt):
 
 fig1 = plt.figure()
 l, = plt.plot([], [], 'r-')
-txt=plt.text(min_lon, min_lat,'time')
+txt=plt.text(0, 0,'time')
 plt.xlim(np.min(lg_m), np.max(lg_m))
 plt.ylim(np.min(lt_m), np.max(lt_m))
 plt.xlabel('longitude (m)')
