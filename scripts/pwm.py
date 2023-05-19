@@ -71,7 +71,7 @@ def pwm():
                             outlier=''
                         else:
                             outlier='**** outlier'
-                        rospy.logdebug("pulse widths: sail: %.3f ms, rudder: %.3f ms %s",ov1,ov2,outlier)
+#                        rospy.logdebug("pulse widths: sail: %.3f ms, rudder: %.3f ms %s",ov1,ov2,outlier)
 
 			channel1.publish(ov1)
 			channel2.publish(ov2)
