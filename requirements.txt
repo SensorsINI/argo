@@ -1,0 +1,7 @@
+# for host side, to install packages needed to interpret recorded bag files
+rospy # python 3.8 and older; https://github.com/rospypi/simple for windows without ROS, just to have packages to interpret messages
+pigpio
+numpy
+libnmea_navsat_driver
+functools
+smbus
