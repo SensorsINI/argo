@@ -10,7 +10,7 @@ import rospy
 from std_msgs.msg import Float64
 import serial
 #import RPi.gpio as gpio
-import pigpio
+import pigpio # https://abyz.me.uk/rpi/pigpio/
 import time
 import numpy as np
 
@@ -25,7 +25,10 @@ rate = rospy.Rate(10) # sample rate in Hz
 
 smoothingWindowLength=3 # number of samples to median filter over; should be odd number
 
-inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
+inPINS=[18,23] # pin numbers for ruder/servo (not necessarily in that order) that are used (BCM Broadcom pin naming convention; see https://abyz.me.uk/rpi/pigpio/)
+# actual header pin numbers for GPIO 13,23 are header pins 12,16
+
+outPINS=[18,23] # pin numbers for ruder/servo (not necessarily in that order) that are used (BCM Broadcom pin naming convention; see https://abyz.me.uk/rpi/pigpio/)
 
 gpio=pigpio.pi()
 
