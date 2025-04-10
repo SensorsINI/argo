@@ -6,3 +6,4 @@ This repository contains all the files that need to be in the in the ROS package
 
 See the argo sailboat master readme at https://docs.google.com/document/d/1k4FYVaFQ-n34UVE_fHvFsXmN1hixLR1Vu4WXfNnHY-0/edit?usp=sharing
 
+To plot ros bag file data, see [argo-plots.py](develop%2Frecorded_data%2Fargo-plots.py)
