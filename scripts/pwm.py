@@ -25,7 +25,13 @@ rate = rospy.Rate(10) # sample rate in Hz
 
 smoothingWindowLength=3 # number of samples to median filter over; should be odd number
 
-inPINS=[18,23] #pinnumbers that are used(BCM nameingconvention)
+
+# PWM outputs from radio receiver are wired to header pins 18 (rudder) and 22 (sail)
+# On RPi3 Model 2B, these are pigpio GPIO pins 24 and 25
+
+GPIO_RUDDER=25
+GPIO_SAIL=24
+inPINS=[GPIO_RUDDER,GPIO_SAIL] # was [18,23] #pinnumbers that are used(BCM nameingconvention)
 
 gpio=pigpio.pi()
 
