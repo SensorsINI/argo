@@ -88,7 +88,7 @@ def anem():
     # x is speed in m/s
     # y is angle in deg
     # z is temperature in celsius
-    rospy.init_node('anem', anonymous=True,log_level=rospy.INFO)
+    rospy.init_node('anem', anonymous=True,log_level=rospy.DEBUG)
     rate = rospy.Rate(10) # Hz
 
     rospy.loginfo('anem: Opening i2c SMBus')

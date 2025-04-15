@@ -39,7 +39,7 @@ def sendcmd(serialport, rate, msg):
 
 def gps():
     pub = rospy.Publisher('gps_data', String, queue_size=10)
-    rospy.init_node('gps', anonymous=True,log_level=rospy.INFO)
+    rospy.init_node('gps', anonymous=True,log_level=rospy.DEBUG) # change logging level here
     rate = rospy.Rate(10) # 1hz loop runs at this rate checking for stuff on serial port
     serialport=serial.Serial('/dev/ttyAMA0', baudrate=4800,
 				parity=serial.PARITY_NONE,
@@ -119,7 +119,13 @@ def gps():
 
                     if data.startswith('$GPGSV'):
                             numSatelites_inview=data.strip().split(',')[3]
-                            rospy.logdebug("Satelites in view: %s" % numSatelites_inview)
+			    try:
+				    if int(numSatelites_inview)<3:
+					rospy.logwarn("Satelites in view: %s" % numSatelites_inview)
+				    else:
+		                    	rospy.logdebug("Satelites in view: %s" % numSatelites_inview)
+			    except ValueError:
+                                    rospy.logwarng("could not parse num satelites")
 
                     if data.startswith('$GPGGA'):
                             utc=data.strip().split(',')[1]
