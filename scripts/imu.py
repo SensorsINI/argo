@@ -61,11 +61,44 @@ def imu():
                 # x, y, z = imu.getFusionData()
                 # print("%f %f %f" % (x,y,z))
                 data = imu.getIMUData()
+
+                """ 
+                sample of data returned
+
+                {'accelValid': True, 'fusionQPoseValid': True, 'timestamp': 1744717994965783L, 
+                'compassValid': True, 
+                'compass': (-24.0, 20.340002059936523, 2.3400001525878906), (should be uT (micro Tesla)? )
+                'accel': (-0.4088134765625, 0.838134765625, 0.34693604707717896), (units shold be g)
+                'gyroValid': True, 
+                'gyro': (0.0062618679367005825, 0.0140159260481596, -0.004969525150954723), (should be rad/s)
+                'fusionQPose': (0.04537138342857361, 0.2931070029735565, -0.5019389986991882, -0.8124573230743408), 
+                'fusionPoseValid': True, 
+                'fusionPose': (1.2032440900802612, 0.4452976584434509, -2.7216269969940186)} (should be rad)
+                """
+#                rospy.logdebug(data)
                 fusionPose = data["fusionPose"]
+                gyro=data['gyro']
+                accel=data['accel']
+                compass=data['compass']
+
                 rollDeg=math.degrees(fusionPose[0])
                 panDeg=math.degrees(fusionPose[1])
                 yawDeg=math.degrees(fusionPose[2])
-                rospy.logdebug("r: %.2f p: %.2f y: %.2f" % (rollDeg,panDeg,yawDeg)) 
+                
+                gx=math.degrees(gyro[0])
+                gy=math.degrees(gyro[1])
+                gz=math.degrees(gyro[2])
+                
+                ax=accel[0]
+                ay=accel[1]
+                az=accel[2]
+
+                cx=compass[0]
+                cy=compass[1]
+                cz=compass[2]
+
+                rospy.logdebug("pose rpy=(%.2f,%.2f,%.2f), gyro xyz=(%.1f,%.1f,%.1f)deg/s, acc xyz=(%.2f,%.2f,%.2f)g, mag xyz=(%.1f,%.1f,%.1f)uT" 
+                    % (rollDeg,panDeg,yawDeg,gx,gy,gz, ax,ay,az, cx,cy,cz)) 
                 pub_fusion.publish(Vector3(rollDeg,panDeg,yawDeg))
             else:
                 rospy.logwarn('could not read IMU')
