@@ -35,17 +35,17 @@ def sendcmd(serialport, rate, msg):
         return reply
     except Exception as e:
         rospy.logwarn('GPS serial port exception: '+str(e))
-	return None
+    return None
 
 def gps():
     pub = rospy.Publisher('gps_data', String, queue_size=10)
     rospy.init_node('gps', anonymous=True,log_level=rospy.DEBUG) # change logging level here
     rate = rospy.Rate(10) # 1hz loop runs at this rate checking for stuff on serial port
     serialport=serial.Serial('/dev/ttyAMA0', baudrate=4800,
-				parity=serial.PARITY_NONE,
-				stopbits=serial.STOPBITS_ONE,
-				bytesize=serial.EIGHTBITS
-				)
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                bytesize=serial.EIGHTBITS
+                )
     rospy.loginfo("Serial connection established; starting GPS...sleeping a bit")
     rospy.sleep(1)
     rospy.logdebug("Sending initialization commands")
@@ -88,86 +88,86 @@ def gps():
     altitude=0
     magnetic_variation_deg=0
     position_system_mode_indicator=0
-    # make driver to parse the sentences as they come from Copernicus II, then publish them
+    # make the nmea_navsat_driver that is used later to parse the sentences as they come from GPS unit
     driver = libnmea_navsat_driver.driver.RosNMEADriver()
     gps_frame_id = "argo_gps"
 
     # main loop
     while not rospy.is_shutdown():
 
-	if serialport.inWaiting(): # returns num bytes, so skips to rate.sleep if nothing there
-		rospy.logdebug("*******************************************************************")
-		try:
-		    data=serialport.readline()
-		except Exception as e:
-		     rospy.logwarn('could not read data: '+str(e)) 
-                     continue
-		rospy.logdebug(data.strip())
-        	pub.publish(data)
-                try:
-                    # parse NMEA sentence and publish to other topic
-                    driver.add_sentence(data.strip(),gps_frame_id,rospy.get_rostime())
-                except ValueError as e:
-                    rospy.logwarn("Value error, likely due to missing NMEA fields in messge. Error was %s." % e)
-                try:
-                    if data.startswith('$GPVTG'):
-                            track_made_good_true=data.strip().split(',')[1]
-                            track_made_good_magnetic=data.strip().split(',')[3]
-                            speed_over_ground=data.strip().split(',')[7]
-                            mode_indicator=data.strip().split(',')[9]
-                            rospy.logdebug("Track made good true: %s" % track_made_good_true)
-                            rospy.logdebug("Track made good magnetic: %s" % track_made_good_magnetic)
-                            rospy.logdebug("Speed over ground[km/h]: %s" % speed_over_ground)
-                            rospy.logdebug("Mode: %s" % mode_indicator)
+        if serialport.inWaiting(): # returns num bytes, so skips to rate.sleep if nothing there
+            rospy.logdebug("*******************************************************************")
+            try:
+                data=serialport.readline()
+            except Exception as e:
+                rospy.logwarn('could not read data: '+str(e)) 
+                continue
+            rospy.logdebug(data.strip())
+            pub.publish(data) # publish the raw data string
+            try:
+                # parse NMEA sentence and publish to other topic
+                driver.add_sentence(data.strip(),gps_frame_id,rospy.get_rostime())
+            except ValueError as e:
+                rospy.logwarn("Value error, likely due to missing NMEA fields in message. Error was %s." % e)
+            try:
+                if data.startswith('$GPVTG'):
+                        track_made_good_true=data.strip().split(',')[1]
+                        track_made_good_magnetic=data.strip().split(',')[3]
+                        speed_over_ground=data.strip().split(',')[7]
+                        mode_indicator=data.strip().split(',')[9]
+                        rospy.logdebug("Track made good true: %s" % track_made_good_true)
+                        rospy.logdebug("Track made good magnetic: %s" % track_made_good_magnetic)
+                        rospy.logdebug("Speed over ground[km/h]: %s" % speed_over_ground)
+                        rospy.logdebug("Mode: %s" % mode_indicator)
 
-                    if data.startswith('$GPGSV'):
-                            numSatelites_inview=data.strip().split(',')[3]
-			    try:
-				    if int(numSatelites_inview)<3:
-					rospy.logwarn("Satelites in view: %s" % numSatelites_inview)
-				    else:
-		                    	rospy.logdebug("Satelites in view: %s" % numSatelites_inview)
-			    except ValueError:
-                                    rospy.logwarn("could not parse num satelites")
+                if data.startswith('$GPGSV'):
+                    numSatelites_inview=data.strip().split(',')[3]
+                    try:
+                        if int(numSatelites_inview)<3:
+                            rospy.logwarn("Satelites in view: %s" % numSatelites_inview)
+                        else:
+                            rospy.logdebug("Satelites in view: %s" % numSatelites_inview)
+                    except ValueError:
+                        rospy.logwarn("could not parse num satelites")
 
-                    if data.startswith('$GPGGA'):
-                            utc=data.strip().split(',')[1]
-                            latitude=data.strip().split(',')[2]
-                            longitude=data.strip().split(',')[4]
-                            gps_quality=data.strip().split(',')[6]
-                            numSatelites_inuse=data.strip().split(',')[7]
-                            altitude=data.strip().split(',')[9]
-                            rospy.logdebug("UTC: %s" % utc)
-                            rospy.logdebug("Latitude: %s" % latitude)
-                            rospy.logdebug("Longitude: %s" % longitude)
-                            rospy.logdebug("GPS quality: %s" % gps_quality)
-                            rospy.logdebug("Satelites in use: %s" % numSatelites_inuse)
-                            rospy.logdebug("Altitude: %s" % altitude)
+                if data.startswith('$GPGGA'):
+                        utc=data.strip().split(',')[1]
+                        latitude=data.strip().split(',')[2]
+                        longitude=data.strip().split(',')[4]
+                        gps_quality=data.strip().split(',')[6]
+                        numSatelites_inuse=data.strip().split(',')[7]
+                        altitude=data.strip().split(',')[9]
+                        rospy.logdebug("UTC: %s" % utc)
+                        rospy.logdebug("Latitude: %s" % latitude)
+                        rospy.logdebug("Longitude: %s" % longitude)
+                        rospy.logdebug("GPS quality: %s" % gps_quality)
+                        rospy.logdebug("Satelites in use: %s" % numSatelites_inuse)
+                        rospy.logdebug("Altitude: %s" % altitude)
 
-                    if data.startswith('$GPRMC'):
-                            utc=data.strip().split(',')[1]
-                            valid=data.strip().split(',')[2]
-                            latitude=data.strip().split(',')[3:4]
-                            latitude=' '.join(latitude)
-                            longitude=data.strip().split(',')[5:6]
-                            longitude=' '.join(longitude)
-                            speed_over_ground=data.strip().split(',')[7]
-                            track_made_good_true=data.strip().split(',')[8]
-                            magnetic_variation_deg=data.strip().split(',')[10:11]
-                            magnetic_variation_deg=' '.join(magnetic_variation_deg)
-                            position_system_mode_indicator=data.strip().split(',')[12]
-                            rospy.logdebug("UTC: %s" % utc)
-                            rospy.logdebug("Valid: %s" % valid)
-                            rospy.logdebug("Latitude: %s" % latitude)
-                            rospy.logdebug("Longitude: %s" % longitude)
-                            rospy.logdebug("Speed over ground [km/h]: %s" % speed_over_ground)
-                            rospy.logdebug("Track made good true (deg): %s" % track_made_good_true)
-                            rospy.logdebug("Magnetic variation (deg): %s" % magnetic_variation_deg)
-                            rospy.logdebug("Position system mode indicator: %s" % position_system_mode_indicator)
-                except IndexError as e:
-                    rospy.logwarn(data % ":IndexError, likely due to missing NMEA fields in messge. Error was %s." % e)
+                if data.startswith('$GPRMC'):
+                        utc=data.strip().split(',')[1]
+                        valid=data.strip().split(',')[2]
+                        latitude=data.strip().split(',')[3:4]
+                        latitude=' '.join(latitude)
+                        longitude=data.strip().split(',')[5:6]
+                        longitude=' '.join(longitude)
+                        speed_over_ground=data.strip().split(',')[7]
+                        track_made_good_true=data.strip().split(',')[8]
+                        magnetic_variation_deg=data.strip().split(',')[10:11]
+                        magnetic_variation_deg=' '.join(magnetic_variation_deg)
+                        position_system_mode_indicator=data.strip().split(',')[12]
+                        rospy.logdebug("UTC: %s" % utc)
+                        rospy.logdebug("Valid: %s" % valid)
+                        rospy.logdebug("Latitude: %s" % latitude)
+                        rospy.logdebug("Longitude: %s" % longitude)
+                        rospy.logdebug("Speed over ground [km/h]: %s" % speed_over_ground)
+                        rospy.logdebug("Track made good true (deg): %s" % track_made_good_true)
+                        rospy.logdebug("Magnetic variation (deg): %s" % magnetic_variation_deg)
+                        rospy.logdebug("Position system mode indicator: %s" % position_system_mode_indicator)
+            except IndexError as e:
+                rospy.logwarn(data % ":IndexError, likely due to missing NMEA fields in messge. Error was %s." % e)
 
-       	rate.sleep() # sleep for 1/rate (1/10) second, then check again for data
+            rate.sleep() # sleep for 1/rate (1/10) second, then check again for data
 
     # shutdown storing data to flash to enable faster startup next time
     rospy.loginfo("rospy is shutdown, gracefully shutting down GPS");
