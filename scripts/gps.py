@@ -128,7 +128,7 @@ def gps():
 				    else:
 		                    	rospy.logdebug("Satelites in view: %s" % numSatelites_inview)
 			    except ValueError:
-                                    rospy.logwarning("could not parse num satelites")
+                                    rospy.logwarn("could not parse num satelites")
 
                     if data.startswith('$GPGGA'):
                             utc=data.strip().split(',')[1]
