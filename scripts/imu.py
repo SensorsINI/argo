@@ -19,22 +19,25 @@ import math
  
 def imu():
 
+    print('initialiing IMU ROS node')
     rospy.init_node('imu', anonymous=True,log_level=rospy.DEBUG)
     #np.set_printoptions(precision=4)
 
     SETTINGS_FILE = "RTIMULib"
 
-    rospy.loginfo("Using IMU settings file " + SETTINGS_FILE + ".ini")
+    abs_path=os.path.abspath(SETTINGS_FILE+".ini")
+    rospy.loginfo("Using IMU settings file " + abs_path)
     if not os.path.exists(SETTINGS_FILE + ".ini"):
       rospy.loginfo("Settings file does not exist, will be created")
 
     s = RTIMU.Settings(SETTINGS_FILE)
+    print('Settings are '+str(s))
     imu = RTIMU.RTIMU(s)
 
     rospy.loginfo("IMU Name: " + imu.IMUName())
 
     if (not imu.IMUInit()):
-        rospy.logerr("IMU Init Failed")
+        rospy.logerr("*************   IMU Init Failed, quiting imu.py")
         quit(1)
     else:
         rospy.loginfo("IMU Init Succeeded")
