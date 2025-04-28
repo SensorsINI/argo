@@ -19,7 +19,7 @@ def checksum(sentence):
     calc_cksum = reduce(operator.xor, (ord(s) for s in nmeadata), 0)
 
     return calc_cksum
-    
+
 def sendcmd(serialport, rate, msg):
     if not '*' in msg: # add checksum
         cs=checksum(msg)
@@ -41,16 +41,16 @@ def gps():
     pub = rospy.Publisher('gps_data', String, queue_size=10)
     rospy.init_node('gps', anonymous=True,log_level=rospy.DEBUG) # change logging level here
     rate = rospy.Rate(10) # 1hz loop runs at this rate checking for stuff on serial port
-    serialport=serial.Serial('/dev/ttyAMA0', baudrate=4800,
+    serialport=serial.Serial('/dev/serial0', baudrate=38400,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 bytesize=serial.EIGHTBITS
                 )
     rospy.loginfo("Serial connection established; starting GPS...sleeping a bit")
     rospy.sleep(1)
-    rospy.logdebug("Sending initialization commands")
-    sendcmd(serialport,rate,"$PTNLSRT,H") # reset, hot start, uses SRAM data that was loaded from flash
-    rospy.sleep(1)
+#    rospy.logdebug("Sending initialization commands")
+#    sendcmd(serialport,rate,"$PTNLSRT,H") # reset, hot start, uses SRAM data that was loaded from flash
+#    rospy.sleep(1)
 
     rospy.logdebug("Getting version info")
     hwVersion=sendcmd(serialport,rate,"$PTNLQVR,H") # query hardware version info
@@ -63,7 +63,7 @@ def gps():
 
 
     rospy.logdebug("Setting up GPS output")
-    sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1") # config reciever 
+    sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1") # config reciever
     #sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0")# command not in user guide
     sendcmd(serialport,rate,"$PTNLSFS,S,0") # H = high sensitivity aquisition mode, but slower (S=standard)
     #sendcmd(serialport,rate,"$PTNLQCR") # query receiver config
@@ -100,7 +100,7 @@ def gps():
             try:
                 data=serialport.readline()
             except Exception as e:
-                rospy.logwarn('could not read data: '+str(e)) 
+                rospy.logwarn('could not read data: '+str(e))
                 continue
             rospy.logdebug(data.strip())
             pub.publish(data) # publish the raw data string
