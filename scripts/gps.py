@@ -38,8 +38,10 @@ def sendcmd(serialport, rate, msg):
     return None
 
 def gps():
+    rospy.init_node('gps', anonymous=True,log_level=rospy.INFO) # change logging level here
     pub = rospy.Publisher('gps_data', String, queue_size=10)
-    rospy.init_node('gps', anonymous=True,log_level=rospy.DEBUG) # change logging level here
+    #pub_fix = rospy.Publisher('gps_fix', String, queue_size=10)
+    #pub_heading_speed = rospy.Publisher('gps_heading_speed', String, queue_size=10)
     rate = rospy.Rate(10) # 1hz loop runs at this rate checking for stuff on serial port
     serialport=serial.Serial('/dev/serial0', baudrate=38400,
                 parity=serial.PARITY_NONE,
@@ -92,6 +94,7 @@ def gps():
     driver = libnmea_navsat_driver.driver.RosNMEADriver()
     gps_frame_id = "argo_gps"
 
+    counter=0
     # main loop
     while not rospy.is_shutdown():
 

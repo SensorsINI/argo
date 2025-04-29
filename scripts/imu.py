@@ -20,7 +20,7 @@ import math
 def imu():
 
     print('initialiing IMU ROS node')
-    rospy.init_node('imu', anonymous=True,log_level=rospy.DEBUG)
+    rospy.init_node('imu', anonymous=True,log_level=rospy.INFO)
     #np.set_printoptions(precision=4)
 
     SETTINGS_FILE = "RTIMULib"
@@ -49,8 +49,9 @@ def imu():
     imu.setAccelEnable(True)
     imu.setCompassEnable(True)
 
-    pub_pose = rospy.Publisher('pose', Vector3, queue_size=100)
+    #pub_pose = rospy.Publisher('pose', Vector3, queue_size=100)
     pub_accel = rospy.Publisher('accel', Vector3, queue_size=100)
+    pub_gyro = rospy.Publisher('gyro', Vector3, queue_size=100)
     pub_compass = rospy.Publisher('compass', Vector3, queue_size=100)
     pub_fusion = rospy.Publisher('fusion', Vector3, queue_size=100)
     # x is speed in m/s
@@ -102,6 +103,9 @@ def imu():
 
                 rospy.logdebug("pose rpy=(%.2f,%.2f,%.2f), gyro xyz=(%.1f,%.1f,%.1f)deg/s, acc xyz=(%.2f,%.2f,%.2f)g, mag xyz=(%.1f,%.1f,%.1f)uT" 
                     % (rollDeg,panDeg,yawDeg,gx,gy,gz, ax,ay,az, cx,cy,cz)) 
+		pub_compass.publish(Vector3(cx,cy,cz))
+		pub_gyro.publish(Vector3(gx,gy,gz))
+		pub_accel.publish(Vector3(ax,ay,az))
                 pub_fusion.publish(Vector3(rollDeg,panDeg,yawDeg))
             else:
                 rospy.logwarn('could not read IMU')

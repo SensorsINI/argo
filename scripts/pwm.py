@@ -22,7 +22,7 @@ def getTimex():
 pub_sail = rospy.Publisher('sail', Float64, queue_size=100)
 pub_rudder = rospy.Publisher('rudder', Float64, queue_size=100)
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              # rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
-rospy.init_node('pwm', anonymous=True, log_level=rospy.DEBUG)
+rospy.init_node('pwm', anonymous=True, log_level=rospy.INFO)
 rate = rospy.Rate(10)  # sample rate in Hz
 
 # number of samples to median filter over; should be odd number
