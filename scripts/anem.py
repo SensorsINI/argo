@@ -7,6 +7,17 @@
 #Check the datasheet at https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/0_Datasheets/Differential_Pressure/Sensirion_Differential_Pressure_Sensors_SDP8xx_Digital_Datasheet.pdf
 #The sensor i2c address is 0x21 to 0x23 (Not user programable).
 
+# topics
+# publishes
+# /anem_speed_angle_temp, Vector3 with
+    # x is speed in m/s
+    # y is angle in deg CW from front of boat looking down on boat
+    # z is temperature in celsius
+# /anem_diffpressure
+    # .x is along boat, positive if wind from front
+    # .y from left front, positive if wind from front
+    # .z from right front, positive if wind from front
+
 import rospy
 #import roslib
 from  geometry_msgs.msg import Vector3
