@@ -4,6 +4,7 @@
 	<node name="pwm" pkg="argo" type="pwm.py" output="screen" />
 	<node name="gps" pkg="argo" type="gps.py" output="screen" respawn="true"/>
 	<node name="imu" pkg="argo" type="imu.py" output="screen" />
+	<node name="control" pkg="argo" type="control.py" output="screen" />
 
 	<include file="$(find rosbridge_server)/launch/rosbridge_websocket.launch"></include>
 
