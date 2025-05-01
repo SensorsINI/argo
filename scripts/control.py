@@ -32,6 +32,8 @@ human_control=False
 
 
 def rudder_sail_radio_callback(data):
+    global radio_rudder
+    global radio_sail
     rospy.loginfo("/rudder_sail_radio message %s",data)
     radio_rudder=data.x
     radio_sail=data.y
@@ -39,32 +41,25 @@ def compass_callback(data):
     global compass
     global pose
     global target_compass
+    global radio_rudder
+    global radio_sail
     pose=data
-    compass=pose.z
-    rospy.logdebug("/compass heading message %s",compass)
-    if not target_compass is None:
+    compass=pose.x
+    rospy.loginfo("/pose message %s",pose)
+    if not target_compass is None and not human_control:
         compass_err=compass-target_compass
         rudder_cmd=RUDDER_GAIN*compass_err
         rospy.loginfo("compass_err=%.1f deg, rudder_cmd=%.2f",compass_err,rudder_cmd)
-        pub_rudder_sail_cmd.publish(Vector3(rudder_cmd,0,0))
+        pub_rudder_sail_cmd.publish(Vector3(rudder_cmd,radio_sail,0))
 def human_control_callback(data):
     global human_control
     global last_human_control
     human_control=data
-    rospy.loginfo("human has control: %s",human_control)
-    if human_control: # human took control
-        if compass is None:
-            rospy.logwarn("no /compass to set as reference")
-        else:
-            target_compass=compass
-            rospy.loginfo("human has control with target_compass %.1f deg",target_compass)
-    elif last_human_control and not human_control:
-        if compass is None:
-            logpy.logwarning("no /compass to set as reference")
-        else:
-            target_compass=compass
-            rospy.loginfo("computer took control with target_compass %.1f deg",target_compass)
-    last_human_control=human_control
+    if human_control:
+        rospy.loginfo("human has control")
+    else:
+        rospy.loginfo("computer has control")
+
 
 
 
@@ -77,12 +72,7 @@ rate = rospy.Rate(10)  # sample rate in Hz
 
     
 def control():
-    # while not rospy.is_shutdown():
-        # spin() simply keeps python from exiting until this node is stopped
-    try:
-        rospy.spin()
-    except KeyboardInterrupt:
-        rospy.loginfo('Interrupt: stopping control')
+    rospy.spin()
 
 if __name__ == '__main__':
     try:

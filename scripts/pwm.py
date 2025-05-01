@@ -24,13 +24,24 @@ import time
 import numpy as np
 
 
+
+def rudder_sail_cmd_callback(data):
+    global cmd_rudder
+    global cmd_sail
+    rospy.loginfo("/rudder_sail_cmd message %s",data)
+    cmd_rudder=data.x
+    cmd_sail=data.y
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              # rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
 rospy.init_node('pwm', anonymous=True, log_level=rospy.INFO)
 # pub_sail = rospy.Publisher('sail', Float64, queue_size=10)
 # pub_rudder = rospy.Publisher('rudder', Float64, queue_size=10)
 pub_rudder_sail=rospy.Publisher('rudder_sail_radio', Vector3, queue_size=10)
 pub_human_controlled=rospy.Publisher('human_controlled', Bool, queue_size=2)
+sub_sail=rospy.Subscriber('/rudder_sail_cmd',Vector3,rudder_sail_cmd_callback)
 rate = rospy.Rate(10)  # sample rate in Hz
+
+def rudder_sail_cmd_callback(data):
+    pass
 
 # number of samples to median filter over; should be odd number
 smoothingWindowLength = 3
