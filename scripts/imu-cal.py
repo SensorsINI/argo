@@ -88,22 +88,22 @@ def imu_cal():
                 'fusionPose': (1.2032440900802612, 0.4452976584434509, -2.7216269969940186)} (should be rad)
                 """
 #                rospy.logdebug(data)
-                # fusionPose = data["fusionPose"]
-                # gyro=data['gyro']
-                # accel=data['accel']
+                fusionPose = data["fusionPose"]
+                gyro=data['gyro']
+                accel=data['accel']
                 compass=data['compass']
 
-                # rollDeg=math.degrees(fusionPose[0])
-                # panDeg=math.degrees(fusionPose[1])
-                # yawDeg=math.degrees(fusionPose[2])
+                rollDeg=math.degrees(fusionPose[0])
+                panDeg=math.degrees(fusionPose[1])
+                yawDeg=math.degrees(fusionPose[2])
                 
-                # gx=math.degrees(gyro[0])
-                # gy=math.degrees(gyro[1])
-                # gz=math.degrees(gyro[2])
+                gx=math.degrees(gyro[0])
+                gy=math.degrees(gyro[1])
+                gz=math.degrees(gyro[2])
                 
-                # ax=accel[0]
-                # ay=accel[1]
-                # az=accel[2]
+                ax=accel[0]
+                ay=accel[1]
+                az=accel[2]
 
                 cx=compass[0]
                 cy=compass[1]
@@ -118,10 +118,10 @@ def imu_cal():
                 if cz<czmin: czmin=cz
                 if cz>czmax: czmax=cz
 
-                # print("pose rpy=(%.2f,%.2f,%.2f), gyro xyz=(%.1f,%.1f,%.1f)deg/s, acc xyz=(%.2f,%.2f,%.2f)g, mag xyz=(%.1f,%.1f,%.1f)uT" 
-                #     % (rollDeg,panDeg,yawDeg,gx,gy,gz, ax,ay,az, cx,cy,cz)) 
-                print("compass xyz=(%.1f,%.1f,%.1f)uT min/max=(%.1f/%1.f,%.1f/%1.f,%.1f/%1.f)uT" 
-                    % (cx,cy,cz,cxmin,cxmax,cymin,cymax,czmin,czmax)) 
+                print("pose rpy=(%.2f,%.2f,%.2f), gyro xyz=(%.1f,%.1f,%.1f)deg/s, acc xyz=(%.2f,%.2f,%.2f)g, mag xyz=(%.1f,%.1f,%.1f)uT" 
+                    % (rollDeg,panDeg,yawDeg,gx,gy,gz, ax,ay,az, cx,cy,cz)) 
+                # print("compass xyz=(%.1f,%.1f,%.1f)uT min/max=(%.1f/%1.f,%.1f/%1.f,%.1f/%1.f)uT" 
+                    # % (cx,cy,cz,cxmin,cxmax,cymin,cymax,czmin,czmax)) 
 		# pub_compass.publish(Vector3(cx,cy,cz))
 		# pub_gyro.publish(Vector3(gx,gy,gz))
 		# pub_accel.publish(Vector3(ax,ay,az))
