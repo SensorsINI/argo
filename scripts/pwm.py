@@ -3,11 +3,20 @@
 # (used to be duty cycle which doesn't make sense for a servo)
 
 # topics
+
+# /rudder_sail_radio, Vector3 with .x=rudder, .y=sail, .z reserved (currently 0)
+# values are normalized to -1:+1 assuming range of pulse width is 1ms to 2ms
+# rudder -1 means full left rudder (turn CCW looking down on boat), +1 is full right rudddder
+# sail -1 means pulled in fully, +1 let out fully
+
+#previously was
 # /rudder rudder pulse width in ms, right/starboard is smaller value, left/port is higher value
 # /sail position, in smaller, out larger
 
 import rospy
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, Bool
+from  geometry_msgs.msg import Vector3 # publish rudder and sail together as x and y. z=0 always
+
 import serial
 # import RPi.GPIO as GPIO # standard GPIO library for low level pin control
 import pigpio # daemon-based PWM controller with good precision
@@ -15,14 +24,12 @@ import time
 import numpy as np
 
 
-def getTimex():
-    return time.time()
-
-
-pub_sail = rospy.Publisher('sail', Float64, queue_size=100)
-pub_rudder = rospy.Publisher('rudder', Float64, queue_size=100)
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              # rospy.init_node('pwm', anonymous=True,log_level=rospy.INFO)
 rospy.init_node('pwm', anonymous=True, log_level=rospy.INFO)
+# pub_sail = rospy.Publisher('sail', Float64, queue_size=10)
+# pub_rudder = rospy.Publisher('rudder', Float64, queue_size=10)
+pub_rudder_sail=rospy.Publisher('rudder_sail_radio', Vector3, queue_size=10)
+pub_human_controlled=rospy.Publisher('human_controlled', Bool, queue_size=2)
 rate = rospy.Rate(10)  # sample rate in Hz
 
 # number of samples to median filter over; should be odd number
@@ -41,6 +48,14 @@ GPIO_SAIL_SERVO = 23
 inPINS = [GPIO_RUDDER_RADIO, GPIO_SAIL_RADIO]
 # was [18,23] #pinnumbers that are used(BCM nameingconvention)
 outPINS = [GPIO_RUDDER_SERVO, GPIO_SAIL_SERVO]
+
+HUMAN_CONTROL_TIMEOUT_S=2 
+# time in seconds that human takes control after rudder command deviates by
+# more than HUMAN_CONTROL_THRESHOLD
+HUMAN_CONTROL_THRESHOLD=.1
+# threshold deviation from zero for radio rudder input that human takes control
+
+rospy.loginfo("human control timeout=%.1fs, human control threshold=%.1f", HUMAN_CONTROL_TIMEOUT_S, HUMAN_CONTROL_THRESHOLD)
 
 # GPIO.setmode(GPIO.BCM) # use broadcom GPIO (not pin numbers) with GPIO. pigpio always uses GPIO numbers.
 
@@ -103,6 +118,9 @@ rospy.loginfo("PWM initialization completed")
 
 
 def pwm():
+    time_last_human_cmd=time.time()
+    human_has_control=True # set True when boat PWM radio input has priority
+
     try:
         while not rospy.is_shutdown():
             radio_pwm_sail_ms=np.median(deltaTimes[0])
@@ -112,8 +130,24 @@ def pwm():
                 outlier=''
             else:
                 outlier='**** outlier'
-            pub_sail.publish(radio_pwm_sail_ms)
-            pub_rudder.publish(radio_pwm_rudder_ms)
+            radio_pwm_rudder_normalized=-(-1+2*(radio_pwm_rudder_ms-1)) 
+            # 1ms->+1, full right rudder, 2ms->-1, full left rudder
+            radio_pwm_sail_normalized=-1+2*(radio_pwm_sail_ms-1) 
+            # 1ms->-1, sail pulled fully in, 2ms->+1, sail fully let out
+            pub_rudder_sail.publish(Vector3(radio_pwm_rudder_normalized, radio_pwm_sail_normalized,0))
+            if np.abs(radio_pwm_rudder_normalized)>HUMAN_CONTROL_THRESHOLD:
+                time_last_human_cmd=time.time()
+                if not human_has_control:
+                    rospy.loginfo("human took control")
+                    pub_human_controlled.publish(True)
+
+            human_has_control_now=time.time()-time_last_human_cmd<HUMAN_CONTROL_TIMEOUT_S
+            if not human_has_control_now and human_has_control:
+                rospy.loginfo("computer took control")
+                pub_human_controlled.publish(False)
+            human_has_control=human_has_control_now
+            # pub_sail.publish(radio_pwm_sail_ms)
+            # pub_rudder.publish(radio_pwm_rudder_ms)
             mirrored=''
             if MIRROR_RADIO_TO_SERVO and outlier=='':
                 ppio.set_servo_pulsewidth(GPIO_RUDDER_SERVO,int(radio_pwm_sail_ms*1000))

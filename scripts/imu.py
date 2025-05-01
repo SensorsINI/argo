@@ -7,6 +7,13 @@
 #Check the datasheet at https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/0_Datasheets/Differential_Pressure/Sensirion_Differential_Pressure_Sensors_SDP8xx_Digital_Datasheet.pdf
 #The sensor i2c address is 0x21 to 0x23 (Not user programable).
 
+# topics
+# publishes
+# /pose, Vector3 .z is compass heading corrected by magnetometer calibration
+# /accel
+# /gyro
+# /compass
+
 import rospy
 import RTIMU
 import os.path
@@ -53,10 +60,8 @@ def imu():
     pub_accel = rospy.Publisher('accel', Vector3, queue_size=100)
     pub_gyro = rospy.Publisher('gyro', Vector3, queue_size=100)
     pub_compass = rospy.Publisher('compass', Vector3, queue_size=100)
-    pub_fusion = rospy.Publisher('fusion', Vector3, queue_size=100)
-    # x is speed in m/s
-    # y is angle in deg
-    # z is temperature in celsius
+    pub_pose = rospy.Publisher('pose', Vector3, queue_size=100)
+   
     rate = rospy.Rate(10) # Hz
 
     try:
@@ -106,7 +111,7 @@ def imu():
 		pub_compass.publish(Vector3(cx,cy,cz))
 		pub_gyro.publish(Vector3(gx,gy,gz))
 		pub_accel.publish(Vector3(ax,ay,az))
-                pub_fusion.publish(Vector3(rollDeg,panDeg,yawDeg))
+                pub_pose.publish(Vector3(rollDeg,panDeg,yawDeg))
             else:
                 rospy.logwarn('could not read IMU')
 
