@@ -94,8 +94,8 @@ def anem():
 
     #np.set_printoptions(precision=4)
 
-    pub_diff_pressure = rospy.Publisher('anem_diffpressure', Vector3, queue_size=100)
-    pub_wind_temp = rospy.Publisher('anem_speed_angle_temp', Vector3, queue_size=100)
+    pub_diff_pressure = rospy.Publisher('anem_diffpressure', Vector3, queue_size=10)
+    pub_wind_temp = rospy.Publisher('anem_speed_angle_temp', Vector3, queue_size=10)
     # x is speed in m/s
     # y is angle in deg
     # z is temperature in celsius
