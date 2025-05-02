@@ -65,7 +65,7 @@ def pose_callback(data):
     global human_control
     pose=data
     compass=pose.z # z component is the magnetic compass heading in deg
-    if human_control:
+    if human_control or human_control is None:
         target_compass=compass
     # rospy.loginfo("/pose message %s",pose)
     if not target_compass is None and not human_control:
@@ -82,12 +82,10 @@ def human_control_callback(data):
     # global target_compass, compass
     # print(data.data)
     human_control=data.data
-    if human_control==True:
+    if human_control:
         rospy.loginfo("control: human has control")
-    elif human_control==False:
-        rospy.loginfo("control: computer has control")
     else:
-        rospy.logerr("control: human control is not a valid ROS Bool")
+        rospy.loginfo("control: computer has control to maintain heading %.1f deg",target_compass)
 
 
 
