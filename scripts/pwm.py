@@ -189,11 +189,13 @@ def pwm():
                 time_last_human_cmd=time.time()
                 if not human_control:
                     rospy.loginfo("pwm: human took control")
+                    pub_human_controlled.publish(False) # put both to get transition in plot
                     pub_human_controlled.publish(True)
 
             human_control_now=time.time()-time_last_human_cmd<HUMAN_CONTROL_TIMEOUT_S
             if not human_control_now and human_control:
                 rospy.loginfo("pwm: computer took control")
+                pub_human_controlled.publish(True)
                 pub_human_controlled.publish(False)
             human_control=human_control_now
             # pub_sail.publish(radio_pwm_sail_ms)
