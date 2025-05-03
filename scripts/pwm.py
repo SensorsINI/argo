@@ -155,7 +155,7 @@ def pw_us_to_cmd(pw_us):
     return cmd
 
 def set_rudder_sail_pw(rudder_pw_us, sail_pw_us):
-    ppio.set_servo_pulsewidth(GPIO_RUDDER_SERVO,int(rudder))
+    ppio.set_servo_pulsewidth(GPIO_RUDDER_SERVO,int(rudder_pw_us))
     ppio.set_servo_pulsewidth(GPIO_SAIL_SERVO,int(sail_pw_us))
     rospy.logdebug('pwm: rudder_pw_us=%d sail_pw_us=%d',int(rudder_pw_us), int(sail_pw_us))
     pub_rudder_sail_servo.publish(Vector3(pw_us_to_cmd(rudder_pw_us),pw_us_to_cmd(sail_pw_us),0))
