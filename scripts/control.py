@@ -37,6 +37,10 @@ else:
 # gain from compass error in degress to -1:+1 range of rudder control
 
 pub_rudder_sail_cmd = rospy.Publisher('rudder_sail_cmd', Vector3, queue_size=10)
+
+rate = rospy.Rate(1)  # main loop rate in Hz
+
+
 # pub_rudder = rospy.Publisher('cmd_rudder', Float64, queue_size=100)
 radio_rudder=None
 radio_sail=None
@@ -68,9 +72,31 @@ def pose_callback(data):
     global human_control
     pose=data
     compass=pose.z # z component is the magnetic compass heading in deg
+    rospy.loginfo("control: compass=%.1f deg",compass)
+    control()
+def human_control_callback(data):
+    global human_control, target_compass
+    # global target_compass, compass
+    # print(data.data)
+    human_control=data.data
+    if human_control:
+        rospy.loginfo("control: human has control")
+    elif not target_compass is None:
+        rospy.loginfo("control: computer has control to maintain heading %.1f deg",target_compass)
+    else:
+        rospy.logwarn("control: computer has control but target_compass=None")
+def compute_control():
+    global compass
+    global target_compass
+    global radio_sail, cmd_rudder, cmd_sail
+    global human_control
     if human_control or human_control is None:
         target_compass=compass
-        info("control: human_control target_compass=%.1f deg",target_compass)
+        if not target_compass is None:
+            rospy.loginfo("control: human_control target_compass=%.1f deg",target_compass)
+        else:
+            rospy.logwarn("control: human_control but target_compass=None")
+
     if not target_compass is None and not human_control:
         compass_err=compass-target_compass # degrees error
         cmd_rudder=rudder_gain*(compass_err/RUDDER_FULL_SCALE_DEG)
@@ -80,30 +106,15 @@ def pose_callback(data):
         cmd_sail=radio_sail
         info("control: compass_err=%.1f deg, cmd_rudder=%.2f",compass_err,cmd_rudder)
         pub_rudder_sail_cmd.publish(Vector3(cmd_rudder,cmd_sail,0))
-def human_control_callback(data):
-    global human_control
-    # global target_compass, compass
-    # print(data.data)
-    human_control=data.data
-    if human_control:
-        rospy.loginfo("control: human has control")
-    else:
-        rospy.loginfo("control: computer has control to maintain heading %.1f deg",target_compass)
-
-
-
 
 sub_rudder_sail_radio=rospy.Subscriber('/rudder_sail_radio',Vector3,rudder_sail_radio_callback)
 sub_compass=rospy.Subscriber('/pose',Vector3,pose_callback)
 sub_compass=rospy.Subscriber('/human_controlled',Bool,human_control_callback)
-
-rate = rospy.Rate(1)  # main loop rate in Hz
-
-
     
 def control():
     global rudder_gain
     while not rospy.is_shutdown():
+        compute_control()
         if load_or_reload_params(ARGO_PARAMS):
             rudder_gain=rospy.get_param('/argo/rudder_gain') #rospy.get_param("rudder_gain")
             rospy.logdebug("rudder_gain=%.2f from argo.yaml",rudder_gain)

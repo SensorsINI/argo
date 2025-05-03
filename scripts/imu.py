@@ -57,10 +57,10 @@ def imu():
     imu.setCompassEnable(True)
 
     #pub_pose = rospy.Publisher('pose', Vector3, queue_size=100)
-    pub_accel = rospy.Publisher('accel', Vector3, queue_size=10)
-    pub_gyro = rospy.Publisher('gyro', Vector3, queue_size=10)
-    pub_compass = rospy.Publisher('compass', Vector3, queue_size=10)
-    pub_pose = rospy.Publisher('pose', Vector3, queue_size=10)
+    pub_accel = rospy.Publisher('accel', Vector3, queue_size=100)
+    pub_gyro = rospy.Publisher('gyro', Vector3, queue_size=100)
+    pub_compass = rospy.Publisher('compass', Vector3, queue_size=100)
+    pub_pose = rospy.Publisher('pose', Vector3, queue_size=100)
    
     rate = rospy.Rate(10) # Hz
 
@@ -106,14 +106,14 @@ def imu():
                 cy=compass[1]
                 cz=compass[2]
 
-                rospy.logdebug("pose rpy=(%.2f,%.2f,%.2f), gyro xyz=(%.1f,%.1f,%.1f)deg/s, acc xyz=(%.2f,%.2f,%.2f)g, mag xyz=(%.1f,%.1f,%.1f)uT" 
+                rospy.logdebug("imu: pose rpy=(%.2f,%.2f,%.2f), gyro xyz=(%.1f,%.1f,%.1f)deg/s, acc xyz=(%.2f,%.2f,%.2f)g, mag xyz=(%.1f,%.1f,%.1f)uT" 
                     % (rollDeg,panDeg,yawDeg,gx,gy,gz, ax,ay,az, cx,cy,cz)) 
                 pub_compass.publish(Vector3(cx,cy,cz))
                 pub_gyro.publish(Vector3(gx,gy,gz))
                 pub_accel.publish(Vector3(ax,ay,az))
                 pub_pose.publish(Vector3(rollDeg,panDeg,yawDeg))
             else:
-                rospy.logwarn('could not read IMU')
+                rospy.logerr('could not read IMU')
 
             rate.sleep()
     except KeyboardInterrupt:

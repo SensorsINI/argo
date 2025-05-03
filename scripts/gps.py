@@ -64,15 +64,15 @@ def gps():
         rospy.loginfo("GPS version info: HW=" +hwVersion+" SW="+swVersion+" NAV="+navVersion)
 
 
-    rospy.logdebug("Setting up GPS output")
-    sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1") # config reciever
+    # rospy.logdebug("Setting up GPS output")
+    # sendcmd(serialport,rate,"$PTNLSCR,0.60,5.00,12.00,6.00,0.0000060,0,2,1,1") # config reciever
     #sendcmd(serialport,rate,"$PTNLSDM,0,0.0,0.0,0.0,0.0,0.0")# command not in user guide
-    sendcmd(serialport,rate,"$PTNLSFS,S,0") # H = high sensitivity aquisition mode, but slower (S=standard)
+    # sendcmd(serialport,rate,"$PTNLSFS,S,0") # H = high sensitivity aquisition mode, but slower (S=standard)
     #sendcmd(serialport,rate,"$PTNLQCR") # query receiver config
     #sendcmd(serialport,rate,"$PTNLQDM") # unknown command
     #sendcmd(serialport,rate,"$PTNLQFS") # query aquistion sensotivity mode
     #sendcmd(serialport,rate,"$PTNLQTF") # query status and position fix
-    sendcmd(serialport,rate,"$PTNLSNM,010D,01") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
+    # sendcmd(serialport,rate,"$PTNLSNM,010D,01") # set automatic message output to 0x0107=0xhhh b0111=GGA,VTG every 1 second
     #sendcmd(serialport,rate,"$PTNLQNM") # query automatic reporting
     rospy.loginfo("Set up completed")
 
