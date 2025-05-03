@@ -18,6 +18,7 @@ import rosparam
 import time
 from load_or_reload_params import load_or_reload_params
 # import numpy as np
+from logskip import logskip
 
 rospy.init_node('control', anonymous=True, log_level=rospy.INFO)
 rospy.loginfo('control: initializing')
@@ -54,9 +55,10 @@ last_human_control=None
 def rudder_sail_radio_callback(data):
     global radio_rudder
     global radio_sail
-    rospy.loginfo("/rudder_sail_radio message %s",data)
     radio_rudder=data.x
     radio_sail=data.y
+    # rospy.logdebug("control: /rudder_sail_radio message %s",data)
+
 def pose_callback(data):
     # control is computed here, on every pose update
     global compass
@@ -68,7 +70,7 @@ def pose_callback(data):
     compass=pose.z # z component is the magnetic compass heading in deg
     if human_control or human_control is None:
         target_compass=compass
-        rospy.loginfo("control: human_control target_compass=%.1f deg",target_compass)
+        rospy.logdebug("control: human_control target_compass=%.1f deg",target_compass)
     if not target_compass is None and not human_control:
         compass_err=compass-target_compass # degrees error
         cmd_rudder=rudder_gain*(compass_err/RUDDER_FULL_SCALE_DEG)
