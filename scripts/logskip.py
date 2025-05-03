@@ -1,7 +1,8 @@
 # utility to throttle logging
 import rospy,logging,time
-EVERY=30
-INTERVAL=2
+EVERY=30 # skip this many between each logging
+INTERVAL=2 # minimum interval in seconds between log messages
+
 def _logskip(lggr,*args):
 	_logskip.counter+=1;
 	now=time.time()
@@ -12,10 +13,13 @@ def _logskip(lggr,*args):
 	
 _logskip.counter=-1
 _logskip.last_time=time.time()
+_logskip.info=logging.getLogger('rosout').info
+_logskip.debug=logging.getLogger('rosout').debug
+_logskip.warn=logging.getLogger('rosout').warning
 
 def info(*args):
-	_logskip(logging.getLogger('rosout').info, *args)
+	_logskip(_logskip.info, *args)
 def debug(*args):
-	_logskip(logging.getLogger('rosout').debug, *args)
+	_logskip(_logskip.debug, *args)
 def warn(*args):
-	_logskip(logging.getLogger('rosout').warning, *args)
+	_logskip(_logskip.warn, *args)

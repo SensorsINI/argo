@@ -18,7 +18,7 @@ import rosparam
 import time
 from load_or_reload_params import load_or_reload_params
 # import numpy as np
-from logskip import logskip
+from logskip import *
 
 rospy.init_node('control', anonymous=True, log_level=rospy.INFO)
 rospy.loginfo('control: initializing')
@@ -70,7 +70,7 @@ def pose_callback(data):
     compass=pose.z # z component is the magnetic compass heading in deg
     if human_control or human_control is None:
         target_compass=compass
-        rospy.logdebug("control: human_control target_compass=%.1f deg",target_compass)
+        info("control: human_control target_compass=%.1f deg",target_compass)
     if not target_compass is None and not human_control:
         compass_err=compass-target_compass # degrees error
         cmd_rudder=rudder_gain*(compass_err/RUDDER_FULL_SCALE_DEG)
@@ -78,7 +78,7 @@ def pose_callback(data):
         # a heading error of 1 deg causes rudder_gain cmd or rudder_gain*60 deg
         # 
         cmd_sail=radio_sail
-        rospy.logdebug("control: compass_err=%.1f deg, cmd_rudder=%.2f",compass_err,cmd_rudder)
+        info("control: compass_err=%.1f deg, cmd_rudder=%.2f",compass_err,cmd_rudder)
         pub_rudder_sail_cmd.publish(Vector3(cmd_rudder,cmd_sail,0))
 def human_control_callback(data):
     global human_control

@@ -23,7 +23,7 @@ import serial
 import pigpio # daemon-based PWM controller with good precision
 import time
 import numpy as np
-
+from logskip import *
 
 def rudder_sail_cmd_callback(data):
     global cmd_rudder
@@ -178,7 +178,7 @@ def pwm():
             else:
                 outlier=True
             if outlier:
-                rospy.logwarn("pwm: outlier radio PWM rudder=%.1fms sail=%.1fms", radio_pwm_rudder_ms,radio_pwm_sail_ms)
+                warn("pwm: outlier radio PWM rudder=%.1fms sail=%.1fms", radio_pwm_rudder_ms,radio_pwm_sail_ms)
                 continue
             radio_pwm_rudder_normalized=- pw_us_to_cmd(radio_pwm_rudder_ms*1000) 
             # 1ms->+1, full right rudder, 2ms->-1, full left rudder
