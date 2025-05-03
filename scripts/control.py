@@ -58,6 +58,7 @@ def rudder_sail_radio_callback(data):
     radio_rudder=data.x
     radio_sail=data.y
 def pose_callback(data):
+    # control is computed here, on every pose update
     global compass
     global pose
     global target_compass
@@ -67,7 +68,7 @@ def pose_callback(data):
     compass=pose.z # z component is the magnetic compass heading in deg
     if human_control or human_control is None:
         target_compass=compass
-    # rospy.loginfo("/pose message %s",pose)
+        rospy.loginfo("control: human_control target_compass=%.1f deg",target_compass)
     if not target_compass is None and not human_control:
         compass_err=compass-target_compass # degrees error
         cmd_rudder=rudder_gain*(compass_err/RUDDER_FULL_SCALE_DEG)
@@ -90,7 +91,7 @@ def human_control_callback(data):
 
 
 
-sub_sail=rospy.Subscriber('/rudder_sail_pwm',Vector3,rudder_sail_radio_callback)
+sub_rudder_sail_radio=rospy.Subscriber('/rudder_sail_radio',Vector3,rudder_sail_radio_callback)
 sub_compass=rospy.Subscriber('/pose',Vector3,pose_callback)
 sub_compass=rospy.Subscriber('/human_controlled',Bool,human_control_callback)
 

@@ -3,15 +3,16 @@
 # (used to be duty cycle which doesn't make sense for a servo)
 
 # topics
+# publishes
+# /rudder_sail_radio, -1:1 Vector3 with .x=rudder, .y=sail, .z reserved (currently 0)
+    # values are normalized to -1:+1 assuming range of pulse width is 1ms to 2ms
+    # rudder -1 means full left rudder (turn CCW looking down on boat), +1 is full right rudddder
+    # sail -1 means pulled in fully, +1 let out fully
+# /rudder_sail_servo, -1:1 Vector3 with similar normalized actual servo commands
+# /human_controlled: True if human has taken control, False if rudder is left near neutral for some time
 
-# /rudder_sail_radio, Vector3 with .x=rudder, .y=sail, .z reserved (currently 0)
-# values are normalized to -1:+1 assuming range of pulse width is 1ms to 2ms
-# rudder -1 means full left rudder (turn CCW looking down on boat), +1 is full right rudddder
-# sail -1 means pulled in fully, +1 let out fully
-
-#previously was
-# /rudder rudder pulse width in ms, right/starboard is smaller value, left/port is higher value
-# /sail position, in smaller, out larger
+# subscribes to
+# /rudder_sail_cmd: -1:+1 range Vector3 rudder and sail commands (from control.py)
 
 import rospy
 from std_msgs.msg import Float64, Bool
@@ -34,10 +35,10 @@ def rudder_sail_cmd_callback(data):
 rospy.init_node('pwm', anonymous=True, log_level=rospy.INFO)
 # pub_sail = rospy.Publisher('sail', Float64, queue_size=10)
 # pub_rudder = rospy.Publisher('rudder', Float64, queue_size=10)
-pub_radio_rudder_sail=rospy.Publisher('rudder_sail_radio', Vector3, queue_size=10)
-pub_pwm_rudder_sail=rospy.Publisher('rudder_sail_pwm', Vector3, queue_size=10)
+pub_rudder_sail_radio=rospy.Publisher('rudder_sail_radio', Vector3, queue_size=10)
+pub_rudder_sail_servo=rospy.Publisher('rudder_sail_servo', Vector3, queue_size=10)
 pub_human_controlled=rospy.Publisher('human_controlled', Bool, queue_size=10)
-sub_sail=rospy.Subscriber('/rudder_sail_cmd',Vector3,rudder_sail_cmd_callback)
+sub_rudder_sail_cmd=rospy.Subscriber('/rudder_sail_cmd',Vector3,rudder_sail_cmd_callback)
 rate = rospy.Rate(10)  # sample rate in Hz
 
 cmd_rudder=None
@@ -153,10 +154,11 @@ def pw_us_to_cmd(pw_us):
         cmd=1
     return cmd
 
-def set_rudder_sail_pw(rudder, sail):
+def set_rudder_sail_pw(rudder_pw_us, sail_pw_us):
     ppio.set_servo_pulsewidth(GPIO_RUDDER_SERVO,int(rudder))
-    ppio.set_servo_pulsewidth(GPIO_SAIL_SERVO,int(sail))
-    rospy.logdebug('pwm: rudder=%d sail=%d us',int(rudder), int(sail))
+    ppio.set_servo_pulsewidth(GPIO_SAIL_SERVO,int(sail_pw_us))
+    rospy.logdebug('pwm: rudder_pw_us=%d sail_pw_us=%d',int(rudder_pw_us), int(sail_pw_us))
+    pub_rudder_sail_servo.publish(Vector3(pw_us_to_cmd(rudder_pw_us),pw_us_to_cmd(sail_pw_us),0))
 
 
 
@@ -182,7 +184,7 @@ def pwm():
             # 1ms->+1, full right rudder, 2ms->-1, full left rudder
             radio_pwm_sail_normalized=pw_us_to_cmd(radio_pwm_sail_ms*1000) 
             # 1ms->-1, sail pulled fully in, 2ms->+1, sail fully let out
-            pub_radio_rudder_sail.publish(Vector3(radio_pwm_rudder_normalized, radio_pwm_sail_normalized,0))
+            pub_rudder_sail_radio.publish(Vector3(radio_pwm_rudder_normalized, radio_pwm_sail_normalized,0))
             if np.abs(radio_pwm_rudder_normalized)>HUMAN_CONTROL_THRESHOLD:
                 time_last_human_cmd=time.time()
                 if not human_control:
