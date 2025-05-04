@@ -1,0 +1,16 @@
+[Unit]
+Description=Argo Robot Rosbag Recording Service
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/home/ubuntu/catkin_ws/src/argo/launch/argo.env
+ExecStart=/opt/ros/kinetic/bin/rosbag record -a -o /home/ubuntu/bagfiles/argo  __name:=argo
+Restart=no
+;Restart=on-failure
+;RestartSec=10
+
+[Install]
+; WantedBy=multi-user.target
+; No WantedBy directive, so it won't start automatically.

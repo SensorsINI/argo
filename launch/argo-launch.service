@@ -1,0 +1,16 @@
+[Unit]
+Description=Argo Robot Launch Service
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+EnvironmentFile=/home/ubuntu/catkin_ws/src/argo/launch/argo.env
+ExecStart=/bin/bash -l -c 'exec "$@"' _  roslaunch argo argo.launch
+Restart=no
+;Restart=on-failure
+;RestartSec=10
+
+[Install]
+; WantedBy=multi-user.target
+; No WantedBy directive, so it won't start automatically.
