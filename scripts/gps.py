@@ -33,7 +33,7 @@ def sendcmd(serialport, rate, msg):
         reply=serialport.readline()
         rospy.loginfo('Sent: '+msg.strip()+' Recieved: '+reply.strip())
         return reply
-    except Exception as e:
+    except SerialException as e:
         rospy.logwarn('GPS serial port exception: '+str(e))
     return None
 
@@ -102,7 +102,7 @@ def gps():
             rospy.logdebug("*******************************************************************")
             try:
                 data=serialport.readline()
-            except Exception as e:
+            except SerialException as e:
                 rospy.logwarn('could not read data: '+str(e))
                 continue
             rospy.logdebug(data.strip())

@@ -100,7 +100,6 @@ def signed_angle_difference_degrees(angle1_deg, angle2_deg):
     within the range of -180 to 180 degrees.
     """
     diff_deg = angle1_deg - angle2_deg
-    print(diff_deg)
     return (diff_deg + 180.0) % 360.0 - 180.0
 
 def compute_control():
