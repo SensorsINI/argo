@@ -28,7 +28,8 @@ smoothingWindowLength=3 # number of samples to median filter over; should be odd
 inPINS=[18,23] # pin numbers for ruder/servo (not necessarily in that order) that are used (BCM Broadcom pin naming convention; see https://abyz.me.uk/rpi/pigpio/)
 # actual header pin numbers for GPIO 13,23 are header pins 12,16
 
-outPINS=[18,23] # pin numbers for ruder/servo (not necessarily in that order) that are used (BCM Broadcom pin naming convention; see https://abyz.me.uk/rpi/pigpio/)
+outPINS=[24,25] # GPIO numbers for ruder/servo (not necessarily in that order) that are used (BCM Broadcom pin naming convention; see https://abyz.me.uk/rpi/pigpio/)
+# these are pins GPIO 24=pin 18, GPIO 25=pin 22
 
 gpio=pigpio.pi()
 
