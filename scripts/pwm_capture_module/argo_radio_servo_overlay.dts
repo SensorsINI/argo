@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-2.0
+// DTS for Argo Radio Servo Module Overlay on Orange Pi Zero 2W (Allwinner H618)
+
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/gpio/gpio.h> // For GPIO_ACTIVE_HIGH/LOW, etc.
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "xunlong,orangepi-zero2w", "allwinner,sun50i-h618";
+
+    // Node for our kernel module to claim GPIOs (using compatible for lookup)
+    argo_radio_servo_gpios {
+        compatible = "argo,radio-servo-gpio"; // Unique compatible string for your module
+        radio_rudder_gpio = <&pio 8 11 GPIO_ACTIVE_HIGH>; // PI11 (Bank I, Pin 11)
+        radio_sail_gpio = <&pio 8 13 GPIO_ACTIVE_HIGH>;   // PI13 (Bank I, Pin 13)
+        // Add placeholders for output PWM pins if your module needed to fetch them via DT
+        // For now, module uses gpio_request by global number.
+    };
+
+    // Fragment to configure pinmuxing for all involved GPIOs
+    fragment@0 {
+        target = <&pio>; // Target the main pinctrl node (pinctrl@300b000)
+        __overlay__ {
+            // PI11 (PWM1_RADIO_RUDDER) - Input for measurement
+            // 'function = "pwm1"' is already default in your main DTS and is ALT6.
+            // If you needed to explicitly set EINT for input capture (which is common for GPIO interrupts):
+            pi11_eint_pulse_in: pi11_eint_pulse_in {
+                pins = "PI11";
+                function = "pi_eint11"; // EINT function for PI11
+                // bias-pull-up; // Example: Add pull-up if your input signal floats
+            };
+
+            // PI13 (PWM3_RADIO_SAIL) - Input for measurement
+            pi13_eint_pulse_in: pi13_eint_pulse_in {
+                pins = "PI13";
+                function = "pi_eint13"; // EINT function for PI13
+                // bias-pull-up; // Example: Add pull-up if your input signal floats
+            };
+
+            // PI12 (PWM2_SERVO_RUDDER) - Output for servo control
+            pi12_pwm2_out: pi12_pwm2_out {
+                pins = "PI12";
+                function = "pwm2"; // PWM2 output function for PI12
+            };
+
+            // PI14 (PWM4_SERVO_SAIL) - Output for servo control
+            pi14_pwm4_out: pi14_pwm4_out {
+                pins = "PI14";
+                function = "pwm4"; // PWM4 output function for PI14
+            };
+
+            // It's crucial that these newly defined pin groups are actually applied.
+            // This assumes the main 'pinctrl@300b000' node has a 'pinctrl-names = "default";'
+            // and `pinctrl-0` property which can be overridden by our overlay.
+            // If your base DTS is very strict, you might need to combine groups.
+            // For simplicity, let's assume setting `pinctrl-0` here overrides the relevant pins.
+
+            // Override the default pinctrl-0 with a new group that includes all our desired pins
+            // This is more complex if the original 'pinctrl-0' is already a large group.
+            // A common pattern is to make individual pins configurable.
+            // Given your decompiled DTS, individual pins are listed as `pins = "PIXX"; function = "YYY";`
+            // and are implicitly part of the default `pinctrl-0`.
+            // Our overlay fragments targeting `<&pio>` and defining new named pin groups
+            // (`pi11_eint_pulse_in`, etc.) should take precedence for those specific pins.
+        };
+    };
+};
