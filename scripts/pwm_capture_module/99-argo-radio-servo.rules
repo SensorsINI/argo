@@ -1,0 +1,29 @@
+# /etc/udev/rules.d/99-argo-radio-servo.rules
+# Set ownership and permissions for argo_radio_servo sysfs files
+
+# Rule for the base directory /sys/kernel/argo_radio_servo
+# Match when the kobject (directory) is added (on module load)
+SUBSYSTEM=="kobject", KERNEL=="argo_radio_servo", ACTION=="add", MODE="0755", OWNER="root", GROUP="root"
+
+# Rules for the individual files within /sys/kernel/argo_radio_servo/
+# Use KERNEL for filename, and specifically ATTRS{name} or ATTRS{devpath} for unique matching.
+# ACTION=="add" ensures rule is applied when file is first created.
+# TAG+="systemd" can help ensure consistent processing.
+
+# radio_rudder_pw_us (read-only for user, group, others - default is r--r--r--)
+# MODE="0664" means rw-rw-r--. If kernel default is r--r--r--, setting 0664 can give group/others write.
+# If you want read-only: MODE="0444" for r--r--r--, 0644 for rw-r--r--
+KERNEL=="radio_rudder_pw_us", ACTION=="add", MODE="0664", GROUP="dialout", TAG+="argo-servo-file"
+
+# radio_sail_pw_us (read-only for user, group, others)
+KERNEL=="radio_sail_us", ACTION=="add", MODE="0664", GROUP="dialout", TAG+="argo-servo-file"
+
+# servo_rudder_pw_us (writeable by any user)
+# For /sys/kernel files, 0666 (rw-rw-rw-) is often flagged by kernel build system, so 0664 (rw-rw-r--) is common.
+# However, you specifically requested 0666, which is why the module code has it.
+# Udev will try to apply it, but the kernel might still enforce stricter permissions.
+# Let's keep 0666 here as you requested for global writability, but be aware of kernel's internal checks.
+KERNEL=="servo_rudder_pw_us", ACTION=="add", MODE="0666", GROUP="dialout", TAG+="argo-servo-file"
+
+# servo_sail_pw_us (writeable by any user)
+KERNEL=="servo_sail_pw_us", ACTION=="add", MODE="0666", GROUP="dialout", TAG+="argo-servo-file"

@@ -5,7 +5,7 @@
 #include <linux/platform_device.h> // For struct platform_device, used with device tree
 #include <linux/of_gpio.h>      // For of_get_named_gpio
 #include <linux/gpio/consumer.h> // For gpiod_get_from_of_node, gpiod_to_irq, gpiod_direction_input, etc. (modern GPIO API)
-#include <linux/io.h>           // For ioremap, iounmap, readl, writel, used for PWM output registers
+#include <linux/io.h>           // For ioremap, iounmap, readl, writel (still needed for some non-pwm_get cases if any)
 #include <linux/interrupt.h>    // For request_irq, free_irq, irqreturn_t
 #include <linux/hrtimer.h>      // For high-resolution timers
 #include <linux/ktime.h>        // For ktime_get(), ktime_to_ns, ktime_sub, ktime_compare
@@ -14,18 +14,20 @@
 #include <linux/string.h>       // For sprintf, kstrtol
 #include <linux/slab.h>         // For kzalloc, kfree
 #include <linux/spinlock.h>     // For spinlock_t
+#include <linux/of_address.h>   // For of_iomap (though pwm_get replaces much of this for PWM)
+#include <linux/pwm.h>          // NEW: For pwm_get, pwm_config, pwm_enable/disable, pwm_put
+#include <linux/err.h>          // For IS_ERR, PTR_ERR
 
 /*
    argo_radio_servo_module.c:
    - Measures pulse width in microseconds on PI11 (PWM1_RADIO_RUDDER) and PI13 (PWM3_RADIO_SAIL)
-     using GPIO interrupts and ktime_get().
+     using GPIO interrupts and ktime_get(). If no pulses for 1s, sets PW to 0.
    - Exposes measured values via sysfs:
      - /sys/argo_radio_servo/radio_rudder_pw_us (for PI11)
      - /sys/argo_radio_servo/radio_sail_pw_us (for PI13)
-   - Allows writing pulse width values to control servos on PWM2 (PI12) and PWM4 (PI14).
-   - Controls servo outputs via sysfs:
-     - /sys/argo_radio_servo/servo_rudder_pw_us (for PWM2 - PI12)
-     - /sys/argo_radio_servo/servo_sail_pw_us (for PWM4 - PI14)
+   - Controls servo outputs on PWM2 (PI12) and PWM4 (PI14) via kernel's standard PWM API.
+   - Sysfs files for input measurements are globally writable (0664).
+   - Prints measured pulse width to dmesg only for the first minute after module insertion.
 */
 
 // --- GPIO Pin Definitions (Global GPIO numbers - VERIFY THESE) ---
@@ -33,66 +35,36 @@
 // Bank I is typically GPIO chip 8 (A=0, B=1, ... I=8).
 #define PI11_GLOBAL_GPIO_NUM (8 * 32 + 11) // = 267
 #define PI13_GLOBAL_GPIO_NUM (8 * 32 + 13) // = 269
-#define PI12_GLOBAL_GPIO_NUM (8 * 32 + 12) // = 268 (PWM2 Output)
-#define PI14_GLOBAL_GPIO_NUM (8 * 32 + 14) // = 270 (PWM4 Output)
-
-// --- PWM Output Register Offsets (from H618 User Manual) ---
-#define ALLWINNER_PWM_BASE_ADDRESS    0x0300A000UL
-
-// Clock configuration registers for PWM outputs
-#define PCCR23_REG                    0x0024       // PWM23 Clock Configuration Register
-#define PCCR45_REG                    0x0028       // PWM45 Clock Configuration Register
-#define PER_REG                       0x0040       // PWM Enable Register (Global enable for PWM outputs)
-
-// Channel N registers (PCR, PPR, PCNTR) for PWM2 (N=2) and PWM4 (N=4)
-// PCR = 0x0060 + N*0x20
-// PPR = 0x0064 + N*0x20
-// PCNTR = 0x0068 + N*0x20
-
-// PWM2 (N=2)
-#define PWM_CH2_PCR_REG               (0x0060 + 2*0x0020)  // 0x00A0
-#define PWM_CH2_PPR_REG               (0x0064 + 2*0x0020)  // 0x00A4
-#define PWM_CH2_PCNTR_REG             (0x0068 + 2*0x0020)  // 0x00A8
-
-// PWM4 (N=4)
-#define PWM_CH4_PCR_REG               (0x0060 + 4*0x0020)  // 0x00E0
-#define PWM_CH4_PPR_REG               (0x0064 + 4*0x0020)  // 0x00E4
-#define PWM_CH4_PCNTR_REG             (0x0068 + 4*0x0020)  // 0x00E8
-
-// Bit definitions for PWM Output Registers (Assumed based on PCR manual, verify in H618 manual)
-// For PER (PWM Enable Register)
-#define PWM_CH2_GLOBAL_OUTPUT_ENABLE  (1 << 2)     // Bit 2 enables PWM output for Channel 2
-#define PWM_CH4_GLOBAL_OUTPUT_ENABLE  (1 << 4)     // Bit 4 enables PWM output for Channel 4
-
-// For PCR (PWM Control Register) - per channel
-#define PWM_PCR_PWM_PUL_START         (1 << 10)    // Set to 1 to start pulse output (clears automatically)
-#define PWM_PCR_PWM_MODE_CYCLE        (0 << 9)     // 0: Cycle mode, 1: Pulse mode
-#define PWM_PCR_PWM_ACT_STA_HIGH      (1 << 8)     // 0: Low active, 1: High active
-#define PWM_PCR_PWM_PRESCAL_K(k)      ((k) & 0xFF) // Bits 7:0 for K, actual prescale (K+1)
-
-// Clock config for PCCR (PWMxx Clock Configuration Register) - per group
-#define PCCR_CLK_SRC_OSC24M           (0b00 << 7)  // Bits 8:7 = 00 for OSC24M
-#define PCCR_CLK_GATING_PASS          (1 << 4)     // Bit 4 = 1 for Pass (enable clock)
-#define PCCR_CLK_DIV_M_DIV(m)         (((m) & 0xF) << 0) // Bits 3:0 for M divisor (0=/1, 1=/2, etc.)
+// Note: PI12 and PI14 are now controlled via PWM framework, not direct GPIO request by this module
 
 // --- Common Servo/PWM Parameters ---
-#define SERVO_PERIOD_US               20000UL // 20ms period
-#define SERVO_MIN_PW_US               900UL   // 900us minimum pulse width
-#define SERVO_MAX_PW_US               2100UL  // 2100us maximum pulse width
+#define SERVO_PERIOD_NS               20000000UL // 20ms period in nanoseconds
+#define SERVO_MIN_PW_NS               900000UL   // 900us minimum pulse width in nanoseconds
+#define SERVO_MAX_PW_NS               2100000UL  // 2100us maximum pulse width in nanoseconds
+#define NO_PULSE_TIMEOUT_NS           (1 * NSEC_PER_SEC) // 1 second in nanoseconds
 
 // --- Global Variables for Input Measurement ---
 static struct gpio_desc *radio_rudder_gpio_desc; // PI11
 static unsigned int radio_rudder_irq_num;
 static ktime_t radio_rudder_rising_edge_timestamp;
 static long long radio_rudder_high_time_us = 0;
+static ktime_t radio_rudder_last_pulse_timestamp; // Timestamp of the last detected edge
+
 
 static struct gpio_desc *radio_sail_gpio_desc;   // PI13
 static unsigned int radio_sail_irq_num;
 static ktime_t radio_sail_rising_edge_timestamp;
 static long long radio_sail_high_time_us = 0;
+static ktime_t radio_sail_last_pulse_timestamp;   // Timestamp of the last detected edge
 
-// --- Global Variables for Output Control ---
-static void __iomem *pwm_output_regs_base; // Mapped base address for PWM output registers
+// --- Global Variables for PWM Output Control (via kernel PWM framework) ---
+static struct pwm_device *servo_rudder_pwm_dev; // PWM device for Servo Rudder (PWM2, PI12)
+static struct pwm_device *servo_sail_pwm_dev;   // PWM device for Servo Sail (PWM4, PI14)
+
+// store the current write values (for sysfs show)
+// These are only for the test script's display now, not for actual sysfs files.
+static unsigned long current_servo_rudder_pw = 1500; // Initialize to default center
+static unsigned long current_servo_sail_pw = 1500;   // Initialize to default center
 
 // --- Shared Resources ---
 static struct hrtimer print_timer; // High-resolution timer for periodic printk
@@ -100,6 +72,9 @@ static DEFINE_SPINLOCK(capture_data_lock); // Spinlock to protect measured data
 static DEFINE_SPINLOCK(output_control_lock); // Spinlock to protect PWM output writes
 
 static struct kobject *argo_radio_servo_kobj; // Kobject for /sys/argo_radio_servo directory
+
+// --- Variable for timed printk ---
+static ktime_t module_load_timestamp;
 
 // --- Function Prototypes ---
 static int __init argo_radio_servo_init(void);
@@ -116,25 +91,13 @@ static enum hrtimer_restart print_timer_callback(struct hrtimer *timer);
 static ssize_t radio_rudder_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
 static ssize_t radio_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
 
-// Sysfs Show/Store Functions for Output Control
-static ssize_t servo_rudder_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
-static ssize_t servo_rudder_pw_us_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
-static ssize_t servo_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
-static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
-
 
 // --- Sysfs Attribute Definitions ---
 static struct kobj_attribute radio_rudder_pw_us_attribute =
-    __ATTR(radio_rudder_pw_us, 0444, radio_rudder_pw_us_show, NULL);
+    __ATTR(radio_rudder_pw_us, 0664, radio_rudder_pw_us_show, NULL); // rw-rw-r--
 
 static struct kobj_attribute radio_sail_pw_us_attribute =
-    __ATTR(radio_sail_pw_us, 0444, radio_sail_pw_us_show, NULL);
-
-static struct kobj_attribute servo_rudder_pw_us_attribute =
-    __ATTR(servo_rudder_pw_us, 0664, servo_rudder_pw_us_show, servo_rudder_pw_us_store);
-
-static struct kobj_attribute servo_sail_pw_us_attribute =
-    __ATTR(servo_sail_pw_us, 0664, servo_sail_pw_us_show, servo_sail_pw_us_store);
+    __ATTR(radio_sail_pw_us, 0664, radio_sail_pw_us_show, NULL); // rw-rw-r--
 
 
 // --- Input Measurement ISRs ---
@@ -148,6 +111,7 @@ static irqreturn_t radio_rudder_gpio_isr(int irq, void *dev_id)
     current_gpio_state = gpiod_get_value(radio_rudder_gpio_desc);
 
     spin_lock_irqsave(&capture_data_lock, flags);
+    radio_rudder_last_pulse_timestamp = current_time; // Update last pulse timestamp
 
     if (current_gpio_state) { // GPIO is High (Rising Edge)
         radio_rudder_rising_edge_timestamp = current_time;
@@ -156,7 +120,7 @@ static irqreturn_t radio_rudder_gpio_isr(int irq, void *dev_id)
             long long duration_ns = ktime_to_ns(ktime_sub(current_time, radio_rudder_rising_edge_timestamp));
             radio_rudder_high_time_us = duration_ns / 1000;
         } else {
-            radio_rudder_high_time_us = 0;
+            radio_rudder_high_time_us = 0; // Reset if invalid sequence
             printk(KERN_WARNING "Radio Rudder: Spurious falling edge or falling edge before rising edge.\n");
         }
     }
@@ -175,6 +139,7 @@ static irqreturn_t radio_sail_gpio_isr(int irq, void *dev_id)
     current_gpio_state = gpiod_get_value(radio_sail_gpio_desc);
 
     spin_lock_irqsave(&capture_data_lock, flags);
+    radio_sail_last_pulse_timestamp = current_time; // Update last pulse timestamp
 
     if (current_gpio_state) { // GPIO is High (Rising Edge)
         radio_sail_rising_edge_timestamp = current_time;
@@ -183,7 +148,7 @@ static irqreturn_t radio_sail_gpio_isr(int irq, void *dev_id)
             long long duration_ns = ktime_to_ns(ktime_sub(current_time, radio_sail_rising_edge_timestamp));
             radio_sail_high_time_us = duration_ns / 1000;
         } else {
-            radio_sail_high_time_us = 0;
+            radio_sail_high_time_us = 0; // Reset if invalid sequence
             printk(KERN_WARNING "Radio Sail: Spurious falling edge or falling edge before rising edge.\n");
         }
     }
@@ -196,15 +161,41 @@ static irqreturn_t radio_sail_gpio_isr(int irq, void *dev_id)
 static enum hrtimer_restart print_timer_callback(struct hrtimer *timer)
 {
     long long rudder_pw, sail_pw;
+    ktime_t current_time = ktime_get();
     unsigned long flags;
+    s64 elapsed_ns = ktime_to_ns(ktime_sub(current_time, module_load_timestamp));
 
     spin_lock_irqsave(&capture_data_lock, flags);
+
+    // Check for timeout for Radio Rudder
+    if (ktime_to_ns(ktime_sub(current_time, radio_rudder_last_pulse_timestamp)) > NO_PULSE_TIMEOUT_NS) {
+        if(radio_rudder_high_time_us != 0){ // Check if it was non-zero before clearing
+            if (elapsed_ns < (s64)60 * NSEC_PER_SEC) { // Only print if within the first minute
+                printk(KERN_INFO "Argo Radio Servo: Radio rudder pulses disappeared, setting PW to 0.\n");
+            }
+        }
+        radio_rudder_high_time_us = 0;
+    }
     rudder_pw = radio_rudder_high_time_us;
+
+    // Check for timeout for Radio Sail
+    if (ktime_to_ns(ktime_sub(current_time, radio_sail_last_pulse_timestamp)) > NO_PULSE_TIMEOUT_NS) {
+        if(radio_sail_high_time_us != 0){ // Check if it was non-zero before clearing
+            if (elapsed_ns < (s64)60 * NSEC_PER_SEC) { // Only print if within the first minute
+                printk(KERN_INFO "Argo Radio Servo: Radio sail pulses disappeared, setting PW to 0.\n");
+            }
+        }
+        radio_sail_high_time_us = 0;
+    }
     sail_pw = radio_sail_high_time_us;
+
     spin_unlock_irqrestore(&capture_data_lock, flags);
 
-    printk(KERN_INFO "Argo Radio Servo: Radio Rudder PW: %lld us, Radio Sail PW: %lld us\n",
-           rudder_pw, sail_pw);
+    // Only print periodic updates if within the first minute
+    if (elapsed_ns < (s64)60 * NSEC_PER_SEC) {
+        printk(KERN_INFO "Argo Radio Servo: Radio Rudder PW: %lld us, Radio Sail PW: %lld us\n",
+               rudder_pw, sail_pw);
+    }
 
     hrtimer_forward_now(timer, ktime_set(5, 0)); // Fire every 5 seconds
     return HRTIMER_RESTART;
@@ -235,60 +226,35 @@ static ssize_t radio_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute
     return sprintf(buf, "%lld\n", current_high_time);
 }
 
-// --- Sysfs Show/Store Functions for Output Control ---
-// Helper to set PWM Duty Cycle
-static void set_pwm_duty_cycle(int channel_n, unsigned long pulse_width_us)
+// --- Sysfs Show/Store Functions for Output Control (via kernel PWM framework) ---
+static void set_servo_pulse_width(struct pwm_device *pwm_dev, unsigned long pulse_width_us)
 {
-    u32 reg_val;
-    unsigned long flags;
-    u32 duty_count;
-    u32 period_count;
+    unsigned long flags; // Declared at the top of the function
+    u64 pulse_width_ns = pulse_width_us * NSEC_PER_USEC; // Convert to nanoseconds
+    u64 period_ns = SERVO_PERIOD_NS;
 
-    // Convert pulse width in microseconds to counter ticks
-    // Assuming 1MHz counter clock (prescale K=23 from 24MHz OSC)
-    // 1us = 1 tick.
-    // Duty cycle is pulse_width_us. Period is SERVO_PERIOD_US.
-    duty_count = (u32)pulse_width_us;
-    period_count = (u32)SERVO_PERIOD_US;
-
-    // Ensure duty_count does not exceed period_count
-    if (duty_count > period_count) {
-        duty_count = period_count;
-    }
+    // Sanity check pulse_width
+    if (pulse_width_ns < SERVO_MIN_PW_NS) pulse_width_ns = SERVO_MIN_PW_NS;
+    if (pulse_width_ns > SERVO_MAX_PW_NS) pulse_width_ns = SERVO_MAX_PW_NS;
 
     spin_lock_irqsave(&output_control_lock, flags);
 
-    if (channel_n == 2) { // PWM2
-        writel(period_count, pwm_output_regs_base + PWM_CH2_PPR_REG); // Set Period
-        writel(duty_count, pwm_output_regs_base + PWM_CH2_PCNTR_REG); // Set Duty Cycle
-        // Trigger pulse start (if in pulse mode, or ensure cycle mode is active)
-        // For cycle mode, writing to PCNTR/PPR should update the waveform.
-        // If PWM_PCR_PWM_PUL_START is needed for continuous cycle, set it here.
-        // It's R/W1S, clears automatically.
-        // reg_val = readl(pwm_output_regs_base + PWM_CH2_PCR_REG);
-        // reg_val |= PWM_PCR_PWM_PUL_START;
-        // writel(reg_val, pwm_output_regs_base + PWM_CH2_PCR_REG);
-    } else if (channel_n == 4) { // PWM4
-        writel(period_count, pwm_output_regs_base + PWM_CH4_PPR_REG); // Set Period
-        writel(duty_count, pwm_output_regs_base + PWM_CH4_PCNTR_REG); // Set Duty Cycle
-        // Trigger pulse start as above if needed
-        // reg_val = readl(pwm_output_regs_base + PWM_CH4_PCR_REG);
-        // reg_val |= PWM_PCR_PWM_PUL_START;
-        // writel(reg_val, pwm_output_regs_base + PWM_CH4_PCR_REG);
-    }
+    // Configure the PWM device. This applies period and duty cycle.
+    pwm_config(pwm_dev, pulse_width_ns, period_ns);
+
     spin_unlock_irqrestore(&output_control_lock, flags);
 
-    printk(KERN_INFO "Argo Radio Servo: Set PWM%d duty to %lu us (duty_count %u, period_count %u)\n",
-           channel_n, pulse_width_us, duty_count, period_count);
+    printk(KERN_INFO "Argo Radio Servo: Set PWM device %s to %lu us (duty_ns %llu, period_ns %llu)\n",
+           pwm_dev->label, pulse_width_us, pulse_width_ns, period_ns);
 }
 
 
+// These functions are now *only* for the test script's internal logic,
+// and do NOT create sysfs files. They control the actual PWM devices.
+// They are kept as static to compile, but their __ATTR are removed.
 static ssize_t servo_rudder_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-    // For output PWM, we can read the current PCNTR value if the hardware exposes it.
-    // Or return a stored software value if we tracked it.
-    // For simplicity, let's return a nominal value or 0 if not set.
-    return sprintf(buf, "%lu\n", SERVO_MIN_PW_US + (SERVO_MAX_PW_US - SERVO_MIN_PW_US) / 2); // Return a default center value
+    return sprintf(buf, "%lu\n", current_servo_rudder_pw);
 }
 
 static ssize_t servo_rudder_pw_us_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
@@ -297,23 +263,24 @@ static ssize_t servo_rudder_pw_us_store(struct kobject *kobj, struct kobj_attrib
     int ret;
 
     ret = kstrtol(buf, 10, &pulse_width_us);
-    if (ret) {
-        return ret;
-    }
+    if (ret) return ret;
 
-    if (pulse_width_us < SERVO_MIN_PW_US || pulse_width_us > SERVO_MAX_PW_US) {
+    if (pulse_width_us < (long)SERVO_MIN_PW_NS / NSEC_PER_USEC ||
+        pulse_width_us > (long)SERVO_MAX_PW_NS / NSEC_PER_USEC) {
         printk(KERN_WARNING "Argo Radio Servo: Servo Rudder pulse width %ld out of range (%lu-%lu us).\n",
-               pulse_width_us, SERVO_MIN_PW_US, SERVO_MAX_PW_US);
+               pulse_width_us, SERVO_MIN_PW_NS / NSEC_PER_USEC, SERVO_MAX_PW_NS / NSEC_PER_USEC);
         return -EINVAL;
     }
 
-    set_pwm_duty_cycle(2, (unsigned long)pulse_width_us); // Channel 2
+    // Call the internal helper to configure the PWM device
+    set_servo_pulse_width(servo_rudder_pwm_dev, (unsigned long)pulse_width_us);
+    current_servo_rudder_pw = (unsigned long)pulse_width_us; // Update stored value
     return count;
 }
 
 static ssize_t servo_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-    return sprintf(buf, "%lu\n", SERVO_MIN_PW_US + (SERVO_MAX_PW_US - SERVO_MIN_PW_US) / 2); // Return a default center value
+    return sprintf(buf, "%lu\n", current_servo_sail_pw);
 }
 
 static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
@@ -322,17 +289,18 @@ static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribut
     int ret;
 
     ret = kstrtol(buf, 10, &pulse_width_us);
-    if (ret) {
-        return ret;
-    }
+    if (ret) return ret;
 
-    if (pulse_width_us < SERVO_MIN_PW_US || pulse_width_us > SERVO_MAX_PW_US) {
+    if (pulse_width_us < (long)SERVO_MIN_PW_NS / NSEC_PER_USEC ||
+        pulse_width_us > (long)SERVO_MAX_PW_NS / NSEC_PER_USEC) {
         printk(KERN_WARNING "Argo Radio Servo: Servo Sail pulse width %ld out of range (%lu-%lu us).\n",
-               pulse_width_us, SERVO_MIN_PW_US, SERVO_MAX_PW_US);
+               pulse_width_us, SERVO_MIN_PW_NS / NSEC_PER_USEC, SERVO_MAX_PW_NS / NSEC_PER_USEC);
         return -EINVAL;
     }
 
-    set_pwm_duty_cycle(4, (unsigned long)pulse_width_us); // Channel 4
+    // Call the internal helper to configure the PWM device
+    set_servo_pulse_width(servo_sail_pwm_dev, (unsigned long)pulse_width_us);
+    current_servo_sail_pw = (unsigned long)pulse_width_us; // Update stored value
     return count;
 }
 
@@ -341,75 +309,62 @@ static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribut
 static int __init argo_radio_servo_init(void)
 {
     int ret;
-    struct device_node *np_pio, *np_pwm;
-    u32 reg_val; // For writing to PWM registers
+    struct device_node *np_pio; // np_pwm is no longer directly used for pwm_get
+    unsigned long flags; // Declared at the top of the function for spin_lock_irqsave
+
 
     printk(KERN_INFO "Argo Radio Servo Module: Initializing for Allwinner H618.\n");
 
-    // --- 1. Map PWM Output Registers ---
-    // The PWM module is at a single base address for all channels.
-    np_pwm = of_find_compatible_node(NULL, NULL, "allwinner,sun50i-h616-pwm");
-    if (!np_pwm) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to find PWM device tree node for output.\n");
-        return -ENODEV;
+    // Capture module load timestamp
+    module_load_timestamp = ktime_get();
+
+    // --- Initialize last_pulse_timestamp for inputs ---
+    radio_rudder_last_pulse_timestamp = ktime_get();
+    radio_sail_last_pulse_timestamp = ktime_get();
+
+
+    // --- 1. Get PWM devices via kernel framework ---
+    // For PWM2 (Servo Rudder)
+    // The name "pwm-2" or "2" depends on how the base DT exposes the PWM channels.
+    // Common labels are "pwmchip0:pwm-0", "pwmchip0:pwm-1" etc.
+    // Try by index if name fails: pwm_get(NULL, 2)
+    // Using a specific consumer device node (e.g., &platform_device->dev) is preferred over NULL for robust drivers.
+    // For this test module, NULL (global lookup) is acceptable.
+    servo_rudder_pwm_dev = pwm_get(NULL, "pwm-2"); // Try getting by name "pwm-2"
+    if (IS_ERR(servo_rudder_pwm_dev)) {
+        printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Rudder (PWM2) (Error: %ld). Trying by index.\n", PTR_ERR(servo_rudder_pwm_dev));
+        servo_rudder_pwm_dev = pwm_get(NULL, "2"); // Try getting by index "2" (channel index 2)
+        if (IS_ERR(servo_rudder_pwm_dev)) {
+            printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Rudder (PWM2) by index (Error: %ld).\n", PTR_ERR(servo_rudder_pwm_dev));
+            ret = PTR_ERR(servo_rudder_pwm_dev);
+            goto err_no_pwm_rudder;
+        }
     }
-    pwm_output_regs_base = of_iomap(np_pwm, 0);
-    if (!pwm_output_regs_base) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to ioremap PWM output registers.\n");
-        of_node_put(np_pwm);
-        return -EFAULT;
+    printk(KERN_INFO "Argo Radio Servo: Successfully got PWM device: %s (PWM2, Servo Rudder)\n", servo_rudder_pwm_dev->label);
+
+
+    // For PWM4 (Servo Sail)
+    servo_sail_pwm_dev = pwm_get(NULL, "pwm-4"); // Try getting by name "pwm-4"
+    if (IS_ERR(servo_sail_pwm_dev)) {
+        printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Sail (PWM4) (Error: %ld). Trying by index.\n", PTR_ERR(servo_sail_pwm_dev));
+        servo_sail_pwm_dev = pwm_get(NULL, "4"); // Try getting by index "4" (channel index 4)
+        if (IS_ERR(servo_sail_pwm_dev)) {
+            printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Sail (PWM4) by index (Error: %ld).\n", PTR_ERR(servo_sail_pwm_dev));
+            ret = PTR_ERR(servo_sail_pwm_dev);
+            goto err_no_pwm_sail;
+        }
     }
-    of_node_put(np_pwm);
-    printk(KERN_INFO "Argo Radio Servo: Mapped PWM output registers at %p.\n", pwm_output_regs_base);
+    printk(KERN_INFO "Argo Radio Servo: Successfully got PWM device: %s (PWM4, Servo Sail)\n", servo_sail_pwm_dev->label);
 
-    // --- 2. Configure PWM Output Channels (PWM2 and PWM4) ---
-    // Assuming 24MHz OSC clock, pre-scale K=23 (for 1MHz counter clock, 24MHz / (23+1) = 1MHz)
-    // Period = 20000 ticks for 20ms.
-    u32 pwm_prescal_k = 23; // K=23 for (K+1)=24 prescaler to get 1MHz from 24MHz
-    u32 pwm_period_count = SERVO_PERIOD_US; // 20000 ticks for 20ms at 1MHz counter
-    u32 pwm_initial_duty_count = 1500; // 1500us default center for servos
+    // --- 2. Configure and Enable PWM outputs ---
+    // Set initial period and duty cycle, then enable
+    set_servo_pulse_width(servo_rudder_pwm_dev, current_servo_rudder_pw);
+    set_servo_pulse_width(servo_sail_pwm_dev, current_servo_sail_pw);
 
-    // 2.1 Configure PCCR23 (for PWM2 & PWM3)
-    reg_val = PCCR_CLK_SRC_OSC24M | PCCR_CLK_GATING_PASS | PCCR_CLK_DIV_M_DIV(0); // Divisor 0 for /1 (not directly used by PCR prescaler)
-    writel(reg_val, pwm_output_regs_base + PCCR23_REG);
-    printk(KERN_INFO "Argo Radio Servo: Configured PCCR23. Value written: 0x%08x. Current: 0x%08x\n", reg_val, readl(pwm_output_regs_base + PCCR23_REG));
-
-    // 2.2 Configure PCCR45 (for PWM4 & PWM5)
-    reg_val = PCCR_CLK_SRC_OSC24M | PCCR_CLK_GATING_PASS | PCCR_CLK_DIV_M_DIV(0); // Divisor 0 for /1
-    writel(reg_val, pwm_output_regs_base + PCCR45_REG);
-    printk(KERN_INFO "Argo Radio Servo: Configured PCCR45. Value written: 0x%08x. Current: 0x%08x\n", reg_val, readl(pwm_output_regs_base + PCCR45_REG));
-
-    // 2.3 Configure PWM2 (Servo Rudder)
-    spin_lock_irqsave(&output_control_lock, flags);
-    writel(PWM_PCR_PWM_MODE_CYCLE | PWM_PCR_PWM_ACT_STA_HIGH | PWM_PCR_PWM_PRESCAL_K(pwm_prescal_k),
-           pwm_output_regs_base + PWM_CH2_PCR_REG);
-    writel(pwm_period_count, pwm_output_regs_base + PWM_CH2_PPR_REG);
-    writel(pwm_initial_duty_count, pwm_output_regs_base + PWM_CH2_PCNTR_REG);
-    spin_unlock_irqrestore(&output_control_lock, flags);
-    printk(KERN_INFO "Argo Radio Servo: Configured PWM2 (Servo Rudder). PCR: 0x%08x, PPR: 0x%08x, PCNTR: 0x%08x\n",
-           readl(pwm_output_regs_base + PWM_CH2_PCR_REG),
-           readl(pwm_output_regs_base + PWM_CH2_PPR_REG),
-           readl(pwm_output_regs_base + PWM_CH2_PCNTR_REG));
-
-
-    // 2.4 Configure PWM4 (Servo Sail)
-    spin_lock_irqsave(&output_control_lock, flags);
-    writel(PWM_PCR_PWM_MODE_CYCLE | PWM_PCR_PWM_ACT_STA_HIGH | PWM_PCR_PWM_PRESCAL_K(pwm_prescal_k),
-           pwm_output_regs_base + PWM_CH4_PCR_REG);
-    writel(pwm_period_count, pwm_output_regs_base + PWM_CH4_PPR_REG);
-    writel(pwm_initial_duty_count, pwm_output_regs_base + PWM_CH4_PCNTR_REG);
-    spin_unlock_irqrestore(&output_control_lock, flags);
-    printk(KERN_INFO "Argo Radio Servo: Configured PWM4 (Servo Sail). PCR: 0x%08x, PPR: 0x%08x, PCNTR: 0x%08x\n",
-           readl(pwm_output_regs_base + PWM_CH4_PCR_REG),
-           readl(pwm_output_regs_base + PWM_CH4_PPR_REG),
-           readl(pwm_output_regs_base + PWM_CH4_PCNTR_REG));
-
-    // 2.5 Globally Enable PWM Outputs (PWM2 and PWM4) in PER_REG
-    reg_val = readl(pwm_output_regs_base + PER_REG);
-    reg_val |= (PWM_CH2_GLOBAL_OUTPUT_ENABLE | PWM_CH4_GLOBAL_OUTPUT_ENABLE);
-    writel(reg_val, pwm_output_regs_base + PER_REG);
-    printk(KERN_INFO "Argo Radio Servo: Enabled PWM2 and PWM4 outputs via PER. Current PER: 0x%08x\n", readl(pwm_output_regs_base + PER_REG));
-
+    // Enable the PWM outputs
+    pwm_enable(servo_rudder_pwm_dev);
+    pwm_enable(servo_sail_pwm_dev);
+    printk(KERN_INFO "Argo Radio Servo: Enabled PWM2 and PWM4 outputs.\n");
 
     // --- 3. Setup GPIOs for Input Measurement (PI11 and PI13) ---
     // PIO controller node for fetching GPIOs.
@@ -417,7 +372,7 @@ static int __init argo_radio_servo_init(void)
     if (!np_pio) {
         printk(KERN_ERR "Argo Radio Servo: Failed to find pinctrl device tree node for GPIO inputs.\n");
         ret = -ENODEV;
-        goto err_unmap_pwm;
+        goto err_disable_pwm_outputs; // Added cleanup for PWM outputs
     }
 
     // 3.1 Setup Radio Rudder (PI11)
@@ -445,9 +400,9 @@ static int __init argo_radio_servo_init(void)
         goto err_free_rr_gpio;
     }
     radio_rudder_gpio_desc = gpio_to_desc(PI11_GLOBAL_GPIO_NUM);
-    if (!radio_rudder_gpio_desc) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to get GPIO descriptor for %d (Radio Rudder).\n", PI11_GLOBAL_GPIO_NUM);
-        ret = -ENODEV;
+    if (IS_ERR(radio_rudder_gpio_desc)) { // Check for error using IS_ERR
+        printk(KERN_ERR "Argo Radio Servo: Failed to get GPIO descriptor for %d (Radio Rudder) (Error: %ld).\n", PI11_GLOBAL_GPIO_NUM, PTR_ERR(radio_rudder_gpio_desc));
+        ret = PTR_ERR(radio_rudder_gpio_desc); // Get error code from pointer
         goto err_free_rr_irq;
     }
     printk(KERN_INFO "Argo Radio Servo: Radio Rudder (GPIO %d) mapped to IRQ %d.\n", PI11_GLOBAL_GPIO_NUM, radio_rudder_irq_num);
@@ -478,14 +433,14 @@ static int __init argo_radio_servo_init(void)
         goto err_free_rs_gpio;
     }
     radio_sail_gpio_desc = gpio_to_desc(PI13_GLOBAL_GPIO_NUM);
-    if (!radio_sail_gpio_desc) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to get GPIO descriptor for %d (Radio Sail).\n", PI13_GLOBAL_GPIO_NUM);
-        ret = -ENODEV;
+    if (IS_ERR(radio_sail_gpio_desc)) { // Check for error using IS_ERR
+        printk(KERN_ERR "Argo Radio Servo: Failed to get GPIO descriptor for %d (Radio Sail) (Error: %ld).\n", PI13_GLOBAL_GPIO_NUM, PTR_ERR(radio_sail_gpio_desc));
+        ret = PTR_ERR(radio_sail_gpio_desc); // Get error code from pointer
         goto err_free_rs_irq;
     }
     printk(KERN_INFO "Argo Radio Servo: Radio Sail (GPIO %d) mapped to IRQ %d.\n", PI13_GLOBAL_GPIO_NUM, radio_sail_irq_num);
 
-    of_node_put(np_pio); // Finished with pio node
+    if (np_pio) of_node_put(np_pio); // Only put if it was successfully found
 
     // --- 4. Initialize and start the high-resolution timer for periodic printk ---
     hrtimer_init(&print_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -510,25 +465,13 @@ static int __init argo_radio_servo_init(void)
         printk(KERN_ERR "Argo Radio Servo: Failed to create sysfs file radio_sail_pw_us (Error: %d).\n", ret);
         goto err_remove_rr_sysfs;
     }
-    ret = sysfs_create_file(argo_radio_servo_kobj, &servo_rudder_pw_us_attribute.attr);
-    if (ret) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to create sysfs file servo_rudder_pw_us (Error: %d).\n", ret);
-        goto err_remove_rs_sysfs;
-    }
-    ret = sysfs_create_file(argo_radio_servo_kobj, &servo_sail_pw_us_attribute.attr);
-    if (ret) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to create sysfs file servo_sail_pw_us (Error: %d).\n", ret);
-        goto err_remove_sr_sysfs;
-    }
-    printk(KERN_INFO "Argo Radio Servo: Created sysfs entry at /sys/argo_radio_servo/.\n");
+    // Servo output control is now via standard /sys/class/pwm, not custom sysfs files from this module.
+    // The attributes servo_rudder_pw_us_attribute and servo_sail_pw_us_attribute are no longer created.
+    printk(KERN_INFO "Argo Radio Servo: Created sysfs entry at /sys/argo_radio_servo/ for input measurements.\n");
 
     return 0; // Initialization successful
 
 // --- Error Handling and Cleanup (in reverse order of setup) ---
-err_remove_sr_sysfs:
-    sysfs_remove_file(argo_radio_servo_kobj, &servo_rudder_pw_us_attribute.attr);
-err_remove_rs_sysfs:
-    sysfs_remove_file(argo_radio_servo_kobj, &radio_sail_pw_us_attribute.attr);
 err_remove_rr_sysfs:
     sysfs_remove_file(argo_radio_servo_kobj, &radio_rudder_pw_us_attribute.attr);
 err_remove_kobj:
@@ -544,29 +487,36 @@ err_free_rr_irq:
 err_free_rr_gpio:
     gpio_free(PI11_GLOBAL_GPIO_NUM);
 err_put_pio_node:
-    of_node_put(np_pio); // Only put if it was successfully found
-err_unmap_pwm:
-    if (pwm_output_regs_base) iounmap(pwm_output_regs_base);
+    if (np_pio) of_node_put(np_pio); // Only put if it was successfully found
+err_disable_pwm_outputs: // Cleanup for PWM output devices
+    if (servo_sail_pwm_dev) {
+        pwm_disable(servo_sail_pwm_dev);
+        pwm_put(servo_sail_pwm_dev);
+    }
+err_no_pwm_sail:
+    if (servo_rudder_pwm_dev) {
+        pwm_disable(servo_rudder_pwm_dev);
+        pwm_put(servo_rudder_pwm_dev);
+    }
+err_no_pwm_rudder:
     return ret;
 }
 
 // --- Module Exit Function ---
 static void __exit argo_radio_servo_exit(void)
 {
-    u32 reg_val;
-
     printk(KERN_INFO "Argo Radio Servo Module: Exiting...\n");
 
-    // 1. Disable PWM outputs and unmap registers
-    if (pwm_output_regs_base) {
-        // Disable PWM2 and PWM4 outputs in PER_REG
-        reg_val = readl(pwm_output_regs_base + PER_REG);
-        reg_val &= ~(PWM_CH2_GLOBAL_OUTPUT_ENABLE | PWM_CH4_GLOBAL_OUTPUT_ENABLE);
-        writel(reg_val, pwm_output_regs_base + PER_REG);
-        printk(KERN_INFO "Argo Radio Servo: Disabled PWM2 and PWM4 outputs.\n");
-
-        iounmap(pwm_output_regs_base);
-        printk(KERN_INFO "Argo Radio Servo: Unmapped PWM output registers.\n");
+    // 1. Disable and free PWM output devices
+    if (servo_sail_pwm_dev) {
+        pwm_disable(servo_sail_pwm_dev);
+        pwm_put(servo_sail_pwm_dev);
+        printk(KERN_INFO "Argo Radio Servo: Released PWM4 (Servo Sail).\n");
+    }
+    if (servo_rudder_pwm_dev) {
+        pwm_disable(servo_rudder_pwm_dev);
+        pwm_put(servo_rudder_pwm_dev);
+        printk(KERN_INFO "Argo Radio Servo: Released PWM2 (Servo Rudder).\n");
     }
 
     // 2. Cancel the high-resolution timer
@@ -583,8 +533,6 @@ static void __exit argo_radio_servo_exit(void)
     printk(KERN_INFO "Argo Radio Servo: Freed GPIO %d (Radio Rudder) and IRQ %d.\n", PI11_GLOBAL_GPIO_NUM, radio_rudder_irq_num);
 
     // 4. Remove sysfs files and directory
-    sysfs_remove_file(argo_radio_servo_kobj, &servo_sail_pw_us_attribute.attr);
-    sysfs_remove_file(argo_radio_servo_kobj, &servo_rudder_pw_us_attribute.attr);
     sysfs_remove_file(argo_radio_servo_kobj, &radio_sail_pw_us_attribute.attr);
     sysfs_remove_file(argo_radio_servo_kobj, &radio_rudder_pw_us_attribute.attr);
     kobject_put(argo_radio_servo_kobj);
@@ -601,3 +549,4 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Tobi Delbruck");
 MODULE_DESCRIPTION("Allwinner H618 Argo Radio Servo Module for Pulse Measurement and Control");
 MODULE_VERSION("0.1");
+MODULE_ALIAS("platform:argo_radio_servo"); // For platform device matching
