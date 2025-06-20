@@ -5,4 +5,5 @@ disp_mode=1920x1080p60
 overlay_prefix=sun50i-h616
 rootdev=UUID=a242a8f4-865f-4653-8bbc-b89dc54c6c5d
 rootfstype=ext4
-overlays=ph-uart5 pi-i2c0 pi-pwm1 pi-pwm2 pi-pwm3 pi-pwm4 argo_radio_servo_module
+overlays=ph-uart5 pi-i2c0 pi-pwm2 pi-pwm4 
+user_overlays=argo_radio_servo_overlay 
