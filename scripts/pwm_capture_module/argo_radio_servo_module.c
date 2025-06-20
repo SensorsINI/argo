@@ -25,8 +25,28 @@
    - Exposes measured values via sysfs:
      - /sys/argo_radio_servo/radio_rudder_pw_us (for PI11)
      - /sys/argo_radio_servo/radio_sail_pw_us (for PI13)
-   - Controls servo outputs on PWM2 (PI12) and PWM4 (PI14) via kernel's standard PWM API.
-   - Sysfs files for input measurements are globally writable (0664).
+     - These files are group and owner readable (0444), allowing user-space scripts to read radio input pulse widths.
+   - Controls servo outputs on PWM2 (PI12) and PWM4 (PI14) via kernel's standard PWM API, but sysfs files in /sys/kernel/pwm/pwmchipX/pwmY/ are used for testing.
+     - PWM2 (PI12) is used for Servo Rudder, PWM4 (PI14) is used for Servo Sail.
+     - /sys/argo_radio_servo/servo_rudder_pw_us (for PWM2)
+     - /sys/argo_radio_servo/rservo_sail_pw_us (for PWM4)
+     
+     - The standard sysfs files for PWM output are not created by this module, are used here to actually control the PWM outputs.
+   - Our sysfs files for output are created for testing purposes, but the actual control is done via the kernel's PWM framework.
+     /sys/class/pwm/pwmchipX/pwmY/period and /duty_cycle.
+   - Uses high-resolution timer to print pulse widths every 5 seconds for the first minute after module load.
+   - Uses spinlocks to protect access to shared data (pulse widths and timestamps).
+   - Uses GPIO interrupts for both PI11 and PI13 to measure pulse widths.
+   - Uses ktime for high-resolution time measurement.
+   - Uses kernel's PWM framework to control servo outputs.
+   - Uses device tree for GPIO and PWM configuration.
+   - Uses modern GPIO API (gpiod_get_value, gpiod_to_irq, gpiod_direction_input, etc.)
+   - Uses kobject for sysfs entry creation.
+   - Uses ktime for high-resolution time measurement.
+   - Uses kstrtol for converting sysfs input to long integers.
+   - Uses printk for logging.
+   - Uses module_init and module_exit for module loading and unloading.
+   - Uses module parameters for configurable pulse widths (not implemented yet, but can be added).  
    - Prints measured pulse width to dmesg only for the first minute after module insertion.
 */
 
@@ -330,7 +350,7 @@ static int __init argo_radio_servo_init(void)
     // Try by index if name fails: pwm_get(NULL, 2)
     // Using a specific consumer device node (e.g., &platform_device->dev) is preferred over NULL for robust drivers.
     // For this test module, NULL (global lookup) is acceptable.
-    servo_rudder_pwm_dev = pwm_get(NULL, "pwm-2"); // Try getting by name "pwm-2"
+    servo_rudder_pwm_dev = pwm_get(NULL, "pwm2"); // Try getting by name "pwm2"
     if (IS_ERR(servo_rudder_pwm_dev)) {
         printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Rudder (PWM2) (Error: %ld). Trying by index.\n", PTR_ERR(servo_rudder_pwm_dev));
         servo_rudder_pwm_dev = pwm_get(NULL, "2"); // Try getting by index "2" (channel index 2)
@@ -344,7 +364,7 @@ static int __init argo_radio_servo_init(void)
 
 
     // For PWM4 (Servo Sail)
-    servo_sail_pwm_dev = pwm_get(NULL, "pwm-4"); // Try getting by name "pwm-4"
+    servo_sail_pwm_dev = pwm_get(NULL, "pwm4"); // Try getting by name "pwm4"
     if (IS_ERR(servo_sail_pwm_dev)) {
         printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Sail (PWM4) (Error: %ld). Trying by index.\n", PTR_ERR(servo_sail_pwm_dev));
         servo_sail_pwm_dev = pwm_get(NULL, "4"); // Try getting by index "4" (channel index 4)

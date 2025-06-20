@@ -21,6 +21,19 @@ overlay:
 install_overlay:
 	cp $(OVERLAY).dtbo /boot/overlay-user
 
+install_boot_env:
+	# only copy if orangepiEnv.txt is diffferent than the existing one
+	if ! cmp -s orangepiEnv.txt /boot/orangepiEnv.txt ; then
+		echo "orangepiEnv.txt has changed, copying to /boot..."
+		echo "Installing boot environment variables for Orange Pi..."
+		# Copy the environment file to the boot directory
+		# This file should contain the necessary boot parameters for the Orange Pi
+		sudo cp orangepiEnv.txt /boot/
+		echo "reboot to apply changes"
+	else
+		echo "No changes in orangepiEnv.txt, skipping copy."
+	fi
+
 install_rules:
 	# Copy the udev rules file to the appropriate directory
 	sudo cp 99-argo-radio-servo.rules /etc/udev/rules.d/
