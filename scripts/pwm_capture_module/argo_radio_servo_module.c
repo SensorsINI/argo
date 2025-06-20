@@ -20,19 +20,29 @@
 
 /*
    argo_radio_servo_module.c:
+    -signals are as follows 
+     - PI11 (GPIO267, pin 32) is used for Radio Rudder input (PWM1_RADIO_RUDDER)
+     - PI13 (GPIO269, pin 7) is used for Radio Sail input (PWM3_RADIO_SAIL)
+     - PI12 (PWM2, pin 33) is used for Servo Rudder output (PWM2_SERVO_RUDDER)
+     - PI14 (PWM4, pin 16) is used for Servo Sail output (PWM4_SERVO_SAIL)
    - Measures pulse width in microseconds on PI11 (PWM1_RADIO_RUDDER) and PI13 (PWM3_RADIO_SAIL)
      using GPIO interrupts and ktime_get(). If no pulses for 1s, sets PW to 0.
    - Exposes measured values via sysfs:
      - /sys/argo_radio_servo/radio_rudder_pw_us (for PI11)
      - /sys/argo_radio_servo/radio_sail_pw_us (for PI13)
      - These files are group and owner readable (0444), allowing user-space scripts to read radio input pulse widths.
-   - Controls servo outputs on PWM2 (PI12) and PWM4 (PI14) via kernel's standard PWM API, but sysfs files in /sys/kernel/pwm/pwmchipX/pwmY/ are used for testing.
+   - Controls servo outputs on PWM2_SERVO_RUDDER (PI12) and PWM4_SERVO_SAIL (PI14) via kernel's standard PWM API.
+    - Servo frequency is fixed to 50Hz (20ms period).
+    - Uses PWM framework to set pulse widths for Servo Rudder and Servo Sail.
+   - Exposes servo output pulse width values via sysfs:
+     - /sys/argo_radio_servo/servo_rudder_pw_us (for PI12, PWM2)
+     - /sys/argo_radio_servo/servo_sail_pw_us (for PI14, PWM4)
+     - These files are group and owner writable (0664), allowing user-space scripts to write servo output pulse widths.
+        but sysfs files in /sys/kernel/pwm/pwmchipX/pwmY/ are used for testing.
      - PWM2 (PI12) is used for Servo Rudder, PWM4 (PI14) is used for Servo Sail.
-     - /sys/argo_radio_servo/servo_rudder_pw_us (for PWM2)
-     - /sys/argo_radio_servo/rservo_sail_pw_us (for PWM4)
      
-     - The standard sysfs files for PWM output are not created by this module, are used here to actually control the PWM outputs.
-   - Our sysfs files for output are created for testing purposes, but the actual control is done via the kernel's PWM framework.
+     - The standard sysfs files for PWM output are not created by this module.
+   - Our sysfs files for output are created for simpler control by user program, but the actual control is done via the kernel's PWM framework.
      /sys/class/pwm/pwmchipX/pwmY/period and /duty_cycle.
    - Uses high-resolution timer to print pulse widths every 5 seconds for the first minute after module load.
    - Uses spinlocks to protect access to shared data (pulse widths and timestamps).
@@ -298,6 +308,7 @@ static ssize_t servo_rudder_pw_us_store(struct kobject *kobj, struct kobj_attrib
     return count;
 }
 
+// These functions are now *only* for the test script's internal logic,
 static ssize_t servo_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
     return sprintf(buf, "%lu\n", current_servo_sail_pw);
@@ -330,7 +341,7 @@ static int __init argo_radio_servo_init(void)
 {
     int ret;
     struct device_node *np_pio; // np_pwm is no longer directly used for pwm_get
-    unsigned long flags; // Declared at the top of the function for spin_lock_irqsave
+    // unsigned long flags; // Declared at the top of the function for spin_lock_irqsave, but unused here
 
 
     printk(KERN_INFO "Argo Radio Servo Module: Initializing for Allwinner H618.\n");

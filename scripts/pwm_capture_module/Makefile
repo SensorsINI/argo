@@ -8,7 +8,10 @@ PWD := $(shell pwd)
 
 .PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup # Ensure all targets are listed here
 
-all:
+# all target does everything needed to build the module and overlay
+all: modules overlay install_module install_overlay install_boot_env install_rules install_permissions_service 
+
+modules:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:
@@ -94,6 +97,7 @@ insmod:
 	sudo insmod $(MOD).ko
 	# Removed call to post_insmod_setup here. Udev will handle permissions.
 	sudo $(MAKE) post_insmod_setup
+	dmesg | tail -n 20
 
 rmmod:
 	rmmod $(MOD)
