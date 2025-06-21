@@ -20,3 +20,11 @@ scripts/pwm_capture_module/pwm_capture_module.c
 scripts/pwm_capture_module/pwm_capture_module.dts
 scripts/pwm_capture_module/pwm_capture_module.dts.cpp
 scripts/pwm_capture_module/sun50i-h618-orangepi-zero2w.dtb.orig
+scripts/pwm_capture_module/argo_radio_servo_module.mod.c
+scripts/pwm_capture_module/argo_radio_servo_module.mod.o
+scripts/pwm_capture_module/argo_radio_servo_module.mod.c
+scripts/pwm_capture_module/argo_radio_servo_module.mod.o
+scripts/pwm_capture_module/argo_radio_servo_module.mod.o
+scripts/pwm_capture_module/argo_radio_servo_module.mod.c
+scripts/pwm_capture_module/.argo_radio_servo_module.o.d
+scripts/pwm_capture_module/argo_radio_servo_module.mod.c

@@ -121,14 +121,24 @@ static enum hrtimer_restart print_timer_callback(struct hrtimer *timer);
 static ssize_t radio_rudder_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
 static ssize_t radio_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
 
+// Sysfs Show/Store Functions for Output Control
+static ssize_t servo_rudder_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
+static ssize_t servo_rudder_pw_us_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
+static ssize_t servo_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf);
+static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count);
+
 
 // --- Sysfs Attribute Definitions ---
 static struct kobj_attribute radio_rudder_pw_us_attribute =
-    __ATTR(radio_rudder_pw_us, 0664, radio_rudder_pw_us_show, NULL); // rw-rw-r--
+    __ATTR(radio_rudder_pw_us, 0444, radio_rudder_pw_us_show, NULL); // r--r--r--
 
 static struct kobj_attribute radio_sail_pw_us_attribute =
-    __ATTR(radio_sail_pw_us, 0664, radio_sail_pw_us_show, NULL); // rw-rw-r--
+    __ATTR(radio_sail_pw_us, 0444, radio_sail_pw_us_show, NULL); // r--r--r--
 
+static struct kobj_attribute servo_rudder_pw_us_attribute =
+    __ATTR(servo_rudder_pw_us, 0664, servo_rudder_pw_us_show, servo_rudder_pw_us_store); // rw-rw-r--
+static struct kobj_attribute servo_sail_pw_us_attribute =
+__ATTR(servo_sail_pw_us, 0664, servo_sail_pw_us_show, servo_sail_pw_us_store); // rw-rw-r--
 
 // --- Input Measurement ISRs ---
 static irqreturn_t radio_rudder_gpio_isr(int irq, void *dev_id)
@@ -279,10 +289,8 @@ static void set_servo_pulse_width(struct pwm_device *pwm_dev, unsigned long puls
 }
 
 
-// These functions are now *only* for the test script's internal logic,
-// and do NOT create sysfs files. They control the actual PWM devices.
-// They are kept as static to compile, but their __ATTR are removed.
-static ssize_t servo_rudder_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+// Sysfs show/store functions for Servo Rudder output.
+static ssize_t servo_rudder_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf) // rw-rw-r--
 {
     return sprintf(buf, "%lu\n", current_servo_rudder_pw);
 }
@@ -308,7 +316,8 @@ static ssize_t servo_rudder_pw_us_store(struct kobject *kobj, struct kobj_attrib
     return count;
 }
 
-// These functions are now *only* for the test script's internal logic,
+// Sysfs show/store functions for Servo Sail output.
+// Writing to the corresponding sysfs file sets the pulse width.
 static ssize_t servo_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
     return sprintf(buf, "%lu\n", current_servo_sail_pw);
@@ -363,7 +372,7 @@ static int __init argo_radio_servo_init(void)
     // For this test module, NULL (global lookup) is acceptable.
     servo_rudder_pwm_dev = pwm_get(NULL, "pwm2"); // Try getting by name "pwm2"
     if (IS_ERR(servo_rudder_pwm_dev)) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Rudder (PWM2) (Error: %ld). Trying by index.\n", PTR_ERR(servo_rudder_pwm_dev));
+        printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Rudder by name (\"pwm2\") (Error: %ld). Trying by index.\n", PTR_ERR(servo_rudder_pwm_dev));
         servo_rudder_pwm_dev = pwm_get(NULL, "2"); // Try getting by index "2" (channel index 2)
         if (IS_ERR(servo_rudder_pwm_dev)) {
             printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Rudder (PWM2) by index (Error: %ld).\n", PTR_ERR(servo_rudder_pwm_dev));
@@ -496,13 +505,25 @@ static int __init argo_radio_servo_init(void)
         printk(KERN_ERR "Argo Radio Servo: Failed to create sysfs file radio_sail_pw_us (Error: %d).\n", ret);
         goto err_remove_rr_sysfs;
     }
-    // Servo output control is now via standard /sys/class/pwm, not custom sysfs files from this module.
-    // The attributes servo_rudder_pw_us_attribute and servo_sail_pw_us_attribute are no longer created.
-    printk(KERN_INFO "Argo Radio Servo: Created sysfs entry at /sys/argo_radio_servo/ for input measurements.\n");
+    ret = sysfs_create_file(argo_radio_servo_kobj, &servo_rudder_pw_us_attribute.attr);
+    if (ret) {
+        printk(KERN_ERR "Argo Radio Servo: Failed to create sysfs file servo_rudder_pw_us (Error: %d).\n", ret);
+        goto err_remove_rs_sysfs;
+    }
+    ret = sysfs_create_file(argo_radio_servo_kobj, &servo_sail_pw_us_attribute.attr);
+    if (ret) {
+        printk(KERN_ERR "Argo Radio Servo: Failed to create sysfs file servo_sail_pw_us (Error: %d).\n", ret);
+        goto err_remove_servo_rudder_sysfs;
+    }
+    printk(KERN_INFO "Argo Radio Servo: Created sysfs entries at /sys/argo_radio_servo/ for input and output control.\n");
 
     return 0; // Initialization successful
 
 // --- Error Handling and Cleanup (in reverse order of setup) ---
+err_remove_servo_rudder_sysfs:
+    sysfs_remove_file(argo_radio_servo_kobj, &servo_rudder_pw_us_attribute.attr);
+err_remove_rs_sysfs:
+    sysfs_remove_file(argo_radio_servo_kobj, &radio_sail_pw_us_attribute.attr);
 err_remove_rr_sysfs:
     sysfs_remove_file(argo_radio_servo_kobj, &radio_rudder_pw_us_attribute.attr);
 err_remove_kobj:
@@ -564,6 +585,8 @@ static void __exit argo_radio_servo_exit(void)
     printk(KERN_INFO "Argo Radio Servo: Freed GPIO %d (Radio Rudder) and IRQ %d.\n", PI11_GLOBAL_GPIO_NUM, radio_rudder_irq_num);
 
     // 4. Remove sysfs files and directory
+    sysfs_remove_file(argo_radio_servo_kobj, &servo_sail_pw_us_attribute.attr);
+    sysfs_remove_file(argo_radio_servo_kobj, &servo_rudder_pw_us_attribute.attr);
     sysfs_remove_file(argo_radio_servo_kobj, &radio_sail_pw_us_attribute.attr);
     sysfs_remove_file(argo_radio_servo_kobj, &radio_rudder_pw_us_attribute.attr);
     kobject_put(argo_radio_servo_kobj);

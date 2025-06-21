@@ -11,7 +11,7 @@ PWD := $(shell pwd)
 # all target does everything needed to build the module and overlay
 all: modules overlay install_module install_overlay install_boot_env install_rules install_permissions_service 
 
-modules:
+module:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:
@@ -91,11 +91,14 @@ post_insmod_setup:
 	@echo "Sysfs file group ownership and permissions updated (manual run only). Udev handles boot-time."
 	ls -l $(SYS)
 
+blacklist_ethernet:
+	@echo "blacklist sunxi_gmac" | sudo tee /etc/modprobe.d/blacklist-sunxi-gmac.conf > /dev/null
+	@echo "Blacklisted sunxi-gmac module to prevent ethernet conflict with PWM pins."
 
 insmod:
 	-sudo rmmod $(MOD) # Attempt to remove, ignore errors if not loaded
 	sudo insmod $(MOD).ko
-	# Removed call to post_insmod_setup here. Udev will handle permissions.
+	# Call here to post_insmod_setup here is for testing. Udev will handle permissions normally
 	sudo $(MAKE) post_insmod_setup
 	dmesg | tail -n 20
 

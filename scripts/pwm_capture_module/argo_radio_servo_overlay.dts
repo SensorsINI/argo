@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // DTS for Argo Radio Servo Module Overlay on Orange Pi Zero 2W (Allwinner H618)
-// This overlay ONLY configures input pins PI11 and PI13 for EINT.
-// It relies on the base DT and other Armbian overlays for PWM output functionality.
+// This overlay configures EINT input pins and explicitly defines PWM channels 2 and 4
+// for control via the kernel's generic PWM API (pwm_get).
 
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
@@ -17,31 +17,33 @@
     // Node for our kernel module to claim GPIOs (using compatible for lookup)
     argo_radio_servo_gpios: argo_radio_servo_gpios {
         compatible = "argo,radio-servo-gpio";
-        // Define GPIOs for input measurement.
-        // PI11 (Bank I, Pin 11) for Radio Rudder
-        radio_rudder_gpio = <&pio 8 11 GPIO_ACTIVE_HIGH>;
-        // PI13 (Bank I, Pin 13) for Radio Sail
-        radio_sail_gpio = <&pio 8 13 GPIO_ACTIVE_HIGH>;
+        radio_rudder_gpio = <&pio 8 11 GPIO_ACTIVE_HIGH>; // PI11
+        radio_sail_gpio = <&pio 8 13 GPIO_ACTIVE_HIGH>;   // PI13
     };
 
-    // --- Fragment 0: Define our specific EINT pin groups as children of &pio ---
-    // This fragment creates the named pin groups that will be referenced by other fragments.
+    // --- Fragment 0: Explicitly disable the Ethernet GMAC controller itself ---
     fragment@0 {
+        target = <&emac1>;
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+
+    // --- Fragment 1: Define our specific EINT pin groups as children of &pio ---
+    fragment@1 {
         target = <&pio>; // Target the main pinctrl node (&pio == pinctrl@300b000)
         __overlay__ {
-            pinctrl-names = "default"; // Declare the default pinctrl state
+            pinctrl-names = "default";
             pinctrl-0 = <&pi11_eint_pulse_in_group>,
-                          <&pi13_eint_pulse_in_group>; // Only our EINT pins
+                          <&pi13_eint_pulse_in_group>;
 
-            // PI11 (PWM1_RADIO_RUDDER) - Input for measurement (EINT function)
-            // Manual: PI11_SELECT 110:PI_EINT11 (ALT6)
+            // PI11 (PWM1_RADIO_RUDDER) - Input (EINT function)
             pi11_eint_pulse_in_group: pi11_eint_pulse_in_group {
                 pins = "PI11";
                 function = "pi_eint11"; // EINT function for PI11
             };
 
-            // PI13 (PWM3_RADIO_SAIL) - Input for measurement (EINT function)
-            // Manual: PI13_SELECT 110:PI_EINT13 (ALT6)
+            // PI13 (PWM3_RADIO_SAIL) - Input (EINT function)
             pi13_eint_pulse_in_group: pi13_eint_pulse_in_group {
                 pins = "PI13";
                 function = "pi_eint13"; // EINT function for PI13
@@ -49,6 +51,54 @@
         };
     };
 
-    // --- No fragments for Ethernet disablement or PWM output pinmuxing here ---
-    // We rely on the base DT and other overlays for PWM output.
+    // --- Fragment 2: Define PWM Channels 2 and 4 (and their pinctrl) for pwm_get() ---
+    // This targets the main PWM controller node.
+    fragment@2 {
+        target = <&pwm>; // Target the main pwm@300a000 node (labeled &pwm in base DTS)
+        __overlay__ {
+            status = "okay"; // Ensure the main PWM controller is enabled
+
+            // Define PWM channel 2 for Servo Rudder (PI12)
+            // REMOVED unit address from node name to clear DTC warning.
+            pwm2: channel@2 { // Changed 'pwm@2' to 'channel@2' for cleaner node naming
+                compatible = "allwinner,sunxi-pwm2"; // Add compatible if base doesn't have it explicitly
+                label = "pwm2"; // *** CRITICAL: Label for pwm_get(NULL, "pwm2") ***
+                #pwm-cells = <0>; // Consumed by consumer (our module)
+                pinctrl-names = "default";
+                pinctrl-0 = <&pi12_pwm2_out_group>;
+                status = "okay";
+            };
+
+            // Define PWM channel 4 for Servo Sail (PI14)
+            // REMOVED unit address from node name to clear DTC warning.
+            pwm4: channel@4 { // Changed 'pwm@4' to 'channel@4' for cleaner node naming
+                compatible = "allwinner,sunxi-pwm4"; // Add compatible if base doesn't have it explicitly
+                label = "pwm4"; // *** CRITICAL: Label for pwm_get(NULL, "pwm4") ***
+                #pwm-cells = <0>;
+                pinctrl-names = "default";
+                pinctrl-0 = <&pi14_pwm4_out_group>;
+                status = "okay";
+            };
+        };
+    };
+
+    // following commented out because we use armbian pwm output overlay instead
+    // --- Fragment 3: Define PWM Output Pinmuxing Groups for PI12 and PI14 ---
+    /* fragment@3 {
+        target = <&pio>; // Target the main pinctrl node
+        __overlay__ {
+            // PI12 (PWM2_SERVO_RUDDER) - Output
+            pi12_pwm2_out_group: pi12_pwm2_out_group {
+                pins = "PI12";
+                function = "pwm2"; // As per manual's PI12_SELECT (101:PWM2)
+            };
+
+            // PI14 (PWM4_SERVO_SAIL) - Output
+            pi14_pwm4_out_group: pi14_pwm4_out_group {
+                pins = "PI14";
+                function = "pwm4"; // As per manual's PI14_SELECT (101:PWM4)
+            };
+        };
+    };
+    */
 };
