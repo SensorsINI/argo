@@ -136,16 +136,20 @@ static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribut
 
 
 // --- Sysfs Attribute Definitions ---
+// group and group permission for dialout group are set in argo-radio-servo-postinit.sh which runs once as a boot service
+// radio input readonly files
 static struct kobj_attribute radio_rudder_pw_us_attribute =
     __ATTR(radio_rudder_pw_us, 0444, radio_rudder_pw_us_show, NULL); // r--r--r--
 
 static struct kobj_attribute radio_sail_pw_us_attribute =
     __ATTR(radio_sail_pw_us, 0444, radio_sail_pw_us_show, NULL); // r--r--r--
 
+// servo output writable files
 static struct kobj_attribute servo_rudder_pw_us_attribute =
     __ATTR(servo_rudder_pw_us, 0664, servo_rudder_pw_us_show, servo_rudder_pw_us_store); // rw-rw-r--
 static struct kobj_attribute servo_sail_pw_us_attribute =
 __ATTR(servo_sail_pw_us, 0664, servo_sail_pw_us_show, servo_sail_pw_us_store); // rw-rw-r--
+
 
 // --- Input Measurement ISRs ---
 static irqreturn_t radio_rudder_gpio_isr(int irq, void *dev_id)

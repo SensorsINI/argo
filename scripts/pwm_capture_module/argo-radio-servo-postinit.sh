@@ -17,8 +17,8 @@ chown root:$TARGET_GROUP "$SYS_PATH"/radio_sail_pw_us || true
 chown root:$TARGET_GROUP "$SYS_PATH"/servo_rudder_pw_us || true
 chown root:$TARGET_GROUP "$SYS_PATH"/servo_sail_pw_us || true
 
-chmod 0444 "$SYS_PATH"/radio_rudder_pw_us || true # rw-rw-r--
-chmod 0444 "$SYS_PATH"/radio_sail_pw_us || true   # rw-rw-r--
+chmod 0444 "$SYS_PATH"/radio_rudder_pw_us || true # r-r-r--
+chmod 0444 "$SYS_PATH"/radio_sail_pw_us || true   # r-r-r--
 chmod 0664 "$SYS_PATH"/servo_rudder_pw_us || true # rw-rw-r--
 chmod 0664 "$SYS_PATH"/servo_sail_pw_us || true   # rw-rw-r--
 
