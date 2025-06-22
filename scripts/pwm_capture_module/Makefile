@@ -1,3 +1,5 @@
+# builds radio-servo kernel module for argo and handles system installation
+
 MOD=argo_radio_servo_module
 OVERLAY=argo_radio_servo_overlay
 SYS=/sys/kernel/argo_radio_servo
@@ -7,6 +9,7 @@ obj-m := $(MOD).o
 BUILD_DATE_CMD = $(shell date +%Y-%m-%d)
 EXTRA_CFLAGS += -DBUILD_DATE='\"$(BUILD_DATE_CMD)\"' 
 KDIR := /lib/modules/$(shell uname -r)/build
+MDIR := /lib/modules/$(shell uname -r)/kernel/drivers/misc/argo
 PWD := $(shell pwd)
 
 .PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup # Ensure all targets are listed here
@@ -15,6 +18,7 @@ PWD := $(shell pwd)
 all: module overlay install_module install_overlay install_boot_env install_rules install_permissions_service
 
 module:
+	# bulding kernel module for PWM input and output
 	@echo $(EXTRA_CFLAGS)
 	$(MAKE) -C $(KDIR) M=$(PWD) EXTRA_CFLAGS="$(EXTRA_CFLAGS)"
 
@@ -22,10 +26,12 @@ clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
 
 overlay:
+	# make the kernel overlay for the PWM input pins
 	cpp -nostdinc -undef -x assembler-with-cpp -I ${KDIR}/include $(OVERLAY).dts $(OVERLAY).dts.cpp \
 	&& dtc -I dts -O dtb -o $(OVERLAY).dtbo $(OVERLAY).dts.cpp
 
 install_overlay:
+	# verifed working
 	cp $(OVERLAY).dtbo /boot/overlay-user
 
 install_boot_env:
@@ -50,6 +56,7 @@ install_rules:
 	sudo udevadm trigger --subsystem-match=kobject # Target kobject subsystem specifically
 
 install_permissions_service:
+	# verified working
 	# Copy the postinit script
 	sudo cp $(PWD)/argo-radio-servo-postinit.sh /usr/local/bin
 	# Copy the systemd service file FIRST
@@ -64,21 +71,24 @@ install_permissions_service:
 	# Then enable the service
 	sudo systemctl enable argo-radio-servo-perms.service
 
-install_module: module
+install_module:
+# not working, the module installed this way does not load by modprobe and does not load on boot
 	@echo "--- Debugging install_module ---"
 	@echo "Source .ko file expected at: $(PWD)/$(MOD).ko"
 	@ls -l "$(PWD)/$(MOD).ko" || echo "ERROR: Source .ko file not found at $(PWD)/$(MOD).ko"
-	@echo "Attempting to create target directory: $(KDIR)/drivers/misc/argo/"
-	sudo mkdir -p "$(KDIR)/drivers/misc/argo/"
+	@echo "Attempting to create target directory: $(MDIR)"
+	sudo mkdir -p "$(MDIR)"
 	@echo "Checking target directory after mkdir -p:"
-	@ls -ld "$(KDIR)/drivers/misc/argo/" || echo "FATAL ERROR: Target directory still not found after mkdir -p. Permissions issue or fundamental path problem."
+	@ls -ld "$(MDIR)" || echo "FATAL ERROR: Target directory still not found after mkdir -p. Permissions issue or fundamental path problem."
 	@echo "Attempting to copy module..."
-	sudo cp "$(PWD)/$(MOD).ko" "$(KDIR)/drivers/misc/argo/"
+	sudo cp "$(PWD)/$(MOD).ko" "$(MDIR)"
 	@echo "Copy command executed. Checking target directory after copy:"
-	@ls -l "$(KDIR)/drivers/misc/argo/$(MOD).ko" || echo "ERROR: Module not found in target after copy. Copy command likely failed."
-	sudo depmod -a
+	@ls -l "$(MDIR)/$(MOD).ko" || echo "ERROR: Module not found in target after copy. Copy command likely failed."
+	@echo "Running depmod to refresh modules cache"
+	sudo depmod 
+	@echo "Writing a conf file to load the module"
 	echo "$(MOD)" | sudo tee /etc/modules-load.d/argo-radio-servo.conf > /dev/null
-	@echo "--- Debugging install_module complete ---"
+	@echo "Run \"modprobe argo_radio_sail_module\" to test if module can load"
 
 # The post_insmod_setup target is now only for manual testing, not for boot-time persistence.
 # Udev rules handle boot-time permissions.
@@ -96,7 +106,7 @@ post_insmod_setup:
 	ls -l $(SYS)
 
 blacklist_ethernet:
-	@echo "blacklist sunxi_gmac" | sudo tee /etc/modprobe.d/blacklist-sunxi-gmac.conf > /dev/null
+	echo "blacklist sunxi_gmac" | sudo tee /etc/modprobe.d/blacklist-sunxi-gmac.conf > /dev/null
 	@echo "Blacklisted sunxi-gmac module to prevent ethernet conflict with PWM pins."
 
 insmod: module
