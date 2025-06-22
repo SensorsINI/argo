@@ -28,3 +28,5 @@ scripts/pwm_capture_module/argo_radio_servo_module.mod.o
 scripts/pwm_capture_module/argo_radio_servo_module.mod.c
 scripts/pwm_capture_module/.argo_radio_servo_module.o.d
 scripts/pwm_capture_module/argo_radio_servo_module.mod.c
+scripts/pwm_capture_module/argo_radio_servo_module.mod.c
+scripts/pwm_capture_module/argo_radio_servo_module.mod.o
