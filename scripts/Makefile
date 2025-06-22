@@ -9,14 +9,14 @@
 
 RTIMULIB2_REPO := https://github.com/orca-io/RTIMULib2.git
 RTIMULIB2_DIR := RTIMULib2
-BUILD_DIR := $(RTIMULIB2_DIR)/build
+BUILD_DIR := $(RTIMULIB2_DIR)/Linux/build
 PYTHON_BINDINGS_DIR := $(RTIMULIB2_DIR)/Linux/python
 
 i2c:
 	sudo adduser $(USER) i2c
 
 pip:
-	pip install smbus argparse tqdm 
+	pip install smbus argparse tqdm pyserial
 
 all: imu
 
@@ -39,7 +39,8 @@ $(BUILD_DIR): $(RTIMULIB2_DIR)
 # Step 3: Run CMake to configure the build
 $(BUILD_DIR)/Makefile: $(BUILD_DIR)
 	@echo "Running CMake for RTIMULib2..."
-	cd $(BUILD_DIR) && cmake ..
+	# build RTIMULib2 without GL support since qt4 is not available in Ubuntu 22.04
+	cd $(BUILD_DIR) && cmake -DBUILD_GL=OFF ..
 	@echo "CMake finished."
 
 # Step 4: Build the RTIMULib2 C++ library
