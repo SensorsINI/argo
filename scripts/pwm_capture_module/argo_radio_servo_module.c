@@ -19,17 +19,9 @@
 #include <linux/err.h>          // For IS_ERR, PTR_ERR
 
 /*
- * GIT_HASH is expected to be passed in from the Makefile, e.g.,
- *   EXTRA_CFLAGS += -DGIT_HASH='"$(shell git rev-parse --short HEAD)"'
- * GIT_COMMIT_DATE is also passed from the Makefile to allow for reproducible builds, e.g.,
- *   EXTRA_CFLAGS += -DGIT_COMMIT_DATE='"$(shell git show -s --format=%ci HEAD)"'
+ * BUILD_DATE is expected to be passed in from the Makefile, e.g.,
+ *   EXTRA_CFLAGS += -DBUILD_DATE= some date string without spaces'
  */
-#ifndef GIT_HASH
-#define GIT_HASH "unknown"
-#endif
-#ifndef GIT_COMMIT_DATE
-#define GIT_COMMIT_DATE "unknown"
-#endif
 #ifndef BUILD_DATE
 #define BUILD_DATE "unknown"
 #endif
@@ -369,9 +361,7 @@ static int __init argo_radio_servo_init(void)
 
 
     // print the module plus the compile date and git commit hash
-    printk(KERN_INFO "Argo Radio Servo Module: Initializing for Allwinner H618.\n");
-    printk(KERN_INFO "Argo Radio Servo Module: Built %s from git commit %s, dated %s\n",
-           BUILD_DATE, GIT_HASH, GIT_COMMIT_DATE);
+    printk(KERN_INFO "Argo Radio Servo Module: Initializing for Allwinner H618. Built %s.\n", BUILD_DATE);
 
     // Capture module load timestamp
     module_load_timestamp = ktime_get();
@@ -380,39 +370,29 @@ static int __init argo_radio_servo_init(void)
     radio_rudder_last_pulse_timestamp = ktime_get();
     radio_sail_last_pulse_timestamp = ktime_get();
 
-
-    // --- 1. Get PWM devices via kernel framework ---
-    // For PWM2 (Servo Rudder)
-    // The name "pwm-2" or "2" depends on how the base DT exposes the PWM channels.
-    // Common labels are "pwmchip0:pwm-0", "pwmchip0:pwm-1" etc.
-    // Try by index if name fails: pwm_get(NULL, 2)
-    // Using a specific consumer device node (e.g., &platform_device->dev) is preferred over NULL for robust drivers.
-    // For this test module, NULL (global lookup) is acceptable.
-    servo_rudder_pwm_dev = pwm_get(NULL, "pwm2"); // Try getting by name "pwm2"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    // --- 1. Request PWM devices using legacy pwm_request ---
+    // The pwm_get() API requires a `struct device` on Device Tree systems, which this
+    // standalone module doesn't have. The deprecated pwm_request() allows getting a PWM
+    // by its global index and is suitable here. We assume PWM2 and PWM4 from pwmchip0
+    // correspond to global indices 2 and 4.
+    servo_rudder_pwm_dev = pwm_request(2, "servo-rudder"); // Request global PWM ID 2
     if (IS_ERR(servo_rudder_pwm_dev)) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Rudder by name (\"pwm2\") (Error: %ld). Trying by index.\n", PTR_ERR(servo_rudder_pwm_dev));
-        servo_rudder_pwm_dev = pwm_get(NULL, "2"); // Try getting by index "2" (channel index 2)
-        if (IS_ERR(servo_rudder_pwm_dev)) {
-            printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Rudder (PWM2) by index (Error: %ld).\n", PTR_ERR(servo_rudder_pwm_dev));
-            ret = PTR_ERR(servo_rudder_pwm_dev);
-            goto err_no_pwm_rudder;
-        }
+        printk(KERN_ERR "Argo Radio Servo: Failed to request PWM device for Servo Rudder (PWM2) (Error: %ld).\n", PTR_ERR(servo_rudder_pwm_dev));
+        ret = PTR_ERR(servo_rudder_pwm_dev);
+        goto err_no_pwm_rudder;
     }
-    printk(KERN_INFO "Argo Radio Servo: Successfully got PWM device: %s (PWM2, Servo Rudder)\n", servo_rudder_pwm_dev->label);
+    printk(KERN_INFO "Argo Radio Servo: Successfully requested PWM device: %s (PWM2, Servo Rudder)\n", servo_rudder_pwm_dev->label);
 
-
-    // For PWM4 (Servo Sail)
-    servo_sail_pwm_dev = pwm_get(NULL, "pwm4"); // Try getting by name "pwm4"
+    servo_sail_pwm_dev = pwm_request(4, "servo-sail"); // Request global PWM ID 4
     if (IS_ERR(servo_sail_pwm_dev)) {
-        printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Sail (PWM4) (Error: %ld). Trying by index.\n", PTR_ERR(servo_sail_pwm_dev));
-        servo_sail_pwm_dev = pwm_get(NULL, "4"); // Try getting by index "4" (channel index 4)
-        if (IS_ERR(servo_sail_pwm_dev)) {
-            printk(KERN_ERR "Argo Radio Servo: Failed to get PWM device for Servo Sail (PWM4) by index (Error: %ld).\n", PTR_ERR(servo_sail_pwm_dev));
-            ret = PTR_ERR(servo_sail_pwm_dev);
-            goto err_no_pwm_sail;
-        }
+        printk(KERN_ERR "Argo Radio Servo: Failed to request PWM device for Servo Sail (PWM4) (Error: %ld).\n", PTR_ERR(servo_sail_pwm_dev));
+        ret = PTR_ERR(servo_sail_pwm_dev);
+        goto err_no_pwm_sail;
     }
-    printk(KERN_INFO "Argo Radio Servo: Successfully got PWM device: %s (PWM4, Servo Sail)\n", servo_sail_pwm_dev->label);
+    printk(KERN_INFO "Argo Radio Servo: Successfully requested PWM device: %s (PWM4, Servo Sail)\n", servo_sail_pwm_dev->label);
+#pragma GCC diagnostic pop
 
     // --- 2. Configure and Enable PWM outputs ---
     // Set initial period and duty cycle, then enable
@@ -560,16 +540,17 @@ err_put_pio_node:
     if (np_pio) of_node_put(np_pio); // Only put if it was successfully found
 err_disable_pwm_outputs: // Cleanup for PWM output devices
     if (servo_sail_pwm_dev) {
-        pwm_disable(servo_sail_pwm_dev);
-        pwm_put(servo_sail_pwm_dev);
+        pwm_free(servo_sail_pwm_dev);
     }
 err_no_pwm_sail:
     if (servo_rudder_pwm_dev) {
-        pwm_disable(servo_rudder_pwm_dev);
-        pwm_put(servo_rudder_pwm_dev);
+        pwm_free(servo_rudder_pwm_dev);
     }
 err_no_pwm_rudder:
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     return ret;
+#pragma GCC diagnostic pop
 }
 
 // --- Module Exit Function ---
@@ -577,18 +558,20 @@ static void __exit argo_radio_servo_exit(void)
 {
     printk(KERN_INFO "Argo Radio Servo Module: Exiting...\n");
 
-    // following is commmented out because it disables PWM preventing future module loads
-    // 1. Free PWM output devices. pwm_put() will also disable the PWM if it's running.
-    // if (servo_sail_pwm_dev) {
-    //     pwm_put(servo_sail_pwm_dev);
-    //     printk(KERN_INFO "Argo Radio Servo: Released PWM4 (Servo Sail).\n");
-    // }
-    // if (servo_rudder_pwm_dev) {
-    //     pwm_put(servo_rudder_pwm_dev);
-    //     printk(KERN_INFO "Argo Radio Servo: Released PWM2 (Servo Rudder).\n");
-    // }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    // 1. Free PWM output devices. pwm_free() will also disable the PWM.
+    if (servo_sail_pwm_dev) {
+        pwm_free(servo_sail_pwm_dev);
+        printk(KERN_INFO "Argo Radio Servo: Freed PWM4 (Servo Sail).\n");
+    }
+    if (servo_rudder_pwm_dev) {
+        pwm_free(servo_rudder_pwm_dev);
+        printk(KERN_INFO "Argo Radio Servo: Freed PWM2 (Servo Rudder).\n");
+    }
+#pragma GCC diagnostic pop
 
-    // 2. Cancel the high-resolution timer
+    // 2. Cancel the high-resolution timer.
     hrtimer_cancel(&print_timer);
     printk(KERN_INFO "Argo Radio Servo: Timer cancelled.\n");
 
@@ -620,4 +603,4 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Tobi Delbruck");
 MODULE_DESCRIPTION("Allwinner H618 Argo Radio Servo Module for Pulse Measurement and Control");
 MODULE_VERSION("0.1");
-MODULE_ALIAS("platform:argo_radio_servo"); // For platform device matching
+// MODULE_ALIAS("platform:argo_radio_servo"); // For platform device matching
