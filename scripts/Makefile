@@ -2,12 +2,21 @@
 # This Makefile assumes a Debian-based system (like Raspberry Pi OS or Armbian)
 # and Python 3.
 
+# currently does not build because of missing qt4 library (which we dont need, since we do not use the QT GUI)
+# qt4 was deprecated and is not part of Ubuntu 22.04 and it requires a complex modified built from source.
+
 .PHONY: all imu clean install_deps
 
 RTIMULIB2_REPO := https://github.com/orca-io/RTIMULib2.git
 RTIMULIB2_DIR := RTIMULib2
 BUILD_DIR := $(RTIMULIB2_DIR)/build
 PYTHON_BINDINGS_DIR := $(RTIMULIB2_DIR)/Linux/python
+
+i2c:
+	sudo adduser $(USER) i2c
+
+pip:
+	pip install smbus argparse tqdm 
 
 all: imu
 
@@ -25,6 +34,7 @@ $(BUILD_DIR): $(RTIMULIB2_DIR)
 	@echo "Creating build directory for RTIMULib2..."
 	mkdir -p $(BUILD_DIR)
 	@echo "Build directory created."
+
 
 # Step 3: Run CMake to configure the build
 $(BUILD_DIR)/Makefile: $(BUILD_DIR)
@@ -62,3 +72,7 @@ install_deps:
 	sudo apt update
 	sudo apt install -y git cmake build-essential python3-dev python3-pip
 	@echo "Dependencies installed."
+	@echo "Running CMake for RTIMULib2..."
+	cd $(BUILD_DIR) && cmake ..
+	@echo "CMake finished."
+
