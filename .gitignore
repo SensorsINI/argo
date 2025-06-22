@@ -32,3 +32,4 @@ scripts/pwm_capture_module/argo_radio_servo_module.mod.c
 scripts/pwm_capture_module/argo_radio_servo_module.mod.o
 scripts/pwm_capture_module/argo_radio_servo_module.ko
 scripts/pwm_capture_module/argo_radio_servo_module.mod
+scripts/Makefile.mk
