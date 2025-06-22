@@ -19,6 +19,21 @@
 #include <linux/err.h>          // For IS_ERR, PTR_ERR
 
 /*
+ * GIT_HASH is expected to be passed in from the Makefile, e.g.,
+ *   EXTRA_CFLAGS += -DGIT_HASH='"$(shell git rev-parse --short HEAD)"'
+ * GIT_COMMIT_DATE is also passed from the Makefile to allow for reproducible builds, e.g.,
+ *   EXTRA_CFLAGS += -DGIT_COMMIT_DATE='"$(shell git show -s --format=%ci HEAD)"'
+ */
+#ifndef GIT_HASH
+#define GIT_HASH "unknown"
+#endif
+#ifndef GIT_COMMIT_DATE
+#define GIT_COMMIT_DATE "unknown"
+#endif
+#ifndef BUILD_DATE
+#define BUILD_DATE "unknown"
+#endif
+/*
    argo_radio_servo_module.c:
     -signals are as follows 
      - PI11 (GPIO267, pin 32) is used for Radio Rudder input (PWM1_RADIO_RUDDER)
@@ -353,7 +368,10 @@ static int __init argo_radio_servo_init(void)
     // unsigned long flags; // Declared at the top of the function for spin_lock_irqsave, but unused here
 
 
+    // print the module plus the compile date and git commit hash
     printk(KERN_INFO "Argo Radio Servo Module: Initializing for Allwinner H618.\n");
+    printk(KERN_INFO "Argo Radio Servo Module: Built %s from git commit %s, dated %s\n",
+           BUILD_DATE, GIT_HASH, GIT_COMMIT_DATE);
 
     // Capture module load timestamp
     module_load_timestamp = ktime_get();
@@ -559,17 +577,16 @@ static void __exit argo_radio_servo_exit(void)
 {
     printk(KERN_INFO "Argo Radio Servo Module: Exiting...\n");
 
-    // 1. Disable and free PWM output devices
-    if (servo_sail_pwm_dev) {
-        pwm_disable(servo_sail_pwm_dev);
-        pwm_put(servo_sail_pwm_dev);
-        printk(KERN_INFO "Argo Radio Servo: Released PWM4 (Servo Sail).\n");
-    }
-    if (servo_rudder_pwm_dev) {
-        pwm_disable(servo_rudder_pwm_dev);
-        pwm_put(servo_rudder_pwm_dev);
-        printk(KERN_INFO "Argo Radio Servo: Released PWM2 (Servo Rudder).\n");
-    }
+    // following is commmented out because it disables PWM preventing future module loads
+    // 1. Free PWM output devices. pwm_put() will also disable the PWM if it's running.
+    // if (servo_sail_pwm_dev) {
+    //     pwm_put(servo_sail_pwm_dev);
+    //     printk(KERN_INFO "Argo Radio Servo: Released PWM4 (Servo Sail).\n");
+    // }
+    // if (servo_rudder_pwm_dev) {
+    //     pwm_put(servo_rudder_pwm_dev);
+    //     printk(KERN_INFO "Argo Radio Servo: Released PWM2 (Servo Rudder).\n");
+    // }
 
     // 2. Cancel the high-resolution timer
     hrtimer_cancel(&print_timer);

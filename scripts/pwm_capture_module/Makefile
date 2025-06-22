@@ -2,14 +2,23 @@ MOD=argo_radio_servo_module
 OVERLAY=argo_radio_servo_overlay
 SYS=/sys/kernel/argo_radio_servo
 obj-m := $(MOD).o       
-
+ 
+# Define GIT_HASH to be passed to the C code.
+# This will be picked up by the kernel build system.
+# The `|| echo "not-a-repo"` part handles cases where this is not a git repository.
+GIT_HASH_CMD = $(shell git rev-parse --short HEAD 2>/dev/null || echo "not-a-repo")
+GIT_COMMIT_DATE_CMD = $(shell git show -s --format=%ci HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE_CMD = $(shell date +%Y-%m-%dT%H:%M:%S%z)
+EXTRA_CFLAGS += -DGIT_HASH='"$(GIT_HASH_CMD)"'
+EXTRA_CFLAGS += -DGIT_COMMIT_DATE='"$(GIT_COMMIT_DATE_CMD)"'
+EXTRA_CFLAGS += -DBUILD_DATE='"$(BUILD_DATE_CMD)"' 
 KDIR := /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
 .PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup # Ensure all targets are listed here
 
 # all target does everything needed to build the module and overlay
-all: modules overlay install_module install_overlay install_boot_env install_rules install_permissions_service 
+all: module overlay install_module install_overlay install_boot_env install_rules install_permissions_service 
 
 module:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
@@ -60,7 +69,7 @@ install_permissions_service:
 	# Then enable the service
 	sudo systemctl enable argo-radio-servo-perms.service
 
-install_module:
+install_module: module
 	@echo "--- Debugging install_module ---"
 	@echo "Source .ko file expected at: $(PWD)/$(MOD).ko"
 	@ls -l "$(PWD)/$(MOD).ko" || echo "ERROR: Source .ko file not found at $(PWD)/$(MOD).ko"
@@ -95,11 +104,10 @@ blacklist_ethernet:
 	@echo "blacklist sunxi_gmac" | sudo tee /etc/modprobe.d/blacklist-sunxi-gmac.conf > /dev/null
 	@echo "Blacklisted sunxi-gmac module to prevent ethernet conflict with PWM pins."
 
-insmod:
+insmod: module
 	-sudo rmmod $(MOD) # Attempt to remove, ignore errors if not loaded
 	sudo insmod $(MOD).ko
 	# Call here to post_insmod_setup here is for testing. Udev will handle permissions normally
-	sudo $(MAKE) post_insmod_setup
 	dmesg | tail -n 20
 
 rmmod:
