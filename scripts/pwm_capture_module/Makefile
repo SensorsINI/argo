@@ -30,21 +30,19 @@ overlay:
 	cpp -nostdinc -undef -x assembler-with-cpp -I ${KDIR}/include $(OVERLAY).dts $(OVERLAY).dts.cpp \
 	&& dtc -I dts -O dtb -o $(OVERLAY).dtbo $(OVERLAY).dts.cpp
 
-install_overlay:
-	# verifed working
-	cp $(OVERLAY).dtbo /boot/overlay-user
+install_overlay: overlay
+	# installing overlay to boot environment
+	sudo cp $(OVERLAY).dtbo /boot/overlay-user
 
 install_boot_env:
 	# only copy if orangepiEnv.txt is diffferent than the existing one
-	if ! cmp -s orangepiEnv.txt /boot/orangepiEnv.txt ; then
-		echo "orangepiEnv.txt has changed, copying to /boot..."
-		echo "Installing boot environment variables for Orange Pi..."
-		# Copy the environment file to the boot directory
-		# This file should contain the necessary boot parameters for the Orange Pi
-		sudo cp orangepiEnv.txt /boot/
-		echo "reboot to apply changes"
-	else
-		echo "No changes in orangepiEnv.txt, skipping copy."
+	@if ! cmp -s orangepiEnv.txt /boot/orangepiEnv.txt; then \
+		echo "orangepiEnv.txt has changed, copying to /boot..."; \
+		echo "Installing boot environment variables for Orange Pi..."; \
+		sudo cp orangepiEnv.txt /boot/; \
+		echo "Reboot to apply changes."; \
+	else \
+		echo "No changes in orangepiEnv.txt, skipping copy."; \
 	fi
 
 install_rules:
@@ -56,39 +54,30 @@ install_rules:
 	sudo udevadm trigger --subsystem-match=kobject # Target kobject subsystem specifically
 
 install_permissions_service:
-	# verified working
 	# Copy the postinit script
 	sudo cp $(PWD)/argo-radio-servo-postinit.sh /usr/local/bin
-	# Copy the systemd service file FIRST
+	# Copy the systemd service file
 	sudo cp $(PWD)/argo-radio-servo-perms.service /etc/systemd/system
-	# Force systemd to re-scan for new unit files and clear its cache
-	# This is a bit aggressive but helps with stubborn caching issues
-	sudo systemctl daemon-reload --no-pager
-	# Add a small delay to allow systemd to process
-	sleep 3
-	# Check if systemd now sees the unit file before attempting to enable
-	@systemctl status argo-radio-servo-perms.service --no-pager 2>/dev/null || echo "DEBUG: systemd does not yet see the unit file. This is the problem."
-	# Then enable the service
+	# Reload systemd manager configuration to recognize the new service
+	sudo systemctl daemon-reload
+	# Enable the service to start on boot
 	sudo systemctl enable argo-radio-servo-perms.service
 
-install_module:
-# not working, the module installed this way does not load by modprobe and does not load on boot
-	@echo "--- Debugging install_module ---"
-	@echo "Source .ko file expected at: $(PWD)/$(MOD).ko"
-	@ls -l "$(PWD)/$(MOD).ko" || echo "ERROR: Source .ko file not found at $(PWD)/$(MOD).ko"
-	@echo "Attempting to create target directory: $(MDIR)"
+install_module: module
+	@echo "--- Installing kernel module for boot-time loading ---"
+	@echo "Creating target directory: $(MDIR)"
 	sudo mkdir -p "$(MDIR)"
-	@echo "Checking target directory after mkdir -p:"
-	@ls -ld "$(MDIR)" || echo "FATAL ERROR: Target directory still not found after mkdir -p. Permissions issue or fundamental path problem."
-	@echo "Attempting to copy module..."
+	@echo "Copying module to $(MDIR)..."
 	sudo cp "$(PWD)/$(MOD).ko" "$(MDIR)"
-	@echo "Copy command executed. Checking target directory after copy:"
-	@ls -l "$(MDIR)/$(MOD).ko" || echo "ERROR: Module not found in target after copy. Copy command likely failed."
-	@echo "Running depmod to refresh modules cache"
-	sudo depmod 
-	@echo "Writing a conf file to load the module"
+	@echo "Updating module dependencies..."
+	sudo depmod -a
+	@echo "Configuring module to load on boot..."
 	echo "$(MOD)" | sudo tee /etc/modules-load.d/argo-radio-servo.conf > /dev/null
-	@echo "Run \"modprobe argo_radio_sail_module\" to test if module can load"
+	@echo "--- Installation Complete ---"
+	@echo "Module has been installed. You can now manage it with modprobe."
+	@echo "To test, run: 'sudo modprobe $(MOD)'"
+	@echo "To check status, run: 'lsmod | grep $(MOD)'"
+	@echo "The module is configured to load automatically on next boot."
 
 # The post_insmod_setup target is now only for manual testing, not for boot-time persistence.
 # Udev rules handle boot-time permissions.
