@@ -152,6 +152,7 @@ class PwmNode(Node):
             servo_sail_pw_us = int(radio_sail_pw_us)
         else:
             # Use computer commands
+            
             servo_rudder_pw_us = cmd_to_pw_us(self.cmd_rudder)
             servo_sail_pw_us = cmd_to_pw_us(self.cmd_sail)
 
