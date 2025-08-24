@@ -11,10 +11,17 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32
 import smbus
+import time
+import sys
 
 class AdcNode(Node):
     def __init__(self):
         super().__init__('adc_node')
+
+        # Set logger level to DEBUG if --debug flag is passed
+        if '--debug' in sys.argv:
+            self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
+
         self.get_logger().info('Initializing ADC node...')
 
         # Publishers
@@ -29,7 +36,7 @@ class AdcNode(Node):
         self.lsb_value = self.vref / 4096.0 # Value of one LSB in Volts (12-bit ADC)
 
         try:
-            self.bus = smbus.SMBus(1) # The default i2c bus
+            self.bus = smbus.SMBus(0) # The default i2c bus
             self.get_logger().info('Opened i2c SMBus for ADC')
         except FileNotFoundError:
             self.get_logger().error("I2C bus not found. Is I2C enabled? Shutting down.")
@@ -48,17 +55,32 @@ class AdcNode(Node):
         """
         Reads a single channel from the MAX11612 ADC.
         """
-        # Configuration byte for MAX11612:
-        # Bit 7: 1 (Start conversion)
-        # Bit 6: 1 (Single-ended input)
-        # Bit 5: 0 (CS3, not used for channels 0-7)
-        # Bit 4-2: Channel select (CS2-CS0)
-        # Bit 1-0: 00 (Single conversion on selected channel)
-        config = 0b11000000 | (channel << 3)
+        # Setup byte for MAX11612:
+        # Bit 7: 1 (SETUP bit, indicates a setup byte)
+        # Bit 6-4: Channel select (SEL2-SEL0)
+        # Bit 3-2: 00 (SCAN bits, single conversion on selected channel)
+        # Bit 1: 1 (SGL/DIF bit, single-ended input)
+        # Bit 0: 0 (CS_EN bit, not used for single conversion)
+        # Construct the setup byte: 0b1_CCC_0010 where CCC are the channel bits
+        config = 0b10000010 | (channel << 4)
 
         try:
-            # This command writes the config byte then reads 2 bytes of data
+            # The MAX11612 datasheet indicates a "read-twice" pattern is needed
+            # when switching channels or after a period of inactivity.
+            # The first I2C transaction (write config + read data) selects the
+            # new channel, starts a conversion, and returns stale data from the
+            # *previous* channel's conversion. We discard this stale data.
+            self.bus.read_i2c_block_data(self.i2c_addr, config, 2)
+
+            # The conversion time (t_CONV) is very short (max 3.5us). A small
+            # delay ensures the conversion is complete before the next read.
+            time.sleep(0.001)
+
+            # The second I2C transaction re-sends the config, starts a new
+            # conversion, and crucially, returns the result from the conversion
+            # we initiated in the first step. This is the valid data we want.
             data = self.bus.read_i2c_block_data(self.i2c_addr, config, 2)
+
             # The result is a 12-bit value, right-justified.
             # The 4 MSBs of the first byte are don't care bits.
             raw_adc = ((data[0] & 0x0F) << 8) | data[1]
@@ -91,7 +113,7 @@ class AdcNode(Node):
             self.get_logger().debug(f'Saltwater Voltage: {saltwater_voltage:.3f} V')
 
         # Read sail winch current from AIN3
-        raw_sail_current = self.read_adc(3)
+        raw_sail_current = self.read_adc(2)
         if raw_sail_current is not None:
             # V_shunt = raw * lsb_value. I = V_shunt / R_shunt. R_shunt = 1 Ohm.
             sail_current = raw_sail_current * self.lsb_value
