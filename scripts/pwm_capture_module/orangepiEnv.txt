@@ -1,5 +1,5 @@
 verbosity=1
-bootlogo=true
+bootlogo=false
 console=both
 disp_mode=1920x1080p60
 overlay_prefix=sun50i-h616
