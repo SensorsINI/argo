@@ -129,17 +129,18 @@ class PwmNode(Node):
         )
 
         # 3. Human control logic
+        # If the human moves the rudder stick, reset the control timer.
         if abs(radio_rudder_normalized) > HUMAN_CONTROL_THRESHOLD:
             self.time_last_human_cmd = time.time()
-            if not self.human_control:
-                self.get_logger().info("Human took control")
-                self.pub_human_controlled.publish(Bool(data=True))
 
+        # Determine the current control state based on the timeout.
         human_control_now = (time.time() - self.time_last_human_cmd) < HUMAN_CONTROL_TIMEOUT_S
-        if not human_control_now and self.human_control:
-            self.get_logger().info("Computer took control")
-            self.pub_human_controlled.publish(Bool(data=False))
-        
+
+        # Only log and publish if the control state has changed.
+        if human_control_now != self.human_control:
+            self.get_logger().info("Human took control" if human_control_now else "Computer took control")
+            self.pub_human_controlled.publish(Bool(data=human_control_now))
+
         self.human_control = human_control_now
 
         # 4. Set servo outputs
@@ -165,7 +166,6 @@ class PwmNode(Node):
         self.pub_rudder_sail_servo.publish(
             Vector3(x=servo_rudder_normalized, y=servo_sail_normalized, z=0.0)
         )
-        self.pub_human_controlled.publish(Bool(data=self.human_control))
 
 def main(args=None):
     rclpy.init(args=args)
