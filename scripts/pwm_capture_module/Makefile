@@ -45,13 +45,14 @@ install_boot_env:
 		echo "No changes in orangepiEnv.txt, skipping copy."; \
 	fi
 
-install_rules:
-	# Copy the udev rules file to the appropriate directory
-	sudo cp 99-argo-radio-servo.rules /etc/udev/rules.d/
-	# Reload udev rules
-	sudo udevadm control --reload-rules
-	# Trigger udev to apply the new rules
-	sudo udevadm trigger --subsystem-match=kobject # Target kobject subsystem specifically
+# following rules not used, instead permissions service that is more robust
+# install_rules:
+# 	# Copy the udev rules file to the appropriate directory
+# 	sudo cp 99-argo-radio-servo.rules /etc/udev/rules.d/
+# 	# Reload udev rules
+# 	sudo udevadm control --reload-rules
+# 	# Trigger udev to apply the new rules
+# 	sudo udevadm trigger --subsystem-match=kobject # Target kobject subsystem specifically
 
 install_permissions_service:
 	# Copy the postinit script
