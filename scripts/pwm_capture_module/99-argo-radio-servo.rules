@@ -1,4 +1,7 @@
 # /etc/udev/rules.d/99-argo-radio-servo.rules
+
+# NOTE these rules are not used because instead we use the systemd service argo-radio-servo-perms.service
+
 # Set ownership and permissions for argo_radio_servo sysfs files
 
 # Rule for the base directory /sys/kernel/argo_radio_servo
