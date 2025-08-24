@@ -112,7 +112,7 @@ class AdcNode(Node):
             self.pub_saltwater_voltage.publish(msg)
             self.get_logger().debug(f'Saltwater Voltage: {saltwater_voltage:.3f} V')
 
-        # Read sail winch current from AIN3
+        # Read sail winch current from AIN2
         raw_sail_current = self.read_adc(2)
         if raw_sail_current is not None:
             # V_shunt = raw * lsb_value. I = V_shunt / R_shunt. R_shunt = 1 Ohm.
