@@ -15,14 +15,19 @@
     compatible = "xunlong,orangepi-zero2w", "allwinner,sun50i-h618";
 
     // Node for our kernel module to claim GPIOs (using compatible for lookup)
+    // This node now also controls the pin multiplexing for the EINT pins.
     argo_radio_servo_gpios: argo_radio_servo_gpios {
         compatible = "argo,radio-servo-gpio";
         radio_rudder_gpio = <&pio 8 11 GPIO_ACTIVE_HIGH>; // PI11
         radio_sail_gpio = <&pio 8 13 GPIO_ACTIVE_HIGH>;   // PI13
+        pinctrl-names = "default";
+        pinctrl-0 = <&pi11_eint_pulse_in_group>,
+                    <&pi13_eint_pulse_in_group>;
+        status = "okay";
     };
 
     // --- Fragment 0: Explicitly disable the Ethernet GMAC controller itself ---
-    fragment@0 {
+    frag_emac_disable: fragment@0 {
         target = <&emac1>;
         __overlay__ {
             status = "disabled";
@@ -30,13 +35,12 @@
     };
 
     // --- Fragment 1: Define our specific EINT pin groups as children of &pio ---
-    fragment@1 {
+    // This fragment now ONLY adds the pin group nodes to the pio controller.
+    // It does NOT modify the pio controller's own properties, which was the
+    // source of the i2c0 conflict.
+    frag_eint_pins: fragment@1 {
         target = <&pio>; // Target the main pinctrl node (&pio == pinctrl@300b000)
         __overlay__ {
-            pinctrl-names = "default";
-            pinctrl-0 = <&pi11_eint_pulse_in_group>,
-                          <&pi13_eint_pulse_in_group>;
-
             // PI11 (PWM1_RADIO_RUDDER) - Input (EINT function)
             pi11_eint_pulse_in_group: pi11_eint_pulse_in_group {
                 pins = "PI11";
@@ -47,37 +51,6 @@
             pi13_eint_pulse_in_group: pi13_eint_pulse_in_group {
                 pins = "PI13";
                 function = "pi_eint13"; // EINT function for PI13
-            };
-        };
-    };
-
-    // --- Fragment 2: Define PWM Channels 2 and 4 (and their pinctrl) for pwm_get() ---
-    // This targets the main PWM controller node.
-    fragment@2 {
-        target = <&pwm>; // Target the main pwm@300a000 node (labeled &pwm in base DTS)
-        __overlay__ {
-            status = "okay"; // Ensure the main PWM controller is enabled
-
-            // Define PWM channel 2 for Servo Rudder (PI12)
-            // REMOVED unit address from node name to clear DTC warning.
-            pwm2: channel@2 { // Changed 'pwm@2' to 'channel@2' for cleaner node naming
-                compatible = "allwinner,sunxi-pwm2"; // Add compatible if base doesn't have it explicitly
-                label = "pwm2"; // *** CRITICAL: Label for pwm_get(NULL, "pwm2") ***
-                #pwm-cells = <0>; // Consumed by consumer (our module)
-                pinctrl-names = "default";
-                pinctrl-0 = <&pi12_pwm2_out_group>;
-                status = "okay";
-            };
-
-            // Define PWM channel 4 for Servo Sail (PI14)
-            // REMOVED unit address from node name to clear DTC warning.
-            pwm4: channel@4 { // Changed 'pwm@4' to 'channel@4' for cleaner node naming
-                compatible = "allwinner,sunxi-pwm4"; // Add compatible if base doesn't have it explicitly
-                label = "pwm4"; // *** CRITICAL: Label for pwm_get(NULL, "pwm4") ***
-                #pwm-cells = <0>;
-                pinctrl-names = "default";
-                pinctrl-0 = <&pi14_pwm4_out_group>;
-                status = "okay";
             };
         };
     };
