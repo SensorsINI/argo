@@ -49,7 +49,7 @@ class HumidityNode(Node):
 
         # Timer for periodic reading at 1 Hz
         self.timer = self.create_timer(1.0, self.read_and_publish)
-        self.get_logger().info('Humidity node initialized and reading at 1 Hz.')
+        self.get_logger().info('Humidity node initialized and reading at 1 Hz. Run with --debug to see sensors values.')
 
     def _check_crc(self, data):
         """
