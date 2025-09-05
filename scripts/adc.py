@@ -23,6 +23,13 @@ except Exception:
     smbus2 = None
     i2c_msg = None
 
+# tqdm for terminal bars in debug mode
+try:
+    from tqdm import tqdm
+    _HAS_TQDM = True
+except Exception:
+    _HAS_TQDM = False
+
 try:
     import matplotlib.pyplot as plt
     plotting_enabled = True
@@ -35,8 +42,9 @@ class AdcNode(Node):
         super().__init__('adc_node')
 
         # Set logger level to DEBUG if --debug flag is passed
-        if '--debug' in sys.argv:
-            self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
+        # Debug bars (tqdm) will be used instead of ROS debug logs
+        # if '--debug' in sys.argv:
+        #     self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
 
         # Prefer smbus2 automatically if available
         self.use_smbus2 = (smbus2 is not None)
@@ -106,6 +114,34 @@ class AdcNode(Node):
         else:
             self.timer = self.create_timer(1.0, self.read_and_publish)
             self.get_logger().info('ADC node initialized and reading at 1 Hz.')
+
+        # Debug bars (tqdm)
+        self._bars = {}
+        if _HAS_TQDM and ('--debug' in sys.argv) and not (self.test_ref or self.test_cfg):
+            # Bars: battery (0-12 V), saltwater (0-4.2 V), sail current (0-4.2 A)
+            self._bars['bat'] = tqdm(total=100, desc='Battery (V)', position=0, leave=False, dynamic_ncols=True)
+            self._bars['sw']  = tqdm(total=100, desc='Saltwater (V)', position=1, leave=False, dynamic_ncols=True)
+            self._bars['cur'] = tqdm(total=100, desc='Sail Current (A)', position=2, leave=False, dynamic_ncols=True)
+
+    def _scale_pct(self, value, vmin, vmax):
+        if vmax == vmin:
+            return 0
+        pct = int(100.0 * (max(min(value, vmax), vmin) - vmin) / (vmax - vmin))
+        return max(0, min(100, pct))
+
+    def _update_bars(self, bat_v, sw_v, cur_a):
+        if not self._bars:
+            return
+        # Nominal ranges
+        bat_max = 12.0
+        sw_max  = 4.2
+        cur_max = 4.2
+        self._bars['bat'].n = self._scale_pct(bat_v, 0.0, bat_max)
+        self._bars['bat'].set_postfix_str(f"{bat_v:.3f} V"); self._bars['bat'].refresh()
+        self._bars['sw' ].n = self._scale_pct(sw_v, 0.0, sw_max)
+        self._bars['sw' ].set_postfix_str(f"{sw_v:.3f} V"); self._bars['sw' ].refresh()
+        self._bars['cur'].n = self._scale_pct(cur_a, 0.0, cur_max)
+        self._bars['cur'].set_postfix_str(f"{cur_a:.3f} A"); self._bars['cur'].refresh()
 
     def _i2c_write_read(self, write_byte: int) -> list:
         """Perform write of 1 byte then read 2 bytes using repeated start (smbus2 if available)."""
@@ -199,6 +235,9 @@ class AdcNode(Node):
         msg_i = Float32(); msg_i.data = sail_current
         self.pub_sail_current.publish(msg_i)
         self.get_logger().debug(f'Sail Current: {sail_current:.3f} A')
+
+        # Update debug bars if enabled
+        self._update_bars(battery_voltage, saltwater_voltage, sail_current)
 
         # CH3 averaged code logged for diagnostics only
 
@@ -328,6 +367,29 @@ class AdcNode(Node):
             self.get_logger().debug(f'Shutdown: wrote setup to disable REFOUT (SEL=101) -> {bin(setup_disable_refout)}')
         except Exception as e:
             self.get_logger().error(f'Failed to write shutdown setup: {e}')
+        # Close tqdm bars if any
+        if hasattr(self, '_bars'):
+            for b in self._bars.values():
+                try:
+                    b.close()
+                except Exception:
+                    pass
+
+    def _quiet_shutdown(self) -> None:
+        # Same as shutdown_adc but without any logging to avoid rosout errors
+        def build_setup(reg, sel, clk, bip_uni, rst, x):
+            return ((reg & 1) << 7) | ((sel & 0b111) << 4) | ((clk & 1) << 3) | ((bip_uni & 1) << 2) | ((rst & 1) << 1) | (x & 1)
+        try:
+            setup_disable_refout = build_setup(reg=1, sel=0b101, clk=0, bip_uni=0, rst=1, x=0)
+            self._i2c_write(setup_disable_refout)
+        except Exception:
+            pass
+        if hasattr(self, '_bars'):
+            for b in self._bars.values():
+                try:
+                    b.close()
+                except Exception:
+                    pass
 
 def main(args=None):
     rclpy.init(args=args)
@@ -339,15 +401,28 @@ def main(args=None):
         try:
             rclpy.spin(adc_node)
         except KeyboardInterrupt:
+            # Perform non-logging shutdown to avoid rosout traceback
+            adc_node._quiet_shutdown()
             try:
-                adc_node.shutdown_adc()
-            finally:
-                sys.exit(0)
+                adc_node.destroy_node()
+            except Exception:
+                pass
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+            sys.exit(0)
         except ExternalShutdownException:
+            adc_node._quiet_shutdown()
             try:
-                adc_node.shutdown_adc()
-            finally:
-                sys.exit(0)
+                adc_node.destroy_node()
+            except Exception:
+                pass
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+            sys.exit(0)
 
 if __name__ == '__main__':
     main()
