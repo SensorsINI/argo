@@ -101,7 +101,7 @@ class AnemNode(Node):
         self.bus = None
         
         try:
-            self.bus = smbus.SMBus(1) # The default i2c bus
+            self.bus = smbus.SMBus(0) # The default i2c bus
             self.get_logger().info('Opened i2c SMBus')
         except FileNotFoundError:
             self.get_logger().error("I2C bus not found. Is I2C enabled? Shutting down.")
