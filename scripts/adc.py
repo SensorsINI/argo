@@ -156,53 +156,51 @@ class AdcNode(Node):
 
     def read_and_publish(self):
         """
-        Read ADC via SCAN per Table 5: SCAN=00 scans up from AIN0 to CS-selected input.
-        Here we scan AIN0..AIN3 (CS=3, single-ended).
+        Read ADC channels sequentially (CH0..CH3) with multiple samples per channel,
+        averaging per Table 5 using SCAN=01 (convert selected channel eight times).
         """
         # Config byte format: REG(1b)<<7 | SCAN[1:0]<<5 | CS[3:0]<<1 | SGL/DIF(1b)
         def build_config(reg, scan, cs, sgl_dif):
             return ((reg & 1) << 7) | ((scan & 0b11) << 5) | ((cs & 0b1111) << 1) | (sgl_dif & 1)
 
-        # REG=0, SCAN=00 (scan up), CS=0011 (end at AIN3), SGL/DIF=1 (single-ended)
-        config_scan = build_config(reg=0, scan=0b00, cs=0b0011, sgl_dif=1)
-        self.get_logger().debug(
-            f'Config SCAN: REG=0 SCAN=00 CS=0011 SGL/DIF=1 -> {bin(config_scan)}'
-        )
+        repeats = 8  # SCAN=01: device converts selected channel eight times
+        settle_delay_s = 0.001
 
+        raw = [0, 0, 0, 0]
         try:
-            self._i2c_write(config_scan)
-            time.sleep(0.02) # sleep for 20ms, plenty of time for reference to stabilize and convert
-            # In scan mode, read all channel results in a single block read (4 channels * 2 bytes = 8 bytes)
-            all_data = self._i2c_read_block(8)
-            d0 = all_data[0:2]
-            d1 = all_data[2:4]
-            d2 = all_data[4:6]
-            d3 = all_data[6:8]
-            raw0 = ((d0[0] & 0x0F) << 8) | d0[1]
-            raw1 = ((d1[0] & 0x0F) << 8) | d1[1]
-            raw2 = ((d2[0] & 0x0F) << 8) | d2[1]
-            raw3 = ((d3[0] & 0x0F) << 8) | d3[1]
-            self.get_logger().debug(f'SCAN bytes: CH0={d0}, CH1={d1}, CH2={d2}, CH3={d3}')
-            self.get_logger().debug(f'SCAN raw: CH0={raw0}, CH1={raw1}, CH2={raw2}, CH3={raw3}')
+            for ch in range(4):
+                # REG=0, SCAN=01 (convert selected input eight times), CS=ch, SGL/DIF=1
+                cfg = build_config(reg=0, scan=0b01, cs=ch, sgl_dif=1)
+                self._i2c_write(cfg)
+                time.sleep(settle_delay_s)
+                acc = 0
+                for _ in range(repeats):
+                    d = self._i2c_read2()
+                    code = ((d[0] & 0x0F) << 8) | d[1]
+                    acc += code
+                raw[ch] = acc // repeats
+            self.get_logger().debug(f'AVG raw (SCAN=01): CH0={raw[0]}, CH1={raw[1]}, CH2={raw[2]}, CH3={raw[3]}')
         except IOError as e:
-            self.get_logger().error(f"I2C SCAN transaction failed: {e}")
+            self.get_logger().error(f"I2C SCAN=01 average transaction failed: {e}")
             return
 
         # Publish readings
-        battery_voltage = raw0 * self.lsb_value * 2.0
+        battery_voltage = raw[0] * self.lsb_value * 2.0
         msg_b = Float32(); msg_b.data = battery_voltage
         self.pub_battery_voltage.publish(msg_b)
-        self.get_logger().debug(f'Battery Voltage (AIN0): raw={raw0}, voltage={battery_voltage:.3f} V')
+        self.get_logger().debug(f'Battery Voltage: {battery_voltage:.3f} V')
 
-        saltwater_voltage = raw1 * self.lsb_value
+        saltwater_voltage = raw[1] * self.lsb_value
         msg_s = Float32(); msg_s.data = saltwater_voltage
         self.pub_saltwater_voltage.publish(msg_s)
-        self.get_logger().debug(f'Saltwater Voltage (AIN1): raw={raw1}, voltage={saltwater_voltage:.3f} V')
+        self.get_logger().debug(f'Saltwater Voltage: {saltwater_voltage:.3f} V')
 
-        sail_current = raw2 * self.lsb_value
+        sail_current = raw[2] * self.lsb_value
         msg_i = Float32(); msg_i.data = sail_current
         self.pub_sail_current.publish(msg_i)
-        self.get_logger().debug(f'Sail Current (AIN2): raw={raw2}, current={sail_current:.3f} A')
+        self.get_logger().debug(f'Sail Current: {sail_current:.3f} A')
+
+        # CH3 averaged code logged for diagnostics only
 
     def i2c_test(self):
         """
