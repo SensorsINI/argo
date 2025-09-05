@@ -29,6 +29,10 @@ from  geometry_msgs.msg import Vector3
 import smbus
 import time
 import numpy as np
+import argparse
+from rclpy.logging import LoggingSeverity
+import math
+import sys
 
 # from https://stackoverflow.com/questions/49906101/byte-array-to-int-in-python-2-x-using-standard-libraries
 # This function is compatible with Python 3.
@@ -87,13 +91,16 @@ def calculate_speed_mps(dp1,dp2, dp3):
     return A
 
 class AnemNode(Node):
-    def __init__(self):
+    def __init__(self, debug_visually: bool = False):
         super().__init__('anem_node')
         self.get_logger().info('Initializing Anemometer node...')
 
         # Publishers
         self.pub_diff_pressure = self.create_publisher(Vector3, 'anem_diffpressure', 10)
         self.pub_wind_temp = self.create_publisher(Vector3, 'anem_speed_angle_temp', 10)
+
+        # Visual debug mode flag
+        self.debug_visually = debug_visually
 
         # I2C setup
         # 21 is CCW, 23 is center, 22 is clockwise (viewed from top)
@@ -117,6 +124,90 @@ class AnemNode(Node):
         # Main loop timer
         self.timer = self.create_timer(0.1, self.timer_callback) # 10 Hz
         self.get_logger().info("Initialization of anemometer wind sensor completed.")
+
+        # Visual mode init
+        self._vis_initialized = False
+        self._vis_width = 41
+        self._vis_height = 21
+        # Full-scale visual radius corresponds to 15 knots ≈ 7.72 m/s
+        self._vis_speed_ref = 15 * 0.514444  # ≈ 7.7167 m/s
+        if self.debug_visually:
+            self._init_visual()
+
+    def _init_visual(self):
+        # Setup terminal for in-place drawing (no scrolling)
+        if self._vis_initialized:
+            return
+        try:
+            sys.stdout.write('\x1b[?25l')  # hide cursor
+            sys.stdout.write('\x1b[2J')    # clear screen
+            sys.stdout.write('\x1b[H')     # move cursor home
+            sys.stdout.flush()
+            self._vis_initialized = True
+        except Exception:
+            self._vis_initialized = False
+
+    def _teardown_visual(self):
+        if not self._vis_initialized:
+            return
+        try:
+            sys.stdout.write('\x1b[0m')   # reset attributes
+            sys.stdout.write('\x1b[2J')   # clear
+            sys.stdout.write('\x1b[H')    # home
+            sys.stdout.write('\x1b[?25h') # show cursor
+            sys.stdout.flush()
+        except Exception:
+            pass
+        self._vis_initialized = False
+
+    def _render_visual(self, speed_mps: float, angle_deg: float, temp_c: float, dp_tuple):
+        if not self._vis_initialized:
+            self._init_visual()
+        width = self._vis_width
+        height = self._vis_height
+        cx = width // 2
+        cy = height // 2
+
+        # Compute endpoint based on angle (CW from forward) and speed
+        # Forward is up; x = sin(theta), y = -cos(theta)
+        theta = math.radians(angle_deg)
+        radius = min(cx - 2, cy - 2)
+        scale = radius / max(self._vis_speed_ref, 0.1)
+        r = max(0, min(radius, int(round(speed_mps * scale))))
+        ex = cx + int(round(r * math.sin(theta)))
+        ey = cy + int(round(-r * math.cos(theta)))
+
+        # Build grid
+        grid = [[' ' for _ in range(width)] for _ in range(height)]
+        # Axes
+        for x in range(width):
+            grid[cy][x] = '-' if grid[cy][x] == ' ' else grid[cy][x]
+        for y in range(height):
+            grid[y][cx] = '|' if grid[y][cx] == ' ' else grid[y][cx]
+        grid[cy][cx] = '+'
+
+        # Mark endpoint
+        if 0 <= ey < height and 0 <= ex < width:
+            grid[ey][ex] = 'o'
+
+        # Header lines (fixed count to avoid scrolling)
+        header = [
+            f"Wind v={speed_mps:5.2f} m/s  angle={angle_deg:6.2f} deg  temp={temp_c:5.1f} C",
+            f"dp(Pa)=({dp_tuple[0]:.2f}, {dp_tuple[1]:.2f}, {dp_tuple[2]:.2f})  scale~{self._vis_speed_ref:.1f} m/s->radius",
+            "Use Ctrl+C to exit visual mode"
+        ]
+
+        # Render
+        try:
+            sys.stdout.write('\x1b[H')  # move home
+            for line in header:
+                sys.stdout.write(line.ljust(width) + '\n')
+            for row in grid:
+                sys.stdout.write(''.join(row) + '\n')
+            # Ensure we always write the same number of lines
+            sys.stdout.flush()
+        except Exception:
+            pass
 
     def setup_sensors(self):
         self.get_logger().info('Stopping existing continuous measurements')
@@ -172,6 +263,9 @@ class AnemNode(Node):
                 f"temp(C)={temp_celsius:.1f} dp(pascal)=({dp[0]:.4f}, {dp[1]:.4f}, {dp[2]:.4f})"
             )
 
+            if self.debug_visually:
+                self._render_visual(speed_mps, angle_deg, temp_celsius, (dp[0], dp[1], dp[2]))
+
         except IOError as e:
             self.get_logger().error(f"I2C read error: {e}. Check sensor connections.")
         except IndexError as e:
@@ -181,6 +275,8 @@ class AnemNode(Node):
         # This is the recommended way to perform cleanup in ROS2.
         # It gets called automatically when the node is destroyed.
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
+        if self.debug_visually:
+            self._teardown_visual()
         if self.bus:
             for a in self.i2cAddr:
                 try:
@@ -190,8 +286,21 @@ class AnemNode(Node):
         super().destroy_node()
 
 def main(args=None):
-    rclpy.init(args=args)
-    anem_node = AnemNode()
+    # Parse CLI args for this script first, pass the remainder to ROS 2
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--debug', action='store_true', help='Log sensor values to the terminal')
+    parser.add_argument('--debug_visually', action='store_true', help='Show test-mode ASCII visualization of wind vector')
+    parsed_args, ros_args = parser.parse_known_args()
+
+    rclpy.init(args=ros_args)
+    anem_node = AnemNode(debug_visually=parsed_args.debug_visually)
+
+    if parsed_args.debug_visually:
+        # Suppress routine logs to avoid interfering with visual display
+        anem_node.get_logger().set_level(LoggingSeverity.WARN)
+    elif parsed_args.debug:
+        anem_node.get_logger().set_level(LoggingSeverity.DEBUG)
+        anem_node.get_logger().info('Debug logging enabled; sensor values will be printed.')
 
     if rclpy.ok():
         try:
