@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # - adapted from anem.py to read values over i2c from the MAX11612 ADC chip. The i2c address is 0x34.
 # - the reference voltage is 4.096 volts, so each DN is 1mV for this 12-bit converter.
-# - reads battery_voltage from AIN0 over a voltage divider with R1=R2.
+# - reads battery_voltage from AIN0 over a voltage divider with Rtop=27kOhm and Rbot=18kOhm.
 # - reads saltwater voltage from AIN1 with 1MOhm resistor load.
 # - reads sail winch current from AIN2 with a 1Ohm resistor shunt.
 # - uses AIN3 only for testing the i2c communication.
@@ -10,7 +10,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Bool
 import smbus
 import time
 import sys
@@ -68,12 +68,44 @@ class AdcNode(Node):
         self.pub_saltwater_voltage = self.create_publisher(Float32, 'saltwater_voltage', 10)
         self.pub_sail_current = self.create_publisher(Float32, 'sail_current', 10)
         self.pub_battery_voltage = self.create_publisher(Float32, 'battery_voltage', 10)
+        # Alert publishers
+        self.pub_battery_low_alert = self.create_publisher(Bool, 'battery_low_alert', 10)
+        self.pub_saltwater_alert = self.create_publisher(Bool, 'saltwater_alert', 10)
+        # Battery remaining percentage publisher
+        self.pub_battery_remaining_pct = self.create_publisher(Float32, 'battery_remaining_pct', 10)
 
         # I2C setup
         self.i2c_addr = 0x34  # MAX11612 I2C address
         self.bus = None
         self.vref = 4.096 # Reference voltage in Volts
         self.lsb_value = self.vref / 4096.0 # Value of one LSB in Volts (12-bit ADC)
+        # Thresholds
+        # LiPo 2S ~20% remaining ≈ 3.6 V/cell -> 7.2 V pack (adjust if needed)
+        self.batt_low_threshold_v = 7.2
+        # Saltwater leak alert threshold (adjustable constant)
+        self.saltwater_alert_threshold_v = float(self.declare_parameter('saltwater_alert_threshold_v', 1.0).value)
+        # Battery SOC parameters
+        self.batt_series_cells = int(self.declare_parameter('battery_series_cells', 2).value)
+        self.batt_cell_full_v = float(self.declare_parameter('battery_cell_full_v', 4.2).value)
+        self.batt_cell_empty_v = float(self.declare_parameter('battery_cell_empty_v', 3.3).value)
+        self.battery_soc_method = str(self.declare_parameter('battery_soc_method', 'rc_lipo').value)
+        # Typical high-current RC LiPo per-cell OCV/loaded curve (Volts -> %SOC), piecewise linear
+        # Values are approximate and intended for under-load estimation.
+        self._rc_lipo_soc_curve = [
+            (3.40, 0.0),
+            (3.50, 5.0),
+            (3.60, 10.0),
+            (3.65, 15.0),
+            (3.70, 20.0),
+            (3.75, 30.0),
+            (3.80, 40.0),
+            (3.85, 50.0),
+            (3.90, 60.0),
+            (3.95, 70.0),
+            (4.00, 80.0),
+            (4.10, 90.0),
+            (4.20, 100.0),
+        ]
 
         try:
             self.bus = smbus.SMBus(0) # The default i2c bus
@@ -115,13 +147,11 @@ class AdcNode(Node):
             self.timer = self.create_timer(1.0, self.read_and_publish)
             self.get_logger().info('ADC node initialized and reading at 1 Hz.')
 
-        # Debug bars (tqdm)
-        self._bars = {}
-        if _HAS_TQDM and ('--debug' in sys.argv) and not (self.test_ref or self.test_cfg):
-            # Bars: battery (0-12 V), saltwater (0-4.2 V), sail current (0-4.2 A)
-            self._bars['bat'] = tqdm(total=100, desc='Battery (V)', position=0, leave=False, dynamic_ncols=True)
-            self._bars['sw']  = tqdm(total=100, desc='Saltwater (V)', position=1, leave=False, dynamic_ncols=True)
-            self._bars['cur'] = tqdm(total=100, desc='Sail Current (A)', position=2, leave=False, dynamic_ncols=True)
+        # ASCII visual debug (like imu.py) when --debug is passed and not in test modes
+        self._vis_ascii = ('--debug' in sys.argv) and not (self.test_ref or self.test_cfg)
+        self._vis_initialized = False
+        if self._vis_ascii:
+            self._init_ascii_vis()
 
     def _scale_pct(self, value, vmin, vmax):
         if vmax == vmin:
@@ -130,18 +160,93 @@ class AdcNode(Node):
         return max(0, min(100, pct))
 
     def _update_bars(self, bat_v, sw_v, cur_a):
-        if not self._bars:
+        if not self._vis_ascii:
             return
         # Nominal ranges
         bat_max = 12.0
         sw_max  = 4.2
         cur_max = 4.2
-        self._bars['bat'].n = self._scale_pct(bat_v, 0.0, bat_max)
-        self._bars['bat'].set_postfix_str(f"{bat_v:.3f} V"); self._bars['bat'].refresh()
-        self._bars['sw' ].n = self._scale_pct(sw_v, 0.0, sw_max)
-        self._bars['sw' ].set_postfix_str(f"{sw_v:.3f} V"); self._bars['sw' ].refresh()
-        self._bars['cur'].n = self._scale_pct(cur_a, 0.0, cur_max)
-        self._bars['cur'].set_postfix_str(f"{cur_a:.3f} A"); self._bars['cur'].refresh()
+        try:
+            import sys
+            sys.stdout.write('\x1b[H')  # home
+            lines = [
+                f"Battery {bat_v:6.3f} V  " + self._bar(bat_v, bat_max),
+                f"Salt   {sw_v:6.3f} V  " + self._bar(sw_v, sw_max),
+                f"Sail I {cur_a:6.3f} A  " + self._bar(cur_a, cur_max),
+                "Ctrl-C to exit"
+            ]
+            for ln in lines:
+                sys.stdout.write(ln + '\n')
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    def _init_ascii_vis(self):
+        if self._vis_initialized:
+            return
+        try:
+            import sys
+            sys.stdout.write('\x1b[?25l')  # hide cursor
+            sys.stdout.write('\x1b[2J')    # clear
+            sys.stdout.write('\x1b[H')     # home
+            sys.stdout.flush()
+            self._vis_initialized = True
+        except Exception:
+            self._vis_initialized = False
+
+    def _teardown_ascii_vis(self):
+        if not self._vis_initialized:
+            return
+        try:
+            import sys
+            sys.stdout.write('\x1b[0m')
+            sys.stdout.write('\x1b[2J')
+            sys.stdout.write('\x1b[H')
+            sys.stdout.write('\x1b[?25h')
+            sys.stdout.flush()
+        except Exception:
+            pass
+        self._vis_initialized = False
+
+    def _bar(self, value: float, limit: float, width: int = 50) -> str:
+        width = max(10, width)
+        v = max(0.0, min(limit, float(value)))
+        fill = int(round((v / limit) * width)) if limit > 0 else 0
+        if fill > width:
+            fill = width
+        return '[' + ('#' * fill) + ('-' * (width - fill)) + ']'
+
+    def _estimate_soc_pct(self, pack_voltage: float) -> float:
+        try:
+            cells = max(1, int(self.batt_series_cells))
+        except Exception:
+            cells = 2
+        per_cell_v = float(pack_voltage) / float(cells) if cells > 0 else float(pack_voltage)
+        method = (self.battery_soc_method or 'rc_lipo').lower()
+        if method == 'linear':
+            span = max(1e-6, (self.batt_cell_full_v - self.batt_cell_empty_v))
+            soc = (per_cell_v - self.batt_cell_empty_v) / span * 100.0
+        else:
+            # Piecewise-linear interpolation on RC LiPo curve
+            curve = self._rc_lipo_soc_curve
+            if per_cell_v <= curve[0][0]:
+                soc = curve[0][1]
+            elif per_cell_v >= curve[-1][0]:
+                soc = curve[-1][1]
+            else:
+                soc = 0.0
+                for i in range(1, len(curve)):
+                    v0, p0 = curve[i - 1]
+                    v1, p1 = curve[i]
+                    if v0 <= per_cell_v <= v1:
+                        t = (per_cell_v - v0) / (v1 - v0) if v1 != v0 else 0.0
+                        soc = p0 + t * (p1 - p0)
+                        break
+        if soc < 0.0:
+            soc = 0.0
+        elif soc > 100.0:
+            soc = 100.0
+        return float(soc)
 
     def _i2c_write_read(self, write_byte: int) -> list:
         """Perform write of 1 byte then read 2 bytes using repeated start (smbus2 if available)."""
@@ -221,10 +326,25 @@ class AdcNode(Node):
             return
 
         # Publish readings
-        battery_voltage = raw[0] * self.lsb_value * 2.0
+        # Divider scaling: V_adc = V_batt * (Rbot / (Rtop + Rbot)) = V_batt * (18k / 45k) = 0.4
+        # Therefore V_batt = V_adc * 2.5
+        battery_voltage = raw[0] * self.lsb_value * 2.5
         msg_b = Float32(); msg_b.data = battery_voltage
         self.pub_battery_voltage.publish(msg_b)
         self.get_logger().debug(f'Battery Voltage: {battery_voltage:.3f} V')
+        # Compute and publish SOC estimate (linear per-cell mapping)
+        try:
+            cells = max(1, int(self.batt_series_cells))
+            per_cell_v = battery_voltage / float(cells)
+            span = max(1e-6, (self.batt_cell_full_v - self.batt_cell_empty_v))
+            soc = (per_cell_v - self.batt_cell_empty_v) / span * 100.0
+            if soc < 0.0:
+                soc = 0.0
+            elif soc > 100.0:
+                soc = 100.0
+            self.pub_battery_remaining_pct.publish(Float32(data=float(soc)))
+        except Exception:
+            pass
 
         saltwater_voltage = raw[1] * self.lsb_value
         msg_s = Float32(); msg_s.data = saltwater_voltage
@@ -238,6 +358,15 @@ class AdcNode(Node):
 
         # Update debug bars if enabled
         self._update_bars(battery_voltage, saltwater_voltage, sail_current)
+
+        # Alerts
+        try:
+            batt_low = battery_voltage <= self.batt_low_threshold_v
+            salt_alert = saltwater_voltage >= self.saltwater_alert_threshold_v
+            self.pub_battery_low_alert.publish(Bool(data=bool(batt_low)))
+            self.pub_saltwater_alert.publish(Bool(data=bool(salt_alert)))
+        except Exception:
+            pass
 
         # CH3 averaged code logged for diagnostics only
 
@@ -367,13 +496,8 @@ class AdcNode(Node):
             self.get_logger().debug(f'Shutdown: wrote setup to disable REFOUT (SEL=101) -> {bin(setup_disable_refout)}')
         except Exception as e:
             self.get_logger().error(f'Failed to write shutdown setup: {e}')
-        # Close tqdm bars if any
-        if hasattr(self, '_bars'):
-            for b in self._bars.values():
-                try:
-                    b.close()
-                except Exception:
-                    pass
+        # Teardown ASCII bars if enabled
+        self._teardown_ascii_vis()
 
     def _quiet_shutdown(self) -> None:
         # Same as shutdown_adc but without any logging to avoid rosout errors
@@ -384,12 +508,8 @@ class AdcNode(Node):
             self._i2c_write(setup_disable_refout)
         except Exception:
             pass
-        if hasattr(self, '_bars'):
-            for b in self._bars.values():
-                try:
-                    b.close()
-                except Exception:
-                    pass
+        # Teardown ASCII bars if enabled
+        self._teardown_ascii_vis()
 
 def main(args=None):
     rclpy.init(args=args)
