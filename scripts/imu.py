@@ -22,12 +22,6 @@ import sys
 import json
 from datetime import datetime
 
-try:
-    from tqdm import tqdm
-    _HAS_TQDM = True
-except Exception:
-    _HAS_TQDM = False
-
 def _to_int16(msb, lsb):
     return struct.unpack('>h', bytes([msb, lsb]))[0]
 
@@ -157,65 +151,59 @@ class ImuNode(Node):
         self.pub_gyro = self.create_publisher(Vector3, 'gyro', 10)
         self.pub_compass = self.create_publisher(Vector3, 'compass', 10)
 
-        # Optional tqdm bars when in debug
-        self._bars = {}
-        if self.debug and _HAS_TQDM:
-            # Create progress bars for accel, gyro, compass, and yaw
-            self._bars['accel_x'] = tqdm(total=100, desc='Accel X (g)', position=0, leave=False, dynamic_ncols=True)
-            self._bars['accel_y'] = tqdm(total=100, desc='Accel Y (g)', position=1, leave=False, dynamic_ncols=True)
-            self._bars['accel_z'] = tqdm(total=100, desc='Accel Z (g)', position=2, leave=False, dynamic_ncols=True)
-            self._bars['gyro_x']  = tqdm(total=100, desc='Gyro X (dps)', position=3, leave=False, dynamic_ncols=True)
-            self._bars['gyro_y']  = tqdm(total=100, desc='Gyro Y (dps)', position=4, leave=False, dynamic_ncols=True)
-            self._bars['gyro_z']  = tqdm(total=100, desc='Gyro Z (dps)', position=5, leave=False, dynamic_ncols=True)
-            self._bars['mag_x']   = tqdm(total=100, desc='Mag X (uT)', position=6, leave=False, dynamic_ncols=True)
-            self._bars['mag_y']   = tqdm(total=100, desc='Mag Y (uT)', position=7, leave=False, dynamic_ncols=True)
-            self._bars['mag_z']   = tqdm(total=100, desc='Mag Z (uT)', position=8, leave=False, dynamic_ncols=True)
-            # yaw removed (no fusion)
-        elif self.debug and not _HAS_TQDM:
-            self.get_logger().warn('tqdm not available; falling back to text debug output')
+        # ASCII visual debug
+        self._vis_ascii = self.debug
+        self._vis_initialized = False
+        if self._vis_ascii:
+            self._init_ascii_vis()
 
         # Main loop timer
         self.timer = self.create_timer(0.1, self.timer_callback) # 10 Hz
 
-    def _scale_pct(self, value, vmin, vmax):
-        # Clamp and scale to 0-100 percentage for bars
-        if vmax == vmin:
-            return 0
-        pct = int(100.0 * (max(min(value, vmax), vmin) - vmin) / (vmax - vmin))
-        return max(0, min(100, pct))
-
-    def _update_bars(self, accel, gyro_dps, compass, yawDeg):
-        if not self._bars:
+    def _init_ascii_vis(self):
+        if self._vis_initialized:
             return
-        # Define nominal ranges
-        a_rng = 2.0  # +/- 2 g
-        g_rng = 500.0  # +/- 500 deg/s
-        m_rng = 100.0  # +/- 100 uT
-        # Accel
-        self._bars['accel_x'].n = self._scale_pct(accel[0], -a_rng, a_rng)
-        self._bars['accel_y'].n = self._scale_pct(accel[1], -a_rng, a_rng)
-        self._bars['accel_z'].n = self._scale_pct(accel[2], -a_rng, a_rng)
-        self._bars['accel_x'].set_postfix_str(f"{accel[0]:+.2f} g"); self._bars['accel_x'].refresh()
-        self._bars['accel_y'].set_postfix_str(f"{accel[1]:+.2f} g"); self._bars['accel_y'].refresh()
-        self._bars['accel_z'].set_postfix_str(f"{accel[2]:+.2f} g"); self._bars['accel_z'].refresh()
-        # Gyro
-        self._bars['gyro_x'].n = self._scale_pct(gyro_dps[0], -g_rng, g_rng)
-        self._bars['gyro_y'].n = self._scale_pct(gyro_dps[1], -g_rng, g_rng)
-        self._bars['gyro_z'].n = self._scale_pct(gyro_dps[2], -g_rng, g_rng)
-        self._bars['gyro_x'].set_postfix_str(f"{gyro_dps[0]:+.1f} dps"); self._bars['gyro_x'].refresh()
-        self._bars['gyro_y'].set_postfix_str(f"{gyro_dps[1]:+.1f} dps"); self._bars['gyro_y'].refresh()
-        self._bars['gyro_z'].set_postfix_str(f"{gyro_dps[2]:+.1f} dps"); self._bars['gyro_z'].refresh()
-        # Compass
-        self._bars['mag_x'].n = self._scale_pct(compass[0], -m_rng, m_rng)
-        self._bars['mag_y'].n = self._scale_pct(compass[1], -m_rng, m_rng)
-        self._bars['mag_z'].n = self._scale_pct(compass[2], -m_rng, m_rng)
-        self._bars['mag_x'].set_postfix_str(f"{compass[0]:+.1f} uT"); self._bars['mag_x'].refresh()
-        self._bars['mag_y'].set_postfix_str(f"{compass[1]:+.1f} uT"); self._bars['mag_y'].refresh()
-        self._bars['mag_z'].set_postfix_str(f"{compass[2]:+.1f} uT"); self._bars['mag_z'].refresh()
-        # Yaw bar may not be present in raw mode
-        if 'yaw' in self._bars:
-            self._bars['yaw'].n = self._scale_pct(yawDeg, -180.0, 180.0)
-            self._bars['yaw'].set_postfix_str(f"{yawDeg:+.1f} deg"); self._bars['yaw'].refresh()
+        try:
+            sys.stdout.write('\x1b[?25l')  # hide cursor
+            sys.stdout.write('\x1b[2J')    # clear
+            sys.stdout.write('\x1b[H')     # home
+            sys.stdout.flush()
+            self._vis_initialized = True
+        except Exception:
+            self._vis_initialized = False
+
+    def _teardown_ascii_vis(self):
+        if not self._vis_initialized:
+            return
+        try:
+            sys.stdout.write('\x1b[0m')
+            sys.stdout.write('\x1b[2J')
+            sys.stdout.write('\x1b[H')
+            sys.stdout.write('\x1b[?25h')
+            sys.stdout.flush()
+        except Exception:
+            pass
+        self._vis_initialized = False
+
+    def _signed_bar(self, value: float, limit: float, width: int = 50) -> str:
+        # Centered at zero; '-' for negative, '+' for positive; '|' marks zero
+        width = max(10, width)
+        mid = width // 2
+        # clip
+        val = max(-limit, min(limit, value))
+        pos = int(round((val / limit) * mid))
+        left = [' '] * mid
+        right = [' '] * (width - mid - 1)
+        if pos < 0:
+            fill = mid + pos  # fill up to this index (exclusive)
+            for i in range(fill, mid):
+                left[i] = '-'
+        elif pos > 0:
+            for i in range(0, pos):
+                if i < len(right):
+                    right[i] = '+'
+        # build
+        return '[' + ''.join(left) + '|' + ''.join(right) + ']'
 
     def timer_callback(self):
         try:
@@ -248,19 +236,30 @@ class ImuNode(Node):
             except Exception:
                 pass
 
-            if self.debug and not _HAS_TQDM:
-                self.get_logger().info(
-                    f"accel(g)=({ax_g:+.3f},{ay_g:+.3f},{az_g:+.3f}), gyro(dps)=({gx_dps:+.1f},{gy_dps:+.1f},{gz_dps:+.1f}), mag(uT)=({mx_uT:+.1f},{my_uT:+.1f},{mz_uT:+.1f})"
-                )
-
-            if self.debug and _HAS_TQDM:
-                # show normalized bars using nominal ranges
-                self._update_bars(
-                    (ax_g, ay_g, az_g),
-                    (gx_dps, gy_dps, gz_dps),
-                    (mx_uT, my_uT, mz_uT),
-                    0.0,
-                )
+            if self._vis_ascii:
+                try:
+                    sys.stdout.write('\x1b[H')  # home
+                    # Nominal limits for bars
+                    a_lim = 2.0   # g
+                    g_lim = 500.0 # dps
+                    m_lim = 100.0 # uT
+                    lines = [
+                        f"Ax {ax_g:+7.3f} g  " + self._signed_bar(ax_g, a_lim),
+                        f"Ay {ay_g:+7.3f} g  " + self._signed_bar(ay_g, a_lim),
+                        f"Az {az_g:+7.3f} g  " + self._signed_bar(az_g, a_lim),
+                        f"Gx {gx_dps:+7.1f} dps " + self._signed_bar(gx_dps, g_lim),
+                        f"Gy {gy_dps:+7.1f} dps " + self._signed_bar(gy_dps, g_lim),
+                        f"Gz {gz_dps:+7.1f} dps " + self._signed_bar(gz_dps, g_lim),
+                        f"Mx {mx_uT:+7.1f} uT " + self._signed_bar(mx_uT, m_lim),
+                        f"My {my_uT:+7.1f} uT " + self._signed_bar(my_uT, m_lim),
+                        f"Mz {mz_uT:+7.1f} uT " + self._signed_bar(mz_uT, m_lim),
+                        "Ctrl-C to exit"
+                    ]
+                    for ln in lines:
+                        sys.stdout.write(ln + '\n')
+                    sys.stdout.flush()
+                except Exception:
+                    pass
 
             # Apply compass calibration if present (min-max/diagonal soft-iron)
             if isinstance(self._compass_cal, dict) and self._compass_cal.get('method') in ('minmax', 'diag'):
@@ -281,13 +280,8 @@ class ImuNode(Node):
             self.get_logger().error(f'IMU read failed: {e}')
 
     def _quiet_shutdown(self) -> None:
-        # Close progress bars without logging to avoid rosout errors during shutdown
-        if hasattr(self, '_bars'):
-            for b in self._bars.values():
-                try:
-                    b.close()
-                except Exception:
-                    pass
+        # Teardown ASCII view
+        self._teardown_ascii_vis()
         # Attempt to close I2C bus if supported
         try:
             if hasattr(self, 'bus') and hasattr(self.bus, 'close'):
