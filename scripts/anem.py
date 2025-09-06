@@ -1,27 +1,39 @@
 #!/usr/bin/env python
-# ROS2 version of anem.py
+# ROS2 Anemometer Node - Wind Speed and Direction Sensor
 
-#Reading the Sensirion SDP32 sensor
-#Dev by JJ SlabbertSDP810_example / modified by tobi
-#This script is based on the original anem.py for ROS1.
-#It communicates with three differential pressure sensors over I2C to
-#determine wind speed and direction.
-#Run sudo i2cdetect -y 1 in the terminal, to see if the sensor is connected. it will show address 25
-#Check the datasheet at https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/0_Datasheets/Differential_Pressure/Sensirion_Differential_Pressure_Sensors_SDP8xx_Digital_Datasheet.pdf
-#The sensor i2c address is 0x21 to 0x23 (Not user programable).
-
-# scripts runs but not yet tested with wind sensor connected
-
-# topics
-# publishes
-# /anem_speed_angle_temp, Vector3 with:
-#   x is speed in m/s
-#   y is angle in deg CW from front of boat looking down on boat
-#   z is temperature in celsius
-# /anem_diffpressure, Vector3 with:
-#   .x is from sensor 1 (CCW)
-#   .y from sensor 2 (center)
-#   .z from sensor 3 (CW)
+# Reading three Sensirion SDP3x differential pressure sensors
+# Dev by JJ Slabbert, modified by tobi
+# This ROS2 node communicates with three differential pressure sensors over I2C
+# to determine wind speed and direction using directional wind meter principles.
+#
+# Hardware Setup:
+# - Uses I2C bus 0 (not bus 1)
+# - Three sensors at addresses 0x21 (CCW), 0x22 (CW), 0x23 (center)
+# - Run "sudo i2cdetect -y 0" to verify sensor connections
+# - Sensors show as addresses 21, 22, 23 in hex
+#
+# Algorithm based on Sensirion's directional wind meter application:
+# https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
+#
+# Features:
+# - Automatic sensor reconnection on I2C errors
+# - Optional visual debug mode with ASCII wind vector display
+# - Temperature compensation and averaging
+# - Configurable logging levels
+#
+# Command line options:
+# --debug: Enable debug logging of sensor values
+# --debug_visually: Show real-time ASCII visualization of wind vector
+#
+# Topics Published:
+# /anem_speed_angle_temp (geometry_msgs/Vector3):
+#   x: wind speed in m/s
+#   y: wind angle in degrees CW from front of boat (looking down)
+#   z: average temperature in celsius
+# /anem_diffpressure (geometry_msgs/Vector3):
+#   x: differential pressure from sensor 1 (CCW) in Pascals
+#   y: differential pressure from sensor 2 (center) in Pascals  
+#   z: differential pressure from sensor 3 (CW) in Pascals
 
 import rclpy
 from rclpy.node import Node
