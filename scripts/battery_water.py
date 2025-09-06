@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
-# Combined ROS2 node: Battery/Water (MAX11612 ADC) + Temperature/Humidity (SHT45)
+# Battery/Water ROS2 node
+# - Reads MAX11612 ADC: AIN0=battery via 27k/18k divider, AIN1=saltwater probe, AIN2=sail winch shunt
+# - Reads SHT45 temperature/humidity sensor
+# Publishes (Float32):
+# - battery_voltage (V), saltwater_voltage (V), sail_current (A), temperature (C), relative_humidity (%)
+# - battery_remaining_pct (%) using per‑cell LiPo formula: soc% = S − S/(1 + (v/V0)^A)^B
+# Alerts (Bool):
+# - battery_low_alert (hysteresis 50 mV around battery_low_threshold_v; warning on low, info on recover)
+# - saltwater_alert (voltage >= saltwater_alert_threshold_v)
+# - humidity_alert (RH% >= humidity_alert_threshold_pct)
+# Debug:
+# - ASCII terminal bars when --debug is used (disabled during --test-adc)
+# Key parameters:
+# - battery_low_threshold_v (default 7.2 V), saltwater_alert_threshold_v (1.0 V), humidity_alert_threshold_pct (75.0)
+# - battery_series_cells (default 2)
+# - soc_S (123.0), soc_V0 (3.7), soc_A (80.0), soc_B (0.165)
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Bool
 import time
 import sys
 from rclpy.executors import ExternalShutdownException
@@ -50,6 +65,16 @@ class BatteryWaterNode(Node):
         self.pub_sail_current = self.create_publisher(Float32, 'sail_current', 10)
         self.pub_temperature = self.create_publisher(Float32, 'temperature', 10)
         self.pub_humidity = self.create_publisher(Float32, 'relative_humidity', 10)
+        # Alert publishers
+        self.pub_battery_low_alert = self.create_publisher(Bool, 'battery_low_alert', 10)
+        self.pub_saltwater_alert = self.create_publisher(Bool, 'saltwater_alert', 10)
+        self.pub_humidity_alert = self.create_publisher(Bool, 'humidity_alert', 10)
+        # Battery remaining percentage publisher
+        self.pub_battery_remaining_pct = self.create_publisher(Float32, 'battery_remaining_pct', 10)
+        # Alert previous-state flags for edge-triggered logging
+        self._batt_low_prev = False
+        self._salt_alert_prev = False
+        self._humid_alert_prev = False
 
         # I2C preferences
         self.use_smbus2 = (smbus2 is not None)
@@ -62,6 +87,25 @@ class BatteryWaterNode(Node):
         self.adc_addr = 0x34
         self.vref = 4.096
         self.lsb_value = self.vref / 4096.0
+        # Battery divider scaling (updated hardware: 27k/18k -> 2.5x)
+        self.battery_divider_scale = 2.5
+
+        # Threshold parameters
+        # LiPo 2S ~20% remaining ≈ 3.6 V/cell -> 7.2 V pack (tweak if needed)
+        self.batt_low_threshold_v = float(self.declare_parameter('battery_low_threshold_v', 7.2).value)
+        # Battery low hysteresis (Volts)
+        self.batt_low_hysteresis_v = 0.05
+        # Saltwater alert threshold (Volts)
+        self.saltwater_alert_threshold_v = float(self.declare_parameter('saltwater_alert_threshold_v', 1.0).value)
+        # Humidity alert threshold (%)
+        self.humidity_alert_threshold_pct = float(self.declare_parameter('humidity_alert_threshold_pct', 75.0).value)
+        # Battery SOC parameters (per-cell formula; defaults from RC LiPo curve)
+        self.batt_series_cells = int(self.declare_parameter('battery_series_cells', 2).value)
+        # Formula: soc% = S - S / (1 + (v / V0)^A)^B
+        self.soc_S = float(self.declare_parameter('soc_S', 123.0).value)
+        self.soc_V0 = float(self.declare_parameter('soc_V0', 3.7).value)
+        self.soc_A = float(self.declare_parameter('soc_A', 80.0).value)
+        self.soc_B = float(self.declare_parameter('soc_B', 0.165).value)
 
         # SHT45
         self.sht_addr = 0x44
@@ -76,14 +120,11 @@ class BatteryWaterNode(Node):
         except Exception as e:
             self.get_logger().error(f'ADC setup failed: {e}')
 
-        # Debug bars (tqdm)
-        self._bars = {}
-        if self.debug and _HAS_TQDM:
-            self._bars['bat'] = tqdm(total=100, desc='Battery (V)', position=0, leave=False, dynamic_ncols=True)
-            self._bars['sw']  = tqdm(total=100, desc='Saltwater (V)', position=1, leave=False, dynamic_ncols=True)
-            self._bars['cur'] = tqdm(total=100, desc='Sail Current (A)', position=2, leave=False, dynamic_ncols=True)
-            self._bars['tmp'] = tqdm(total=100, desc='Temp (C)', position=3, leave=False, dynamic_ncols=True)
-            self._bars['hum'] = tqdm(total=100, desc='Humidity (%)', position=4, leave=False, dynamic_ncols=True)
+        # ASCII visual debug (like imu.py/adc.py) when --debug is passed and not in test mode
+        self._vis_ascii = self.debug and not self.test_adc
+        self._vis_initialized = False
+        if self._vis_ascii:
+            self._init_ascii_vis()
 
         # Timer: 1 Hz
         if self.test_adc:
@@ -253,7 +294,7 @@ class BatteryWaterNode(Node):
         return max(0, min(100, pct))
 
     def _update_bars(self, bat_v, sw_v, cur_a, temp_c, humid_pct):
-        if not (self.debug and _HAS_TQDM and self._bars):
+        if not self._vis_ascii:
             return
         # Nominal ranges
         bat_max = 12.0
@@ -261,18 +302,59 @@ class BatteryWaterNode(Node):
         cur_max = 4.2
         t_min, t_max = -20.0, 60.0
         h_min, h_max = 0.0, 100.0
-        self._bars['bat'].n = self._scale_pct(bat_v, 0.0, bat_max)
-        self._bars['bat'].set_postfix_str(f"{bat_v:.3f} V"); self._bars['bat'].refresh()
-        self._bars['sw' ].n = self._scale_pct(sw_v, 0.0, sw_max)
-        self._bars['sw' ].set_postfix_str(f"{sw_v:.3f} V"); self._bars['sw' ].refresh()
-        self._bars['cur'].n = self._scale_pct(cur_a, 0.0, cur_max)
-        self._bars['cur'].set_postfix_str(f"{cur_a:.3f} A"); self._bars['cur'].refresh()
-        if temp_c is not None:
-            self._bars['tmp'].n = self._scale_pct(temp_c, t_min, t_max)
-            self._bars['tmp'].set_postfix_str(f"{temp_c:.2f} C"); self._bars['tmp'].refresh()
-        if humid_pct is not None:
-            self._bars['hum'].n = self._scale_pct(humid_pct, h_min, h_max)
-            self._bars['hum'].set_postfix_str(f"{humid_pct:.2f} %"); self._bars['hum'].refresh()
+        try:
+            sys.stdout.write('\x1b[H')  # home
+            lines = [
+                f"Battery {bat_v:7.3f} V  " + self._bar(bat_v, bat_max),
+                f"Salt   {sw_v:7.3f} V  " + self._bar(sw_v, sw_max),
+                f"Sail I {cur_a:7.3f} A  " + self._bar(cur_a, cur_max),
+            ]
+            if temp_c is not None:
+                # Map temp to 0..range for bar
+                temp_span = max(1e-6, t_max - t_min)
+                temp_norm = (max(t_min, min(t_max, temp_c)) - t_min) / temp_span * 100.0
+                lines.append(f"Temp  {temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
+            if humid_pct is not None:
+                lines.append(f"Humid {humid_pct:7.2f} %  " + self._bar(humid_pct, 100.0))
+            lines.append("Ctrl-C to exit")
+            for ln in lines:
+                sys.stdout.write(ln + '\n')
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    def _init_ascii_vis(self):
+        if self._vis_initialized:
+            return
+        try:
+            sys.stdout.write('\x1b[?25l')  # hide cursor
+            sys.stdout.write('\x1b[2J')    # clear
+            sys.stdout.write('\x1b[H')     # home
+            sys.stdout.flush()
+            self._vis_initialized = True
+        except Exception:
+            self._vis_initialized = False
+
+    def _teardown_ascii_vis(self):
+        if not self._vis_initialized:
+            return
+        try:
+            sys.stdout.write('\x1b[0m')
+            sys.stdout.write('\x1b[2J')
+            sys.stdout.write('\x1b[H')
+            sys.stdout.write('\x1b[?25h')
+            sys.stdout.flush()
+        except Exception:
+            pass
+        self._vis_initialized = False
+
+    def _bar(self, value: float, limit: float, width: int = 50) -> str:
+        width = max(10, width)
+        v = max(0.0, min(limit, float(value)))
+        fill = int(round((v / limit) * width)) if limit > 0 else 0
+        if fill > width:
+            fill = width
+        return '[' + ('#' * fill) + ('-' * (width - fill)) + ']'
 
     # ---------- Main read/publish ----------
     def read_and_publish(self):
@@ -282,13 +364,28 @@ class BatteryWaterNode(Node):
         raw2 = self._read_adc_channel_avg(2)
         raw3 = self._read_adc_channel_avg(3)  # diagnostic only
 
-        battery_voltage = raw0 * self.lsb_value * 2.0
+        battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
         saltwater_voltage = raw1 * self.lsb_value
         sail_current = raw2 * self.lsb_value
 
         self.pub_battery_voltage.publish(Float32(data=battery_voltage))
         self.pub_saltwater_voltage.publish(Float32(data=saltwater_voltage))
         self.pub_sail_current.publish(Float32(data=sail_current))
+        # Publish estimated remaining percentage (per-cell formula)
+        try:
+            cells = max(1, int(self.batt_series_cells))
+            v_cell = battery_voltage / float(cells) if cells > 0 else battery_voltage
+            # soc% = S - S / (1 + (v / V0)^A)^B
+            base = 1.0 + (max(0.0, v_cell) / max(1e-9, self.soc_V0)) ** self.soc_A
+            soc = self.soc_S - (self.soc_S / (base ** self.soc_B))
+            # Clamp 0..100
+            if soc < 0.0:
+                soc = 0.0
+            if soc > 100.0:
+                soc = 100.0
+            self.pub_battery_remaining_pct.publish(Float32(data=float(soc)))
+        except Exception:
+            pass
 
         # SHT45
         temperature, humidity = self._read_sht45()
@@ -297,7 +394,45 @@ class BatteryWaterNode(Node):
         if humidity is not None:
             self.pub_humidity.publish(Float32(data=humidity))
 
-        # Update bars if enabled
+        # Alerts
+        try:
+            # Battery low with 50 mV hysteresis
+            lower = self.batt_low_threshold_v
+            upper = lower + self.batt_low_hysteresis_v
+            if self._batt_low_prev:
+                batt_low = not (battery_voltage >= upper)
+            else:
+                batt_low = (battery_voltage <= lower)
+            salt_alert = saltwater_voltage >= self.saltwater_alert_threshold_v
+            humid_alert = (humidity is not None) and (humidity >= self.humidity_alert_threshold_pct)
+            self.pub_battery_low_alert.publish(Bool(data=bool(batt_low)))
+            self.pub_saltwater_alert.publish(Bool(data=bool(salt_alert)))
+            self.pub_humidity_alert.publish(Bool(data=bool(humid_alert)))
+            # Edge-triggered warnings
+            if batt_low and not self._batt_low_prev:
+                self.get_logger().warning(
+                    f"Battery low alert: {battery_voltage:.2f} V <= threshold {lower:.2f} V"
+                )
+            if (not batt_low) and self._batt_low_prev and (battery_voltage >= upper):
+                self.get_logger().info(
+                    f"Battery voltage OK: {battery_voltage:.2f} V >= release {upper:.2f} V"
+                )
+            if salt_alert and not self._salt_alert_prev:
+                self.get_logger().warning(
+                    f"Saltwater alert: {saltwater_voltage:.3f} V >= threshold {self.saltwater_alert_threshold_v:.3f} V"
+                )
+            if humid_alert and not self._humid_alert_prev:
+                self.get_logger().warning(
+                    f"Humidity alert: {humidity:.1f}% >= threshold {self.humidity_alert_threshold_pct:.1f}%"
+                )
+            # Update previous states
+            self._batt_low_prev = bool(batt_low)
+            self._salt_alert_prev = bool(salt_alert)
+            self._humid_alert_prev = bool(humid_alert)
+        except Exception:
+            pass
+
+        # Update ASCII bars if enabled
         self._update_bars(battery_voltage, saltwater_voltage, sail_current, temperature, humidity)
 
 
@@ -310,12 +445,8 @@ def main(args=None):
         except KeyboardInterrupt:
             # Quiet shutdown to avoid traceback
             try:
-                if hasattr(node, '_bars'):
-                    for b in node._bars.values():
-                        try:
-                            b.close()
-                        except Exception:
-                            pass
+                if hasattr(node, '_teardown_ascii_vis'):
+                    node._teardown_ascii_vis()
             except Exception:
                 pass
             try:
@@ -328,12 +459,8 @@ def main(args=None):
                 pass
         except ExternalShutdownException:
             try:
-                if hasattr(node, '_bars'):
-                    for b in node._bars.values():
-                        try:
-                            b.close()
-                        except Exception:
-                            pass
+                if hasattr(node, '_teardown_ascii_vis'):
+                    node._teardown_ascii_vis()
             except Exception:
                 pass
             try:
@@ -347,12 +474,8 @@ def main(args=None):
         else:
             # Normal shutdown path
             try:
-                if hasattr(node, '_bars'):
-                    for b in node._bars.values():
-                        try:
-                            b.close()
-                        except Exception:
-                            pass
+                if hasattr(node, '_teardown_ascii_vis'):
+                    node._teardown_ascii_vis()
             except Exception:
                 pass
             node.destroy_node()
