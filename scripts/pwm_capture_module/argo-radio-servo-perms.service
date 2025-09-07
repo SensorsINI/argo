@@ -1,0 +1,14 @@
+[Unit]
+Description=Set permissions for Argo Radio Servo sysfs files
+After=sys-kernel-argo_radio_servo.mount
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/argo-radio-servo-postinit.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+

@@ -5,3 +5,4 @@ numpy
 libnmea_navsat_driver
 functools
 smbus
+pathlib

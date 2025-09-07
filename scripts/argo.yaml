@@ -1,0 +1,3 @@
+# parameters for argo control
+/argo/mode: autonomous
+/argo/rudder_gain: 2
