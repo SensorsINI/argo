@@ -5,7 +5,6 @@ Launches all sensor nodes and control system
 """
 
 from launch import LaunchDescription
-from launch_ros.actions import Node
 from launch.actions import ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
@@ -26,57 +25,45 @@ def generate_launch_description():
     # Define all nodes
     nodes = [
         # Anemometer node
-        Node(
-            package='argo',
-            executable=os.path.join(script_dir, 'anem.py'),
+        ExecuteProcess(
+            cmd=[os.path.join(script_dir, 'anem.py')],
             name='anem',
-            output='screen',
-            parameters=[os.path.join(script_dir, 'argo.yaml')]
+            output='screen'
         ),
         
         # PWM node
-        Node(
-            package='argo',
-            executable=os.path.join(script_dir, 'pwm.py'),
+        ExecuteProcess(
+            cmd=[os.path.join(script_dir, 'pwm.py')],
             name='pwm',
-            output='screen',
-            parameters=[os.path.join(script_dir, 'argo.yaml')]
+            output='screen'
         ),
         
         # GPS node
-        Node(
-            package='argo',
-            executable=os.path.join(script_dir, 'gps.py'),
+        ExecuteProcess(
+            cmd=[os.path.join(script_dir, 'gps.py')],
             name='gps',
-            output='screen',
-            parameters=[os.path.join(script_dir, 'argo.yaml')]
+            output='screen'
         ),
         
         # IMU node
-        Node(
-            package='argo',
-            executable=os.path.join(script_dir, 'imu.py'),
+        ExecuteProcess(
+            cmd=[os.path.join(script_dir, 'imu.py')],
             name='imu',
-            output='screen',
-            parameters=[os.path.join(script_dir, 'argo.yaml')]
+            output='screen'
         ),
         
         # Control node
-        Node(
-            package='argo',
-            executable=os.path.join(script_dir, 'control.py'),
+        ExecuteProcess(
+            cmd=[os.path.join(script_dir, 'control.py')],
             name='control',
-            output='screen',
-            parameters=[os.path.join(script_dir, 'argo.yaml')]
+            output='screen'
         ),
         
         # Battery/Water node
-        Node(
-            package='argo',
-            executable=os.path.join(script_dir, 'battery_water.py'),
+        ExecuteProcess(
+            cmd=[os.path.join(script_dir, 'battery_water.py')],
             name='battery_water',
-            output='screen',
-            parameters=[os.path.join(script_dir, 'argo.yaml')]
+            output='screen'
         ),
     ]
     

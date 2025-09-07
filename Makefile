@@ -112,16 +112,33 @@ clean:
 
 aliases:
 	@echo "Installing shell aliases..."
-	@echo "" >> ~/.bashrc
-	@echo "# Argo Robot Control Aliases" >> ~/.bashrc
-	@echo "alias argo_start='make -C /home/orangepi/argo start'" >> ~/.bashrc
-	@echo "alias argo_stop='make -C /home/orangepi/argo stop'" >> ~/.bashrc
-	@echo "alias argo_record='make -C /home/orangepi/argo record'" >> ~/.bashrc
-	@echo "alias argo_close='make -C /home/orangepi/argo stop-record'" >> ~/.bashrc
-	@echo "alias argo_status='make -C /home/orangepi/argo status'" >> ~/.bashrc
-	@echo "alias argo_restart='make -C /home/orangepi/argo restart'" >> ~/.bashrc
-	@echo "" >> ~/.bashrc
-	@echo "Aliases installed! Run: source ~/.bashrc"
+	@touch ~/.bash_aliases
+	@if ! grep -q "# Argo Robot Control Aliases" ~/.bash_aliases 2>/dev/null; then \
+		echo "" >> ~/.bash_aliases; \
+		echo "# Argo Robot Control Aliases" >> ~/.bash_aliases; \
+		echo "alias argo_start='make -C /home/orangepi/argo start'" >> ~/.bash_aliases; \
+		echo "alias argo_stop='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases; \
+		echo "alias argo_record='make -C /home/orangepi/argo record'" >> ~/.bash_aliases; \
+		echo "alias argo_close='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases; \
+		echo "alias argo_status='make -C /home/orangepi/argo status'" >> ~/.bash_aliases; \
+		echo "alias argo_restart='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases; \
+		echo "" >> ~/.bash_aliases; \
+		echo "✅ Aliases installed to ~/.bash_aliases"; \
+	else \
+		echo "⚠️  Argo aliases already exist in ~/.bash_aliases"; \
+	fi
+	@if ! grep -q "source.*\.bash_aliases" ~/.bashrc 2>/dev/null; then \
+		echo "" >> ~/.bashrc; \
+		echo "# Source bash aliases if available" >> ~/.bashrc; \
+		echo "if [ -f ~/.bash_aliases ]; then" >> ~/.bashrc; \
+		echo "    . ~/.bash_aliases" >> ~/.bashrc; \
+		echo "fi" >> ~/.bashrc; \
+		echo "✅ Added .bash_aliases sourcing to ~/.bashrc"; \
+	else \
+		echo "✅ .bash_aliases already sourced in ~/.bashrc"; \
+	fi
+	@echo ""
+	@echo "Run: source ~/.bashrc (or open new terminal)"
 	@echo ""
 	@echo "Available aliases:"
 	@echo "  argo_start   - Start argo service"
