@@ -9,6 +9,10 @@
 # - battery_low_alert (hysteresis 50 mV around battery_low_threshold_v; warning on low, info on recover)
 # - saltwater_alert (voltage >= saltwater_alert_threshold_v)
 # - humidity_alert (RH% >= humidity_alert_threshold_pct)
+# Publishing optimization (saves rosbag space):
+# - First 30s: publishes all sensor data at 1Hz, logs sensor states every 5s via ROS info
+# - After 30s: publishes sensor data only when values change >5% OR every 60s (whichever is shorter)
+# - Alert topics always publish at 1Hz regardless of optimization for safety
 # Debug:
 # - ASCII terminal bars when --debug is used (disabled during --test-adc)
 # Key parameters:
@@ -21,6 +25,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float32, Bool
 import time
 import sys
+import argparse
 from rclpy.executors import ExternalShutdownException
 
 try:
@@ -75,6 +80,18 @@ class BatteryWaterNode(Node):
         self._batt_low_prev = False
         self._salt_alert_prev = False
         self._humid_alert_prev = False
+        
+        # Timing and change detection for optimized publishing
+        self._startup_time = time.monotonic()
+        self._last_publish_time = 0.0
+        self._last_log_time = 0.0
+        # Previous sensor values for 5% change detection
+        self._prev_battery_voltage = None
+        self._prev_saltwater_voltage = None
+        self._prev_sail_current = None
+        self._prev_temperature = None
+        self._prev_humidity = None
+        self._prev_battery_remaining_pct = None
 
         # I2C preferences
         self.use_smbus2 = (smbus2 is not None)
@@ -355,9 +372,26 @@ class BatteryWaterNode(Node):
         if fill > width:
             fill = width
         return '[' + ('#' * fill) + ('-' * (width - fill)) + ']'
+    
+    def _has_significant_change(self, current_value, previous_value, threshold_pct=5.0):
+        """Check if current value has changed by more than threshold_pct from previous value"""
+        if previous_value is None or current_value is None:
+            return True  # Always publish if we don't have previous data
+        
+        if previous_value == 0.0:
+            # Avoid division by zero; consider any non-zero change significant
+            return current_value != 0.0
+        
+        change_pct = abs((current_value - previous_value) / previous_value) * 100.0
+        return change_pct >= threshold_pct
 
     # ---------- Main read/publish ----------
     def read_and_publish(self):
+        current_time = time.monotonic()
+        time_since_startup = current_time - self._startup_time
+        time_since_last_publish = current_time - self._last_publish_time
+        time_since_last_log = current_time - self._last_log_time
+        
         # ADC averages
         raw0 = self._read_adc_channel_avg(0)
         raw1 = self._read_adc_channel_avg(1)
@@ -368,10 +402,8 @@ class BatteryWaterNode(Node):
         saltwater_voltage = raw1 * self.lsb_value
         sail_current = raw2 * self.lsb_value
 
-        self.pub_battery_voltage.publish(Float32(data=battery_voltage))
-        self.pub_saltwater_voltage.publish(Float32(data=saltwater_voltage))
-        self.pub_sail_current.publish(Float32(data=sail_current))
-        # Publish estimated remaining percentage (per-cell formula)
+        # Calculate battery remaining percentage (per-cell formula)
+        battery_remaining_pct = None
         try:
             cells = max(1, int(self.batt_series_cells))
             v_cell = battery_voltage / float(cells) if cells > 0 else battery_voltage
@@ -383,18 +415,68 @@ class BatteryWaterNode(Node):
                 soc = 0.0
             if soc > 100.0:
                 soc = 100.0
-            self.pub_battery_remaining_pct.publish(Float32(data=float(soc)))
+            battery_remaining_pct = float(soc)
         except Exception:
             pass
 
         # SHT45
         temperature, humidity = self._read_sht45()
-        if temperature is not None:
-            self.pub_temperature.publish(Float32(data=temperature))
-        if humidity is not None:
-            self.pub_humidity.publish(Float32(data=humidity))
+        
+        # Determine if we should publish values
+        should_publish = False
+        
+        # First 30 seconds: publish every cycle (1Hz) and log every 5s
+        if time_since_startup <= 30.0:
+            should_publish = True
+            if time_since_last_log >= 5.0:
+                # Build sensor state message
+                battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
+                temp_humid_str = f"Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "Temp/Humidity unavailable"
+                
+                self.get_logger().info(
+                    f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
+                    f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
+                    f"{temp_humid_str}"
+                )
+                self._last_log_time = current_time
+        else:
+            # After 30s: publish only if significant change (>5%) or 60s elapsed
+            significant_change = (
+                self._has_significant_change(battery_voltage, self._prev_battery_voltage) or
+                self._has_significant_change(saltwater_voltage, self._prev_saltwater_voltage) or
+                self._has_significant_change(sail_current, self._prev_sail_current) or
+                self._has_significant_change(temperature, self._prev_temperature) or
+                self._has_significant_change(humidity, self._prev_humidity) or
+                self._has_significant_change(battery_remaining_pct, self._prev_battery_remaining_pct)
+            )
+            
+            if significant_change or time_since_last_publish >= 60.0:
+                should_publish = True
+        
+        # Publish values if conditions are met
+        if should_publish:
+            self.pub_battery_voltage.publish(Float32(data=battery_voltage))
+            self.pub_saltwater_voltage.publish(Float32(data=saltwater_voltage))
+            self.pub_sail_current.publish(Float32(data=sail_current))
+            
+            if battery_remaining_pct is not None:
+                self.pub_battery_remaining_pct.publish(Float32(data=battery_remaining_pct))
+            
+            if temperature is not None:
+                self.pub_temperature.publish(Float32(data=temperature))
+            if humidity is not None:
+                self.pub_humidity.publish(Float32(data=humidity))
+            
+            # Update previous values and timestamp
+            self._prev_battery_voltage = battery_voltage
+            self._prev_saltwater_voltage = saltwater_voltage
+            self._prev_sail_current = sail_current
+            self._prev_temperature = temperature
+            self._prev_humidity = humidity
+            self._prev_battery_remaining_pct = battery_remaining_pct
+            self._last_publish_time = current_time
 
-        # Alerts
+        # Alerts (always published regardless of sensor data publishing logic)
         try:
             # Battery low with 50 mV hysteresis
             lower = self.batt_low_threshold_v
@@ -437,7 +519,56 @@ class BatteryWaterNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Battery/Water ROS2 Node - Monitors battery, saltwater, and environmental sensors',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This ROS2 node monitors various sensors on the Argo autonomous sailboat:
+- MAX11612 ADC: Battery voltage (via voltage divider), saltwater probe, sail winch current
+- SHT45: Temperature and humidity sensor
+- Calculates battery state-of-charge using LiPo discharge curve
+- Publishes alerts for low battery, saltwater detection, and high humidity
+
+Topics:
+  Publishes:
+    /battery_voltage: Float32 - Battery voltage in volts
+    /saltwater_voltage: Float32 - Saltwater probe voltage in volts  
+    /sail_current: Float32 - Sail winch current in amperes
+    /temperature: Float32 - Temperature in Celsius
+    /relative_humidity: Float32 - Relative humidity percentage
+    /battery_remaining_pct: Float32 - Battery state-of-charge percentage
+    /battery_low_alert: Bool - Battery low voltage alert
+    /saltwater_alert: Bool - Saltwater detection alert
+    /humidity_alert: Bool - High humidity alert
+
+Parameters:
+  battery_low_threshold_v: Low battery threshold in volts (default: 7.2)
+  saltwater_alert_threshold_v: Saltwater detection threshold in volts (default: 1.0)
+  humidity_alert_threshold_pct: High humidity threshold percentage (default: 75.0)
+  battery_series_cells: Number of battery cells in series (default: 2)
+  soc_S, soc_V0, soc_A, soc_B: LiPo state-of-charge curve parameters
+
+Options:
+  --debug: Enable ASCII terminal visualization of sensor values
+  --test-adc: Perform RC decay test on AIN3 and save plot (requires matplotlib)
+
+Hardware:
+  MAX11612 ADC at I2C address 0x34
+  SHT45 temperature/humidity sensor at I2C address 0x44
+  Battery voltage divider: 27k/18k (2.5x scaling)
+        """
+    )
+    parser.add_argument('--debug', action='store_true', 
+                       help='Enable ASCII terminal visualization of sensor values')
+    parser.add_argument('--test-adc', action='store_true',
+                       help='Perform RC decay test on AIN3 and save plot (requires matplotlib)')
+    
+    # Parse known args to allow ROS2 arguments to pass through
+    parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Initialize ROS2 with remaining arguments
+    rclpy.init(args=unknown_args)
     node = BatteryWaterNode()
     if rclpy.ok():
         try:
