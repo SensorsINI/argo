@@ -21,6 +21,7 @@ from std_msgs.msg import Bool
 from geometry_msgs.msg import Vector3
 
 import time
+import argparse
 from pathlib import Path
 
 # --- Configuration ---
@@ -168,7 +169,38 @@ class PwmNode(Node):
         )
 
 def main(args=None):
-    rclpy.init(args=args)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='PWM Node for ROS2 - Captures and publishes rudder and sail servo positions',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This ROS2 node interfaces with the argo_radio_servo_module kernel module to:
+- Read radio control inputs for rudder and sail from sysfs
+- Publish normalized servo commands (-1 to +1) to ROS topics
+- Handle human vs computer control switching
+- Write servo commands back to the kernel module
+
+Topics:
+  Publishes:
+    /rudder_sail_radio: Vector3 with normalized radio inputs (x=rudder, y=sail)
+    /rudder_sail_servo: Vector3 with actual servo commands sent to hardware
+    /human_controlled: Bool indicating if human has control (based on rudder input)
+
+  Subscribes:
+    /rudder_sail_cmd: Vector3 with computer-generated servo commands
+
+Hardware:
+  Requires argo_radio_servo_module kernel module loaded
+  Sysfs interface at /sys/kernel/argo_radio_servo/
+  Pulse width range: 1000-2000 microseconds (1500 = center)
+        """
+    )
+    
+    # Parse known args to allow ROS2 arguments to pass through
+    parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Initialize ROS2 with remaining arguments
+    rclpy.init(args=unknown_args)
     pwm_node = PwmNode()
     
     if rclpy.ok():
