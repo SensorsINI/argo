@@ -1,0 +1,180 @@
+(footprint "Fuse_Smd- Nano SMF AliExp"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "Littelfuse NANO2, 250VAC/VDC, 350VAC/VDC, 10.5 x 4.5 x 4.5mm, https://www.littelfuse.com/media?resourcetype=datasheets&itemid=6201db33-6e55-43f2-b41f-15e38bdd2c99&filename=littelfuse-fuse-462-datasheet")
+	(tags "Fuse Nano2 462")
+	(property "Reference" "F?"
+		(at 0 -3 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "350b7069-c211-4bd1-9781-bb5aff6ea947")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "Fuse"
+		(at 0 3.2 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "fe350cd6-6f8e-428b-ba38-3de35acadbe6")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://www.aliexpress.com/item/1005002366334753.html?spm=a2g0o.productlist.main.1.238e730eIwtDBQ&algo_pvid=219e0cdb-c0cc-40aa-8013-869ba75845c1&algo_exp_id=219e0cdb-c0cc-40aa-8013-869ba75845c1-0&pdp_ext_f=%7B%22order%22%3A%221555%22%2C%22eval%22%3A%221%22%7D&pdp_npi=4%40dis%21CHF%211.23%211.23%21%21%211.47%211.47%21%40211b628117495507232402255e4f21%2112000020345183509%21sea%21CH%21705496360%21X&curPageLogUid=G6FVXnZkiLR8&utparam-url=scene%3Asearch%7Cquery_from%3A"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "19b1dde4-f435-487a-be5c-4c734ddde3d2")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Fuse"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "36d959e4-d02d-4373-9ad7-5307bc92e8c5")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Order" "https://www.aliexpress.com/item/1005002366334753.html?spm=a2g0o.productlist.main.1.238e730eIwtDBQ&algo_pvid=219e0cdb-c0cc-40aa-8013-869ba75845c1&algo_exp_id=219e0cdb-c0cc-40aa-8013-869ba75845c1-0&pdp_ext_f=%7B%22order%22%3A%221555%22%2C%22eval%22%3A%221%22%7D&pdp_npi=4%40dis%21CHF%211.23%211.23%21%21%211.47%211.47%21%40211b628117495507232402255e4f21%2112000020345183509%21sea%21CH%21705496360%21X&curPageLogUid=G6FVXnZkiLR8&utparam-url=scene%3Asearch%7Cquery_from%3A"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "e9acb9ba-639b-4832-ad28-e00f98319fad")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -1.99 -2.35)
+		(end 1.99 -2.35)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "c200c53a-7f2b-44c0-9b7d-8dc3dadcf36e")
+	)
+	(fp_line
+		(start -1.99 2.35)
+		(end 1.99 2.35)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "e0be9736-0664-4359-9623-feb39e4fd8d5")
+	)
+	(fp_rect
+		(start -6.4 -2.8)
+		(end 6.1 2.8)
+		(stroke
+			(width 0.05)
+			(type default)
+		)
+		(fill no)
+		(layer "F.CrtYd")
+		(uuid "04882677-f094-4a28-80d7-ff693d3642d7")
+	)
+	(fp_line
+		(start -5.25 -2.25)
+		(end -5.25 2.25)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(layer "F.Fab")
+		(uuid "2b348218-42b2-4df5-99e2-04c0529eb47e")
+	)
+	(fp_line
+		(start -5.25 -2.25)
+		(end 5.25 -2.25)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "0d87c65b-a34d-4e8b-addd-6248cfe62a25")
+	)
+	(fp_line
+		(start -5.25 2.25)
+		(end 5.25 2.25)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "7b680847-6d01-4fc9-8110-54c34fe5d6e5")
+	)
+	(fp_line
+		(start 5.25 -2.25)
+		(end 5.25 2.25)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(layer "F.Fab")
+		(uuid "f6a6f3dc-12d6-41f4-a979-ff8dcbc952e6")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(uuid "d1405ac7-0906-4eb1-b0ca-4f735fc8fec9")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" smd roundrect
+		(at -3.4 0.1)
+		(size 4.2418 3.81)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.04464285714)
+		(uuid "8fe1bc2f-2aa0-4da2-83d5-0725319a684c")
+	)
+	(pad "2" smd roundrect
+		(at 3 0.1)
+		(size 4.2418 3.81)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.04464285714)
+		(uuid "27671d71-1d83-434a-a211-8ce754009f72")
+	)
+	(embedded_fonts no)
+	(model "${KICAD9_3DMODEL_DIR}/Fuse.3dshapes/Fuse_Littelfuse-NANO2-451_453.step"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
+)
