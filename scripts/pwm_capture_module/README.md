@@ -245,3 +245,4 @@ GPL v2 - See kernel module source for full license text.
 ## Author
 
 Tobi Delbruck - Autonomous boat navigation system for Orange Pi Zero 2W
+

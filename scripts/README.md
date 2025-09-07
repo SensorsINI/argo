@@ -353,3 +353,4 @@ ros2 topic echo /battery_voltage
 - **Telemetry system** for remote fleet management
 
 This system provides a robust foundation for autonomous sailboat operation with comprehensive sensor integration, safety systems, and manual override capabilities.
+

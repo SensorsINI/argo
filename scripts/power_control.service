@@ -1,0 +1,22 @@
+[Unit]
+Description=Orange Pi Zero 2W Power Control System
+Documentation=file:///home/orangepi/argo/scripts/POWER_CONTROL_README.md
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/orangepi/argo/scripts
+ExecStart=/usr/bin/python3 /home/orangepi/argo/scripts/power_control.py
+Restart=no
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=false
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
