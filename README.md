@@ -11,6 +11,11 @@ The Argo system consists of multiple ROS2 nodes that work together to provide au
 - **Autonomous Control**: Navigation and sail trimming algorithms
 - **Safety Systems**: Manual override, battery monitoring, water intrusion detection
 
+### Demo Video
+See the Argo autonomous sailboat in action: [Argo Sailboat Demo](https://youtu.be/tjC1262BsCY?si=1GFPk1QcOqpzw8h2)
+
+![Argo Autonomous Sailboat](https://img.youtube.com/vi/tjC1262BsCY/maxresdefault.jpg)
+
 ## Hardware Platform
 
 - **Orange Pi Zero 2W** (Allwinner H618 SoC)
@@ -184,6 +189,14 @@ ros2 topic list
 ros2 node list
 systemctl status argo-launch.service
 ```
+
+## 2025 Development Updates
+
+**Exciting developments are underway for 2025:**
+
+- **Custom PCB Design**: A dedicated PCB is being designed to integrate all sensors and control systems into a single, robust board
+- **Enhanced Seaworthiness**: Significant improvements to waterproofing, structural integrity, and marine-grade components for extended autonomous operation
+- **Production Readiness**: Moving from prototype to production-ready autonomous sailboat system
 
 ## Documentation
 
