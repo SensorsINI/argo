@@ -356,10 +356,42 @@ class AnemNode(Node):
 
 def main(args=None):
     # Parse CLI args for this script first, pass the remainder to ROS 2
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(
+        description='Anemometer Node for ROS2 - Wind Speed and Direction Sensor',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This ROS2 node reads three Sensirion SDP3x differential pressure sensors over I2C
+to determine wind speed and direction using directional wind meter principles.
+
+Hardware Setup:
+  - Uses I2C bus 0 (not bus 1)
+  - Three sensors at addresses 0x21 (CCW), 0x22 (CW), 0x23 (center)
+  - Run "sudo i2cdetect -y 0" to verify sensor connections
+  - Sensors show as addresses 21, 22, 23 in hex
+
+Algorithm based on Sensirion's directional wind meter application:
+  https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
+
+Features:
+  - Automatic sensor reconnection on I2C errors
+  - Optional visual debug mode with ASCII wind vector display
+  - Temperature compensation and averaging
+  - Configurable logging levels
+
+Topics Published:
+  /anem_speed_angle_temp (geometry_msgs/Vector3):
+    x: wind speed in m/s
+    y: wind angle in degrees CW from front of boat (looking down)
+    z: average temperature in celsius
+  /anem_diffpressure (geometry_msgs/Vector3):
+    x: differential pressure from sensor 1 (CCW) in Pascals
+    y: differential pressure from sensor 2 (center) in Pascals  
+    z: differential pressure from sensor 3 (CW) in Pascals
+        """
+    )
     parser.add_argument('--debug', action='store_true', help='Log sensor values to the terminal')
     parser.add_argument('--debug_visually', action='store_true', help='Show test-mode ASCII visualization of wind vector')
-    parsed_args, ros_args = parser.parse_known_args()
+    parsed_args, ros_args = parser.parse_known_args(args)
 
     rclpy.init(args=ros_args)
     anem_node = AnemNode(debug_visually=parsed_args.debug_visually)
