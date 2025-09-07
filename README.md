@@ -12,7 +12,7 @@ The Argo system consists of multiple ROS2 nodes that work together to provide au
 - **Safety Systems**: Manual override, battery monitoring, water intrusion detection
 
 ### Demo Video
-See the Argo autonomous sailboat in action: [Argo Sailboat Demo](https://youtu.be/tjC1262BsCY?si=1GFPk1QcOqpzw8h2)
+See the Argo autonomous sailboat in action at the 2024 CCNW (before current waterproofing and PCB developements): [Argo Sailboat Demo](https://youtu.be/tjC1262BsCY?si=1GFPk1QcOqpzw8h2)
 
 ![Argo Autonomous Sailboat](https://img.youtube.com/vi/tjC1262BsCY/maxresdefault.jpg)
 
