@@ -1,27 +1,39 @@
 #!/usr/bin/env python
-# ROS2 version of anem.py
+# ROS2 Anemometer Node - Wind Speed and Direction Sensor
 
-#Reading the Sensirion SDP32 sensor
-#Dev by JJ SlabbertSDP810_example / modified by tobi
-#This script is based on the original anem.py for ROS1.
-#It communicates with three differential pressure sensors over I2C to
-#determine wind speed and direction.
-#Run sudo i2cdetect -y 1 in the terminal, to see if the sensor is connected. it will show address 25
-#Check the datasheet at https://www.sensirion.com/fileadmin/user_upload/customers/sensirion/Dokumente/0_Datasheets/Differential_Pressure/Sensirion_Differential_Pressure_Sensors_SDP8xx_Digital_Datasheet.pdf
-#The sensor i2c address is 0x21 to 0x23 (Not user programable).
-
-# scripts runs but not yet tested with wind sensor connected
-
-# topics
-# publishes
-# /anem_speed_angle_temp, Vector3 with:
-#   x is speed in m/s
-#   y is angle in deg CW from front of boat looking down on boat
-#   z is temperature in celsius
-# /anem_diffpressure, Vector3 with:
-#   .x is from sensor 1 (CCW)
-#   .y from sensor 2 (center)
-#   .z from sensor 3 (CW)
+# Reading three Sensirion SDP3x differential pressure sensors
+# Dev by JJ Slabbert, modified by tobi
+# This ROS2 node communicates with three differential pressure sensors over I2C
+# to determine wind speed and direction using directional wind meter principles.
+#
+# Hardware Setup:
+# - Uses I2C bus 0 (not bus 1)
+# - Three sensors at addresses 0x21 (CCW), 0x22 (CW), 0x23 (center)
+# - Run "sudo i2cdetect -y 0" to verify sensor connections
+# - Sensors show as addresses 21, 22, 23 in hex
+#
+# Algorithm based on Sensirion's directional wind meter application:
+# https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
+#
+# Features:
+# - Automatic sensor reconnection on I2C errors
+# - Optional visual debug mode with ASCII wind vector display
+# - Temperature compensation and averaging
+# - Configurable logging levels
+#
+# Command line options:
+# --debug: Enable debug logging of sensor values
+# --debug_visually: Show real-time ASCII visualization of wind vector
+#
+# Topics Published:
+# /anem_speed_angle_temp (geometry_msgs/Vector3):
+#   x: wind speed in m/s
+#   y: wind angle in degrees CW from front of boat (looking down)
+#   z: average temperature in celsius
+# /anem_diffpressure (geometry_msgs/Vector3):
+#   x: differential pressure from sensor 1 (CCW) in Pascals
+#   y: differential pressure from sensor 2 (center) in Pascals  
+#   z: differential pressure from sensor 3 (CW) in Pascals
 
 import rclpy
 from rclpy.node import Node
@@ -29,6 +41,10 @@ from  geometry_msgs.msg import Vector3
 import smbus
 import time
 import numpy as np
+import argparse
+from rclpy.logging import LoggingSeverity
+import math
+import sys
 
 # from https://stackoverflow.com/questions/49906101/byte-array-to-int-in-python-2-x-using-standard-libraries
 # This function is compatible with Python 3.
@@ -87,7 +103,7 @@ def calculate_speed_mps(dp1,dp2, dp3):
     return A
 
 class AnemNode(Node):
-    def __init__(self):
+    def __init__(self, debug_visually: bool = False):
         super().__init__('anem_node')
         self.get_logger().info('Initializing Anemometer node...')
 
@@ -95,28 +111,119 @@ class AnemNode(Node):
         self.pub_diff_pressure = self.create_publisher(Vector3, 'anem_diffpressure', 10)
         self.pub_wind_temp = self.create_publisher(Vector3, 'anem_speed_angle_temp', 10)
 
+        # Visual debug mode flag
+        self.debug_visually = debug_visually
+
         # I2C setup
         # 21 is CCW, 23 is center, 22 is clockwise (viewed from top)
         self.i2cAddr = (0x21, 0x23, 0x22)
         self.bus = None
+        self.sensors_ready = False
+        self._last_error_log_time = 0.0
         
         try:
-            self.bus = smbus.SMBus(1) # The default i2c bus
+            self.bus = smbus.SMBus(0) # The default i2c bus
             self.get_logger().info('Opened i2c SMBus')
         except FileNotFoundError:
-            self.get_logger().error("I2C bus not found. Is I2C enabled? Shutting down.")
-            rclpy.shutdown()
-            return
+            self.get_logger().warn("I2C bus not found. Is I2C enabled? Will retry once per second.")
+            self.bus = None
 
-        if not self.setup_sensors():
-            self.get_logger().error("Failed to setup sensors. Shutting down.")
-            self.destroy_node()
-            rclpy.shutdown()
-            return
+        if self.bus is not None:
+            if not self.setup_sensors():
+                self.get_logger().warn("Failed to setup sensors. Will retry once per second.")
+                self.sensors_ready = False
+            else:
+                self.sensors_ready = True
 
         # Main loop timer
         self.timer = self.create_timer(0.1, self.timer_callback) # 10 Hz
+        # Reconnect watchdog (1 Hz)
+        self.reconnect_timer = self.create_timer(1.0, self.reconnect_callback)
         self.get_logger().info("Initialization of anemometer wind sensor completed.")
+
+        # Visual mode init
+        self._vis_initialized = False
+        self._vis_width = 41
+        self._vis_height = 21
+        # Full-scale visual radius corresponds to 15 knots ≈ 7.72 m/s
+        self._vis_speed_ref = 15 * 0.514444  # ≈ 7.7167 m/s
+        if self.debug_visually:
+            self._init_visual()
+
+    def _init_visual(self):
+        # Setup terminal for in-place drawing (no scrolling)
+        if self._vis_initialized:
+            return
+        try:
+            sys.stdout.write('\x1b[?25l')  # hide cursor
+            sys.stdout.write('\x1b[2J')    # clear screen
+            sys.stdout.write('\x1b[H')     # move cursor home
+            sys.stdout.flush()
+            self._vis_initialized = True
+        except Exception:
+            self._vis_initialized = False
+
+    def _teardown_visual(self):
+        if not self._vis_initialized:
+            return
+        try:
+            sys.stdout.write('\x1b[0m')   # reset attributes
+            sys.stdout.write('\x1b[2J')   # clear
+            sys.stdout.write('\x1b[H')    # home
+            sys.stdout.write('\x1b[?25h') # show cursor
+            sys.stdout.flush()
+        except Exception:
+            pass
+        self._vis_initialized = False
+
+    def _render_visual(self, speed_mps: float, angle_deg: float, temp_c: float, dp_tuple):
+        if not self._vis_initialized:
+            self._init_visual()
+        width = self._vis_width
+        height = self._vis_height
+        cx = width // 2
+        cy = height // 2
+
+        # Compute endpoint based on angle (CW from forward) and speed
+        # Forward is up; x = sin(theta), y = -cos(theta)
+        theta = math.radians(angle_deg)
+        radius = min(cx - 2, cy - 2)
+        scale = radius / max(self._vis_speed_ref, 0.1)
+        r = max(0, min(radius, int(round(speed_mps * scale))))
+        ex = cx + int(round(r * math.sin(theta)))
+        ey = cy + int(round(-r * math.cos(theta)))
+
+        # Build grid
+        grid = [[' ' for _ in range(width)] for _ in range(height)]
+        # Axes
+        for x in range(width):
+            grid[cy][x] = '-' if grid[cy][x] == ' ' else grid[cy][x]
+        for y in range(height):
+            grid[y][cx] = '|' if grid[y][cx] == ' ' else grid[y][cx]
+        grid[cy][cx] = '+'
+
+        # Mark endpoint
+        if 0 <= ey < height and 0 <= ex < width:
+            grid[ey][ex] = 'o'
+
+        # Header lines (fixed count to avoid scrolling)
+        header = [
+            f"Wind v={speed_mps:5.2f} m/s  angle={angle_deg:6.2f} deg  temp={temp_c:5.1f} C",
+            f"dp(Pa)=({dp_tuple[0]:.2f}, {dp_tuple[1]:.2f}, {dp_tuple[2]:.2f})  scale~{self._vis_speed_ref:.1f} m/s->radius",
+            "Use Ctrl+C to exit visual mode"
+        ]
+
+        # Render
+        try:
+            sys.stdout.write('\x1b[H')  # move home
+            for line in header:
+                sys.stdout.write(line.ljust(width) + '\n')
+            for row in grid:
+                sys.stdout.write(''.join(row) + '\n')
+            # Ensure we always write the same number of lines
+            sys.stdout.flush()
+        except Exception:
+            pass
 
     def setup_sensors(self):
         self.get_logger().info('Stopping existing continuous measurements')
@@ -146,10 +253,36 @@ class AnemNode(Node):
         time.sleep(0.1)
         return True
 
+    def reconnect_callback(self):
+        if self.sensors_ready:
+            return
+        # Attempt to (re)open bus if needed
+        if self.bus is None:
+            try:
+                self.bus = smbus.SMBus(0)
+                self.get_logger().info('I2C bus reopened.')
+            except FileNotFoundError:
+                # Still not available
+                return
+            except Exception as e:
+                self.get_logger().debug(f"I2C reopen attempt failed: {e}")
+                return
+        # Attempt to setup sensors
+        try:
+            if self.setup_sensors():
+                self.sensors_ready = True
+                self.get_logger().info('Reconnected to anemometer sensors.')
+        except Exception as e:
+            self.get_logger().debug(f"Sensor setup retry failed: {e}")
+
     def timer_callback(self):
         dp = []
         temps = []
         try:
+            if not self.sensors_ready:
+                if self.debug_visually:
+                    self._render_visual_disconnected()
+                return
             for a in self.i2cAddr:
                 b = self.bus.read_i2c_block_data(a, 0, 9)
                 v = int_from_bytes([b[0], b[1]]) / 240.  # convert to Pascals diff pressure
@@ -172,15 +305,47 @@ class AnemNode(Node):
                 f"temp(C)={temp_celsius:.1f} dp(pascal)=({dp[0]:.4f}, {dp[1]:.4f}, {dp[2]:.4f})"
             )
 
+            if self.debug_visually:
+                self._render_visual(speed_mps, angle_deg, temp_celsius, (dp[0], dp[1], dp[2]))
+
         except IOError as e:
-            self.get_logger().error(f"I2C read error: {e}. Check sensor connections.")
+            # Mark sensors as not ready and throttle error logs
+            self.sensors_ready = False
+            self.bus = self.bus  # keep reference; reopen handled by reconnect timer
+            now = time.monotonic()
+            if now - self._last_error_log_time > 2.0:
+                self.get_logger().warn(f"I2C read error: {e}. Will attempt to reconnect once per second.")
+                self._last_error_log_time = now
         except IndexError as e:
             self.get_logger().error(f"Data parsing error: {e}. Received incomplete data from sensor.")
+
+    def _render_visual_disconnected(self):
+        # Minimal placeholder rendering to prevent scrolling
+        if not self._vis_initialized:
+            self._init_visual()
+        width = self._vis_width
+        height = self._vis_height
+        header = [
+            "Sensors disconnected...",
+            "Waiting for reconnection (checking every 1s)",
+            "Use Ctrl+C to exit visual mode"
+        ]
+        try:
+            sys.stdout.write('\x1b[H')
+            for line in header:
+                sys.stdout.write(line.ljust(width) + '\n')
+            for _ in range(height):
+                sys.stdout.write(' '.ljust(width) + '\n')
+            sys.stdout.flush()
+        except Exception:
+            pass
 
     def destroy_node(self):
         # This is the recommended way to perform cleanup in ROS2.
         # It gets called automatically when the node is destroyed.
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
+        if self.debug_visually:
+            self._teardown_visual()
         if self.bus:
             for a in self.i2cAddr:
                 try:
@@ -190,8 +355,53 @@ class AnemNode(Node):
         super().destroy_node()
 
 def main(args=None):
-    rclpy.init(args=args)
-    anem_node = AnemNode()
+    # Parse CLI args for this script first, pass the remainder to ROS 2
+    parser = argparse.ArgumentParser(
+        description='Anemometer Node for ROS2 - Wind Speed and Direction Sensor',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This ROS2 node reads three Sensirion SDP3x differential pressure sensors over I2C
+to determine wind speed and direction using directional wind meter principles.
+
+Hardware Setup:
+  - Uses I2C bus 0 (not bus 1)
+  - Three sensors at addresses 0x21 (CCW), 0x22 (CW), 0x23 (center)
+  - Run "sudo i2cdetect -y 0" to verify sensor connections
+  - Sensors show as addresses 21, 22, 23 in hex
+
+Algorithm based on Sensirion's directional wind meter application:
+  https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
+
+Features:
+  - Automatic sensor reconnection on I2C errors
+  - Optional visual debug mode with ASCII wind vector display
+  - Temperature compensation and averaging
+  - Configurable logging levels
+
+Topics Published:
+  /anem_speed_angle_temp (geometry_msgs/Vector3):
+    x: wind speed in m/s
+    y: wind angle in degrees CW from front of boat (looking down)
+    z: average temperature in celsius
+  /anem_diffpressure (geometry_msgs/Vector3):
+    x: differential pressure from sensor 1 (CCW) in Pascals
+    y: differential pressure from sensor 2 (center) in Pascals  
+    z: differential pressure from sensor 3 (CW) in Pascals
+        """
+    )
+    parser.add_argument('--debug', action='store_true', help='Log sensor values to the terminal')
+    parser.add_argument('--debug_visually', action='store_true', help='Show test-mode ASCII visualization of wind vector')
+    parsed_args, ros_args = parser.parse_known_args(args)
+
+    rclpy.init(args=ros_args)
+    anem_node = AnemNode(debug_visually=parsed_args.debug_visually)
+
+    if parsed_args.debug_visually:
+        # Suppress routine logs to avoid interfering with visual display
+        anem_node.get_logger().set_level(LoggingSeverity.WARN)
+    elif parsed_args.debug:
+        anem_node.get_logger().set_level(LoggingSeverity.DEBUG)
+        anem_node.get_logger().info('Debug logging enabled; sensor values will be printed.')
 
     if rclpy.ok():
         try:

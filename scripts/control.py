@@ -19,6 +19,7 @@ from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
 
 import yaml
+import argparse
 from pathlib import Path
 import math
 import time
@@ -166,7 +167,43 @@ class ControlNode(Node):
             self.pub_rudder_sail_cmd.publish(Vector3(x=cmd_rudder, y=cmd_sail, z=0.0))
 
 def main(args=None):
-    rclpy.init(args=args)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Control Node for ROS2 - Controls Argo based on sensor inputs',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This ROS2 node implements the main control logic for the Argo autonomous sailboat:
+- Maintains heading using compass feedback and proportional rudder control
+- Switches between human and computer control based on radio input
+- Passes through sail commands from radio while controlling rudder autonomously
+- Supports dynamic parameter reloading from YAML configuration file
+
+Topics:
+  Publishes:
+    /rudder_sail_cmd: Vector3 with rudder (-1:+1 left:right) and sail (-1:+1 in:out) commands
+
+  Subscribes:
+    /rudder_sail_radio: Vector3 with radio control inputs from pwm.py
+    /human_controlled: Bool indicating if human has control
+    /pose: Vector3 with IMU data (z component is compass heading in degrees)
+
+Parameters:
+  rudder_gain: Proportional gain for rudder control (default: 1.0)
+  rudder_full_scale_deg: Full-scale rudder deflection in degrees (default: 60.0)
+  param_file_path: Path to YAML parameter file (default: argo.yaml)
+
+Control Logic:
+  - Human control: Passes through radio commands, updates target heading
+  - Computer control: Uses proportional control to maintain target heading
+  - Target heading is set when switching from human to computer control
+        """
+    )
+    
+    # Parse known args to allow ROS2 arguments to pass through
+    parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Initialize ROS2 with remaining arguments
+    rclpy.init(args=unknown_args)
     control_node = None
     try:
         control_node = ControlNode()

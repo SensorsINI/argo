@@ -1,16 +1,18 @@
 [Unit]
-Description=Argo Robot Rosbag Recording Service
+Description=Argo Robot ROS2 Bag Recording Service
 After=network.target
+Wants=argo-launch.service
 
 [Service]
-User=ubuntu
-Group=ubuntu
-EnvironmentFile=/home/ubuntu/catkin_ws/src/argo/launch/argo.env
-ExecStart=/opt/ros/kinetic/bin/rosbag record -a -o /home/ubuntu/bagfiles/argo  __name:=argo
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/bagfiles
+EnvironmentFile=/home/orangepi/argo/launch/argo.env
+ExecStart=/bin/bash -l -c 'source /opt/ros/humble/setup.bash && ros2 bag record -a -o argo_$(date +%%Y%%m%%d_%%H%%M%%S)'
 Restart=no
-;Restart=on-failure
-;RestartSec=10
+StandardOutput=journal
+StandardError=journal
 
 [Install]
-; WantedBy=multi-user.target
-; No WantedBy directive, so it won't start automatically.
+# WantedBy=multi-user.target
+# Uncomment above line to enable automatic startup

@@ -1,79 +1,105 @@
-# Makefile for building RTIMULib2 and its Python bindings
-# This Makefile assumes a Debian-based system (like Raspberry Pi OS or Armbian)
-# and Python 3.
+# Makefile for Orange Pi Zero 2W Power Control System
+# This Makefile installs the power control daemon and systemd service
 
-# currently does not build because of missing qt4 library (which we dont need, since we do not use the QT GUI)
-# qt4 was deprecated and is not part of Ubuntu 22.04 and it requires a complex modified built from source.
+SERVICE_NAME = power_control
+SCRIPT_DIR = $(shell pwd)
+PYTHON_SCRIPT = power_control.py
+SERVICE_FILE = power_control.service
+LOG_FILE = /var/log/power_control.log
 
-.PHONY: all imu clean install_deps
+.PHONY: install_power_control check_deps install_service enable_service create_logs clean uninstall help
 
-RTIMULIB2_REPO := https://github.com/orca-io/RTIMULib2.git
-RTIMULIB2_DIR := RTIMULib2
-BUILD_DIR := $(RTIMULIB2_DIR)/Linux/build
-PYTHON_BINDINGS_DIR := $(RTIMULIB2_DIR)/Linux/python
+# Default target
+all: install_power_control
 
-i2c:
-	sudo adduser $(USER) i2c
+# Main installation target
+install_power_control: check_deps install_service enable_service create_logs
+	@echo ""
+	@echo "✅ Power Control System Installation Complete!"
+	@echo ""
+	@echo "Next steps:"
+	@echo "1. The power control service will start automatically on boot"
+	@echo "2. Check service status with: sudo systemctl status $(SERVICE_NAME)"
+	@echo "3. View logs with: sudo journalctl -u $(SERVICE_NAME) -f"
+	@echo "4. Test with: sudo systemctl start $(SERVICE_NAME)"
+	@echo ""
+	@echo "Hardware connections:"
+	@echo "- PI3 (Pin 40): Connect to !POW relay control (open drain)"
+	@echo "- PI9 (Pin 28): Connect to power button (input, external pullup)"
+	@echo "- PH4 (Pin 18): Connect to green LED in power button"
+	@echo "- PI1 (Pin 12): Connect to blue LED in power button"
+	@echo ""
+	@echo "Power button behavior:"
+	@echo "- Short press (< 1 second): No action"
+	@echo "- Long press (>= 1 second): Initiate shutdown"
+	@echo "- System will de-energize relay after shutdown completes"
 
-pip:
-	pip install smbus argparse tqdm pyserial
+# Check and install dependencies
+check_deps:
+	@echo "🔍 Checking dependencies..."
+	@if ! python3 -c "import gpiod" 2>/dev/null; then \
+		echo "📦 Installing python3-libgpiod..."; \
+		sudo apt-get update; \
+		sudo apt-get install -y python3-libgpiod; \
+	else \
+		echo "✅ python3-libgpiod already installed"; \
+	fi
 
-all: imu
+# Install systemd service
+install_service:
+	@echo "📋 Installing systemd service..."
+	@sudo cp $(SERVICE_FILE) /etc/systemd/system/
+	@sudo chmod +x $(PYTHON_SCRIPT)
+	@sudo systemctl daemon-reload
+	@echo "✅ Service installed and systemd reloaded"
 
-# The main target: builds and installs the RTIMU Python module
-imu: $(PYTHON_BINDINGS_DIR)/RTIMU.so
+# Enable and start service
+enable_service:
+	@echo "🚀 Enabling power control service..."
+	@sudo systemctl enable $(SERVICE_NAME)
+	@sudo systemctl start $(SERVICE_NAME)
+	@echo "✅ Service enabled and started"
 
-# Step 1: Clone the RTIMULib2 repository if it doesn't exist
-$(RTIMULIB2_DIR):
-	@echo "Cloning RTIMULib2 repository..."
-	git clone $(RTIMULIB2_REPO) $(RTIMULIB2_DIR)
-	@echo "RTIMULib2 cloned."
+# Create log file
+create_logs:
+	@echo "📝 Setting up log file..."
+	@sudo touch $(LOG_FILE)
+	@sudo chown root:root $(LOG_FILE)
+	@sudo chmod 644 $(LOG_FILE)
+	@echo "✅ Log file created: $(LOG_FILE)"
 
-# Step 2: Create a build directory for CMake
-$(BUILD_DIR): $(RTIMULIB2_DIR)
-	@echo "Creating build directory for RTIMULib2..."
-	mkdir -p $(BUILD_DIR)
-	@echo "Build directory created."
-
-
-# Step 3: Run CMake to configure the build
-$(BUILD_DIR)/Makefile: $(BUILD_DIR)
-	@echo "Running CMake for RTIMULib2..."
-	# build RTIMULib2 without GL support since qt4 is not available in Ubuntu 22.04
-	cd $(BUILD_DIR) && cmake -DBUILD_GL=OFF ..
-	@echo "CMake finished."
-
-# Step 4: Build the RTIMULib2 C++ library
-$(BUILD_DIR)/RTIMULib.a: $(BUILD_DIR)/Makefile
-	@echo "Building RTIMULib2 C++ library..."
-	cd $(BUILD_DIR) && make
-	@echo "RTIMULib2 C++ library built."
-
-# Step 5: Install the C++ library system-wide (often a prerequisite for Python bindings)
-install_rtimulib_cpp: $(BUILD_DIR)/RTIMULib.a
-	@echo "Installing RTIMULib2 C++ library (requires sudo)..."
-	sudo make -C $(BUILD_DIR) install
-	@echo "RTIMULib2 C++ library installed."
-
-# Step 6: Build and install the RTIMU Python bindings
-$(PYTHON_BINDINGS_DIR)/RTIMU.so: install_rtimulib_cpp
-	@echo "Building and installing RTIMULib2 Python bindings (requires sudo)..."
-	cd $(PYTHON_BINDINGS_DIR) && sudo python3 setup.py install
-	@echo "RTIMULib2 Python bindings installed."
-
-# Clean target: removes the cloned repository and all build artifacts
+# Clean up installation
 clean:
-	@echo "Cleaning RTIMULib2 build artifacts and cloned repository..."
-	rm -rf $(RTIMULIB2_DIR)
-	@echo "Clean complete."
+	@echo "🧹 Cleaning up installation..."
+	@sudo systemctl stop $(SERVICE_NAME) 2>/dev/null || true
+	@sudo systemctl disable $(SERVICE_NAME) 2>/dev/null || true
+	@sudo rm -f /etc/systemd/system/$(SERVICE_NAME).service
+	@sudo systemctl daemon-reload
+	@echo "✅ Cleanup complete"
 
-# Optional: Target to install necessary build dependencies
-install_deps:
-	@echo "Installing build dependencies (requires sudo)..."
-	sudo apt update
-	sudo apt install -y git cmake build-essential python3-dev python3-pip
-	@echo "Dependencies installed."
-	@echo "Running CMake for RTIMULib2..."
-	cd $(BUILD_DIR) && cmake ..
-	@echo "CMake finished."
+# Uninstall everything
+uninstall: clean
+	@echo "🗑️  Uninstalling power control system..."
+	@sudo rm -f $(LOG_FILE)
+	@echo "✅ Uninstall complete"
+
+# Show help
+help:
+	@echo "Orange Pi Zero 2W Power Control System Makefile"
+	@echo ""
+	@echo "Available targets:"
+	@echo "  install_power_control  - Install the complete power control system (default)"
+	@echo "  check_deps            - Check and install required dependencies"
+	@echo "  install_service       - Install systemd service only"
+	@echo "  enable_service        - Enable and start the service"
+	@echo "  create_logs           - Create log file with proper permissions"
+	@echo "  clean                 - Stop and disable service, remove service file"
+	@echo "  uninstall             - Complete removal of power control system"
+	@echo "  help                  - Show this help message"
+	@echo ""
+	@echo "Usage examples:"
+	@echo "  make install_power_control    # Full installation"
+	@echo "  make clean                    # Stop and remove service"
+	@echo "  make uninstall                # Complete removal"
+	@echo "  make help                     # Show this help"
 

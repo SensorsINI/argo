@@ -1,16 +1,17 @@
 [Unit]
-Description=Argo Robot Launch Service
+Description=Argo Robot ROS2 Launch Service
 After=network.target
 
 [Service]
-User=ubuntu
-Group=ubuntu
-EnvironmentFile=/home/ubuntu/catkin_ws/src/argo/launch/argo.env
-ExecStart=/bin/bash -l -c 'exec "$@"' _  roslaunch argo argo.launch
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/argo
+EnvironmentFile=/home/orangepi/argo/launch/argo.env
+ExecStart=/bin/bash -l -c 'source /opt/ros/humble/setup.bash && ros2 launch launch/argo_launch.py'
 Restart=no
-;Restart=on-failure
-;RestartSec=10
+StandardOutput=journal
+StandardError=journal
 
 [Install]
-; WantedBy=multi-user.target
-; No WantedBy directive, so it won't start automatically.
+# WantedBy=multi-user.target
+# Uncomment above line to enable automatic startup

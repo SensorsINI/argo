@@ -1,3 +1,6 @@
 # parameters for argo control
-/argo/mode: autonomous
-/argo/rudder_gain: 2
+/**:
+  ros__parameters:
+    argo:
+      mode: autonomous
+      rudder_gain: 2

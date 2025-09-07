@@ -21,6 +21,7 @@ from std_msgs.msg import Bool
 from geometry_msgs.msg import Vector3
 
 import time
+import argparse
 from pathlib import Path
 
 # --- Configuration ---
@@ -129,17 +130,18 @@ class PwmNode(Node):
         )
 
         # 3. Human control logic
+        # If the human moves the rudder stick, reset the control timer.
         if abs(radio_rudder_normalized) > HUMAN_CONTROL_THRESHOLD:
             self.time_last_human_cmd = time.time()
-            if not self.human_control:
-                self.get_logger().info("Human took control")
-                self.pub_human_controlled.publish(Bool(data=True))
 
+        # Determine the current control state based on the timeout.
         human_control_now = (time.time() - self.time_last_human_cmd) < HUMAN_CONTROL_TIMEOUT_S
-        if not human_control_now and self.human_control:
-            self.get_logger().info("Computer took control")
-            self.pub_human_controlled.publish(Bool(data=False))
-        
+
+        # Only log and publish if the control state has changed.
+        if human_control_now != self.human_control:
+            self.get_logger().info("Human took control" if human_control_now else "Computer took control")
+            self.pub_human_controlled.publish(Bool(data=human_control_now))
+
         self.human_control = human_control_now
 
         # 4. Set servo outputs
@@ -165,10 +167,40 @@ class PwmNode(Node):
         self.pub_rudder_sail_servo.publish(
             Vector3(x=servo_rudder_normalized, y=servo_sail_normalized, z=0.0)
         )
-        self.pub_human_controlled.publish(Bool(data=self.human_control))
 
 def main(args=None):
-    rclpy.init(args=args)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='PWM Node for ROS2 - Captures and publishes rudder and sail servo positions',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This ROS2 node interfaces with the argo_radio_servo_module kernel module to:
+- Read radio control inputs for rudder and sail from sysfs
+- Publish normalized servo commands (-1 to +1) to ROS topics
+- Handle human vs computer control switching
+- Write servo commands back to the kernel module
+
+Topics:
+  Publishes:
+    /rudder_sail_radio: Vector3 with normalized radio inputs (x=rudder, y=sail)
+    /rudder_sail_servo: Vector3 with actual servo commands sent to hardware
+    /human_controlled: Bool indicating if human has control (based on rudder input)
+
+  Subscribes:
+    /rudder_sail_cmd: Vector3 with computer-generated servo commands
+
+Hardware:
+  Requires argo_radio_servo_module kernel module loaded
+  Sysfs interface at /sys/kernel/argo_radio_servo/
+  Pulse width range: 1000-2000 microseconds (1500 = center)
+        """
+    )
+    
+    # Parse known args to allow ROS2 arguments to pass through
+    parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Initialize ROS2 with remaining arguments
+    rclpy.init(args=unknown_args)
     pwm_node = PwmNode()
     
     if rclpy.ok():
