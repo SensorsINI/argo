@@ -11,6 +11,15 @@ The Argo system consists of multiple ROS2 nodes that work together to provide au
 - **Autonomous Control**: Navigation and sail trimming algorithms
 - **Safety Systems**: Manual override, battery monitoring, water intrusion detection
 
+### Data Recording
+The system records comprehensive sensor data via ROS2 rosbag recording. Based on the launch configuration in `argo_launch.py`, the estimated recording file size is **~13-14 MB per hour**, including:
+- GPS data (raw NMEA + navigation data): 4.32 MB/hour
+- IMU data (accelerometer, gyroscope, magnetometer): 2.59 MB/hour  
+- Anemometer data (wind speed/direction): 1.73 MB/hour
+- PWM/Control data (servo commands): 2.62 MB/hour
+- Battery/Water monitoring: 0.10 MB/hour (optimized)
+- ROS2 overhead: ~2-3 MB/hour
+
 ### Demo Video
 See the Argo autonomous sailboat in action at the 2024 CCNW (before current waterproofing and PCB developements): [Argo Sailboat Demo](https://youtu.be/tjC1262BsCY?si=1GFPk1QcOqpzw8h2)
 
@@ -50,7 +59,7 @@ sudo apt install ros-humble-desktop  # ROS2 Humble
 ```bash
 cd /home/orangepi
 git clone https://github.com/SensorsINI/argo.git
-cd argo
+cd a
 ```
 
 ### 4. Install Python Dependencies
@@ -114,6 +123,9 @@ sudo cp /home/orangepi/argo/launch/argo-record.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable argo-launch.service
 sudo systemctl enable argo-record.service
+
+# Setup GUI storage notifications (optional)
+./scripts/setup_gui_notifications.sh
 ```
 
 ## Running the System
@@ -124,6 +136,8 @@ cd /home/orangepi/argo
 source /opt/ros/humble/setup.bash
 ros2 launch launch/argo_launch.py
 ```
+
+**Storage Monitoring**: The launch script automatically checks available storage space and displays warnings when the SD card is running low. It estimates recording capacity based on the ~13.5 MB/hour data rate.
 
 ### Individual Node Testing
 ```bash
@@ -144,6 +158,32 @@ ros2 topic echo /battery_voltage
 ros2 topic echo /anem_speed_angle_temp
 ros2 topic echo /rudder_sail_radio
 ```
+
+### Storage Monitoring
+```bash
+# Check storage status manually
+python3 scripts/storage_monitor.py --check
+
+# Setup terminal warnings (shows storage status in new terminals)
+./scripts/setup_terminal_warning.sh
+
+# Setup GUI notifications (desktop notifications)
+./scripts/setup_gui_notifications.sh
+```
+
+The system includes comprehensive storage monitoring:
+- **Launch warnings**: Shows storage status when starting the system
+- **Terminal warnings**: Displays storage status in new terminal sessions (optional)
+- **GUI notifications**: Desktop notifications for storage warnings
+- **Critical alerts**: Warns when less than 10 hours of recording space remains
+- **Capacity estimation**: Based on 13.5 MB/hour recording rate
+
+#### GUI Notifications
+The GUI notification system provides:
+- **Startup notification**: Shows available recording time when system boots
+- **Critical warning**: Alert when <10 hours of recording space remains
+- **Warning notification**: Alert when <24 hours of recording space remains
+- **Automatic monitoring**: Checks storage every 5 minutes via systemd service
 
 ## Key ROS2 Nodes
 

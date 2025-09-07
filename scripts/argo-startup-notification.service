@@ -1,0 +1,17 @@
+[Unit]
+Description=Argo Startup Notification
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=oneshot
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/argo
+ExecStart=/home/orangepi/argo/scripts/argo_startup_notification.sh
+# Only run if we have a display (GUI environment)
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+[Install]
+WantedBy=graphical.target

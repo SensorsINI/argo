@@ -1,0 +1,19 @@
+[Unit]
+Description=Argo Storage Monitor - GUI Notifications
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/argo
+ExecStart=/usr/bin/python3 /home/orangepi/argo/scripts/storage_notifications.py check
+Restart=on-failure
+RestartSec=300
+# Only run if we have a display (GUI environment)
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+[Install]
+WantedBy=graphical.target
