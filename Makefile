@@ -6,7 +6,7 @@ LAUNCH_SERVICE = argo-launch.service
 RECORD_SERVICE = argo-record.service
 BAGFILES_DIR = /home/orangepi/bagfiles
 
-.PHONY: help install uninstall enable disable start stop restart status clean aliases
+.PHONY: help install uninstall enable disable start start-with-logs stop restart status clean aliases
 
 help:
 	@echo "Argo Robot Services Management"
@@ -20,6 +20,7 @@ help:
 	@echo ""
 	@echo "Service Control:"
 	@echo "  start       - Start argo-launch service"
+	@echo "  start-with-logs - Start service and monitor logs for 60s"
 	@echo "  stop        - Stop all argo services"
 	@echo "  restart     - Restart argo-launch service"
 	@echo "  status      - Show status of all services"
@@ -33,7 +34,7 @@ help:
 	@echo "  aliases     - Install shell aliases (run: source ~/.bashrc after)"
 	@echo ""
 	@echo "Quick Commands (after installing aliases):"
-	@echo "  al  - Launch argo service"
+	@echo "  al  - Launch argo service (with 60s log monitoring)"
 	@echo "  aq  - Quit argo service"
 	@echo "  ar  - Record data"
 	@echo "  ac  - Close recording"
@@ -72,6 +73,18 @@ start:
 	@echo "Starting Argo launch service..."
 	sudo systemctl start $(LAUNCH_SERVICE)
 	@echo "Argo service started!"
+
+start-with-logs:
+	@echo "Starting Argo launch service with startup monitoring..."
+	sudo systemctl start $(LAUNCH_SERVICE)
+	@echo "✅ Service started! Monitoring logs for 60 seconds..."
+	@echo "📊 Watching for node startup messages (Ctrl+C to exit early):"
+	@echo "================================================"
+	@timeout 60 journalctl -u $(LAUNCH_SERVICE) -f --no-pager -n 0 2>/dev/null || true
+	@echo ""
+	@echo "================================================"
+	@echo "🔍 Final status check:"
+	@make --no-print-directory status
 
 stop:
 	@echo "Stopping all Argo services..."
@@ -116,7 +129,7 @@ aliases:
 	@if ! grep -q "# Argo Robot Control Aliases" ~/.bash_aliases 2>/dev/null; then \
 		echo "" >> ~/.bash_aliases; \
 		echo "# Argo Robot Control Aliases" >> ~/.bash_aliases; \
-		echo "alias al='make -C /home/orangepi/argo start'" >> ~/.bash_aliases; \
+		echo "alias al='make -C /home/orangepi/argo start-with-logs'" >> ~/.bash_aliases; \
 		echo "alias aq='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases; \
 		echo "alias ar='make -C /home/orangepi/argo record'" >> ~/.bash_aliases; \
 		echo "alias ac='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases; \
@@ -149,7 +162,7 @@ aliases:
 	@echo "Run: source ~/.bashrc (or open new terminal)"
 	@echo ""
 	@echo "Available aliases:"
-	@echo "  al   - Launch argo service"
+	@echo "  al   - Launch argo service (with 60s log monitoring)"
 	@echo "  aq   - Quit argo service"
 	@echo "  ar   - Record data"
 	@echo "  ac   - Close recording"
