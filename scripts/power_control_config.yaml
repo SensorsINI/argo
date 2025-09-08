@@ -14,22 +14,22 @@ gpio:
 
 # Power Button Settings
 power_button:
-  shutdown_threshold: 1.0  # Seconds to hold for shutdown
-  debounce_time: 0.01      # Button polling interval
+  shutdown_threshold: 2.0  # Seconds to hold for shutdown
+  debounce_time: 0.02      # Button polling interval
   external_pullup: true    # External pullup resistor present
 
 # LED Settings
 leds:
-  blink_fast: 0.1          # Fast blink rate (seconds)
-  blink_slow: 0.5          # Slow blink rate (seconds)
+  blink_fast: 0.1          # Fast blink interval (seconds)
+  blink_slow: 0.5          # Slow blink interval (seconds)
   shutdown_blink_duration: 5.0  # How long to blink during shutdown
 
 # Power Relay Settings
 relay:
   open_drain: true         # Use open drain configuration
   active_low: true         # Low = energized (relay on)
-  startup_delay: 0.5       # Delay before energizing on startup
-  shutdown_delay: 2.0      # Delay before de-energizing on shutdown
+  startup_delay: 0.1       # Delay before energizing on startup in seconds
+  shutdown_delay: 10.0      # Delay before de-energizing on shutdown in seconds
 
 # Logging
 logging:
@@ -40,7 +40,7 @@ logging:
 
 # Safety Settings
 safety:
-  require_root: true       # Require root privileges
+  require_root: false       # Require root privileges
   graceful_shutdown: true  # Perform graceful shutdown before cutting power
   shutdown_timeout: 30     # Maximum time to wait for shutdown (seconds)
 
