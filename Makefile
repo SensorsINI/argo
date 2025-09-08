@@ -6,7 +6,7 @@ LAUNCH_SERVICE = argo-launch.service
 RECORD_SERVICE = argo-record.service
 BAGFILES_DIR = /home/orangepi/bagfiles
 
-.PHONY: help install uninstall enable disable start start-with-logs stop restart status clean aliases install-dotfiles
+.PHONY: help install uninstall enable disable start start-with-logs stop restart status clean aliases install-dotfiles install_power_control
 
 help:
 	@echo "Argo Robot Services Management"
@@ -33,6 +33,7 @@ help:
 	@echo "  clean       - Clean old bag files (>7 days)"
 	@echo "  aliases     - Install shell aliases (run: source ~/.bashrc after)"
 	@echo "  install-dotfiles - Install dotfiles (.bashrc, .bash_aliases, .tmux.conf) to home directory"
+	@echo "  install_power_control - Install GPIO permissions for power control (udev rules, gpio group)"
 	@echo ""
 	@echo "Quick Commands (after installing aliases):"
 	@echo "  al  - Launch argo service (with 60s log monitoring)"
@@ -200,3 +201,39 @@ install-dotfiles:
 	@echo ""
 	@echo "✅ Dotfiles installation complete!"
 	@echo "Run 'source ~/.bashrc' or open a new terminal to apply changes."
+
+install_power_control:
+	@echo "Installing power control GPIO permissions..."
+	@echo "Creating gpio group (if it doesn't exist)..."
+	@sudo groupadd gpio 2>/dev/null || echo "gpio group already exists"
+	@echo "Installing udev rules for GPIO access..."
+	@echo "# GPIO permissions for Orange Pi Zero 2W" | sudo tee /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "# Allow members of the 'gpio' group to access GPIO devices" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "# GPIO chip devices" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'SUBSYSTEM=="gpio", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "# GPIO character devices (gpiochip)" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'KERNEL=="gpiochip*", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "# GPIO sysfs interface" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'SUBSYSTEM=="gpio", KERNEL=="export", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'SUBSYSTEM=="gpio", KERNEL=="unexport", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'SUBSYSTEM=="gpio", KERNEL=="gpio*", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "Adding current user to gpio group..."
+	@sudo usermod -a -G gpio $$(whoami)
+	@echo "Reloading udev rules..."
+	@sudo udevadm control --reload-rules
+	@sudo udevadm trigger
+	@echo ""
+	@echo "✅ Power control GPIO permissions installed successfully!"
+	@echo ""
+	@echo "📋 Next steps:"
+	@echo "  1. Log out and log back in, OR run: newgrp gpio"
+	@echo "  2. Test with: ./scripts/power_control.py --test-mode"
+	@echo ""
+	@echo "🔧 What was installed:"
+	@echo "  - Created 'gpio' group"
+	@echo "  - Added udev rules for GPIO device access"
+	@echo "  - Added user '$$(whoami)' to gpio group"
+	@echo "  - Reloaded udev rules to apply changes"
