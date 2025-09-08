@@ -43,7 +43,7 @@
 #   6. As final action: De-energize relay by setting !POW high
 #
 # USAGE:
-#   sudo ./power_control.py [--help] [--test-mode] [--threshold SECONDS]
+#   ./power_control.py [--help] [--test-mode] [--threshold SECONDS]
 #
 # OPTIONS:
 #   --help              Show this help message and exit
@@ -51,12 +51,12 @@
 #   --threshold SECONDS Set button press threshold for shutdown (default: 1.0)
 #
 # EXAMPLES:
-#   sudo ./power_control.py                    # Normal operation
-#   sudo ./power_control.py --test-mode        # Test mode (safe)
-#   sudo ./power_control.py --threshold 2.0    # 2-second threshold
+#   ./power_control.py                         # Normal operation
+#   ./power_control.py --test-mode             # Test mode (safe)
+#   ./power_control.py --threshold 2.0         # 2-second threshold
 #
 # REQUIREMENTS:
-#   - Must run as root (for GPIO access)
+#   - User must be member of 'gpio' group (for GPIO access)
 #   - python3-gpiod library installed
 #   - External pullup resistor on power button input
 #   - Proper hardware connections as described above
@@ -65,7 +65,7 @@
 #   - Open drain configuration prevents damage from multiple control sources
 #   - Graceful shutdown ensures proper system shutdown before cutting power
 #   - External pullup resistor requirement prevents floating inputs
-#   - Root privilege requirement for GPIO access security
+#   - GPIO group membership requirement for controlled GPIO access
 #
 # AUTHOR: Generated for Orange Pi Zero 2W Power Control System
 # VERSION: 1.0
@@ -120,7 +120,7 @@ class PowerController:
         self.test_mode = test_mode
         
         # GPIO Configuration
-        self.GPIO_CHIP = 'gpiochip0'
+        self.GPIO_CHIP = '/dev/gpiochip0'
         
         # Correct GPIO Line offsets from gpio readall
         self.POWER_RELAY_LINE = 259    # PI3 (Pin 40) - !POW
@@ -133,7 +133,7 @@ class PowerController:
         
         # LED blink patterns
         self.LED_BLINK_FAST = 0.1      # Fast blink for normal operation
-        self.LED_BLINK_SLOW = 0.5      # Slow blink for shutdown warning
+        self.LED_BLINK_SLOW = 0.5      # Slow blink for shutdown warn
         
         # Initialize GPIO
         self.init_gpio()
@@ -147,44 +147,56 @@ class PowerController:
     def init_gpio(self):
         """Initialize GPIO pins"""
         try:
+            logger.info(f"Attempting to open GPIO chip: {self.GPIO_CHIP}")
             self.chip = gpiod.Chip(self.GPIO_CHIP)
+            logger.info(f"Successfully opened GPIO chip: {self.GPIO_CHIP}")
             
             # Configure power relay control (PI3) - Open drain output
-            self.power_relay = self.chip.get_line(self.POWER_RELAY_LINE)
-            self.power_relay.request(
+            relay_settings = gpiod.LineSettings()
+            relay_settings.direction = relay_settings.direction.OUTPUT
+            relay_settings.output_value = relay_settings.output_value.INACTIVE  # Start with relay energized (low = on)
+            relay_settings.drive = relay_settings.drive.OPEN_DRAIN
+            
+            self.power_relay = self.chip.request_lines(
                 consumer="power_control.py",
-                type=gpiod.LINE_REQ_DIR_OUT,
-                default_vals=[0],  # Start with relay energized (low = on)
-                flags=gpiod.LINE_REQ_FLAG_OPEN_DRAIN
+                config={self.POWER_RELAY_LINE: relay_settings}
             )
             
             # Configure power button input (PI9) - Input without pullup
-            self.power_button = self.chip.get_line(self.POWER_BUTTON_LINE)
-            self.power_button.request(
+            button_settings = gpiod.LineSettings()
+            button_settings.direction = button_settings.direction.INPUT
+            button_settings.bias = button_settings.bias.DISABLED  # No internal pullup
+            
+            self.power_button = self.chip.request_lines(
                 consumer="power_control.py",
-                type=gpiod.LINE_REQ_DIR_IN,
-                flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE  # No internal pullup
+                config={self.POWER_BUTTON_LINE: button_settings}
             )
             
             # Configure LED outputs
-            self.green_led = self.chip.get_line(self.GREEN_LED_LINE)
-            self.green_led.request(
+            green_led_settings = gpiod.LineSettings()
+            green_led_settings.direction = green_led_settings.direction.OUTPUT
+            green_led_settings.output_value = green_led_settings.output_value.INACTIVE  # Start with LED off
+            
+            self.green_led = self.chip.request_lines(
                 consumer="power_control.py",
-                type=gpiod.LINE_REQ_DIR_OUT,
-                default_vals=[0]  # Start with LED off
+                config={self.GREEN_LED_LINE: green_led_settings}
             )
             
-            self.blue_led = self.chip.get_line(self.BLUE_LED_LINE)
-            self.blue_led.request(
+            blue_led_settings = gpiod.LineSettings()
+            blue_led_settings.direction = blue_led_settings.direction.OUTPUT
+            blue_led_settings.output_value = blue_led_settings.output_value.INACTIVE  # Start with LED off
+            
+            self.blue_led = self.chip.request_lines(
                 consumer="power_control.py",
-                type=gpiod.LINE_REQ_DIR_OUT,
-                default_vals=[0]  # Start with LED off
+                config={self.BLUE_LED_LINE: blue_led_settings}
             )
             
             logger.info("GPIO pins configured successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize GPIO: {e}")
+            logger.error(f"GPIO chip path attempted: {self.GPIO_CHIP}")
+            logger.error(f"Full error details: {type(e).__name__}: {e}")
             raise
 
     def signal_handler(self, signum, frame):
@@ -195,7 +207,10 @@ class PowerController:
     def read_power_button(self):
         """Read power button state"""
         try:
-            return self.power_button.get_value()
+            values = self.power_button.get_values()
+            # get_values() returns a list of Value objects
+            # For a single line request, the value is at index 0
+            return values[0].value  # Return the actual integer value (0 or 1)
         except Exception as e:
             logger.error(f"Error reading power button: {e}")
             return 1  # Assume not pressed on error
@@ -204,7 +219,9 @@ class PowerController:
         """Control power relay (True = energized/on, False = de-energized/off)"""
         try:
             # For open drain: 0 = energized (relay on), 1 = de-energized (relay off)
-            self.power_relay.set_value(0 if state else 1)
+            settings = gpiod.LineSettings()
+            value = settings.output_value.INACTIVE if state else settings.output_value.ACTIVE
+            self.power_relay.set_values({self.POWER_RELAY_LINE: value})
             logger.info(f"Power relay set to {'ON' if state else 'OFF'}")
         except Exception as e:
             logger.error(f"Error controlling power relay: {e}")
@@ -212,14 +229,18 @@ class PowerController:
     def set_green_led(self, state):
         """Control green LED"""
         try:
-            self.green_led.set_value(1 if state else 0)
+            settings = gpiod.LineSettings()
+            value = settings.output_value.ACTIVE if state else settings.output_value.INACTIVE
+            self.green_led.set_values({self.GREEN_LED_LINE: value})
         except Exception as e:
             logger.error(f"Error controlling green LED: {e}")
 
     def set_blue_led(self, state):
         """Control blue LED"""
         try:
-            self.blue_led.set_value(1 if state else 0)
+            settings = gpiod.LineSettings()
+            value = settings.output_value.ACTIVE if state else settings.output_value.INACTIVE
+            self.blue_led.set_values({self.BLUE_LED_LINE: value})
         except Exception as e:
             logger.error(f"Error controlling blue LED: {e}")
 
@@ -455,22 +476,25 @@ LED INDICATORS:
   - Red LED: Directly connected to power button (not controlled by GPIO)
 
 USAGE:
-  sudo ./power_control.py [OPTIONS]
+  ./power_control.py [OPTIONS]
 
 OPTIONS:
-  --help              Show this help message and exit
-  --test-mode         Run in test mode (disable actual shutdown and power control)
-  --threshold SECONDS Set button press threshold for shutdown (default: 1.0)
-  --test-wall-message Test wall message functionality and exit (safe for testing)
+  --help, -h          Show this help message and exit
+  --test-mode, -t     Run in test mode (disable actual shutdown and power control)
+  --threshold, -T     Set button press threshold for shutdown (default: 1.0)
+  --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
 
 EXAMPLES:
-  sudo ./power_control.py                    # Normal operation
-  sudo ./power_control.py --test-mode        # Test mode (safe)
-  sudo ./power_control.py --threshold 2.0    # 2-second threshold
-  sudo ./power_control.py --test-wall-message # Test wall message (safe)
+  ./power_control.py                         # Normal operation
+  ./power_control.py --test-mode             # Test mode (safe)
+  ./power_control.py -t                      # Test mode (short form)
+  ./power_control.py --threshold 2.0         # 2-second threshold
+  ./power_control.py -T 2.0                  # 2-second threshold (short form)
+  ./power_control.py --test-wall-message     # Test wall message (safe)
+  ./power_control.py -w                      # Test wall message (short form)
 
 REQUIREMENTS:
-  - Must run as root (for GPIO access)
+  - User must be member of 'gpio' group (for GPIO access)
   - python3-gpiod library installed
   - External pullup resistor on power button input
   - Proper hardware connections as described above
@@ -479,7 +503,7 @@ SAFETY FEATURES:
   - Open drain configuration prevents damage from multiple control sources
   - Graceful shutdown ensures proper system shutdown before cutting power
   - External pullup resistor requirement prevents floating inputs
-  - Root privilege requirement for GPIO access security
+  - GPIO group membership requirement for controlled GPIO access
 """
     print(help_text)
 
@@ -489,13 +513,13 @@ def main():
         description='Orange Pi Zero 2W Power Control System',
         add_help=False
     )
-    parser.add_argument('--help', action='store_true', 
+    parser.add_argument('--help', '-h', action='store_true', 
                        help='Show help message and exit')
-    parser.add_argument('--test-mode', action='store_true',
+    parser.add_argument('--test-mode', '-t', action='store_true',
                        help='Run in test mode (disable actual shutdown and power control)')
-    parser.add_argument('--threshold', type=float, default=1.0,
+    parser.add_argument('--threshold', '-T', type=float, default=1.0,
                        help='Set button press threshold for shutdown in seconds (default: 1.0)')
-    parser.add_argument('--test-wall-message', action='store_true',
+    parser.add_argument('--test-wall-message', '-w', action='store_true',
                        help='Test wall message functionality and exit (safe for testing)')
     
     args = parser.parse_args()
@@ -528,10 +552,19 @@ def main():
             sys.exit(1)
         sys.exit(0)
     
-    # Check if running as root (required for GPIO access)
-    if os.geteuid() != 0:
-        print("Error: This script must be run as root for GPIO access")
-        print("Use: sudo ./power_control.py")
+    # Check if user is in the gpio group (required for GPIO access)
+    import grp
+    try:
+        gpio_group = grp.getgrnam('gpio')
+        if gpio_group.gr_gid not in os.getgroups():
+            print("Error: This script requires GPIO access")
+            print("Your user must be a member of the 'gpio' group")
+            print("Run: sudo usermod -a -G gpio $USER")
+            print("Then log out and log back in, or run: newgrp gpio")
+            sys.exit(1)
+    except KeyError:
+        print("Error: GPIO group not found")
+        print("Please ensure the 'gpio' group exists and you are a member")
         sys.exit(1)
     
     # Validate threshold
