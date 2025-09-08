@@ -133,7 +133,7 @@ aliases:
 		echo "alias aq='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases; \
 		echo "alias ar='make -C /home/orangepi/argo record'" >> ~/.bash_aliases; \
 		echo "alias ac='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases; \
-		echo "alias as='make -C /home/orangepi/argo status'" >> ~/.bash_aliases; \
+		echo "alias as='make -C /home/orangepi/argo status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases; \
 		echo "alias ars='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases; \
 		echo "alias argo_help='bash /home/orangepi/argo/scripts/argo_help.sh'" >> ~/.bash_aliases; \
 		echo "" >> ~/.bash_aliases; \
