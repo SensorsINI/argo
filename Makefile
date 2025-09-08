@@ -33,10 +33,10 @@ help:
 	@echo "  aliases     - Install shell aliases (run: source ~/.bashrc after)"
 	@echo ""
 	@echo "Quick Commands (after installing aliases):"
-	@echo "  argo_start  - Start argo service"
-	@echo "  argo_stop   - Stop argo service"
-	@echo "  argo_record - Start recording"
-	@echo "  argo_close  - Stop recording"
+	@echo "  al  - Launch argo service"
+	@echo "  aq  - Quit argo service"
+	@echo "  ar  - Record data"
+	@echo "  ac  - Close recording"
 
 install:
 	@echo "Installing Argo services..."
@@ -116,12 +116,13 @@ aliases:
 	@if ! grep -q "# Argo Robot Control Aliases" ~/.bash_aliases 2>/dev/null; then \
 		echo "" >> ~/.bash_aliases; \
 		echo "# Argo Robot Control Aliases" >> ~/.bash_aliases; \
-		echo "alias argo_start='make -C /home/orangepi/argo start'" >> ~/.bash_aliases; \
-		echo "alias argo_stop='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases; \
-		echo "alias argo_record='make -C /home/orangepi/argo record'" >> ~/.bash_aliases; \
-		echo "alias argo_close='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases; \
-		echo "alias argo_status='make -C /home/orangepi/argo status'" >> ~/.bash_aliases; \
-		echo "alias argo_restart='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases; \
+		echo "alias al='make -C /home/orangepi/argo start'" >> ~/.bash_aliases; \
+		echo "alias aq='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases; \
+		echo "alias ar='make -C /home/orangepi/argo record'" >> ~/.bash_aliases; \
+		echo "alias ac='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases; \
+		echo "alias as='make -C /home/orangepi/argo status'" >> ~/.bash_aliases; \
+		echo "alias ars='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases; \
+		echo "alias argo_help='bash /home/orangepi/argo/scripts/argo_help.sh'" >> ~/.bash_aliases; \
 		echo "" >> ~/.bash_aliases; \
 		echo "✅ Aliases installed to ~/.bash_aliases"; \
 	else \
@@ -137,13 +138,21 @@ aliases:
 	else \
 		echo "✅ .bash_aliases already sourced in ~/.bashrc"; \
 	fi
+	@echo "" >> ~/.bashrc; \
+	echo "# Argo daily reminder (once per day)" >> ~/.bashrc; \
+	echo "if [ ! -f ~/.argo_reminder_date ] || [ \"\$$(date +%Y-%m-%d)\" != \"\$$(cat ~/.argo_reminder_date)\" ]; then" >> ~/.bashrc; \
+	echo "    echo \"🚢 Argo: al=launch, aq=quit, ar=record, ac=close, as=status, ars=restart\"" >> ~/.bashrc; \
+	echo "    date +%Y-%m-%d > ~/.argo_reminder_date" >> ~/.bashrc; \
+	echo "fi" >> ~/.bashrc; \
+	echo "✅ Added daily Argo reminder to ~/.bashrc"
 	@echo ""
 	@echo "Run: source ~/.bashrc (or open new terminal)"
 	@echo ""
 	@echo "Available aliases:"
-	@echo "  argo_start   - Start argo service"
-	@echo "  argo_stop    - Stop argo service"
-	@echo "  argo_record  - Start recording"
-	@echo "  argo_close   - Stop recording"
-	@echo "  argo_status  - Show service status"
-	@echo "  argo_restart - Restart argo service"
+	@echo "  al   - Launch argo service"
+	@echo "  aq   - Quit argo service"
+	@echo "  ar   - Record data"
+	@echo "  ac   - Close recording"
+	@echo "  as   - Show service status"
+	@echo "  ars  - Restart argo service"
+	@echo "  argo_help - Show detailed help"
