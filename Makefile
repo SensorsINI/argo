@@ -6,7 +6,7 @@ LAUNCH_SERVICE = argo-launch.service
 RECORD_SERVICE = argo-record.service
 BAGFILES_DIR = /home/orangepi/bagfiles
 
-.PHONY: help install uninstall enable disable start start-with-logs stop restart status clean aliases
+.PHONY: help install uninstall enable disable start start-with-logs stop restart status clean aliases install-dotfiles
 
 help:
 	@echo "Argo Robot Services Management"
@@ -32,12 +32,15 @@ help:
 	@echo "Utilities:"
 	@echo "  clean       - Clean old bag files (>7 days)"
 	@echo "  aliases     - Install shell aliases (run: source ~/.bashrc after)"
+	@echo "  install-dotfiles - Install dotfiles (.bashrc, .bash_aliases, .tmux.conf) to home directory"
 	@echo ""
 	@echo "Quick Commands (after installing aliases):"
 	@echo "  al  - Launch argo service (with 60s log monitoring)"
 	@echo "  aq  - Quit argo service"
 	@echo "  ar  - Record data"
 	@echo "  ac  - Close recording"
+	@echo "  af  - Launch argo with Foxglove visualization"
+	@echo "  afb - Launch rosbridge for Foxglove connection"
 
 install:
 	@echo "Installing Argo services..."
@@ -136,6 +139,8 @@ aliases:
 		echo "alias as='make -C /home/orangepi/argo status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases; \
 		echo "alias ars='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases; \
 		echo "alias argo_help='bash /home/orangepi/argo/scripts/argo_help.sh'" >> ~/.bash_aliases; \
+		echo "alias af='ros2 launch /home/orangepi/argo/foxglove/argo_with_foxglove_launch.py'" >> ~/.bash_aliases; \
+		echo "alias afb='ros2 launch rosbridge_server rosbridge_websocket_launch.xml'" >> ~/.bash_aliases; \
 		echo "" >> ~/.bash_aliases; \
 		echo "✅ Aliases installed to ~/.bash_aliases"; \
 	else \
@@ -154,7 +159,7 @@ aliases:
 	@echo "" >> ~/.bashrc; \
 	echo "# Argo daily reminder (once per day)" >> ~/.bashrc; \
 	echo "if [ ! -f ~/.argo_reminder_date ] || [ \"\$$(date +%Y-%m-%d)\" != \"\$$(cat ~/.argo_reminder_date)\" ]; then" >> ~/.bashrc; \
-	echo "    echo \"🚢 Argo: al=launch, aq=quit, ar=record, ac=close, as=status, ars=restart\"" >> ~/.bashrc; \
+	echo "    echo \"🚢 Argo: al=launch, aq=quit, ar=record, ac=close, as=status, ars=restart, af=foxglove, afb=rosbridge\"" >> ~/.bashrc; \
 	echo "    date +%Y-%m-%d > ~/.argo_reminder_date" >> ~/.bashrc; \
 	echo "fi" >> ~/.bashrc; \
 	echo "✅ Added daily Argo reminder to ~/.bashrc"
@@ -168,4 +173,30 @@ aliases:
 	@echo "  ac   - Close recording"
 	@echo "  as   - Show service status"
 	@echo "  ars  - Restart argo service"
+	@echo "  af   - Launch argo with Foxglove visualization"
+	@echo "  afb  - Launch rosbridge for Foxglove connection"
 	@echo "  argo_help - Show detailed help"
+
+install-dotfiles:
+	@echo "Installing dotfiles to home directory..."
+	@if [ -f dotfiles/.bashrc ]; then \
+		cp dotfiles/.bashrc ~/.bashrc; \
+		echo "✅ Installed .bashrc"; \
+	else \
+		echo "❌ dotfiles/.bashrc not found"; \
+	fi
+	@if [ -f dotfiles/.bash_aliases ]; then \
+		cp dotfiles/.bash_aliases ~/.bash_aliases; \
+		echo "✅ Installed .bash_aliases"; \
+	else \
+		echo "❌ dotfiles/.bash_aliases not found"; \
+	fi
+	@if [ -f dotfiles/.tmux.conf ]; then \
+		cp dotfiles/.tmux.conf ~/.tmux.conf; \
+		echo "✅ Installed .tmux.conf"; \
+	else \
+		echo "❌ dotfiles/.tmux.conf not found"; \
+	fi
+	@echo ""
+	@echo "✅ Dotfiles installation complete!"
+	@echo "Run 'source ~/.bashrc' or open a new terminal to apply changes."
