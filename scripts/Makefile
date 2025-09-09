@@ -18,10 +18,11 @@ install_power_control: check_deps install_service enable_service create_logs
 	@echo "✅ Power Control System Installation Complete!"
 	@echo ""
 	@echo "Next steps:"
-	@echo "1. The power control service will start automatically on boot"
-	@echo "2. Check service status with: sudo systemctl status $(SERVICE_NAME)"
-	@echo "3. View logs with: sudo journalctl -u $(SERVICE_NAME) -f"
-	@echo "4. Test with: sudo systemctl start $(SERVICE_NAME)"
+	@echo "1. If you were just added to the gpio group, log out and log back in"
+	@echo "2. The power control service will start automatically on boot"
+	@echo "3. Check service status with: sudo systemctl status $(SERVICE_NAME)"
+	@echo "4. View logs with: sudo journalctl -u $(SERVICE_NAME) -f"
+	@echo "5. Test with: sudo systemctl start $(SERVICE_NAME)"
 	@echo ""
 	@echo "Hardware connections:"
 	@echo "- PI3 (Pin 40): Connect to !POW relay control (open drain)"
@@ -44,11 +45,29 @@ check_deps:
 	else \
 		echo "✅ python3-libgpiod already installed"; \
 	fi
+	@echo "🔧 Setting up GPIO permissions..."
+	@if ! getent group gpio > /dev/null 2>&1; then \
+		echo "📦 Creating gpio group..."; \
+		sudo groupadd gpio; \
+	else \
+		echo "✅ gpio group already exists"; \
+	fi
+	@if ! groups $(USER) | grep -q gpio; then \
+		echo "👤 Adding $(USER) to gpio group..."; \
+		sudo usermod -a -G gpio $(USER); \
+		echo "⚠️  IMPORTANT: You must log out and log back in for group changes to take effect!"; \
+		echo "   Or run: newgrp gpio"; \
+	else \
+		echo "✅ $(USER) is already a member of gpio group"; \
+	fi
 
 # Install systemd service
 install_service:
 	@echo "📋 Installing systemd service..."
-	@sudo cp $(SERVICE_FILE) /etc/systemd/system/
+	@echo "🔧 Configuring service for user: $(USER)"
+	@sed "s/User=orangepi/User=$(USER)/g" $(SERVICE_FILE) > /tmp/$(SERVICE_FILE)
+	@sudo cp /tmp/$(SERVICE_FILE) /etc/systemd/system/$(SERVICE_FILE)
+	@rm -f /tmp/$(SERVICE_FILE)
 	@sudo chmod +x $(PYTHON_SCRIPT)
 	@sudo systemctl daemon-reload
 	@echo "✅ Service installed and systemd reloaded"
@@ -90,7 +109,7 @@ help:
 	@echo "Available targets:"
 	@echo "  install_power_control  - Install the complete power control system (default)"
 	@echo "  check_deps            - Check and install required dependencies"
-	@echo "  install_service       - Install systemd service only"
+	@echo "  install_service       - Install systemd service only (auto-configures for current user)"
 	@echo "  enable_service        - Enable and start the service"
 	@echo "  create_logs           - Create log file with proper permissions"
 	@echo "  clean                 - Stop and disable service, remove service file"

@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
 ROS2 Launch file for Argo sailboat
-Launches all sensor nodes and control system
+Launches all sensor nodes, control system, and Foxglove Bridge for visualization
+
+Launch arguments:
+  use_foxglove_bridge:=true/false   Enable/disable Foxglove Bridge (default: true)
+  foxglove_port:=<port>            Set Foxglove Bridge port (default: 8765)
+  foxglove_address:=<address>      Set bind address (default: 0.0.0.0)
+
+Example usage:
+  ros2 launch launch/argo_launch.py                                    # Default (Foxglove enabled)
+  ros2 launch launch/argo_launch.py use_foxglove_bridge:=false        # Disable Foxglove
+  ros2 launch launch/argo_launch.py foxglove_port:=9090               # Custom port
 """
 
 from launch import LaunchDescription
@@ -63,10 +73,22 @@ def generate_launch_description():
     check_storage_and_warn()
     
     # Declare launch arguments
-    use_rosbridge_arg = DeclareLaunchArgument(
-        'use_rosbridge',
+    use_foxglove_bridge_arg = DeclareLaunchArgument(
+        'use_foxglove_bridge',
         default_value='true',
-        description='Whether to launch rosbridge_server'
+        description='Whether to launch foxglove_bridge for visualization'
+    )
+    
+    foxglove_port_arg = DeclareLaunchArgument(
+        'foxglove_port',
+        default_value='8765',
+        description='Port for foxglove_bridge websocket server'
+    )
+    
+    foxglove_address_arg = DeclareLaunchArgument(
+        'foxglove_address',
+        default_value='0.0.0.0',
+        description='Address for foxglove_bridge to bind to (0.0.0.0 = all interfaces)'
     )
     
     # Get script directory (direct path since we're not using colcon build)
@@ -117,30 +139,50 @@ def generate_launch_description():
         ),
     ]
     
-    # Conditionally add rosbridge_server if available
-    # Note: rosbridge_server might not be installed, so we make this optional
-    # Check if rosbridge_server package exists before launching
+    # Conditionally add foxglove_bridge if available
+    # Check if foxglove_bridge package exists before launching
     try:
         from ament_index_python.packages import get_package_share_directory
-        get_package_share_directory('rosbridge_server')
-        rosbridge_available = True
+        get_package_share_directory('foxglove_bridge')
+        foxglove_bridge_available = True
     except:
-        rosbridge_available = False
-        print("Warning: rosbridge_server package not found, skipping rosbridge launch")
+        foxglove_bridge_available = False
+        print("Warning: foxglove_bridge package not found, skipping foxglove_bridge launch")
+        print("Install with: sudo apt install ros-$ROS_DISTRO-foxglove-bridge")
     
-    # Only create rosbridge node if package is available
-    rosbridge_nodes = []
-    if rosbridge_available:
-        rosbridge_node = ExecuteProcess(
-            condition=IfCondition(LaunchConfiguration('use_rosbridge')),
-            cmd=['ros2', 'launch', 'rosbridge_server', 'rosbridge_websocket_launch.xml'],
+    # Only create foxglove_bridge node if package is available
+    foxglove_bridge_nodes = []
+    if foxglove_bridge_available:
+        foxglove_bridge_node = ExecuteProcess(
+            condition=IfCondition(LaunchConfiguration('use_foxglove_bridge')),
+            cmd=[
+                'ros2', 'run', 'foxglove_bridge', 'foxglove_bridge',
+                '--ros-args',
+                '-p', ['port:=', LaunchConfiguration('foxglove_port')],
+                '-p', ['address:=', LaunchConfiguration('foxglove_address')]
+            ],
             output='screen',
             shell=True
         )
-        rosbridge_nodes.append(rosbridge_node)
+        foxglove_bridge_nodes.append(foxglove_bridge_node)
+        
+        # Print connection info when foxglove bridge is enabled
+        # Note: This will always print since we can't evaluate LaunchConfiguration at this point
+        # The actual launching is controlled by the IfCondition
+        print("\n" + "="*60)
+        print("🔗 FOXGLOVE BRIDGE AVAILABLE")
+        print("="*60)
+        print("   To enable: launch with use_foxglove_bridge:=true (default)")
+        print("   To disable: launch with use_foxglove_bridge:=false")
+        print("   WebSocket URL: ws://<your-ip>:8765 (when enabled)")
+        print("   Configure port: foxglove_port:=<port>")
+        print("   Configure address: foxglove_address:=<address>")
+        print("="*60)
     
     return LaunchDescription([
-        use_rosbridge_arg,
+        use_foxglove_bridge_arg,
+        foxglove_port_arg,
+        foxglove_address_arg,
         *nodes,
-        *rosbridge_nodes,
+        *foxglove_bridge_nodes,
     ])

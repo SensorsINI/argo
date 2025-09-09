@@ -295,6 +295,13 @@ class PowerController:
                     self.power_button_pressed = True
                     logger.info("Power button pressed")
                     
+                    # Send desktop notification for button press
+                    self.send_desktop_notification(
+                        "Power Button", 
+                        "Power button pressed - hold for shutdown",
+                        "normal"
+                    )
+                    
                     # Start warning LED pattern (cyan effect)
                     threading.Thread(
                         target=self.cyan_warning_blink,
@@ -312,6 +319,12 @@ class PowerController:
                             self.initiate_shutdown()
                         else:
                             logger.info("Short press detected, no action taken")
+                            # Send notification for short press
+                            self.send_desktop_notification(
+                                "Power Button", 
+                                f"Short press detected ({press_duration:.1f}s) - no action",
+                                "low"
+                            )
                     
                     self.power_button_pressed = False
                     self.button_press_start_time = None
@@ -330,12 +343,67 @@ class PowerController:
                 logger.error(f"Error in power button monitoring: {e}")
                 time.sleep(0.1)
 
+    def send_desktop_notification(self, title, message, urgency="normal"):
+        """Send desktop notification using notify-send"""
+        try:
+            if self.test_mode:
+                logger.info(f"TEST MODE: Would send desktop notification - {title}: {message}")
+            else:
+                # Set up environment for desktop notifications
+                env = os.environ.copy()
+                
+                # Try to find the display for logged-in users
+                try:
+                    # Get list of logged-in users and their displays
+                    result = subprocess.run(['who'], capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        for line in result.stdout.strip().split('\n'):
+                            if line and ':' in line:
+                                parts = line.split()
+                                for part in parts:
+                                    if part.startswith(':'):
+                                        display = part[1:]  # Remove the leading ':'
+                                        if display.isdigit() or '.' in display:
+                                            env['DISPLAY'] = f':{display}'
+                                            break
+                                if 'DISPLAY' in env:
+                                    break
+                except Exception as e:
+                    logger.debug(f"Could not determine display from 'who' command: {e}")
+                
+                # If no display found, try common defaults
+                if 'DISPLAY' not in env:
+                    env['DISPLAY'] = ':0'
+                
+                # Try to send desktop notification
+                subprocess.run([
+                    'notify-send', 
+                    '--urgency', urgency,
+                    '--expire-time', '5000',  # 5 second timeout
+                    title, 
+                    message
+                ], check=True, timeout=5, env=env)
+                logger.info(f"Desktop notification sent: {title}")
+        except subprocess.TimeoutExpired:
+            logger.warning("Desktop notification timed out")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Failed to send desktop notification: {e}")
+        except Exception as e:
+            logger.warning(f"Unexpected error sending desktop notification: {e}")
+
     def broadcast_shutdown_message(self):
         """Broadcast shutdown message to all logged-in users"""
         try:
             # Create shutdown message with timestamp
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             message = f"SYSTEM SHUTDOWN INITIATED by power button at {timestamp}\nThe system will shutdown in 5 seconds."
+            
+            # Send desktop notification
+            self.send_desktop_notification(
+                "System Shutdown", 
+                f"Power button pressed - system will shutdown in 5 seconds",
+                "critical"
+            )
             
             # Use wall command to broadcast message to all users
             if self.test_mode:
@@ -394,6 +462,22 @@ class PowerController:
         
         # As final action, de-energize relay to cut power
         time.sleep(2)  # Give system time to start shutdown
+        
+        # Flush SD card cache before cutting power
+        if self.test_mode:
+            logger.info("TEST MODE: SD card cache flush disabled - would normally flush cache")
+        else:
+            logger.info("Flushing SD card cache before power cut...")
+            try:
+                subprocess.run(['sync'], check=True, timeout=10)
+                logger.info("SD card cache flushed successfully")
+            except subprocess.TimeoutExpired:
+                logger.warning("Cache flush timed out - proceeding with power cut")
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"Cache flush failed: {e} - proceeding with power cut")
+            except Exception as e:
+                logger.warning(f"Unexpected error during cache flush: {e} - proceeding with power cut")
+        
         if self.test_mode:
             logger.info("TEST MODE: Power relay de-energization disabled - would normally cut power")
         else:
@@ -483,6 +567,7 @@ OPTIONS:
   --test-mode, -t     Run in test mode (disable actual shutdown and power control)
   --threshold, -T     Set button press threshold for shutdown (default: 1.0)
   --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
+  --test-notification, -n  Test desktop notification functionality and exit (safe for testing)
 
 EXAMPLES:
   ./power_control.py                         # Normal operation
@@ -492,6 +577,8 @@ EXAMPLES:
   ./power_control.py -T 2.0                  # 2-second threshold (short form)
   ./power_control.py --test-wall-message     # Test wall message (safe)
   ./power_control.py -w                      # Test wall message (short form)
+  ./power_control.py --test-notification     # Test desktop notification (safe)
+  ./power_control.py -n                      # Test desktop notification (short form)
 
 REQUIREMENTS:
   - User must be member of 'gpio' group (for GPIO access)
@@ -521,6 +608,8 @@ def main():
                        help='Set button press threshold for shutdown in seconds (default: 1.0)')
     parser.add_argument('--test-wall-message', '-w', action='store_true',
                        help='Test wall message functionality and exit (safe for testing)')
+    parser.add_argument('--test-notification', '-n', action='store_true',
+                       help='Test desktop notification functionality and exit (safe for testing)')
     
     args = parser.parse_args()
     
@@ -549,6 +638,56 @@ def main():
             sys.exit(1)
         except Exception as e:
             print(f"Error during wall message test: {e}")
+            sys.exit(1)
+        sys.exit(0)
+    
+    # Handle notification test
+    if args.test_notification:
+        print("Testing desktop notification functionality...")
+        try:
+            # Test different notification types
+            print("Sending test notifications...")
+            
+            # Test normal notification
+            subprocess.run([
+                'notify-send', 
+                '--urgency', 'normal',
+                '--expire-time', '3000',
+                'Power Control Test', 
+                'Normal notification test - power button functionality'
+            ], check=True, timeout=5)
+            print("✅ Normal notification sent")
+            
+            # Test critical notification
+            subprocess.run([
+                'notify-send', 
+                '--urgency', 'critical',
+                '--expire-time', '5000',
+                'System Shutdown', 
+                'Critical notification test - system shutdown warning'
+            ], check=True, timeout=5)
+            print("✅ Critical notification sent")
+            
+            # Test low priority notification
+            subprocess.run([
+                'notify-send', 
+                '--urgency', 'low',
+                '--expire-time', '2000',
+                'Power Button', 
+                'Low priority notification test - short press detected'
+            ], check=True, timeout=5)
+            print("✅ Low priority notification sent")
+            
+            print("Desktop notification test completed successfully!")
+            print("Check your desktop - you should have received 3 test notifications.")
+        except subprocess.TimeoutExpired:
+            print("Desktop notification timed out - check if notify-send is working")
+            sys.exit(1)
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to send desktop notification: {e}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error during desktop notification test: {e}")
             sys.exit(1)
         sys.exit(0)
     

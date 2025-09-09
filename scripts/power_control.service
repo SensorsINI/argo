@@ -6,7 +6,7 @@ Wants=multi-user.target
 
 [Service]
 Type=simple
-User=root
+User=orangepi
 WorkingDirectory=/home/orangepi/argo/scripts
 ExecStart=/usr/bin/python3 /home/orangepi/argo/scripts/power_control.py
 Restart=no
