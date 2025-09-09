@@ -35,3 +35,4 @@ scripts/pwm_capture_module/argo_radio_servo_module.mod
 scripts/Makefile.mk
 scripts/pwm_capture_module/Makefile.mk
 launch/__pycache__/
+scripts/power_control.log
