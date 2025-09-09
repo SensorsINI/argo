@@ -137,9 +137,14 @@ class AnemNode(Node):
 
         # Main loop timer
         self.timer = self.create_timer(0.1, self.timer_callback) # 10 Hz
-        # Reconnect watchdog (1 Hz)
-        self.reconnect_timer = self.create_timer(1.0, self.reconnect_callback)
-        self.get_logger().info("Initialization of anemometer wind sensor completed.")
+        # Reconnect watchdog (5 second interval)
+        self.reconnect_timer = self.create_timer(5.0, self.reconnect_callback)
+        
+        # Report actual sensor status
+        if self.sensors_ready:
+            self.get_logger().info("Initialization of anemometer wind sensor completed successfully.")
+        else:
+            self.get_logger().warn("Anemometer node started but sensors not ready. Will attempt to connect every second.")
 
         # Visual mode init
         self._vis_initialized = False
@@ -226,7 +231,22 @@ class AnemNode(Node):
             pass
 
     def setup_sensors(self):
-        self.get_logger().info('Stopping existing continuous measurements')
+        # First try to communicate with sensors to see if they exist
+        sensors_detected = []
+        for a in self.i2cAddr:
+            try:
+                # Try a simple read to test communication
+                self.bus.read_byte(a)
+                sensors_detected.append(hex(a))
+            except IOError:
+                pass  # Sensor not detected, continue checking others
+        
+        if sensors_detected:
+            self.get_logger().info(f'Stopping existing continuous measurements on detected sensors: {sensors_detected}')
+        else:
+            self.get_logger().debug('No sensors detected on I2C bus')
+            return False
+            
         for a in self.i2cAddr:
             try:
                 self.bus.write_i2c_block_data(a, 0x3F, [0xF9]) # Stop any cont measurement

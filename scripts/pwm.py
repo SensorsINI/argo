@@ -1,19 +1,64 @@
-#!/usr/bin/env python
-# ROS2 version of pwm.py
-# Captures and publishes the rudder and sail winch servo positions.
-# Uses the argo_radio_servo_module sysfs interface.
+#!/usr/bin/env python3
+"""
+ROS2 PWM Node - Autonomous Boat Radio Control and Servo Interface
 
-# topics
-# publishes
-# /rudder_sail_radio, -1:1 Vector3 with .x=rudder, .y=sail, .z reserved (currently 0)
-#   values are normalized to -1:+1 assuming range of pulse width is 1000us to 2000us
-#   rudder -1 means full left rudder (turn CCW looking down on boat), +1 is full right rudder
-#   sail -1 means pulled in fully, +1 let out fully
-# /rudder_sail_servo, -1:1 Vector3 with similar normalized actual servo commands
-# /human_controlled: True if human has taken control, False if rudder is left near neutral for some time
+This node provides the interface between radio control hardware and the autonomous
+navigation system. It captures PWM signals from RC receivers, manages human/computer
+control switching, and controls servo outputs for rudder and sail actuators.
 
-# subscribes to
-# /rudder_sail_cmd: -1:+1 range Vector3 rudder and sail commands (from control.py)
+Hardware Interface:
+- Uses argo_radio_servo_module kernel module for hardware PWM capture/generation
+- Interfaces via sysfs at /sys/kernel/argo_radio_servo/
+- Supports Orange Pi Zero 2W with custom GPIO/PWM configuration
+
+Key Features:
+- Real-time radio control input capture and normalization
+- Automatic human/computer control switching based on stick activity
+- Safe servo output with pulse width validation (900-2100µs range)
+- Throttled logging to minimize system load
+- Built-in safety features with neutral position defaults
+
+Control Logic:
+- Human takes control when rudder stick moves beyond threshold
+- Computer regains control after timeout period of stick inactivity
+- All servo outputs are validated and clamped to safe hardware ranges
+- Invalid radio inputs are filtered to prevent system instability
+
+Topics Published:
+- /rudder_sail_radio: Vector3 with normalized radio inputs (-1 to +1)
+  * x: rudder position (-1=full left, +1=full right, looking down at boat)
+  * y: sail position (-1=pulled in fully, +1=let out fully)
+  * z: reserved (currently 0)
+  
+- /rudder_sail_servo: Vector3 with actual servo commands being sent to hardware
+  * Same format as radio topic but reflects actual servo positions
+  
+- /human_controlled: Bool indicating current control state
+  * True: Human has control (radio inputs active)
+  * False: Computer has control (autonomous navigation active)
+
+Topics Subscribed:
+- /rudder_sail_cmd: Vector3 with autonomous navigation commands (-1 to +1 range)
+  * Commands from control.py or other autonomous navigation nodes
+  * Only applied when human_controlled is False
+
+Hardware Requirements:
+- argo_radio_servo_module kernel module loaded
+- GPIO pins configured for radio input capture (PI11, PI13)
+- PWM outputs configured for servo control (PI12=PWM2, PI14=PWM4)
+- RC receiver connected and calibrated for 1000-2000µs pulse width range
+
+Safety Features:
+- Pulse width validation and clamping (900-2100µs hardware range)
+- Outlier radio input filtering (500-2500µs acceptance range)
+- Automatic fallback to neutral positions on invalid inputs
+- Throttled error logging to prevent log spam
+- Graceful handling of hardware disconnection
+
+Author: Tobi Delbruck
+License: MIT
+Version: 2.0 - Added pulse width clamping and improved error handling
+"""
 
 import rclpy
 from rclpy.node import Node
@@ -23,6 +68,10 @@ from geometry_msgs.msg import Vector3
 import time
 import argparse
 from pathlib import Path
+import sys
+import tty
+import termios
+import select
 
 # --- Configuration ---
 SYS_BASE_PATH = Path("/sys/kernel/argo_radio_servo")
@@ -31,11 +80,25 @@ RADIO_SAIL_PATH = SYS_BASE_PATH / "radio_sail_pw_us"
 SERVO_RUDDER_PATH = SYS_BASE_PATH / "servo_rudder_pw_us"
 SERVO_SAIL_PATH = SYS_BASE_PATH / "servo_sail_pw_us"
 
+# Kernel module enforces 900-2100µs range for servo outputs
+SERVO_MIN_PW_US = 900
+SERVO_MAX_PW_US = 2100
+
 HUMAN_CONTROL_TIMEOUT_S = 2.0
 # time in seconds that human takes control after rudder command deviates by
 # more than HUMAN_CONTROL_THRESHOLD
 HUMAN_CONTROL_THRESHOLD = 0.2
 # threshold deviation from zero for radio rudder input that human takes control
+
+# Throttle logging for clamped values to once per minute
+CLAMP_LOG_THROTTLE_S = 60.0
+
+# Test mode configuration
+TEST_MIN_PW = 900
+TEST_MAX_PW = 2100
+TEST_STEP = 100
+TEST_DELAY_S = 0.5
+TEST_DEFAULT_PW = 1500
 
 def cmd_to_pw_us(cmd: float) -> int:
     """Converts a normalized command (-1 to +1) to a pulse width in microseconds (1000 to 2000)."""
@@ -82,6 +145,9 @@ class PwmNode(Node):
         self.cmd_sail = None
         self.time_last_human_cmd = time.time()
         self.human_control = True
+        
+        # Throttling for clamp warning logs
+        self.last_clamp_warning_time = 0.0
 
         self.get_logger().info(f"Human control timeout={HUMAN_CONTROL_TIMEOUT_S:.1f}s, threshold={HUMAN_CONTROL_THRESHOLD:.1f}")
 
@@ -102,10 +168,26 @@ class PwmNode(Node):
             return 0.0 # Return a safe, invalid value
 
     def write_sysfs_pw(self, path: Path, value: int):
-        """Writes a pulse width to a sysfs file."""
+        """Writes a pulse width to a sysfs file, clamping to valid range."""
+        original_value = value
+        
+        # Clamp to kernel module's valid range (900-2100µs)
+        value = max(SERVO_MIN_PW_US, min(SERVO_MAX_PW_US, value))
+        
+        # Log clamping with throttling (once per minute max)
+        if value != original_value:
+            now = time.time()
+            if now - self.last_clamp_warning_time > CLAMP_LOG_THROTTLE_S:
+                self.get_logger().warn(
+                    f"Clamped servo pulse width from {original_value}µs to {value}µs "
+                    f"(valid range: {SERVO_MIN_PW_US}-{SERVO_MAX_PW_US}µs). "
+                    f"Further clamp warnings suppressed for {CLAMP_LOG_THROTTLE_S}s."
+                )
+                self.last_clamp_warning_time = now
+        
         try:
             path.write_text(str(value))
-            self.get_logger().debug(f"Wrote {value} to {path}")
+            self.get_logger().debug(f"Wrote {value}µs to {path}")
         except IOError as e:
             self.get_logger().error(f"Error writing to {path}: {e}")
 
@@ -168,6 +250,140 @@ class PwmNode(Node):
             Vector3(x=servo_rudder_normalized, y=servo_sail_normalized, z=0.0)
         )
 
+# Test mode helper functions
+def get_initial_pw_test(path: Path) -> int:
+    """Reads the initial pulse width from a sysfs file, or returns a default."""
+    try:
+        return int(path.read_text().strip())
+    except (IOError, ValueError, FileNotFoundError):
+        print(f"Warning: Could not read {path}, using default {TEST_DEFAULT_PW} us.", file=sys.stderr)
+        return TEST_DEFAULT_PW
+
+def read_sysfs_pw_test(path: Path) -> str:
+    """Reads a pulse width from a sysfs file for display."""
+    try:
+        return path.read_text().strip()
+    except (IOError, FileNotFoundError):
+        return "N/A"
+
+def write_sysfs_pw_test(path: Path, value: int):
+    """Writes a pulse width to a sysfs file for test mode."""
+    # Apply same clamping as normal mode
+    value = max(SERVO_MIN_PW_US, min(SERVO_MAX_PW_US, value))
+    try:
+        path.write_text(str(value))
+    except IOError as e:
+        print(f"\nError writing to {path}: {e}", file=sys.stderr)
+
+def display_test_status(rudder_pw: int, sail_pw: int, paused: bool):
+    """Clears the screen and displays the current test status."""
+    # ANSI escape code to clear screen and move cursor to top-left
+    print("\033[H\033[J", end="")
+    
+    print("--- Radio Control Input Pulse Widths ---")
+    print(f"Radio Rudder: {read_sysfs_pw_test(RADIO_RUDDER_PATH)} us")
+    print(f"Radio Sail:   {read_sysfs_pw_test(RADIO_SAIL_PATH)} us")
+    print("----------------------------------------")
+    print("--- Servo Motor Output Pulse Widths (Sweeping) ---")
+    print(f"Rudder (PWM2): {rudder_pw} us")
+    print(f"Sail (PWM4):   {sail_pw} us")
+    print("--------------------------------------------------")
+    if paused:
+        print("STATUS: PAUSED (Press Spacebar to RESUME)")
+    else:
+        print("STATUS: RUNNING (Press Spacebar to PAUSE)")
+    sys.stdout.flush()
+
+def get_key_non_blocking() -> str | None:
+    """Reads a single key press without blocking. Returns None if no key is pressed."""
+    if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+        return sys.stdin.read(1)
+    return None
+
+def get_key_blocking() -> str:
+    """Reads a single key press, blocking until one is received."""
+    return sys.stdin.read(1)
+
+def run_test_mode():
+    """Runs the PWM test mode - sweeps servo outputs and displays radio inputs."""
+    # Check if sysfs path exists for better error reporting
+    if not SYS_BASE_PATH.is_dir():
+        print(f"Error: Sysfs path {SYS_BASE_PATH} not found.", file=sys.stderr)
+        print("Is the 'argo_radio_servo_module' kernel module loaded?", file=sys.stderr)
+        sys.exit(1)
+
+    # Initialize state variables
+    current_rudder_pw = get_initial_pw_test(SERVO_RUDDER_PATH)
+    current_sail_pw = get_initial_pw_test(SERVO_SAIL_PATH)
+    direction_rudder = 1  # 1 for increasing, -1 for decreasing
+    direction_sail = 1
+    paused = False
+
+    print("Starting Argo Radio Servo PWM Test Mode...")
+    print("Monitoring input pulse widths and sweeping output servo positions.")
+    print("Press Spacebar to PAUSE/RESUME. Press Ctrl+C to STOP.")
+    time.sleep(1.5)  # Give user time to read the intro message
+
+    # Terminal Setup
+    # Save original terminal settings to restore them on exit
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        # Set terminal to "cbreak" mode to read keys instantly without requiring Enter
+        tty.setcbreak(sys.stdin.fileno())
+
+        # Main Loop
+        while True:
+            display_test_status(current_rudder_pw, current_sail_pw, paused)
+
+            # Handle Input for Pause/Resume
+            key_pressed = get_key_non_blocking()
+
+            if key_pressed == ' ':
+                paused = not paused
+                display_test_status(current_rudder_pw, current_sail_pw, paused)  # Update status immediately
+
+                if paused:
+                    print("\nPAUSED. Press Spacebar to RESUME...")
+                    sys.stdout.flush()
+                    # When paused, enter a blocking loop that waits *only* for a spacebar.
+                    while True:
+                        key_to_resume = get_key_blocking()
+                        if key_to_resume == ' ':
+                            paused = not paused
+                            display_test_status(current_rudder_pw, current_sail_pw, paused)
+                            break  # Exit this inner blocking loop
+
+            if not paused:
+                # Update Rudder (PWM2) Pulse Width
+                current_rudder_pw += direction_rudder * TEST_STEP
+                if current_rudder_pw > TEST_MAX_PW:
+                    current_rudder_pw = TEST_MAX_PW
+                    direction_rudder = -1
+                elif current_rudder_pw < TEST_MIN_PW:
+                    current_rudder_pw = TEST_MIN_PW
+                    direction_rudder = 1
+                write_sysfs_pw_test(SERVO_RUDDER_PATH, current_rudder_pw)
+
+                # Update Sail (PWM4) Pulse Width
+                current_sail_pw += direction_sail * TEST_STEP
+                if current_sail_pw > TEST_MAX_PW:
+                    current_sail_pw = TEST_MAX_PW
+                    direction_sail = -1
+                elif current_sail_pw < TEST_MIN_PW:
+                    current_sail_pw = TEST_MIN_PW
+                    direction_sail = 1
+                write_sysfs_pw_test(SERVO_SAIL_PATH, current_sail_pw)
+
+            time.sleep(TEST_DELAY_S)
+
+    except KeyboardInterrupt:
+        print("\nCtrl+C pressed. Exiting test mode.")
+    finally:
+        # Restore Terminal
+        # This block ensures terminal settings are always restored
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        print("Terminal settings restored.")
+
 def main(args=None):
     # Parse command line arguments
     parser = argparse.ArgumentParser(
@@ -196,8 +412,16 @@ Hardware:
         """
     )
     
+    parser.add_argument('--test', action='store_true', 
+                        help='Run in test mode: sweep servo outputs and display radio inputs (no ROS2)')
+    
     # Parse known args to allow ROS2 arguments to pass through
     parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Check if test mode is requested
+    if parsed_args.test:
+        run_test_mode()
+        return
     
     # Initialize ROS2 with remaining arguments
     rclpy.init(args=unknown_args)

@@ -6,20 +6,24 @@ LAUNCH_SERVICE = argo-launch.service
 RECORD_SERVICE = argo-record.service
 BAGFILES_DIR = /home/orangepi/bagfiles
 
-.PHONY: help install uninstall enable disable start stop restart status clean aliases
+.PHONY: help install uninstall enable disable start start-with-logs stop restart status clean aliases install-dotfiles install_power_control install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install
 
 help:
 	@echo "Argo Robot Services Management"
 	@echo "=============================="
 	@echo ""
 	@echo "Installation:"
-	@echo "  install     - Install service files to systemd"
-	@echo "  uninstall   - Remove service files from systemd"
-	@echo "  enable      - Enable services for automatic startup"
-	@echo "  disable     - Disable automatic startup"
+	@echo "  install-deps         - Install all ROS2 dependencies (foxglove-bridge, etc.)"
+	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
+	@echo "  check-deps           - Check status of all dependencies"
+	@echo "  install              - Install service files to systemd"
+	@echo "  uninstall            - Remove service files from systemd"
+	@echo "  enable               - Enable services for automatic startup"
+	@echo "  disable              - Disable automatic startup"
 	@echo ""
 	@echo "Service Control:"
 	@echo "  start       - Start argo-launch service"
+	@echo "  start-with-logs - Start service and monitor logs for 60s"
 	@echo "  stop        - Stop all argo services"
 	@echo "  restart     - Restart argo-launch service"
 	@echo "  status      - Show status of all services"
@@ -30,13 +34,80 @@ help:
 	@echo ""
 	@echo "Utilities:"
 	@echo "  clean       - Clean old bag files (>7 days)"
-	@echo "  aliases     - Install shell aliases (run: source ~/.bashrc after)"
+	@echo "  aliases-install - Install/update aliases and activate them immediately"
+	@echo "  aliases     - Install shell aliases (then run: eval \$$(make aliases-activate))"
+	@echo "  aliases-force - Force reinstall/update aliases (overwrites existing)"
+	@echo "  aliases-activate - Print command to activate aliases in current shell"
+	@echo "  install-dotfiles - Install dotfiles (.bashrc, .bash_aliases, .tmux.conf) to home directory"
+	@echo "  install_power_control - Install GPIO permissions for power control (udev rules, gpio group)"
 	@echo ""
 	@echo "Quick Commands (after installing aliases):"
-	@echo "  argo_start  - Start argo service"
-	@echo "  argo_stop   - Stop argo service"
-	@echo "  argo_record - Start recording"
-	@echo "  argo_close  - Stop recording"
+	@echo "  al  - Launch argo service (with 60s log monitoring)"
+	@echo "  aq  - Quit argo service"
+	@echo "  ar  - Record data"
+	@echo "  ac  - Close recording"
+	@echo "  af  - Launch argo with Foxglove visualization"
+	@echo "  afb - Launch rosbridge for Foxglove connection"
+
+# ==================== DEPENDENCY INSTALLATION ====================
+
+install-deps: install-foxglove-bridge
+	@echo "✅ All ROS2 dependencies installed successfully!"
+	@echo ""
+	@echo "Installed packages:"
+	@echo "  - ros-$(ROS_DISTRO)-foxglove-bridge (C++ WebSocket bridge for Foxglove Studio)"
+	@echo ""
+	@echo "Usage:"
+	@echo "  ros2 run foxglove_bridge foxglove_bridge                    # Start foxglove bridge"
+	@echo "  ros2 run foxglove_bridge foxglove_bridge --ros-args -p port:=8765  # Custom port"
+	@echo ""
+	@echo "Connect from Foxglove Studio: ws://$(shell hostname -I | awk '{print $$1}'):8765"
+
+install-foxglove-bridge:
+	@echo "Installing Foxglove Bridge for ROS2..."
+	@if [ -z "$(ROS_DISTRO)" ]; then \
+		echo "❌ ROS_DISTRO environment variable not set!"; \
+		echo "   Make sure ROS2 is properly sourced: source /opt/ros/*/setup.bash"; \
+		exit 1; \
+	fi
+	@echo "Installing ros-$(ROS_DISTRO)-foxglove-bridge..."
+	sudo apt update
+	sudo apt install -y ros-$(ROS_DISTRO)-foxglove-bridge
+	@echo "✅ Foxglove Bridge installed successfully!"
+	@echo ""
+	@echo "🔧 Quick Start:"
+	@echo "  1. Run your Python ROS2 node: python3 scripts/battery_water.py"
+	@echo "  2. In another terminal: ros2 run foxglove_bridge foxglove_bridge"
+	@echo "  3. Connect Foxglove Studio to: ws://$(shell hostname -I | awk '{print $$1}'):8765"
+
+check-deps:
+	@echo "Checking ROS2 Dependencies Status"
+	@echo "================================="
+	@echo ""
+	@echo "🔍 Environment:"
+	@if [ -z "$(ROS_DISTRO)" ]; then \
+		echo "❌ ROS_DISTRO: Not set (ROS2 not sourced?)"; \
+	else \
+		echo "✅ ROS_DISTRO: $(ROS_DISTRO)"; \
+	fi
+	@echo ""
+	@echo "🔍 Package Status:"
+	@if dpkg -l | grep -q "ros-$(ROS_DISTRO)-foxglove-bridge"; then \
+		version=$$(dpkg -l | grep "ros-$(ROS_DISTRO)-foxglove-bridge" | awk '{print $$3}'); \
+		echo "✅ foxglove-bridge: Installed ($$version)"; \
+	else \
+		echo "❌ foxglove-bridge: Not installed"; \
+		echo "   Install with: make install-foxglove-bridge"; \
+	fi
+	@echo ""
+	@echo "🔍 Network Info:"
+	@echo "   Your IP: $(shell hostname -I | awk '{print $$1}')"
+	@echo "   Foxglove connection: ws://$(shell hostname -I | awk '{print $$1}'):8765"
+	@echo ""
+	@echo "🔍 Quick Test:"
+	@echo "   Test foxglove-bridge: ros2 run foxglove_bridge foxglove_bridge --help"
+
+# ==================== SERVICE MANAGEMENT ====================
 
 install:
 	@echo "Installing Argo services..."
@@ -72,6 +143,18 @@ start:
 	@echo "Starting Argo launch service..."
 	sudo systemctl start $(LAUNCH_SERVICE)
 	@echo "Argo service started!"
+
+start-with-logs:
+	@echo "Starting Argo launch service with startup monitoring..."
+	sudo systemctl start $(LAUNCH_SERVICE)
+	@echo "✅ Service started! Monitoring logs for 60 seconds..."
+	@echo "📊 Watching for node startup messages (Ctrl+C to exit early):"
+	@echo "================================================"
+	@timeout 60 journalctl -u $(LAUNCH_SERVICE) -f --no-pager -n 0 2>/dev/null || true
+	@echo ""
+	@echo "================================================"
+	@echo "🔍 Final status check:"
+	@make --no-print-directory status
 
 stop:
 	@echo "Stopping all Argo services..."
@@ -116,16 +199,25 @@ aliases:
 	@if ! grep -q "# Argo Robot Control Aliases" ~/.bash_aliases 2>/dev/null; then \
 		echo "" >> ~/.bash_aliases; \
 		echo "# Argo Robot Control Aliases" >> ~/.bash_aliases; \
-		echo "alias argo_start='make -C /home/orangepi/argo start'" >> ~/.bash_aliases; \
-		echo "alias argo_stop='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases; \
-		echo "alias argo_record='make -C /home/orangepi/argo record'" >> ~/.bash_aliases; \
-		echo "alias argo_close='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases; \
-		echo "alias argo_status='make -C /home/orangepi/argo status'" >> ~/.bash_aliases; \
-		echo "alias argo_restart='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases; \
+		echo "alias al='make -C /home/orangepi/argo start-with-logs'" >> ~/.bash_aliases; \
+		echo "alias aq='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases; \
+		echo "alias ar='make -C /home/orangepi/argo record'" >> ~/.bash_aliases; \
+		echo "alias ac='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases; \
+		echo "alias as='make -C /home/orangepi/argo status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases; \
+		echo "alias ars='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases; \
+		echo "alias argo_help='bash /home/orangepi/argo/scripts/argo_help.sh'" >> ~/.bash_aliases; \
+		echo "alias af='ros2 launch /home/orangepi/argo/launch/argo_launch.py'" >> ~/.bash_aliases; \
+		echo "alias afb='ros2 run foxglove_bridge foxglove_bridge'" >> ~/.bash_aliases; \
+		echo "alias afbr='ros2 launch rosbridge_server rosbridge_websocket_launch.xml'" >> ~/.bash_aliases; \
 		echo "" >> ~/.bash_aliases; \
 		echo "✅ Aliases installed to ~/.bash_aliases"; \
 	else \
 		echo "⚠️  Argo aliases already exist in ~/.bash_aliases"; \
+		if ! grep -q "afb.*foxglove_bridge" ~/.bash_aliases 2>/dev/null; then \
+			echo "🔄 Some aliases appear outdated. Run 'make aliases-force' to update them."; \
+		else \
+			echo "✅ Aliases appear up-to-date."; \
+		fi; \
 	fi
 	@if ! grep -q "source.*\.bash_aliases" ~/.bashrc 2>/dev/null; then \
 		echo "" >> ~/.bashrc; \
@@ -137,13 +229,156 @@ aliases:
 	else \
 		echo "✅ .bash_aliases already sourced in ~/.bashrc"; \
 	fi
+	@echo "" >> ~/.bashrc; \
+	echo "# Argo daily reminder (once per day)" >> ~/.bashrc; \
+	echo "if [ ! -f ~/.argo_reminder_date ] || [ \"\$$(date +%Y-%m-%d)\" != \"\$$(cat ~/.argo_reminder_date)\" ]; then" >> ~/.bashrc; \
+	echo "    echo \"🚢 Argo: al=launch, aq=quit, ar=record, ac=close, as=status, ars=restart, af=foxglove, afb=foxglove-bridge, afbr=rosbridge\"" >> ~/.bashrc; \
+	echo "    date +%Y-%m-%d > ~/.argo_reminder_date" >> ~/.bashrc; \
+	echo "fi" >> ~/.bashrc; \
+	echo "✅ Added daily Argo reminder to ~/.bashrc"
 	@echo ""
-	@echo "Run: source ~/.bashrc (or open new terminal)"
+	@echo "🔄 To activate aliases in this terminal, run:"
+	@echo "   eval \$$(make aliases-activate)"
+	@echo ""
+	@echo "💡 In NEW terminals, aliases will be auto-loaded from ~/.bashrc"
 	@echo ""
 	@echo "Available aliases:"
-	@echo "  argo_start   - Start argo service"
-	@echo "  argo_stop    - Stop argo service"
-	@echo "  argo_record  - Start recording"
-	@echo "  argo_close   - Stop recording"
-	@echo "  argo_status  - Show service status"
-	@echo "  argo_restart - Restart argo service"
+	@echo "  al   - Launch argo service (with 60s log monitoring)"
+	@echo "  aq   - Quit argo service"
+	@echo "  ar   - Record data"
+	@echo "  ac   - Close recording"
+	@echo "  as   - Show service status"
+	@echo "  ars  - Restart argo service"
+	@echo "  af   - Launch argo with integrated Foxglove Bridge"
+	@echo "  afb  - Launch Foxglove Bridge (recommended)"
+	@echo "  afbr - Launch rosbridge for Foxglove connection (legacy)"
+	@echo "  argo_help - Show detailed help"
+
+install-dotfiles:
+	@echo "Installing dotfiles to home directory..."
+	@if [ -f dotfiles/.bashrc ]; then \
+		cp dotfiles/.bashrc ~/.bashrc; \
+		echo "✅ Installed .bashrc"; \
+	else \
+		echo "❌ dotfiles/.bashrc not found"; \
+	fi
+	@if [ -f dotfiles/.bash_aliases ]; then \
+		cp dotfiles/.bash_aliases ~/.bash_aliases; \
+		echo "✅ Installed .bash_aliases"; \
+	else \
+		echo "❌ dotfiles/.bash_aliases not found"; \
+	fi
+	@if [ -f dotfiles/.tmux.conf ]; then \
+		cp dotfiles/.tmux.conf ~/.tmux.conf; \
+		echo "✅ Installed .tmux.conf"; \
+	else \
+		echo "❌ dotfiles/.tmux.conf not found"; \
+	fi
+	@echo ""
+	@echo "✅ Dotfiles installation complete!"
+	@echo "Run 'source ~/.bashrc' or open a new terminal to apply changes."
+
+install_power_control:
+	@echo "Installing power control GPIO permissions..."
+	@echo "Creating gpio group (if it doesn't exist)..."
+	@sudo groupadd gpio 2>/dev/null || echo "gpio group already exists"
+	@echo "Installing udev rules for GPIO access..."
+	@echo "# GPIO permissions for Orange Pi Zero 2W" | sudo tee /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "# Allow members of the 'gpio' group to access GPIO devices" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "# GPIO chip devices" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'SUBSYSTEM=="gpio", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "# GPIO character devices (gpiochip)" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'KERNEL=="gpiochip*", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "# GPIO sysfs interface" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'SUBSYSTEM=="gpio", KERNEL=="export", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'SUBSYSTEM=="gpio", KERNEL=="unexport", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo 'SUBSYSTEM=="gpio", KERNEL=="gpio*", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
+	@echo "Adding current user to gpio group..."
+	@sudo usermod -a -G gpio $$(whoami)
+	@echo "Reloading udev rules..."
+	@sudo udevadm control --reload-rules
+	@sudo udevadm trigger
+	@echo ""
+	@echo "✅ Power control GPIO permissions installed successfully!"
+	@echo ""
+	@echo "📋 Next steps:"
+	@echo "  1. Log out and log back in, OR run: newgrp gpio"
+	@echo "  2. Test with: ./scripts/power_control.py --test-mode"
+	@echo ""
+	@echo "🔧 What was installed:"
+	@echo "  - Created 'gpio' group"
+	@echo "  - Added udev rules for GPIO device access"
+	@echo "  - Added user '$$(whoami)' to gpio group"
+	@echo "  - Reloaded udev rules to apply changes"
+
+aliases-force:
+	@echo "Force updating shell aliases..."
+	@touch ~/.bash_aliases
+	@# Remove existing Argo aliases section
+	@sed -i '/^# Argo Robot Control Aliases/,/^$$/d' ~/.bash_aliases
+	@# Add updated aliases
+	@echo "" >> ~/.bash_aliases
+	@echo "# Argo Robot Control Aliases" >> ~/.bash_aliases
+	@echo "alias al='make -C /home/orangepi/argo start-with-logs'" >> ~/.bash_aliases
+	@echo "alias aq='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases
+	@echo "alias ar='make -C /home/orangepi/argo record'" >> ~/.bash_aliases
+	@echo "alias ac='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases
+	@echo "alias as='make -C /home/orangepi/argo status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases
+	@echo "alias ars='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases
+	@echo "alias argo_help='bash /home/orangepi/argo/scripts/argo_help.sh'" >> ~/.bash_aliases
+	@echo "alias af='ros2 launch /home/orangepi/argo/launch/argo_launch.py'" >> ~/.bash_aliases
+	@echo "alias afb='ros2 run foxglove_bridge foxglove_bridge'" >> ~/.bash_aliases
+	@echo "alias afbr='ros2 launch rosbridge_server rosbridge_websocket_launch.xml'" >> ~/.bash_aliases
+	@echo "" >> ~/.bash_aliases
+	@echo "✅ Aliases force-updated in ~/.bash_aliases"
+	@if ! grep -q "source.*\.bash_aliases" ~/.bashrc 2>/dev/null; then \
+		echo "" >> ~/.bashrc; \
+		echo "# Source bash aliases if available" >> ~/.bashrc; \
+		echo "if [ -f ~/.bash_aliases ]; then" >> ~/.bashrc; \
+		echo "    . ~/.bash_aliases" >> ~/.bashrc; \
+		echo "fi" >> ~/.bashrc; \
+		echo "✅ Added .bash_aliases sourcing to ~/.bashrc"; \
+	else \
+		echo "✅ .bash_aliases already sourced in ~/.bashrc"; \
+	fi
+	@echo ""
+	@echo "🔄 To activate aliases in this terminal, run:"
+	@echo "   eval \$$(make aliases-activate)"
+	@echo ""
+	@echo "💡 In NEW terminals, aliases will be auto-loaded from ~/.bashrc"
+	@echo ""
+	@echo "Available aliases:"
+	@echo "  al   - Launch argo service (with 60s log monitoring)"
+	@echo "  aq   - Quit argo service"
+	@echo "  ar   - Record data"
+	@echo "  ac   - Close recording"
+	@echo "  as   - Show service status"
+	@echo "  ars  - Restart argo service"
+	@echo "  af   - Launch argo with integrated Foxglove Bridge"
+	@echo "  afb  - Launch Foxglove Bridge (recommended)"
+	@echo "  afbr - Launch rosbridge for Foxglove connection (legacy)"
+	@echo "  argo_help - Show detailed help"
+
+aliases-install: aliases-force
+	@echo ""
+	@echo "🔄 Creating activation script..."
+	@echo '#!/bin/bash' > /tmp/argo_activate_aliases.sh
+	@echo 'source ~/.bash_aliases' >> /tmp/argo_activate_aliases.sh
+	@echo 'echo "🚀 Aliases activated! Try these commands:"' >> /tmp/argo_activate_aliases.sh
+	@echo 'echo "  afb  # Start Foxglove Bridge"' >> /tmp/argo_activate_aliases.sh
+	@echo 'echo "  al   # Launch Argo"' >> /tmp/argo_activate_aliases.sh
+	@echo 'echo "  aq   # Quit Argo"' >> /tmp/argo_activate_aliases.sh
+	@echo 'echo ""' >> /tmp/argo_activate_aliases.sh
+	@echo 'echo "💡 Aliases are now available in this terminal session!"' >> /tmp/argo_activate_aliases.sh
+	@chmod +x /tmp/argo_activate_aliases.sh
+	@echo ""
+	@echo "🚀 To activate aliases in this terminal, run:"
+	@echo "   source /tmp/argo_activate_aliases.sh"
+	@echo ""
+	@echo "⚡ Quick activation: \$$SHELL -c 'source ~/.bash_aliases && \$$SHELL'"
+
+aliases-activate:
+	@echo "source ~/.bash_aliases"

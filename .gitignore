@@ -35,6 +35,7 @@ scripts/pwm_capture_module/argo_radio_servo_module.mod
 scripts/Makefile.mk
 scripts/pwm_capture_module/Makefile.mk
 launch/__pycache__/
+scripts/power_control.log
 pcb/argo-v9-stable/argo-v9-stable-backups/argo-v9-stable-2025-05-27_195346.zip
 pcb/argo-v9-stable/argo-v9-stable-backups/argo-v9-stable-2025-05-28_150248.zip
 pcb/argo-v9-stable/argo-v9-stable-backups/argo-v9-stable-2025-05-28_151124.zip
