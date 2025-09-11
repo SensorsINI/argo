@@ -93,3 +93,5 @@ pcb/argo-v9-stable/argo-v9-stable-rev1/gerber/argo-v9-stable-rev1-PTH.drl
 pcb/**/*.lck
 pcb/**/*-backups/**
 scripts/power_control.log
+scripts/__pycache__/anem.cpython-310.pyc
+scripts/__pycache__/gps.cpython-310.pyc
