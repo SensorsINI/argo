@@ -4,11 +4,11 @@ After=network.target
 Wants=argo-launch.service
 
 [Service]
-User=orangepi
-Group=orangepi
-WorkingDirectory=/home/orangepi/bagfiles
-EnvironmentFile=/home/orangepi/argo/launch/argo.env
-ExecStart=/bin/bash -l -c 'source /opt/ros/humble/setup.bash && ros2 bag record -a -o argo_$(date +%%Y%%m%%d_%%H%%M%%S)'
+User=%i
+Group=%i
+WorkingDirectory=%h/bagfiles
+EnvironmentFile=%h/argo/launch/argo.env
+ExecStart=%h/argo/scripts/argo_record.sh
 Restart=no
 StandardOutput=journal
 StandardError=journal

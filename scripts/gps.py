@@ -83,16 +83,20 @@ class GpsNode(Node):
             self.get_logger().info(f"Serial connection established on {self.serial_port_name}")
             self.get_logger().debug(f"Serial port settings: {self.baud_rate} baud, 8N1, 1.0s timeout")
         except serial.SerialException as e:
-            self.get_logger().error(f"Failed to open serial port {self.serial_port_name}: {e}")
-            self.get_logger().error("Shutting down GPS node.")
-            # Don't call rclpy.shutdown() in constructor, just let it fail to initialize
-            raise e # re-raise to stop node creation
+            self.get_logger().error(f"CRITICAL: Failed to open serial port {self.serial_port_name}: {e}")
+            self.get_logger().error("CRITICAL: GPS device not accessible. Exiting.")
+            import sys
+            sys.exit(1)
 
         self.setup_gps()
 
         # Initialize data counter for debugging
         self.data_count = 0
         self.last_data_log_time = time.time()
+        
+        # GPS communication timeout tracking
+        self.last_data_received_time = time.time()
+        self.gps_timeout_seconds = 30.0  # Fail if no data received for 30 seconds
         
         # Timer for the main loop to read from the serial port
         self.timer = self.create_timer(0.1, self.read_and_publish) # 10 Hz
@@ -202,12 +206,10 @@ class GpsNode(Node):
             self.enable_nmea_sentences()
             self.get_logger().info("GPS setup completed. Waiting for NMEA data...")
         else:
-            self.get_logger().warn("⚠ GPS communication test failed - no responses received")
-            self.get_logger().warn("GPS may still work if it outputs data automatically")
-            # Try to enable sentences anyway - GPS might still accept configuration
-            self.get_logger().info("Attempting to enable SOG/COG sentences...")
-            self.enable_nmea_sentences()
-            self.get_logger().info("Continuing to listen for automatic NMEA output...")
+            self.get_logger().error("CRITICAL: GPS communication test failed - no responses received")
+            self.get_logger().error("CRITICAL: GPS device is not communicating properly. Exiting.")
+            import sys
+            sys.exit(1)
         
         self.get_logger().debug("Expected NMEA sentences: GGA, GLL, GSA, GSV, RMC, VTG")
         self.get_logger().info("Publishing SOG (Speed Over Ground) to /gps_sog topic")
@@ -386,9 +388,21 @@ class GpsNode(Node):
                 
         else:
             # Log no GPS fix every 5 seconds
-            if current_time - self.last_no_fix_log_time >= 5.0:
+            # After startup, log "no fix" every 5s for the first 3 messages, then every 30s
+            if not hasattr(self, 'no_fix_log_count'):
+                self.no_fix_log_count = 0
+            
+            # Determine log interval based on current count
+            if self.no_fix_log_count < 3:
+                log_interval = 5.0
+            else:
+                log_interval = 30.0
+            
+            # Check if enough time has passed since last log
+            if current_time - self.last_no_fix_log_time >= log_interval:
                 self.get_logger().info("GPS: No fix - searching for satellites...")
                 self.last_no_fix_log_time = current_time
+                self.no_fix_log_count += 1
 
     def publish_navigation_data(self):
         """Publish SOG and COG data to ROS topics."""
@@ -415,6 +429,14 @@ class GpsNode(Node):
 
     def read_and_publish(self):
         """Reads data from the serial port and publishes it."""
+        # Check for GPS communication timeout
+        current_time = time.time()
+        if current_time - self.last_data_received_time > self.gps_timeout_seconds:
+            self.get_logger().error(f"CRITICAL: GPS communication timeout - no data received for {self.gps_timeout_seconds} seconds")
+            self.get_logger().error("CRITICAL: GPS device appears to have stopped communicating. Exiting.")
+            import sys
+            sys.exit(1)
+        
         # The `in_waiting` check is not strictly necessary because `readline()`
         # with a timeout will block until a line is received or the timeout occurs.
         # We just need to ensure the port is open.
@@ -426,6 +448,7 @@ class GpsNode(Node):
                 
                 if data_str:
                     self.data_count += 1
+                    self.last_data_received_time = current_time  # Reset timeout
                     self.get_logger().debug(f"GPS Raw: {data_str}")
                     
                     # Publish raw NMEA data
@@ -466,9 +489,14 @@ class GpsNode(Node):
                 # This node's primary purpose is now to provide the raw data stream.
 
             except serial.SerialException as e:
-                self.get_logger().warn(f'Could not read data from serial port: {e}')
+                self.get_logger().error(f'CRITICAL: Serial port error: {e}')
+                self.get_logger().error('CRITICAL: GPS device communication lost. Exiting.')
+                import sys
+                sys.exit(1)
             except Exception as e:
-                self.get_logger().error(f'An unexpected error occurred in read_and_publish: {e}')
+                self.get_logger().error(f'CRITICAL: Unexpected error in GPS communication: {e}')
+                import sys
+                sys.exit(1)
 
     def destroy_node(self):
         """Gracefully shutdown the node and the GPS device."""

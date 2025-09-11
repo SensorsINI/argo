@@ -1,13 +1,36 @@
 #!/usr/bin/env python3
-# ROS2 version of imu.py
-# Simplified: reads raw accel, gyro, and compass data from ICM-20948 over I2C and publishes.
+"""
+IMU Sensor Node for Argo Autonomous Sailboat
+============================================
 
-# topics
-# publishes
-#  NOT publishing /pose NOW SINCE WE ARE NOT DOING FUSION WITH RTIMULib /pose, Vector3 .z is compass heading in degrees corrected by magnetometer calibration
-# /accel raw sensor values in g
-# /gyro raw sensor values in deg/s
-# /compass raw sensor values in uT
+This ROS2 node interfaces with the ICM-20948 9-axis IMU sensor (accelerometer, 
+gyroscope, magnetometer) via I2C and publishes raw sensor data to ROS2 topics.
+
+Hardware:
+- ICM-20948 9-axis IMU sensor
+- I2C bus 0, address 0x69
+- AK09916 magnetometer (integrated in ICM-20948)
+
+Published Topics:
+- /accel (geometry_msgs/Vector3): Raw accelerometer data in g (gravity units)
+- /gyro (geometry_msgs/Vector3): Raw gyroscope data in deg/s (degrees per second)  
+- /compass (geometry_msgs/Vector3): Raw magnetometer data in uT (microtesla)
+
+Note: This node publishes raw sensor values only. No sensor fusion or pose 
+estimation is performed (unlike RTIMULib-based implementations).
+
+Command Line Options:
+--debug              Enable debug logging to show sensor values being published
+--calib_compass      Run magnetometer calibration mode (interactive)
+                     - Rotate device through all orientations
+                     - Press Ctrl+C to finish and save calibration
+                     - Saves calibration to invensense-20948-compass-calibration.json
+
+Usage Examples:
+  python3 imu.py                    # Normal operation
+  python3 imu.py --debug            # With debug output
+  python3 imu.py --calib_compass    # Calibrate magnetometer
+"""
 
 import rclpy
 from rclpy.node import Node

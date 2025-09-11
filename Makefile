@@ -4,9 +4,10 @@
 SERVICE_DIR = /etc/systemd/system
 LAUNCH_SERVICE = argo-launch.service
 RECORD_SERVICE = argo-record.service
-BAGFILES_DIR = /home/orangepi/bagfiles
+BAGFILES_DIR = $(HOME)/bagfiles
+ARGO_DIR = $(HOME)/argo
 
-.PHONY: help install uninstall enable disable start start-with-logs stop restart status clean aliases install-dotfiles install_power_control install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install
+.PHONY: help install uninstall enable disable start stop restart status clean aliases install-dotfiles install_power_control install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install
 
 help:
 	@echo "Argo Robot Services Management"
@@ -22,8 +23,7 @@ help:
 	@echo "  disable              - Disable automatic startup"
 	@echo ""
 	@echo "Service Control:"
-	@echo "  start       - Start argo-launch service"
-	@echo "  start-with-logs - Start service and monitor logs for 60s"
+	@echo "  start       - Start argo-launch service with 30s monitoring"
 	@echo "  stop        - Stop all argo services"
 	@echo "  restart     - Restart argo-launch service"
 	@echo "  status      - Show status of all services"
@@ -42,12 +42,11 @@ help:
 	@echo "  install_power_control - Install GPIO permissions for power control (udev rules, gpio group)"
 	@echo ""
 	@echo "Quick Commands (after installing aliases):"
-	@echo "  al  - Launch argo service (with 60s log monitoring)"
+	@echo "  al  - Launch argo service (with 30s monitoring)"
 	@echo "  aq  - Quit argo service"
 	@echo "  ar  - Record data"
 	@echo "  ac  - Close recording"
 	@echo "  af  - Launch argo with Foxglove visualization"
-	@echo "  afb - Launch rosbridge for Foxglove connection"
 
 # ==================== DEPENDENCY INSTALLATION ====================
 
@@ -140,21 +139,72 @@ disable:
 	@echo "Automatic startup disabled!"
 
 start:
-	@echo "Starting Argo launch service..."
+	@echo "Starting Argo launch service with monitoring..."
 	sudo systemctl start $(LAUNCH_SERVICE)
-	@echo "Argo service started!"
+	@echo "✅ Service started! Monitoring for node failures (30s timeout)..."
+	@echo "================================================"
+	@echo "🔍 Monitoring journal for errors in real-time..."
+	@# Monitor journal for 30 seconds, consuming output and checking for errors
+	@timeout 30s journalctl -u $(LAUNCH_SERVICE) -f --no-pager | \
+		( \
+			ERRORS_FOUND=0; \
+			PROCESS_DEATHS=0; \
+			CRITICAL_ERRORS=0; \
+			DEAD_NODES=""; \
+			FAILURE_CAUSES=""; \
+			while IFS= read -r line; do \
+				echo "$$line"; \
+				if echo "$$line" | grep -i "process has died" > /dev/null 2>&1; then \
+					PROCESS_DEATHS=1; \
+					ERRORS_FOUND=1; \
+					NODE_NAME=$$(echo "$$line" | sed -n 's/.*\[\([^-]*\)-[0-9]*\]:.*process has died.*/\1/p'); \
+					EXIT_CODE=$$(echo "$$line" | sed -n 's/.*exit code \([0-9]*\).*/\1/p'); \
+					if [ -n "$$NODE_NAME" ]; then \
+						DEAD_NODES="$$DEAD_NODES $$NODE_NAME"; \
+					fi; \
+				fi; \
+				if echo "$$line" | grep -i -E "(CRITICAL|error.*exiting|failed.*exiting)" | grep -v -i "gps.*satellite" | grep -v -i "gps.*fix" > /dev/null 2>&1; then \
+					CRITICAL_ERRORS=1; \
+					ERRORS_FOUND=1; \
+					ERROR_MSG=$$(echo "$$line" | sed 's/.*\[[^-]*-[0-9]*\]:[[:space:]]*//'); \
+					if [ -n "$$ERROR_MSG" ]; then \
+						FAILURE_CAUSES="$$FAILURE_CAUSES\n  - $$ERROR_MSG"; \
+					fi; \
+				fi; \
+			done; \
+			echo ""; \
+			echo "================================================"; \
+			echo "📊 Monitoring Summary:"; \
+			if [ "$$PROCESS_DEATHS" -eq 1 ]; then \
+				echo "❌ CRITICAL: Node processes have died!"; \
+				echo ""; \
+				echo "Failed nodes:"; \
+				for node in $$DEAD_NODES; do \
+					echo "  - $$node"; \
+				done; \
+				if [ -n "$$FAILURE_CAUSES" ]; then \
+					echo ""; \
+					echo "Failure causes:"; \
+					echo -e "$$FAILURE_CAUSES"; \
+				fi; \
+			elif [ "$$CRITICAL_ERRORS" -eq 1 ]; then \
+				echo "❌ WARNING: Critical errors detected!"; \
+				if [ -n "$$FAILURE_CAUSES" ]; then \
+					echo ""; \
+					echo "Error details:"; \
+					echo -e "$$FAILURE_CAUSES"; \
+				fi; \
+			else \
+				echo "✅ No critical errors detected during 30s monitoring"; \
+			fi; \
+		) || \
+		( \
+			echo ""; \
+			echo "================================================"; \
+			echo "📊 Monitoring Summary (timeout reached):"; \
+			echo "✅ 30-second monitoring completed"; \
+		)
 
-start-with-logs:
-	@echo "Starting Argo launch service with startup monitoring..."
-	sudo systemctl start $(LAUNCH_SERVICE)
-	@echo "✅ Service started! Monitoring logs for 60 seconds..."
-	@echo "📊 Watching for node startup messages (Ctrl+C to exit early):"
-	@echo "================================================"
-	@timeout 60 journalctl -u $(LAUNCH_SERVICE) -f --no-pager -n 0 2>/dev/null || true
-	@echo ""
-	@echo "================================================"
-	@echo "🔍 Final status check:"
-	@make --no-print-directory status
 
 stop:
 	@echo "Stopping all Argo services..."
@@ -199,16 +249,13 @@ aliases:
 	@if ! grep -q "# Argo Robot Control Aliases" ~/.bash_aliases 2>/dev/null; then \
 		echo "" >> ~/.bash_aliases; \
 		echo "# Argo Robot Control Aliases" >> ~/.bash_aliases; \
-		echo "alias al='make -C /home/orangepi/argo start-with-logs'" >> ~/.bash_aliases; \
-		echo "alias aq='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases; \
-		echo "alias ar='make -C /home/orangepi/argo record'" >> ~/.bash_aliases; \
-		echo "alias ac='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases; \
-		echo "alias as='make -C /home/orangepi/argo status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases; \
-		echo "alias ars='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases; \
-		echo "alias argo_help='bash /home/orangepi/argo/scripts/argo_help.sh'" >> ~/.bash_aliases; \
-		echo "alias af='ros2 launch /home/orangepi/argo/launch/argo_launch.py'" >> ~/.bash_aliases; \
-		echo "alias afb='ros2 run foxglove_bridge foxglove_bridge'" >> ~/.bash_aliases; \
-		echo "alias afbr='ros2 launch rosbridge_server rosbridge_websocket_launch.xml'" >> ~/.bash_aliases; \
+		echo "alias al='make -C $(ARGO_DIR) start'" >> ~/.bash_aliases; \
+		echo "alias aq='make -C $(ARGO_DIR) stop'" >> ~/.bash_aliases; \
+		echo "alias ar='make -C $(ARGO_DIR) record'" >> ~/.bash_aliases; \
+		echo "alias ac='make -C $(ARGO_DIR) stop-record'" >> ~/.bash_aliases; \
+		echo "alias as='make -C $(ARGO_DIR) status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases; \
+		echo "alias ars='make -C $(ARGO_DIR) restart'" >> ~/.bash_aliases; \
+		echo "alias argo_help='bash $(ARGO_DIR)/scripts/argo_help.sh'" >> ~/.bash_aliases; \
 		echo "" >> ~/.bash_aliases; \
 		echo "✅ Aliases installed to ~/.bash_aliases"; \
 	else \
@@ -232,7 +279,7 @@ aliases:
 	@echo "" >> ~/.bashrc; \
 	echo "# Argo daily reminder (once per day)" >> ~/.bashrc; \
 	echo "if [ ! -f ~/.argo_reminder_date ] || [ \"\$$(date +%Y-%m-%d)\" != \"\$$(cat ~/.argo_reminder_date)\" ]; then" >> ~/.bashrc; \
-	echo "    echo \"🚢 Argo: al=launch, aq=quit, ar=record, ac=close, as=status, ars=restart, af=foxglove, afb=foxglove-bridge, afbr=rosbridge\"" >> ~/.bashrc; \
+	echo "    echo \"🚢 Argo: al=launch, aq=quit, ar=record, ac=close, as=status, ars=restart, af=foxglove\"" >> ~/.bashrc; \
 	echo "    date +%Y-%m-%d > ~/.argo_reminder_date" >> ~/.bashrc; \
 	echo "fi" >> ~/.bashrc; \
 	echo "✅ Added daily Argo reminder to ~/.bashrc"
@@ -243,15 +290,12 @@ aliases:
 	@echo "💡 In NEW terminals, aliases will be auto-loaded from ~/.bashrc"
 	@echo ""
 	@echo "Available aliases:"
-	@echo "  al   - Launch argo service (with 60s log monitoring)"
+	@echo "  al   - Launch argo service (with 30s monitoring)"
 	@echo "  aq   - Quit argo service"
 	@echo "  ar   - Record data"
 	@echo "  ac   - Close recording"
 	@echo "  as   - Show service status"
 	@echo "  ars  - Restart argo service"
-	@echo "  af   - Launch argo with integrated Foxglove Bridge"
-	@echo "  afb  - Launch Foxglove Bridge (recommended)"
-	@echo "  afbr - Launch rosbridge for Foxglove connection (legacy)"
 	@echo "  argo_help - Show detailed help"
 
 install-dotfiles:
@@ -322,16 +366,15 @@ aliases-force:
 	@# Add updated aliases
 	@echo "" >> ~/.bash_aliases
 	@echo "# Argo Robot Control Aliases" >> ~/.bash_aliases
-	@echo "alias al='make -C /home/orangepi/argo start-with-logs'" >> ~/.bash_aliases
-	@echo "alias aq='make -C /home/orangepi/argo stop'" >> ~/.bash_aliases
-	@echo "alias ar='make -C /home/orangepi/argo record'" >> ~/.bash_aliases
-	@echo "alias ac='make -C /home/orangepi/argo stop-record'" >> ~/.bash_aliases
-	@echo "alias as='make -C /home/orangepi/argo status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases
-	@echo "alias ars='make -C /home/orangepi/argo restart'" >> ~/.bash_aliases
-	@echo "alias argo_help='bash /home/orangepi/argo/scripts/argo_help.sh'" >> ~/.bash_aliases
-	@echo "alias af='ros2 launch /home/orangepi/argo/launch/argo_launch.py'" >> ~/.bash_aliases
+	@echo "alias al='make -C $(ARGO_DIR) start'" >> ~/.bash_aliases
+	@echo "alias aq='make -C $(ARGO_DIR) stop'" >> ~/.bash_aliases
+	@echo "alias ar='make -C $(ARGO_DIR) record'" >> ~/.bash_aliases
+	@echo "alias ac='make -C $(ARGO_DIR) stop-record'" >> ~/.bash_aliases
+	@echo "alias as='make -C $(ARGO_DIR) status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases
+	@echo "alias ars='make -C $(ARGO_DIR) restart'" >> ~/.bash_aliases
+	@echo "alias argo_help='bash $(ARGO_DIR)/scripts/argo_help.sh'" >> ~/.bash_aliases
+	@echo "alias af='ros2 launch $(ARGO_DIR)/launch/argo_launch.py'" >> ~/.bash_aliases
 	@echo "alias afb='ros2 run foxglove_bridge foxglove_bridge'" >> ~/.bash_aliases
-	@echo "alias afbr='ros2 launch rosbridge_server rosbridge_websocket_launch.xml'" >> ~/.bash_aliases
 	@echo "" >> ~/.bash_aliases
 	@echo "✅ Aliases force-updated in ~/.bash_aliases"
 	@if ! grep -q "source.*\.bash_aliases" ~/.bashrc 2>/dev/null; then \
@@ -351,7 +394,7 @@ aliases-force:
 	@echo "💡 In NEW terminals, aliases will be auto-loaded from ~/.bashrc"
 	@echo ""
 	@echo "Available aliases:"
-	@echo "  al   - Launch argo service (with 60s log monitoring)"
+	@echo "  al   - Launch argo service (with 30s monitoring)"
 	@echo "  aq   - Quit argo service"
 	@echo "  ar   - Record data"
 	@echo "  ac   - Close recording"
@@ -359,7 +402,6 @@ aliases-force:
 	@echo "  ars  - Restart argo service"
 	@echo "  af   - Launch argo with integrated Foxglove Bridge"
 	@echo "  afb  - Launch Foxglove Bridge (recommended)"
-	@echo "  afbr - Launch rosbridge for Foxglove connection (legacy)"
 	@echo "  argo_help - Show detailed help"
 
 aliases-install: aliases-force

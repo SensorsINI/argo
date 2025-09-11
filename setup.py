@@ -4,8 +4,8 @@ ROS2 Package Setup for Argo Sailboat
 NOTE: This setup.py is currently NOT used in the project's deployment.
 
 CURRENT DEPLOYMENT METHOD:
-- Scripts are executed directly from /home/orangepi/argo/scripts/
-- Launch uses direct paths, not installed packages
+- Scripts are executed directly from the project's scripts/ directory
+- Launch uses relative paths, not installed packages
 - Managed via systemd services (see Makefile and launch/*.service files)
 - No colcon build process required
 

@@ -30,17 +30,17 @@
 #   - Long press (>= 1 second): Initiate shutdown sequence
 #
 # LED INDICATORS:
-#   - Green LED: Solid on when system is running
-#   - Blue LED: Fast blink during button press warning, rapid blink during shutdown
+#   - Green LED: Heartbeat when system is running
+#   - Blue LED: Fast blink during button press warning
+#   - Both LEDs: Alternating short-long pattern during shutdown sequence
 #   - Red LED: Directly connected to power button (not controlled by GPIO)
 #
 # SHUTDOWN SEQUENCE:
 #   1. Broadcast wall message to all users
 #   2. Wait 5 seconds for users to see notification
-#   3. Turn on green LED (system running indicator)
-#   4. Blink blue LED rapidly (shutdown warning)
-#   5. Execute 'sudo shutdown -h now' for graceful shutdown
-#   6. As final action: De-energize relay by setting !POW high
+#   3. Start alternating short-long LED pattern (shutdown indicator)
+#   4. Execute 'sudo shutdown -h now' for graceful shutdown
+#   5. As final action: De-energize relay by setting !POW high
 #
 # USAGE:
 #   ./power_control.py [--help] [--test-mode] [--threshold SECONDS]
@@ -48,7 +48,7 @@
 # OPTIONS:
 #   --help              Show this help message and exit
 #   --test-mode         Run in test mode (disable actual shutdown and power control)
-#   --threshold SECONDS Set button press threshold for shutdown (default: 1.0)
+#   --threshold SECONDS Set button press threshold for shutdown (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})
 #
 # EXAMPLES:
 #   ./power_control.py                         # Normal operation
@@ -83,6 +83,42 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+# Button Press Configuration
+DEFAULT_SHUTDOWN_THRESHOLD_S = 5.0      # Default button hold time for shutdown (seconds)
+BUTTON_POLLING_HZ = 100.0               # Button state polling frequency (100 Hz)
+BUTTON_ERROR_RECOVERY_DELAY_S = 0.1     # Delay on button read error (seconds)
+BUTTON_INTERRUPT_TIMEOUT_S = 1.0        # Interrupt wait timeout (seconds)
+USE_INTERRUPT_MODE = True               # Use interrupt-based button detection (True) or polling (False)
+
+# LED Blink Frequencies (Hz)
+LED_BLINK_FAST_HZ = 10.0                # Fast blink frequency (10 Hz)
+LED_BLINK_SLOW_HZ = 2.0                 # Slow blink frequency (2 Hz)
+LED_HEARTBEAT_HZ = 1.0                  # Green LED heartbeat frequency (1 Hz)
+LED_SHUTDOWN_BLINK_HZ = 10.0            # Shutdown warning blink frequency (10 Hz)
+
+# Shutdown LED Pattern (seconds)
+LED_SHUTDOWN_SHORT_ON_S = 0.2           # Short flash duration (on)
+LED_SHUTDOWN_SHORT_OFF_S = 0.2          # Short flash duration (off)
+LED_SHUTDOWN_LONG_ON_S = 0.8            # Long flash duration (on)
+LED_SHUTDOWN_LONG_OFF_S = 0.4           # Long flash duration (off)
+
+# Shutdown Sequence Timing
+SHUTDOWN_NOTIFICATION_DELAY_S = 5       # Wait time for users to see notification (seconds)
+SHUTDOWN_RELAY_DELAY_S = 10              # Delay before de-energizing relay (seconds)
+SHUTDOWN_CACHE_FLUSH_TIMEOUT_S = 10     # SD card cache flush timeout (seconds)
+
+# Notification Timeouts
+DESKTOP_NOTIFICATION_TIMEOUT_S = 5      # Desktop notification timeout (seconds)
+WALL_MESSAGE_TIMEOUT_S = 5              # Wall message timeout (seconds)
+NOTIFICATION_EXPIRE_TIME_MS = 5000      # Notification expire time (milliseconds)
+
+# Main Loop Timing
+MAIN_LOOP_SLEEP_S = 1                   # Main control loop sleep interval (seconds)
+
 # Configure logging
 def setup_logging():
     """Setup logging configuration"""
@@ -112,12 +148,13 @@ setup_logging()
 logger = logging.getLogger('power_control')
 
 class PowerController:
-    def __init__(self, test_mode=False, threshold=1.0):
+    def __init__(self, test_mode=False, threshold=1.0, use_polling=False):
         self.running = True
         self.power_button_pressed = False
         self.button_press_start_time = None
         self.shutdown_initiated = False
         self.test_mode = test_mode
+        self.use_polling = use_polling
         
         # GPIO Configuration
         self.GPIO_CHIP = '/dev/gpiochip0'
@@ -131,18 +168,16 @@ class PowerController:
         # Button press threshold (seconds)
         self.SHUTDOWN_THRESHOLD = threshold
         
-        # LED blink patterns
-        self.LED_BLINK_FAST = 0.1      # Fast blink for normal operation
-        self.LED_BLINK_SLOW = 0.5      # Slow blink for shutdown warn
-        
         # Initialize GPIO
         self.init_gpio()
         
-        # Setup signal handlers
+        # Setup signal handlers for graceful service shutdown
         signal.signal(signal.SIGTERM, self.signal_handler)
         signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGQUIT, self.signal_handler)
         
         logger.info("Power controller initialized")
+
 
     def init_gpio(self):
         """Initialize GPIO pins"""
@@ -244,15 +279,22 @@ class PowerController:
         except Exception as e:
             logger.error(f"Error controlling blue LED: {e}")
 
-    def led_blink_pattern(self, led_func, duration, blink_rate):
-        """Blink LED with specified pattern"""
+    def led_blink_pattern(self, led_func, duration, blink_frequency_hz):
+        """Blink LED with specified pattern
+        
+        Args:
+            led_func: Function to call to control LED state
+            duration: How long to blink (seconds)
+            blink_frequency_hz: Blink frequency in Hz
+        """
         start_time = time.time()
         led_state = False
+        blink_interval = 1.0 / blink_frequency_hz
         
         while time.time() - start_time < duration and self.running:
             led_func(led_state)
             led_state = not led_state
-            time.sleep(blink_rate)
+            time.sleep(blink_interval)
 
     def green_led_heartbeat(self):
         """Green LED heartbeat during normal operation"""
@@ -260,29 +302,208 @@ class PowerController:
         while self.running:
             self.set_green_led(led_state)
             led_state = not led_state
-            time.sleep(1.0)  # 1 second blink rate for heartbeat
+            time.sleep(1.0 / LED_HEARTBEAT_HZ)
 
     def cyan_shutdown_blink(self):
         """Blink both LEDs together rapidly for cyan effect during shutdown"""
         led_state = False
-        for _ in range(20):  # Blink for about 2 seconds (20 * 0.1s)
+        blink_interval = 1.0 / LED_SHUTDOWN_BLINK_HZ
+        for _ in range(20):  # Blink for about 2 seconds (20 * blink_interval)
             self.set_green_led(led_state)
             self.set_blue_led(led_state)
             led_state = not led_state
-            time.sleep(0.1)  # Fast blink rate for shutdown
+            time.sleep(blink_interval)
+
+    def shutdown_alternating_pattern(self):
+        """Alternating short-long LED pattern during shutdown sequence"""
+        logger.info("Starting shutdown alternating LED pattern")
+        pattern_count = 0
+        
+        while self.running and self.shutdown_initiated:
+            try:
+                # Short flash
+                logger.debug("Shutdown LED: Short flash ON")
+                self.set_green_led(True)
+                self.set_blue_led(True)
+                time.sleep(LED_SHUTDOWN_SHORT_ON_S)
+                
+                if not self.running or not self.shutdown_initiated:
+                    break
+                    
+                logger.debug("Shutdown LED: Short flash OFF")
+                self.set_green_led(False)
+                self.set_blue_led(False)
+                time.sleep(LED_SHUTDOWN_SHORT_OFF_S)
+                
+                if not self.running or not self.shutdown_initiated:
+                    break
+                
+                # Long flash
+                logger.debug("Shutdown LED: Long flash ON")
+                self.set_green_led(True)
+                self.set_blue_led(True)
+                time.sleep(LED_SHUTDOWN_LONG_ON_S)
+                
+                if not self.running or not self.shutdown_initiated:
+                    break
+                    
+                logger.debug("Shutdown LED: Long flash OFF")
+                self.set_green_led(False)
+                self.set_blue_led(False)
+                time.sleep(LED_SHUTDOWN_LONG_OFF_S)
+                
+                pattern_count += 1
+                logger.info(f"Completed shutdown LED pattern cycle {pattern_count}")
+                
+            except Exception as e:
+                logger.error(f"Error in shutdown LED pattern: {e}")
+                break
+        
+        # Turn off LEDs when done
+        self.set_green_led(False)
+        self.set_blue_led(False)
+        logger.info("Shutdown LED pattern completed")
 
     def cyan_warning_blink(self):
         """Blink both LEDs together for cyan warning effect during button press"""
         led_state = False
         start_time = time.time()
-        while time.time() - start_time < self.SHUTDOWN_THRESHOLD and self.running:
+        blink_interval = 1.0 / LED_BLINK_FAST_HZ
+        while (time.time() - start_time < self.SHUTDOWN_THRESHOLD and 
+               self.running and 
+               self.power_button_pressed):
             self.set_green_led(led_state)
             self.set_blue_led(led_state)
             led_state = not led_state
-            time.sleep(self.LED_BLINK_FAST)
+            time.sleep(blink_interval)
+        
+        # Turn off LEDs when warning pattern stops
+        self.set_green_led(False)
+        self.set_blue_led(False)
 
-    def monitor_power_button(self):
-        """Monitor power button for press duration"""
+    def monitor_power_button_interrupt(self):
+        """Monitor power button using interrupt-based edge detection"""
+        logger.info("Starting interrupt-based button monitoring...")
+        
+        try:
+            # Configure button for edge detection
+            button_settings = gpiod.LineSettings()
+            button_settings.direction = button_settings.direction.INPUT
+            button_settings.bias = button_settings.bias.DISABLED  # No internal pullup
+            button_settings.edge_detection = button_settings.edge_detection.BOTH  # Detect both edges
+            
+            # Release the existing button line first to avoid conflict
+            if hasattr(self, 'power_button'):
+                try:
+                    self.power_button.release()
+                    logger.info("Released existing power button line for interrupt setup")
+                except Exception as e:
+                    logger.warning(f"Could not release existing button line: {e}")
+            
+            # Request the line for event monitoring
+            button_line = self.chip.request_lines(
+                consumer="power_control_interrupt",
+                config={self.POWER_BUTTON_LINE: button_settings}
+            )
+            
+            # Get initial button state
+            initial_values = button_line.get_values()
+            last_button_state = initial_values[0].value
+            logger.info(f"Initial button state: {last_button_state}")
+            
+            while self.running:
+                try:
+                    # Wait for edge event with timeout to allow checking self.running
+                    event = button_line.wait_edge_events(timeout=BUTTON_INTERRUPT_TIMEOUT_S)
+                    
+                    if event and self.running:
+                        # Read current button state
+                        current_values = button_line.get_values()
+                        current_button_state = current_values[0].value
+                        
+                        # Detect button press (falling edge: 1 -> 0)
+                        if last_button_state == 1 and current_button_state == 0:
+                            self.button_press_start_time = time.time()
+                            self.power_button_pressed = True
+                            logger.info("Power button pressed (interrupt)")
+                            
+                            # Send desktop notification for button press
+                            self.send_desktop_notification(
+                                "Power Button Pressed", 
+                                "Power button pressed - hold for shutdown",
+                                "normal"
+                            )
+                            
+                            # Start warning LED pattern (cyan effect)
+                            threading.Thread(
+                                target=self.cyan_warning_blink,
+                                daemon=True
+                            ).start()
+                        
+                        # Detect button release (rising edge: 0 -> 1)
+                        elif last_button_state == 0 and current_button_state == 1:
+                            if self.power_button_pressed:
+                                press_duration = time.time() - self.button_press_start_time
+                                logger.info(f"Power button released after {press_duration:.2f} seconds (interrupt)")
+                                
+                                if press_duration >= self.SHUTDOWN_THRESHOLD:
+                                    logger.info("Long press detected, initiating shutdown...")
+                                    self.initiate_shutdown()
+                                else:
+                                    logger.info("Short press detected, no action taken")
+                                    # Send notification for short press
+                                    self.send_desktop_notification(
+                                        "Power Button Released", 
+                                        f"Short press detected ({press_duration:.1f}s) - no action",
+                                        "low"
+                                    )
+                            
+                            self.power_button_pressed = False
+                            self.button_press_start_time = None
+                        
+                        last_button_state = current_button_state
+                        
+                        # Check for long press while button is held
+                        if self.power_button_pressed and current_button_state == 0:
+                            if time.time() - self.button_press_start_time >= self.SHUTDOWN_THRESHOLD:
+                                if not self.shutdown_initiated:
+                                    logger.info("Long press threshold reached, initiating shutdown...")
+                                    self.initiate_shutdown()
+                
+                except Exception as e:
+                    logger.error(f"Error in interrupt-based button monitoring: {e}")
+                    time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
+                    
+        except Exception as e:
+            logger.error(f"Failed to setup interrupt-based button monitoring: {e}")
+            logger.info("Falling back to polling-based monitoring...")
+            self.monitor_power_button_polling()
+        finally:
+            # Clean up the interrupt line
+            try:
+                if 'button_line' in locals():
+                    button_line.release()
+                    logger.info("Released interrupt button line")
+            except Exception as e:
+                logger.error(f"Error releasing interrupt button line: {e}")
+            
+            # Recreate the original power_button line for fallback
+            try:
+                button_settings = gpiod.LineSettings()
+                button_settings.direction = button_settings.direction.INPUT
+                button_settings.bias = button_settings.bias.DISABLED
+                
+                self.power_button = self.chip.request_lines(
+                    consumer="power_control.py",
+                    config={self.POWER_BUTTON_LINE: button_settings}
+                )
+                logger.info("Recreated original power button line")
+            except Exception as e:
+                logger.error(f"Error recreating power button line: {e}")
+
+    def monitor_power_button_polling(self):
+        """Fallback polling-based button monitoring (original implementation)"""
+        logger.info("Using polling-based button monitoring (fallback)")
         last_button_state = 1  # Start assuming not pressed
         
         while self.running:
@@ -293,11 +514,11 @@ class PowerController:
                 if last_button_state == 1 and current_button_state == 0:
                     self.button_press_start_time = time.time()
                     self.power_button_pressed = True
-                    logger.info("Power button pressed")
+                    logger.info("Power button pressed (polling)")
                     
                     # Send desktop notification for button press
                     self.send_desktop_notification(
-                        "Power Button", 
+                        "Power Button Pressed", 
                         "Power button pressed - hold for shutdown",
                         "normal"
                     )
@@ -312,7 +533,7 @@ class PowerController:
                 elif last_button_state == 0 and current_button_state == 1:
                     if self.power_button_pressed:
                         press_duration = time.time() - self.button_press_start_time
-                        logger.info(f"Power button released after {press_duration:.2f} seconds")
+                        logger.info(f"Power button released after {press_duration:.2f} seconds (polling)")
                         
                         if press_duration >= self.SHUTDOWN_THRESHOLD:
                             logger.info("Long press detected, initiating shutdown...")
@@ -321,7 +542,7 @@ class PowerController:
                             logger.info("Short press detected, no action taken")
                             # Send notification for short press
                             self.send_desktop_notification(
-                                "Power Button", 
+                                "Power Button Released", 
                                 f"Short press detected ({press_duration:.1f}s) - no action",
                                 "low"
                             )
@@ -337,53 +558,64 @@ class PowerController:
                             self.initiate_shutdown()
                 
                 last_button_state = current_button_state
-                time.sleep(0.01)  # 100Hz polling rate
+                time.sleep(1.0 / BUTTON_POLLING_HZ)
                 
             except Exception as e:
-                logger.error(f"Error in power button monitoring: {e}")
-                time.sleep(0.1)
+                logger.error(f"Error in polling-based button monitoring: {e}")
+                time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
 
     def send_desktop_notification(self, title, message, urgency="normal"):
         """Send desktop notification using notify-send"""
         try:
+            # Set up environment for desktop notifications
+            env = os.environ.copy()
+            
+            # Try to find the display for logged-in users
+            try:
+                # Get list of logged-in users and their displays
+                result = subprocess.run(['who'], capture_output=True, text=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split('\n'):
+                        if line and ':' in line:
+                            parts = line.split()
+                            for part in parts:
+                                if part.startswith(':'):
+                                    display = part[1:]  # Remove the leading ':'
+                                    if display.isdigit() or '.' in display:
+                                        env['DISPLAY'] = f':{display}'
+                                        break
+                            if 'DISPLAY' in env:
+                                break
+            except Exception as e:
+                logger.debug(f"Could not determine display from 'who' command: {e}")
+            
+            # If no display found, try common defaults
+            if 'DISPLAY' not in env:
+                env['DISPLAY'] = ':0'
+            
+            # Modify title and message for test mode
             if self.test_mode:
-                logger.info(f"TEST MODE: Would send desktop notification - {title}: {message}")
+                test_title = f"[TEST] {title}"
+                test_message = f"{message}\n\n(This is a test notification - no actual action taken)"
+                logger.info(f"TEST MODE: Sending desktop notification - {title}: {message}")
             else:
-                # Set up environment for desktop notifications
-                env = os.environ.copy()
-                
-                # Try to find the display for logged-in users
-                try:
-                    # Get list of logged-in users and their displays
-                    result = subprocess.run(['who'], capture_output=True, text=True, timeout=5)
-                    if result.returncode == 0:
-                        for line in result.stdout.strip().split('\n'):
-                            if line and ':' in line:
-                                parts = line.split()
-                                for part in parts:
-                                    if part.startswith(':'):
-                                        display = part[1:]  # Remove the leading ':'
-                                        if display.isdigit() or '.' in display:
-                                            env['DISPLAY'] = f':{display}'
-                                            break
-                                if 'DISPLAY' in env:
-                                    break
-                except Exception as e:
-                    logger.debug(f"Could not determine display from 'who' command: {e}")
-                
-                # If no display found, try common defaults
-                if 'DISPLAY' not in env:
-                    env['DISPLAY'] = ':0'
-                
-                # Try to send desktop notification
-                subprocess.run([
-                    'notify-send', 
-                    '--urgency', urgency,
-                    '--expire-time', '5000',  # 5 second timeout
-                    title, 
-                    message
-                ], check=True, timeout=5, env=env)
+                test_title = title
+                test_message = message
+            
+            # Try to send desktop notification
+            subprocess.run([
+                'notify-send', 
+                '--urgency', urgency,
+                '--expire-time', str(NOTIFICATION_EXPIRE_TIME_MS),
+                test_title, 
+                test_message
+            ], check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S, env=env)
+            
+            if self.test_mode:
+                logger.info(f"TEST MODE: Desktop notification sent: {title}")
+            else:
                 logger.info(f"Desktop notification sent: {title}")
+                
         except subprocess.TimeoutExpired:
             logger.warning("Desktop notification timed out")
         except subprocess.CalledProcessError as e:
@@ -406,19 +638,22 @@ class PowerController:
             )
             
             # Use wall command to broadcast message to all users
-            if self.test_mode:
-                logger.info(f"TEST MODE: Would broadcast wall message: {message}")
-            else:
-                try:
+            try:
+                if self.test_mode:
+                    # Add test prefix to wall message
+                    test_message = f"TEST: {message}"
+                    subprocess.run(['wall', test_message], check=True, timeout=WALL_MESSAGE_TIMEOUT_S)
+                    logger.info(f"TEST MODE: Wall message sent: {message}")
+                else:
                     # Use wall command to send message to all logged-in users
-                    subprocess.run(['wall', message], check=True, timeout=5)
+                    subprocess.run(['wall', message], check=True, timeout=WALL_MESSAGE_TIMEOUT_S)
                     logger.info("Shutdown message broadcasted to all users")
-                except subprocess.TimeoutExpired:
-                    logger.warning("Wall command timed out - message may not have been sent")
-                except subprocess.CalledProcessError as e:
-                    logger.warning(f"Failed to broadcast wall message: {e}")
-                except Exception as e:
-                    logger.warning(f"Unexpected error broadcasting wall message: {e}")
+            except subprocess.TimeoutExpired:
+                logger.warning("Wall command timed out - message may not have been sent")
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"Failed to broadcast wall message: {e}")
+            except Exception as e:
+                logger.warning(f"Unexpected error broadcasting wall message: {e}")
                     
         except Exception as e:
             logger.error(f"Error preparing shutdown message: {e}")
@@ -432,57 +667,41 @@ class PowerController:
         
         logger.info("Initiating shutdown sequence...")
         
+        # Start alternating short-long LED pattern immediately to show shutdown initiated
+        threading.Thread(
+            target=self.shutdown_alternating_pattern,
+            daemon=True
+        ).start()
+        
+        
         # Broadcast wall message to all users
         self.broadcast_shutdown_message()
         
         # Give users time to see the wall message before shutdown
-        logger.info("Waiting 5 seconds for users to see shutdown notification...")
-        time.sleep(5)
+        logger.info(f"Waiting {SHUTDOWN_NOTIFICATION_DELAY_S} seconds for users to see shutdown notification...")
+        time.sleep(SHUTDOWN_NOTIFICATION_DELAY_S)
         
-        # Blink both LEDs rapidly together for cyan effect during shutdown
-        threading.Thread(
-            target=self.cyan_shutdown_blink,
-            daemon=True
-        ).start()
+        # Send final shutdown notification
+        self.send_desktop_notification(
+            "System Shutdown", 
+            "Shutting down now...",
+            "critical"
+        )
         
         # Execute shutdown command
         if self.test_mode:
             logger.info("TEST MODE: Shutdown command disabled - would normally execute: shutdown -h now")
-            self.running = False  # Only stop running in test mode
+            # In test mode, let the LED pattern run for a while before stopping
+            logger.info("TEST MODE: Running shutdown LED pattern for demonstration...")
+            time.sleep(10)  # Let the pattern run for 10 seconds in test mode
+            self.running = False  # Stop running after LED pattern demonstration
         else:
-            try:
-                logger.info("Executing shutdown command: shutdown -h now")
-                subprocess.run(['shutdown', '-h', 'now'], check=True)
-                logger.info("Shutdown command executed successfully")
-                # Don't set self.running = False here - let the system shutdown
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to execute shutdown command: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error during shutdown: {e}")
-        
-        # As final action, de-energize relay to cut power
-        time.sleep(2)  # Give system time to start shutdown
-        
-        # Flush SD card cache before cutting power
-        if self.test_mode:
-            logger.info("TEST MODE: SD card cache flush disabled - would normally flush cache")
-        else:
-            logger.info("Flushing SD card cache before power cut...")
-            try:
-                subprocess.run(['sync'], check=True, timeout=10)
-                logger.info("SD card cache flushed successfully")
-            except subprocess.TimeoutExpired:
-                logger.warning("Cache flush timed out - proceeding with power cut")
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"Cache flush failed: {e} - proceeding with power cut")
-            except Exception as e:
-                logger.warning(f"Unexpected error during cache flush: {e} - proceeding with power cut")
-        
-        if self.test_mode:
-            logger.info("TEST MODE: Power relay de-energization disabled - would normally cut power")
-        else:
-            logger.info("De-energizing power relay...")
-            self.set_power_relay(False)
+            logger.info("Executing shutdown command: shutdown -h now")
+            subprocess.run(['shutdown', '-h', 'now'], check=True)
+            logger.info("Shutdown command executed successfully")
+            # Don't set self.running = False here - let the system shutdown
+            # systemd will handle the relay de-energization as the final action
+
 
     def run(self):
         """Main control loop"""
@@ -492,7 +711,12 @@ class PowerController:
         self.set_power_relay(True)
         
         # Start power button monitoring in separate thread
-        button_thread = threading.Thread(target=self.monitor_power_button, daemon=True)
+        if self.use_polling or not USE_INTERRUPT_MODE:
+            logger.info("Using polling-based button detection")
+            button_thread = threading.Thread(target=self.monitor_power_button_polling, daemon=True)
+        else:
+            logger.info("Using interrupt-based button detection")
+            button_thread = threading.Thread(target=self.monitor_power_button_interrupt, daemon=True)
         button_thread.start()
         
         # Start green LED heartbeat in separate thread
@@ -502,7 +726,7 @@ class PowerController:
         try:
             # Main loop - just keep alive
             while self.running:
-                time.sleep(1)
+                time.sleep(MAIN_LOOP_SLEEP_S)
                 
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
@@ -519,9 +743,6 @@ class PowerController:
             # Turn off LEDs
             self.set_green_led(False)
             self.set_blue_led(False)
-            
-            # De-energize relay
-            self.set_power_relay(False)
             
             # Close GPIO chip
             if hasattr(self, 'chip'):
@@ -555,8 +776,9 @@ POWER BUTTON BEHAVIOR:
   - Long press (>= threshold): Initiate shutdown sequence
 
 LED INDICATORS:
-  - Green LED: Solid on when system is running
-  - Blue LED: Fast blink during button press warning, rapid blink during shutdown
+  - Green LED: Heartbeat when system is running
+  - Blue LED: Fast blink during button press warning
+  - Both LEDs: Alternating short-long pattern during shutdown sequence
   - Red LED: Directly connected to power button (not controlled by GPIO)
 
 USAGE:
@@ -565,9 +787,10 @@ USAGE:
 OPTIONS:
   --help, -h          Show this help message and exit
   --test-mode, -t     Run in test mode (disable actual shutdown and power control)
-  --threshold, -T     Set button press threshold for shutdown (default: 1.0)
+  --threshold, -T     Set button press threshold for shutdown (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})
   --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
   --test-notification, -n  Test desktop notification functionality and exit (safe for testing)
+  --polling-mode           Use polling-based button detection instead of interrupts
 
 EXAMPLES:
   ./power_control.py                         # Normal operation
@@ -579,6 +802,7 @@ EXAMPLES:
   ./power_control.py -w                      # Test wall message (short form)
   ./power_control.py --test-notification     # Test desktop notification (safe)
   ./power_control.py -n                      # Test desktop notification (short form)
+  ./power_control.py --polling-mode          # Use polling instead of interrupts
 
 REQUIREMENTS:
   - User must be member of 'gpio' group (for GPIO access)
@@ -604,12 +828,14 @@ def main():
                        help='Show help message and exit')
     parser.add_argument('--test-mode', '-t', action='store_true',
                        help='Run in test mode (disable actual shutdown and power control)')
-    parser.add_argument('--threshold', '-T', type=float, default=1.0,
-                       help='Set button press threshold for shutdown in seconds (default: 1.0)')
+    parser.add_argument('--threshold', '-T', type=float, default=DEFAULT_SHUTDOWN_THRESHOLD_S,
+                       help=f'Set button press threshold for shutdown in seconds (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})')
     parser.add_argument('--test-wall-message', '-w', action='store_true',
                        help='Test wall message functionality and exit (safe for testing)')
     parser.add_argument('--test-notification', '-n', action='store_true',
                        help='Test desktop notification functionality and exit (safe for testing)')
+    parser.add_argument('--polling-mode', action='store_true',
+                       help='Use polling-based button detection instead of interrupts')
     
     args = parser.parse_args()
     
@@ -627,7 +853,7 @@ def main():
             message = f"TEST: SYSTEM SHUTDOWN INITIATED by power button at {timestamp}\nThis is a test message - the system will NOT shutdown (would wait 5 seconds)."
             
             print(f"Broadcasting test message: {message}")
-            subprocess.run(['wall', message], check=True, timeout=5)
+            subprocess.run(['wall', message], check=True, timeout=WALL_MESSAGE_TIMEOUT_S)
             print("Wall message test completed successfully!")
             print("Check your terminal - you should have received the wall message.")
         except subprocess.TimeoutExpired:
@@ -655,7 +881,7 @@ def main():
                 '--expire-time', '3000',
                 'Power Control Test', 
                 'Normal notification test - power button functionality'
-            ], check=True, timeout=5)
+            ], check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
             print("✅ Normal notification sent")
             
             # Test critical notification
@@ -665,7 +891,7 @@ def main():
                 '--expire-time', '5000',
                 'System Shutdown', 
                 'Critical notification test - system shutdown warning'
-            ], check=True, timeout=5)
+            ], check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
             print("✅ Critical notification sent")
             
             # Test low priority notification
@@ -675,7 +901,7 @@ def main():
                 '--expire-time', '2000',
                 'Power Button', 
                 'Low priority notification test - short press detected'
-            ], check=True, timeout=5)
+            ], check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
             print("✅ Low priority notification sent")
             
             print("Desktop notification test completed successfully!")
@@ -723,10 +949,11 @@ def main():
         print("  - System will shutdown and cut power on long button press")
     
     print(f"  - Button press threshold: {args.threshold} seconds")
+    print(f"  - Button detection mode: {'Polling' if args.polling_mode or not USE_INTERRUPT_MODE else 'Interrupt'}")
     print("  - Press Ctrl+C to stop")
     print()
     
-    controller = PowerController(test_mode=args.test_mode, threshold=args.threshold)
+    controller = PowerController(test_mode=args.test_mode, threshold=args.threshold, use_polling=args.polling_mode)
     controller.run()
 
 if __name__ == "__main__":

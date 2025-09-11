@@ -134,7 +134,7 @@ if ! shopt -oq posix; then
 fi
 
 
-PATH="~/bin:/home/tobi/Dropbox/GitHub/SensorsINI/jaer:/home/tobi/jdk1.8.0_111/bin:$PATH:/home/orangepi/.local/bin"
+PATH="~/bin:$PATH:$HOME/.local/bin"
 # Avoid duplicates
 HISTCONTROL=ignoredups:erasedups
 # When the shell exits, append to the history file instead of overwriting it
@@ -143,6 +143,7 @@ shopt -s histappend
 # After each command, append to the history file and reread it
 PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}history -a; history -c; history -r"
 PROMPT_COMMAND+='; printf %s "$PWD" > ~/.storepwd'
+PROMPT_COMMAND+='; argo_hourly_timer'
 
 # https://unix.stackexchange.com/questions/685116/case-insensitive-completion-in-bash
 bind -s 'set completion-ignore-case on'
@@ -163,20 +164,20 @@ fi
 
 # >>> conda initialize >>>
 # !! Contents within this block are managed by 'conda init' !!
-__conda_setup="$('/home/tobi/anaconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
+__conda_setup="$('$HOME/anaconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
 if [ $? -eq 0 ]; then
     eval "$__conda_setup"
 else
-    if [ -f "/home/tobi/anaconda3/etc/profile.d/conda.sh" ]; then
-        . "/home/tobi/anaconda3/etc/profile.d/conda.sh"
+    if [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
+        . "$HOME/anaconda3/etc/profile.d/conda.sh"
     else
-        export PATH="/home/tobi/anaconda3/bin:$PATH"
+        export PATH="$HOME/anaconda3/bin:$PATH"
     fi
 fi
 unset __conda_setup
 # <<< conda initialize <<<
 
-export JAVA_HOME='/home/tobi/OpenJDK21U-jdk_x64_linux_hotspot_21.0.2_13/jdk-21.0.2+13'
+export JAVA_HOME="$HOME/OpenJDK21U-jdk_x64_linux_hotspot_21.0.2_13/jdk-21.0.2+13"
 export PATH=${JAVA_HOME}/bin:${PATH}
 # setxkbmap -option ctrl:nocaps
 # Only run setxkbmap in local sessions (not over SSH)
@@ -185,7 +186,7 @@ if [ -z "$SSH_CLIENT" ] && [ -z "$SSH_TTY" ]; then
 fi
 export VISUAL=vim
 source /opt/ros/humble/setup.bash
-echo "restoring last folder in shell $(<~/.storepwd)"
+# echo "restoring last folder in shell $(<~/.storepwd)"
 cd "$(<~/.storepwd)"
 
 # Source bash aliases if available
@@ -193,8 +194,203 @@ if [ -f ~/.bash_aliases ]; then
     . ~/.bash_aliases
 fi
 
-# Argo daily reminder (once per day)
-if [ ! -f ~/.argo_reminder_date ] || [ "$(date +%Y-%m-%d)" != "$(cat ~/.argo_reminder_date)" ]; then
-    echo "🚢 Argo: al=launch, aq=quit, ar=record, ac=close, as=status, ars=restart, af=foxglove, afb=rosbridge"
-    date +%Y-%m-%d > ~/.argo_reminder_date
-fi
+# Argo service status check and warning
+argo_status_check() {
+    local launch_status=$(systemctl is-active argo-launch.service 2>/dev/null)
+    local record_status=$(systemctl is-active argo-record.service 2>/dev/null)
+    local launch_exists=$(systemctl list-unit-files | grep -q "argo-launch.service" && echo "yes" || echo "no")
+    
+    # Define ROS nodes from argo_launch.py (exact script names)
+    local ros_nodes=("anem.py" "pwm.py" "gps.py" "imu.py" "control.py" "battery_water.py" "foxglove_bridge")
+    local running_nodes=0
+    local total_cpu=0
+    local total_mem=0
+    local missing_nodes=()
+    
+    # Check individual ROS nodes and collect stats
+    for node in "${ros_nodes[@]}"; do
+        # Find processes matching the exact script name and check if they're from the argo scripts directory
+        local node_pids=$(pgrep -f "/$node" 2>/dev/null)
+        local valid_pids=""
+        
+        # Filter to only include processes from the argo scripts directory
+        for pid in $node_pids; do
+            local cmd_path=$(ps -p $pid -o cmd --no-headers 2>/dev/null)
+            if [[ "$cmd_path" == *"$HOME/argo/scripts/"* ]]; then
+                valid_pids="$valid_pids $pid"
+            fi
+        done
+        
+        if [ -n "$valid_pids" ]; then
+            running_nodes=$((running_nodes + 1))
+            
+            # Get stats for each valid PID
+            for pid in $valid_pids; do
+                local node_stats=$(ps -p $pid -o pid,pcpu,pmem,cmd --no-headers 2>/dev/null)
+                if [ -n "$node_stats" ]; then
+                    # Extract CPU and memory percentages
+                    local cpu=$(echo "$node_stats" | awk '{print $2}')
+                    local mem=$(echo "$node_stats" | awk '{print $3}')
+                    
+                    # Add to totals (remove % sign if present)
+                    cpu=${cpu%\%}
+                    mem=${mem%\%}
+                    total_cpu=$(echo "$total_cpu + $cpu" | bc -l 2>/dev/null || echo "$total_cpu")
+                    total_mem=$(echo "$total_mem + $mem" | bc -l 2>/dev/null || echo "$total_mem")
+                fi
+            done
+        else
+            missing_nodes+=("$node")
+        fi
+    done
+    
+    # Check if this is a manual call (not from hourly timer)
+    local is_manual_call=${1:-false}
+    
+    if [ "$is_manual_call" = "true" ] || [ ${#missing_nodes[@]} -gt 0 ]; then
+        # Full detailed output for manual calls or when nodes are missing
+        echo -e "\033[1;33m🚢 ARGO STATUS CHECK - $(date '+%Y-%m-%d %H:%M:%S')\033[0m"
+        
+        # Check systemd services
+        echo -e "\033[1;32m📋 SYSTEMD SERVICES:\033[0m"
+        
+        # Check argo-launch service
+        if [ "$launch_exists" = "yes" ]; then
+            if [ "$launch_status" = "active" ]; then
+                local launch_pid=$(systemctl show argo-launch.service --property=MainPID --value 2>/dev/null)
+                if [ -n "$launch_pid" ] && [ "$launch_pid" != "0" ]; then
+                    local launch_stats=$(ps -p $launch_pid -o pid,pcpu,pmem,cmd --no-headers 2>/dev/null)
+                    if [ -n "$launch_stats" ]; then
+                        echo -e "  \033[1;32margo-launch:\033[0m $launch_stats"
+                    fi
+                else
+                    echo -e "  \033[1;32margo-launch:\033[0m \033[1;33mACTIVE\033[0m (no main PID)"
+                fi
+            else
+                echo -e "  \033[1;31margo-launch:\033[0m \033[1;31m$launch_status\033[0m"
+            fi
+        else
+            echo -e "  \033[1;31margo-launch:\033[0m \033[1;31mSERVICE NOT FOUND\033[0m"
+        fi
+        
+        # Check argo-record service
+        if [ "$record_status" = "active" ]; then
+            local record_pid=$(systemctl show argo-record.service --property=MainPID --value 2>/dev/null)
+            if [ -n "$record_pid" ] && [ "$record_pid" != "0" ]; then
+                local record_stats=$(ps -p $record_pid -o pid,pcpu,pmem,cmd --no-headers 2>/dev/null)
+                if [ -n "$record_stats" ]; then
+                    echo -e "  \033[1;32margo-record:\033[0m $record_stats"
+                fi
+            else
+                echo -e "  \033[1;32margo-record:\033[0m \033[1;33mACTIVE\033[0m (no main PID)"
+            fi
+        else
+            echo -e "  \033[1;31margo-record:\033[0m \033[1;31m$record_status\033[0m"
+        fi
+        
+        # Check individual ROS nodes with detailed output
+        echo -e "\033[1;32m🤖 ROS NODES:\033[0m"
+        for node in "${ros_nodes[@]}"; do
+            local node_pids=$(pgrep -f "/$node" 2>/dev/null)
+            local valid_pids=""
+            
+            # Filter to only include processes from the argo scripts directory
+            for pid in $node_pids; do
+                local cmd_path=$(ps -p $pid -o cmd --no-headers 2>/dev/null)
+                if [[ "$cmd_path" == *"$HOME/argo/scripts/"* ]]; then
+                    valid_pids="$valid_pids $pid"
+                fi
+            done
+            
+            if [ -n "$valid_pids" ]; then
+                # Get stats for each valid PID
+                for pid in $valid_pids; do
+                    local node_stats=$(ps -p $pid -o pid,pcpu,pmem,cmd --no-headers 2>/dev/null)
+                    if [ -n "$node_stats" ]; then
+                        # Extract CPU and memory percentages
+                        local cpu=$(echo "$node_stats" | awk '{print $2}')
+                        local mem=$(echo "$node_stats" | awk '{print $3}')
+                        
+                        # Color code based on resource usage
+                        local cpu_color="\033[1;32m"  # Green by default
+                        local mem_color="\033[1;32m"  # Green by default
+                        
+                        # Simple numeric comparison for CPU
+                        if [ $(echo "$cpu > 50" | bc -l 2>/dev/null || echo "0") -eq 1 ]; then
+                            cpu_color="\033[1;31m"  # Red for high CPU
+                        elif [ $(echo "$cpu > 20" | bc -l 2>/dev/null || echo "0") -eq 1 ]; then
+                            cpu_color="\033[1;33m"  # Yellow for medium CPU
+                        fi
+                        
+                        # Simple numeric comparison for memory
+                        if [ $(echo "$mem > 10" | bc -l 2>/dev/null || echo "0") -eq 1 ]; then
+                            mem_color="\033[1;31m"  # Red for high memory
+                        elif [ $(echo "$mem > 5" | bc -l 2>/dev/null || echo "0") -eq 1 ]; then
+                            mem_color="\033[1;33m"  # Yellow for medium memory
+                        fi
+                        
+                        echo -e "  \033[1;32m$node:\033[0m PID:$pid CPU:${cpu_color}${cpu}%\033[0m MEM:${mem_color}${mem}%\033[0m"
+                    fi
+                done
+            else
+                echo -e "  \033[1;31m$node:\033[0m \033[1;31mNOT RUNNING\033[0m"
+            fi
+        done
+        echo -e "\033[1;36m📊 SUMMARY:\033[0m"
+        echo -e "  Running nodes: \033[1;32m$running_nodes\033[0m/\033[1;33m${#ros_nodes[@]}\033[0m"
+        echo -e "  Total CPU usage: \033[1;32m${total_cpu}%\033[0m"
+        echo -e "  Total memory usage: \033[1;32m${total_mem}%\033[0m"
+        
+        # System load and memory info
+        local load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//')
+        local mem_info=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+        echo -e "  System load: \033[1;32m$load_avg\033[0m"
+        echo -e "  System memory: \033[1;32m${mem_info}%\033[0m used"
+        
+        # Storage check (from argo_launch.py logic)
+        local free_gb=$(df / | awk 'NR==2 {printf "%.1f", $4/1024/1024}')
+        local used_percent=$(df / | awk 'NR==2 {printf "%.1f", $3/($3+$4)*100}')
+        echo -e "  Storage: \033[1;32m${free_gb}GB\033[0m free (\033[1;32m${used_percent}%\033[0m used)"
+        
+        echo "============================================================"
+        
+        if [ "$launch_status" = "active" ] || [ "$record_status" = "active" ]; then
+            echo -e "  \033[1;31mStop: \033[0maq (or: sudo systemctl stop argo-launch.service argo-record.service)"
+        fi
+    else
+        # Condensed single-line output for hourly automatic runs
+        local load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//')
+        local mem_info=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+        local free_gb=$(df / | awk 'NR==2 {printf "%.1f", $4/1024/1024}')
+        
+        echo -e "\033[1;33m🚢 ARGO:\033[0m \033[1;32m$running_nodes\033[0m/\033[1;33m${#ros_nodes[@]}\033[0m nodes | CPU:\033[1;32m${total_cpu}%\033[0m MEM:\033[1;32m${total_mem}%\033[0m | Load:\033[1;32m$load_avg\033[0m SysMem:\033[1;32m${mem_info}%\033[0m | Storage:\033[1;32m${free_gb}GB\033[0m free"
+    fi
+}
+
+# Manual status check (always shows full details)
+argo_status() {
+    argo_status_check true
+}
+
+# Hourly timer for automatic status checks
+argo_hourly_timer() {
+    # Check if we should run the hourly check
+    local last_check_file="$HOME/.argo_last_check"
+    local current_time=$(date +%s)
+    local last_check_time=0
+    
+    if [ -f "$last_check_file" ]; then
+        last_check_time=$(cat "$last_check_file" 2>/dev/null || echo "0")
+    fi
+    
+    # Run check if it's been more than 1 hour (3600 seconds) or if manually called
+    local time_diff=$((current_time - last_check_time))
+    if [ $time_diff -ge 3600 ] || [ "$1" = "force" ]; then
+        argo_status_check
+        echo "$current_time" > "$last_check_file"
+    fi
+}
+
+# Run Argo status check on shell startup (with hourly timer)
+# This will only show status if it's been more than an hour since last check
+argo_hourly_timer

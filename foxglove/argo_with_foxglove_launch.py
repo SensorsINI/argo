@@ -19,8 +19,8 @@ def generate_launch_description():
         description='Whether to launch rosbridge_server for Foxglove'
     )
     
-    # Get script directory
-    script_dir = '/home/orangepi/argo/scripts'
+    # Get script directory (relative to this launch file)
+    script_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'scripts')
     
     # Define all argo nodes
     argo_nodes = [

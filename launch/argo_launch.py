@@ -91,8 +91,8 @@ def generate_launch_description():
         description='Address for foxglove_bridge to bind to (0.0.0.0 = all interfaces)'
     )
     
-    # Get script directory (direct path since we're not using colcon build)
-    script_dir = '/home/orangepi/argo/scripts'
+    # Get script directory (relative to this launch file)
+    script_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts')
     
     # Define all nodes
     nodes = [
