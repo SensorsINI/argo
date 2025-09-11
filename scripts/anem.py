@@ -125,26 +125,22 @@ class AnemNode(Node):
             self.bus = smbus.SMBus(0) # The default i2c bus
             self.get_logger().info('Opened i2c SMBus')
         except FileNotFoundError:
-            self.get_logger().warn("I2C bus not found. Is I2C enabled? Will retry once per second.")
-            self.bus = None
+            self.get_logger().error("CRITICAL: I2C bus not found. Is I2C enabled? Exiting.")
+            sys.exit(1)
 
         if self.bus is not None:
             if not self.setup_sensors():
-                self.get_logger().warn("Failed to setup sensors. Will retry once per second.")
-                self.sensors_ready = False
+                self.get_logger().error("CRITICAL: Failed to setup anemometer sensors. Exiting.")
+                sys.exit(1)
             else:
                 self.sensors_ready = True
 
         # Main loop timer
         self.timer = self.create_timer(0.1, self.timer_callback) # 10 Hz
-        # Reconnect watchdog (5 second interval)
-        self.reconnect_timer = self.create_timer(5.0, self.reconnect_callback)
         
         # Report actual sensor status
         if self.sensors_ready:
             self.get_logger().info("Initialization of anemometer wind sensor completed successfully.")
-        else:
-            self.get_logger().warn("Anemometer node started but sensors not ready. Will attempt to connect every second.")
 
         # Visual mode init
         self._vis_initialized = False
@@ -244,7 +240,7 @@ class AnemNode(Node):
         if sensors_detected:
             self.get_logger().info(f'Stopping existing continuous measurements on detected sensors: {sensors_detected}')
         else:
-            self.get_logger().debug('No sensors detected on I2C bus')
+            self.get_logger().warn('Wind sensor not detected on I2C bus')
             return False
             
         for a in self.i2cAddr:
@@ -273,36 +269,14 @@ class AnemNode(Node):
         time.sleep(0.1)
         return True
 
-    def reconnect_callback(self):
-        if self.sensors_ready:
-            return
-        # Attempt to (re)open bus if needed
-        if self.bus is None:
-            try:
-                self.bus = smbus.SMBus(0)
-                self.get_logger().info('I2C bus reopened.')
-            except FileNotFoundError:
-                # Still not available
-                return
-            except Exception as e:
-                self.get_logger().debug(f"I2C reopen attempt failed: {e}")
-                return
-        # Attempt to setup sensors
-        try:
-            if self.setup_sensors():
-                self.sensors_ready = True
-                self.get_logger().info('Reconnected to anemometer sensors.')
-        except Exception as e:
-            self.get_logger().debug(f"Sensor setup retry failed: {e}")
 
     def timer_callback(self):
         dp = []
         temps = []
         try:
             if not self.sensors_ready:
-                if self.debug_visually:
-                    self._render_visual_disconnected()
-                return
+                self.get_logger().error("CRITICAL: Anemometer sensors not ready. Exiting.")
+                sys.exit(1)
             for a in self.i2cAddr:
                 b = self.bus.read_i2c_block_data(a, 0, 9)
                 v = int_from_bytes([b[0], b[1]]) / 240.  # convert to Pascals diff pressure
@@ -329,36 +303,12 @@ class AnemNode(Node):
                 self._render_visual(speed_mps, angle_deg, temp_celsius, (dp[0], dp[1], dp[2]))
 
         except IOError as e:
-            # Mark sensors as not ready and throttle error logs
-            self.sensors_ready = False
-            self.bus = self.bus  # keep reference; reopen handled by reconnect timer
-            now = time.monotonic()
-            if now - self._last_error_log_time > 2.0:
-                self.get_logger().warn(f"I2C read error: {e}. Will attempt to reconnect once per second.")
-                self._last_error_log_time = now
+            # Critical I2C error - exit immediately
+            self.get_logger().error(f"CRITICAL: I2C read error: {e}. Exiting.")
+            sys.exit(1)
         except IndexError as e:
             self.get_logger().error(f"Data parsing error: {e}. Received incomplete data from sensor.")
 
-    def _render_visual_disconnected(self):
-        # Minimal placeholder rendering to prevent scrolling
-        if not self._vis_initialized:
-            self._init_visual()
-        width = self._vis_width
-        height = self._vis_height
-        header = [
-            "Sensors disconnected...",
-            "Waiting for reconnection (checking every 1s)",
-            "Use Ctrl+C to exit visual mode"
-        ]
-        try:
-            sys.stdout.write('\x1b[H')
-            for line in header:
-                sys.stdout.write(line.ljust(width) + '\n')
-            for _ in range(height):
-                sys.stdout.write(' '.ljust(width) + '\n')
-            sys.stdout.flush()
-        except Exception:
-            pass
 
     def destroy_node(self):
         # This is the recommended way to perform cleanup in ROS2.
