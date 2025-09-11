@@ -3,10 +3,10 @@ Description=Argo Robot ROS2 Launch Service
 After=network.target
 
 [Service]
-User=orangepi
-Group=orangepi
-WorkingDirectory=/home/orangepi/argo
-EnvironmentFile=/home/orangepi/argo/launch/argo.env
+User=%i
+Group=%i
+WorkingDirectory=%h/argo
+EnvironmentFile=%h/argo/launch/argo.env
 ExecStart=/bin/bash -l -c 'source /opt/ros/humble/setup.bash && ros2 launch launch/argo_launch.py'
 Restart=no
 StandardOutput=journal
