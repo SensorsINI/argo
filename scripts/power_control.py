@@ -26,8 +26,9 @@
 #   When !POW goes high, the relay is de-energized, cutting power.
 #
 # POWER BUTTON BEHAVIOR:
-#   - Short press (< 1 second): No action
-#   - Long press (>= 1 second): Initiate shutdown sequence
+#   - Short press (< threshold): No action
+#   - Long press (>= threshold): Initiate shutdown sequence
+#   - Boot delay period: Button presses ignored for 30 seconds after startup
 #
 # LED INDICATORS:
 #   - Green LED: Heartbeat when system is running
@@ -89,10 +90,12 @@ from datetime import datetime
 
 # Button Press Configuration
 DEFAULT_SHUTDOWN_THRESHOLD_S = 5.0      # Default button hold time for shutdown (seconds)
-BUTTON_POLLING_HZ = 100.0               # Button state polling frequency (100 Hz)
+BUTTON_POLLING_HZ = 5.0                 # Button state polling frequency (5 Hz - reduced for lower CPU usage)
 BUTTON_ERROR_RECOVERY_DELAY_S = 0.1     # Delay on button read error (seconds)
-BUTTON_INTERRUPT_TIMEOUT_S = 1.0        # Interrupt wait timeout (seconds)
-USE_INTERRUPT_MODE = True               # Use interrupt-based button detection (True) or polling (False)
+
+# Boot Delay Configuration
+BOOT_DELAY_S = 30.0                     # Delay after startup before button monitoring begins (seconds)
+BOOT_STABILIZATION_DELAY_S = 5.0        # Additional delay for system stabilization (seconds)
 
 # LED Blink Frequencies (Hz)
 LED_BLINK_FAST_HZ = 10.0                # Fast blink frequency (10 Hz)
@@ -148,13 +151,17 @@ setup_logging()
 logger = logging.getLogger('power_control')
 
 class PowerController:
-    def __init__(self, test_mode=False, threshold=1.0, use_polling=False):
+    def __init__(self, test_mode=False, threshold=1.0):
         self.running = True
         self.power_button_pressed = False
         self.button_press_start_time = None
         self.shutdown_initiated = False
         self.test_mode = test_mode
-        self.use_polling = use_polling
+        
+        # Boot delay tracking
+        self.startup_time = time.time()
+        self.boot_delay_active = True
+        self.initial_button_state = None
         
         # GPIO Configuration
         self.GPIO_CHIP = '/dev/gpiochip0'
@@ -177,6 +184,10 @@ class PowerController:
         signal.signal(signal.SIGQUIT, self.signal_handler)
         
         logger.info("Power controller initialized")
+        
+        # Record initial button state during boot
+        self.initial_button_state = self.read_power_button()
+        logger.info(f"Initial button state recorded: {self.initial_button_state}")
 
 
     def init_gpio(self):
@@ -185,45 +196,38 @@ class PowerController:
             logger.info(f"Attempting to open GPIO chip: {self.GPIO_CHIP}")
             self.chip = gpiod.Chip(self.GPIO_CHIP)
             logger.info(f"Successfully opened GPIO chip: {self.GPIO_CHIP}")
-            
-            # Configure power relay control (PI3) - Open drain output
-            relay_settings = gpiod.LineSettings()
-            relay_settings.direction = relay_settings.direction.OUTPUT
-            relay_settings.output_value = relay_settings.output_value.INACTIVE  # Start with relay energized (low = on)
-            relay_settings.drive = relay_settings.drive.OPEN_DRAIN
-            
-            self.power_relay = self.chip.request_lines(
+
+            # Get line objects
+            self.power_relay_line = self.chip.get_line(self.POWER_RELAY_LINE)
+            self.power_button_line = self.chip.get_line(self.POWER_BUTTON_LINE)
+            self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE)
+            self.blue_led_line = self.chip.get_line(self.BLUE_LED_LINE)
+
+            # Request power relay line
+            self.power_relay_line.request(
                 consumer="power_control.py",
-                config={self.POWER_RELAY_LINE: relay_settings}
+                type=gpiod.LINE_REQ_DIR_OUT,
+                flags=gpiod.LINE_REQ_FLAG_OPEN_DRAIN,
+                default_vals=[0]  # Start with relay energized (low = on)
             )
-            
-            # Configure power button input (PI9) - Input without pullup
-            button_settings = gpiod.LineSettings()
-            button_settings.direction = button_settings.direction.INPUT
-            button_settings.bias = button_settings.bias.DISABLED  # No internal pullup
-            
-            self.power_button = self.chip.request_lines(
+
+            # Request power button line
+            self.power_button_line.request(
                 consumer="power_control.py",
-                config={self.POWER_BUTTON_LINE: button_settings}
+                type=gpiod.LINE_REQ_DIR_IN,
+                flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE
             )
-            
-            # Configure LED outputs
-            green_led_settings = gpiod.LineSettings()
-            green_led_settings.direction = green_led_settings.direction.OUTPUT
-            green_led_settings.output_value = green_led_settings.output_value.INACTIVE  # Start with LED off
-            
-            self.green_led = self.chip.request_lines(
+
+            # Request LED lines
+            self.green_led_line.request(
                 consumer="power_control.py",
-                config={self.GREEN_LED_LINE: green_led_settings}
+                type=gpiod.LINE_REQ_DIR_OUT,
+                default_vals=[0]  # Start with LED off
             )
-            
-            blue_led_settings = gpiod.LineSettings()
-            blue_led_settings.direction = blue_led_settings.direction.OUTPUT
-            blue_led_settings.output_value = blue_led_settings.output_value.INACTIVE  # Start with LED off
-            
-            self.blue_led = self.chip.request_lines(
+            self.blue_led_line.request(
                 consumer="power_control.py",
-                config={self.BLUE_LED_LINE: blue_led_settings}
+                type=gpiod.LINE_REQ_DIR_OUT,
+                default_vals=[0]  # Start with LED off
             )
             
             logger.info("GPIO pins configured successfully")
@@ -239,13 +243,27 @@ class PowerController:
         logger.info(f"Received signal {signum}, stopping power controller...")
         self.running = False
 
+    def is_boot_delay_active(self):
+        """Check if we're still in the boot delay period"""
+        if not self.boot_delay_active:
+            return False
+            
+        elapsed_time = time.time() - self.startup_time
+        if elapsed_time >= BOOT_DELAY_S:
+            self.boot_delay_active = False
+            logger.info(f"Boot delay period completed after {elapsed_time:.1f} seconds - button monitoring now active")
+            return False
+        
+        remaining_time = BOOT_DELAY_S - elapsed_time
+        if int(remaining_time) % 5 == 0 and remaining_time > 0:  # Log every 5 seconds
+            logger.info(f"Boot delay active - {remaining_time:.0f} seconds remaining before button monitoring starts")
+        
+        return True
+
     def read_power_button(self):
         """Read power button state"""
         try:
-            values = self.power_button.get_values()
-            # get_values() returns a list of Value objects
-            # For a single line request, the value is at index 0
-            return values[0].value  # Return the actual integer value (0 or 1)
+            return self.power_button_line.get_value()
         except Exception as e:
             logger.error(f"Error reading power button: {e}")
             return 1  # Assume not pressed on error
@@ -254,9 +272,8 @@ class PowerController:
         """Control power relay (True = energized/on, False = de-energized/off)"""
         try:
             # For open drain: 0 = energized (relay on), 1 = de-energized (relay off)
-            settings = gpiod.LineSettings()
-            value = settings.output_value.INACTIVE if state else settings.output_value.ACTIVE
-            self.power_relay.set_values({self.POWER_RELAY_LINE: value})
+            value = 0 if state else 1
+            self.power_relay_line.set_value(value)
             logger.info(f"Power relay set to {'ON' if state else 'OFF'}")
         except Exception as e:
             logger.error(f"Error controlling power relay: {e}")
@@ -264,18 +281,16 @@ class PowerController:
     def set_green_led(self, state):
         """Control green LED"""
         try:
-            settings = gpiod.LineSettings()
-            value = settings.output_value.ACTIVE if state else settings.output_value.INACTIVE
-            self.green_led.set_values({self.GREEN_LED_LINE: value})
+            value = 1 if state else 0
+            self.green_led_line.set_value(value)
         except Exception as e:
             logger.error(f"Error controlling green LED: {e}")
 
     def set_blue_led(self, state):
         """Control blue LED"""
         try:
-            settings = gpiod.LineSettings()
-            value = settings.output_value.ACTIVE if state else settings.output_value.INACTIVE
-            self.blue_led.set_values({self.BLUE_LED_LINE: value})
+            value = 1 if state else 0
+            self.blue_led_line.set_value(value)
         except Exception as e:
             logger.error(f"Error controlling blue LED: {e}")
 
@@ -299,10 +314,15 @@ class PowerController:
     def green_led_heartbeat(self):
         """Green LED heartbeat during normal operation"""
         led_state = False
+        heartbeat_interval = 1.0 / LED_HEARTBEAT_HZ  # 1 second interval
         while self.running:
             self.set_green_led(led_state)
             led_state = not led_state
-            time.sleep(1.0 / LED_HEARTBEAT_HZ)
+            # Sleep in small increments to allow for responsive shutdown
+            sleep_time = 0
+            while sleep_time < heartbeat_interval and self.running:
+                time.sleep(0.1)  # Sleep in 100ms increments
+                sleep_time += 0.1
 
     def cyan_shutdown_blink(self):
         """Blink both LEDs together rapidly for cyan effect during shutdown"""
@@ -381,130 +401,11 @@ class PowerController:
         self.set_green_led(False)
         self.set_blue_led(False)
 
-    def monitor_power_button_interrupt(self):
-        """Monitor power button using interrupt-based edge detection"""
-        logger.info("Starting interrupt-based button monitoring...")
-        
-        try:
-            # Configure button for edge detection
-            button_settings = gpiod.LineSettings()
-            button_settings.direction = button_settings.direction.INPUT
-            button_settings.bias = button_settings.bias.DISABLED  # No internal pullup
-            button_settings.edge_detection = button_settings.edge_detection.BOTH  # Detect both edges
-            
-            # Release the existing button line first to avoid conflict
-            if hasattr(self, 'power_button'):
-                try:
-                    self.power_button.release()
-                    logger.info("Released existing power button line for interrupt setup")
-                except Exception as e:
-                    logger.warning(f"Could not release existing button line: {e}")
-            
-            # Request the line for event monitoring
-            button_line = self.chip.request_lines(
-                consumer="power_control_interrupt",
-                config={self.POWER_BUTTON_LINE: button_settings}
-            )
-            
-            # Get initial button state
-            initial_values = button_line.get_values()
-            last_button_state = initial_values[0].value
-            logger.info(f"Initial button state: {last_button_state}")
-            
-            while self.running:
-                try:
-                    # Wait for edge event with timeout to allow checking self.running
-                    event = button_line.wait_edge_events(timeout=BUTTON_INTERRUPT_TIMEOUT_S)
-                    
-                    if event and self.running:
-                        # Read current button state
-                        current_values = button_line.get_values()
-                        current_button_state = current_values[0].value
-                        
-                        # Detect button press (falling edge: 1 -> 0)
-                        if last_button_state == 1 and current_button_state == 0:
-                            self.button_press_start_time = time.time()
-                            self.power_button_pressed = True
-                            logger.info("Power button pressed (interrupt)")
-                            
-                            # Send desktop notification for button press
-                            self.send_desktop_notification(
-                                "Power Button Pressed", 
-                                "Power button pressed - hold for shutdown",
-                                "normal"
-                            )
-                            
-                            # Start warning LED pattern (cyan effect)
-                            threading.Thread(
-                                target=self.cyan_warning_blink,
-                                daemon=True
-                            ).start()
-                        
-                        # Detect button release (rising edge: 0 -> 1)
-                        elif last_button_state == 0 and current_button_state == 1:
-                            if self.power_button_pressed:
-                                press_duration = time.time() - self.button_press_start_time
-                                logger.info(f"Power button released after {press_duration:.2f} seconds (interrupt)")
-                                
-                                if press_duration >= self.SHUTDOWN_THRESHOLD:
-                                    logger.info("Long press detected, initiating shutdown...")
-                                    self.initiate_shutdown()
-                                else:
-                                    logger.info("Short press detected, no action taken")
-                                    # Send notification for short press
-                                    self.send_desktop_notification(
-                                        "Power Button Released", 
-                                        f"Short press detected ({press_duration:.1f}s) - no action",
-                                        "low"
-                                    )
-                            
-                            self.power_button_pressed = False
-                            self.button_press_start_time = None
-                        
-                        last_button_state = current_button_state
-                        
-                        # Check for long press while button is held
-                        if self.power_button_pressed and current_button_state == 0:
-                            if time.time() - self.button_press_start_time >= self.SHUTDOWN_THRESHOLD:
-                                if not self.shutdown_initiated:
-                                    logger.info("Long press threshold reached, initiating shutdown...")
-                                    self.initiate_shutdown()
-                
-                except Exception as e:
-                    logger.error(f"Error in interrupt-based button monitoring: {e}")
-                    time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
-                    
-        except Exception as e:
-            logger.error(f"Failed to setup interrupt-based button monitoring: {e}")
-            logger.info("Falling back to polling-based monitoring...")
-            self.monitor_power_button_polling()
-        finally:
-            # Clean up the interrupt line
-            try:
-                if 'button_line' in locals():
-                    button_line.release()
-                    logger.info("Released interrupt button line")
-            except Exception as e:
-                logger.error(f"Error releasing interrupt button line: {e}")
-            
-            # Recreate the original power_button line for fallback
-            try:
-                button_settings = gpiod.LineSettings()
-                button_settings.direction = button_settings.direction.INPUT
-                button_settings.bias = button_settings.bias.DISABLED
-                
-                self.power_button = self.chip.request_lines(
-                    consumer="power_control.py",
-                    config={self.POWER_BUTTON_LINE: button_settings}
-                )
-                logger.info("Recreated original power button line")
-            except Exception as e:
-                logger.error(f"Error recreating power button line: {e}")
-
     def monitor_power_button_polling(self):
-        """Fallback polling-based button monitoring (original implementation)"""
-        logger.info("Using polling-based button monitoring (fallback)")
+        """Polling-based button monitoring"""
+        logger.info("Using polling-based button monitoring")
         last_button_state = 1  # Start assuming not pressed
+        poll_interval = 1.0 / BUTTON_POLLING_HZ  # Calculate once
         
         while self.running:
             try:
@@ -512,22 +413,26 @@ class PowerController:
                 
                 # Detect button press (falling edge)
                 if last_button_state == 1 and current_button_state == 0:
-                    self.button_press_start_time = time.time()
-                    self.power_button_pressed = True
-                    logger.info("Power button pressed (polling)")
-                    
-                    # Send desktop notification for button press
-                    self.send_desktop_notification(
-                        "Power Button Pressed", 
-                        "Power button pressed - hold for shutdown",
-                        "normal"
-                    )
-                    
-                    # Start warning LED pattern (cyan effect)
-                    threading.Thread(
-                        target=self.cyan_warning_blink,
-                        daemon=True
-                    ).start()
+                    # Check if we're still in boot delay period
+                    if self.is_boot_delay_active():
+                        logger.info("Power button pressed during boot delay - ignoring (polling)")
+                    else:
+                        self.button_press_start_time = time.time()
+                        self.power_button_pressed = True
+                        logger.info("Power button pressed (polling)")
+                        
+                        # Send desktop notification for button press
+                        self.send_desktop_notification(
+                            "Power Button Pressed", 
+                            "Power button pressed - hold for shutdown",
+                            "normal"
+                        )
+                        
+                        # Start warning LED pattern (cyan effect)
+                        threading.Thread(
+                            target=self.cyan_warning_blink,
+                            daemon=True
+                        ).start()
                 
                 # Detect button release (rising edge)
                 elif last_button_state == 0 and current_button_state == 1:
@@ -535,30 +440,40 @@ class PowerController:
                         press_duration = time.time() - self.button_press_start_time
                         logger.info(f"Power button released after {press_duration:.2f} seconds (polling)")
                         
-                        if press_duration >= self.SHUTDOWN_THRESHOLD:
-                            logger.info("Long press detected, initiating shutdown...")
-                            self.initiate_shutdown()
+                        # Only process button release if we're not in boot delay
+                        if not self.is_boot_delay_active():
+                            if press_duration >= self.SHUTDOWN_THRESHOLD:
+                                logger.info("Long press detected, initiating shutdown...")
+                                self.initiate_shutdown()
+                            else:
+                                logger.info("Short press detected, no action taken")
+                                # Send notification for short press
+                                self.send_desktop_notification(
+                                    "Power Button Released", 
+                                    f"Short press detected ({press_duration:.1f}s) - no action",
+                                    "low"
+                                )
                         else:
-                            logger.info("Short press detected, no action taken")
-                            # Send notification for short press
-                            self.send_desktop_notification(
-                                "Power Button Released", 
-                                f"Short press detected ({press_duration:.1f}s) - no action",
-                                "low"
-                            )
+                            logger.info("Button release during boot delay - ignoring")
                     
                     self.power_button_pressed = False
                     self.button_press_start_time = None
                 
                 # Check for long press while button is held
                 elif self.power_button_pressed and current_button_state == 0:
-                    if time.time() - self.button_press_start_time >= self.SHUTDOWN_THRESHOLD:
-                        if not self.shutdown_initiated:
-                            logger.info("Long press threshold reached, initiating shutdown...")
-                            self.initiate_shutdown()
+                    if not self.is_boot_delay_active():
+                        if time.time() - self.button_press_start_time >= self.SHUTDOWN_THRESHOLD:
+                            if not self.shutdown_initiated:
+                                logger.info("Long press threshold reached, initiating shutdown...")
+                                self.initiate_shutdown()
                 
                 last_button_state = current_button_state
-                time.sleep(1.0 / BUTTON_POLLING_HZ)
+                
+                # Sleep in small increments to allow for responsive shutdown
+                sleep_time = 0
+                while sleep_time < poll_interval and self.running:
+                    time.sleep(0.01)  # Sleep in 10ms increments
+                    sleep_time += 0.01
                 
             except Exception as e:
                 logger.error(f"Error in polling-based button monitoring: {e}")
@@ -706,17 +621,14 @@ class PowerController:
     def run(self):
         """Main control loop"""
         logger.info("Power controller starting...")
+        logger.info(f"Boot delay period: {BOOT_DELAY_S} seconds - button monitoring will be disabled during this time")
         
         # Ensure relay is energized on startup
         self.set_power_relay(True)
         
         # Start power button monitoring in separate thread
-        if self.use_polling or not USE_INTERRUPT_MODE:
-            logger.info("Using polling-based button detection")
-            button_thread = threading.Thread(target=self.monitor_power_button_polling, daemon=True)
-        else:
-            logger.info("Using interrupt-based button detection")
-            button_thread = threading.Thread(target=self.monitor_power_button_interrupt, daemon=True)
+        logger.info("Starting polling-based button detection")
+        button_thread = threading.Thread(target=self.monitor_power_button_polling, daemon=True)
         button_thread.start()
         
         # Start green LED heartbeat in separate thread
@@ -774,6 +686,7 @@ HARDWARE CONFIGURATION:
 POWER BUTTON BEHAVIOR:
   - Short press (< threshold): No action
   - Long press (>= threshold): Initiate shutdown sequence
+  - Boot delay period: Button presses ignored for 30 seconds after startup
 
 LED INDICATORS:
   - Green LED: Heartbeat when system is running
@@ -790,8 +703,6 @@ OPTIONS:
   --threshold, -T     Set button press threshold for shutdown (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})
   --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
   --test-notification, -n  Test desktop notification functionality and exit (safe for testing)
-  --polling-mode           Use polling-based button detection instead of interrupts
-
 EXAMPLES:
   ./power_control.py                         # Normal operation
   ./power_control.py --test-mode             # Test mode (safe)
@@ -802,7 +713,6 @@ EXAMPLES:
   ./power_control.py -w                      # Test wall message (short form)
   ./power_control.py --test-notification     # Test desktop notification (safe)
   ./power_control.py -n                      # Test desktop notification (short form)
-  ./power_control.py --polling-mode          # Use polling instead of interrupts
 
 REQUIREMENTS:
   - User must be member of 'gpio' group (for GPIO access)
@@ -834,8 +744,6 @@ def main():
                        help='Test wall message functionality and exit (safe for testing)')
     parser.add_argument('--test-notification', '-n', action='store_true',
                        help='Test desktop notification functionality and exit (safe for testing)')
-    parser.add_argument('--polling-mode', action='store_true',
-                       help='Use polling-based button detection instead of interrupts')
     
     args = parser.parse_args()
     
@@ -918,19 +826,23 @@ def main():
         sys.exit(0)
     
     # Check if user is in the gpio group (required for GPIO access)
-    import grp
-    try:
-        gpio_group = grp.getgrnam('gpio')
-        if gpio_group.gr_gid not in os.getgroups():
-            print("Error: This script requires GPIO access")
-            print("Your user must be a member of the 'gpio' group")
-            print("Run: sudo usermod -a -G gpio $USER")
-            print("Then log out and log back in, or run: newgrp gpio")
+    # Skip this check if running as root (systemd service)
+    if os.geteuid() != 0:
+        import grp
+        try:
+            gpio_group = grp.getgrnam('gpio')
+            if gpio_group.gr_gid not in os.getgroups():
+                print("Error: This script requires GPIO access")
+                print("Your user must be a member of the 'gpio' group")
+                print("Run: sudo usermod -a -G gpio $USER")
+                print("Then log out and log back in, or run: newgrp gpio")
+                sys.exit(1)
+        except KeyError:
+            print("Error: GPIO group not found")
+            print("Please ensure the 'gpio' group exists and you are a member")
             sys.exit(1)
-    except KeyError:
-        print("Error: GPIO group not found")
-        print("Please ensure the 'gpio' group exists and you are a member")
-        sys.exit(1)
+    else:
+        print("Running as root - skipping GPIO group check")
     
     # Validate threshold
     if args.threshold <= 0:
@@ -949,11 +861,11 @@ def main():
         print("  - System will shutdown and cut power on long button press")
     
     print(f"  - Button press threshold: {args.threshold} seconds")
-    print(f"  - Button detection mode: {'Polling' if args.polling_mode or not USE_INTERRUPT_MODE else 'Interrupt'}")
+    print(f"  - Button detection mode: Polling ({BUTTON_POLLING_HZ} Hz)")
     print("  - Press Ctrl+C to stop")
     print()
     
-    controller = PowerController(test_mode=args.test_mode, threshold=args.threshold, use_polling=args.polling_mode)
+    controller = PowerController(test_mode=args.test_mode, threshold=args.threshold)
     controller.run()
 
 if __name__ == "__main__":

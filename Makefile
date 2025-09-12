@@ -7,7 +7,7 @@ RECORD_SERVICE = argo-record.service
 BAGFILES_DIR = $(HOME)/bagfiles
 ARGO_DIR = $(HOME)/argo
 
-.PHONY: help install uninstall enable disable start stop restart status clean aliases install-dotfiles install_power_control install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install
+.PHONY: help install uninstall enable disable start stop restart clean install-argo-cli install_power_control install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install
 
 help:
 	@echo "Argo Robot Services Management"
@@ -26,7 +26,6 @@ help:
 	@echo "  start       - Start argo-launch service with 30s monitoring"
 	@echo "  stop        - Stop all argo services"
 	@echo "  restart     - Restart argo-launch service"
-	@echo "  status      - Show status of all services"
 	@echo ""
 	@echo "Recording Control:"
 	@echo "  record      - Start ROS2 bag recording"
@@ -35,13 +34,12 @@ help:
 	@echo "Utilities:"
 	@echo "  clean       - Clean old bag files (>7 days)"
 	@echo "  aliases-install - Install/update aliases and activate them immediately"
-	@echo "  aliases     - Install shell aliases (then run: eval \$$(make aliases-activate))"
 	@echo "  aliases-force - Force reinstall/update aliases (overwrites existing)"
 	@echo "  aliases-activate - Print command to activate aliases in current shell"
-	@echo "  install-dotfiles - Install dotfiles (.bashrc, .bash_aliases, .tmux.conf) to home directory"
+	@echo "  install-argo-cli - Install Argo CLI (aliases, functions, dotfiles) to ~/.bashrc"
 	@echo "  install_power_control - Install GPIO permissions for power control (udev rules, gpio group)"
 	@echo ""
-	@echo "Quick Commands (after installing aliases):"
+	@echo "Quick Commands (after installing CLI):"
 	@echo "  al  - Launch argo service (with 30s monitoring)"
 	@echo "  aq  - Quit argo service"
 	@echo "  ar  - Record data"
@@ -217,17 +215,6 @@ restart:
 	sudo systemctl restart $(LAUNCH_SERVICE)
 	@echo "Argo service restarted!"
 
-status:
-	@echo "Argo Services Status:"
-	@echo "===================="
-	@systemctl is-active $(LAUNCH_SERVICE) --quiet && echo "✅ Launch service: RUNNING" || echo "❌ Launch service: STOPPED"
-	@systemctl is-active $(RECORD_SERVICE) --quiet && echo "✅ Record service: RUNNING" || echo "❌ Record service: STOPPED"
-	@echo ""
-	@echo "Detailed Status:"
-	@systemctl status $(LAUNCH_SERVICE) --no-pager -l || true
-	@echo ""
-	@systemctl status $(RECORD_SERVICE) --no-pager -l || true
-
 record:
 	@echo "Starting ROS2 bag recording..."
 	sudo systemctl start $(RECORD_SERVICE)
@@ -243,74 +230,15 @@ clean:
 	find $(BAGFILES_DIR) -name "argo_*" -type d -mtime +7 -exec rm -rf {} \; 2>/dev/null || true
 	@echo "Old bag files cleaned!"
 
-aliases:
-	@echo "Installing shell aliases..."
-	@touch ~/.bash_aliases
-	@if ! grep -q "# Argo Robot Control Aliases" ~/.bash_aliases 2>/dev/null; then \
-		echo "" >> ~/.bash_aliases; \
-		echo "# Argo Robot Control Aliases" >> ~/.bash_aliases; \
-		echo "alias al='make -C $(ARGO_DIR) start'" >> ~/.bash_aliases; \
-		echo "alias aq='make -C $(ARGO_DIR) stop'" >> ~/.bash_aliases; \
-		echo "alias ar='make -C $(ARGO_DIR) record'" >> ~/.bash_aliases; \
-		echo "alias ac='make -C $(ARGO_DIR) stop-record'" >> ~/.bash_aliases; \
-		echo "alias as='make -C $(ARGO_DIR) status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases; \
-		echo "alias ars='make -C $(ARGO_DIR) restart'" >> ~/.bash_aliases; \
-		echo "alias argo_help='bash $(ARGO_DIR)/scripts/argo_help.sh'" >> ~/.bash_aliases; \
-		echo "" >> ~/.bash_aliases; \
-		echo "✅ Aliases installed to ~/.bash_aliases"; \
-	else \
-		echo "⚠️  Argo aliases already exist in ~/.bash_aliases"; \
-		if ! grep -q "afb.*foxglove_bridge" ~/.bash_aliases 2>/dev/null; then \
-			echo "🔄 Some aliases appear outdated. Run 'make aliases-force' to update them."; \
-		else \
-			echo "✅ Aliases appear up-to-date."; \
-		fi; \
-	fi
-	@if ! grep -q "source.*\.bash_aliases" ~/.bashrc 2>/dev/null; then \
+install-argo-cli:
+	@echo "Installing Argo CLI (aliases, functions, and dotfiles)..."
+	@if ! grep -q "source.*dotfiles.*\.bashrc" ~/.bashrc 2>/dev/null; then \
 		echo "" >> ~/.bashrc; \
-		echo "# Source bash aliases if available" >> ~/.bashrc; \
-		echo "if [ -f ~/.bash_aliases ]; then" >> ~/.bashrc; \
-		echo "    . ~/.bash_aliases" >> ~/.bashrc; \
-		echo "fi" >> ~/.bashrc; \
-		echo "✅ Added .bash_aliases sourcing to ~/.bashrc"; \
+		echo "# Source Argo dotfiles" >> ~/.bashrc; \
+		echo "source ~/argo/dotfiles/.bashrc" >> ~/.bashrc; \
+		echo "✅ Added dotfiles sourcing to ~/.bashrc"; \
 	else \
-		echo "✅ .bash_aliases already sourced in ~/.bashrc"; \
-	fi
-	@echo "" >> ~/.bashrc; \
-	echo "# Argo daily reminder (once per day)" >> ~/.bashrc; \
-	echo "if [ ! -f ~/.argo_reminder_date ] || [ \"\$$(date +%Y-%m-%d)\" != \"\$$(cat ~/.argo_reminder_date)\" ]; then" >> ~/.bashrc; \
-	echo "    echo \"🚢 Argo: al=launch, aq=quit, ar=record, ac=close, as=status, ars=restart, af=foxglove\"" >> ~/.bashrc; \
-	echo "    date +%Y-%m-%d > ~/.argo_reminder_date" >> ~/.bashrc; \
-	echo "fi" >> ~/.bashrc; \
-	echo "✅ Added daily Argo reminder to ~/.bashrc"
-	@echo ""
-	@echo "🔄 To activate aliases in this terminal, run:"
-	@echo "   eval \$$(make aliases-activate)"
-	@echo ""
-	@echo "💡 In NEW terminals, aliases will be auto-loaded from ~/.bashrc"
-	@echo ""
-	@echo "Available aliases:"
-	@echo "  al   - Launch argo service (with 30s monitoring)"
-	@echo "  aq   - Quit argo service"
-	@echo "  ar   - Record data"
-	@echo "  ac   - Close recording"
-	@echo "  as   - Show service status"
-	@echo "  ars  - Restart argo service"
-	@echo "  argo_help - Show detailed help"
-
-install-dotfiles:
-	@echo "Installing dotfiles to home directory..."
-	@if [ -f dotfiles/.bashrc ]; then \
-		cp dotfiles/.bashrc ~/.bashrc; \
-		echo "✅ Installed .bashrc"; \
-	else \
-		echo "❌ dotfiles/.bashrc not found"; \
-	fi
-	@if [ -f dotfiles/.bash_aliases ]; then \
-		cp dotfiles/.bash_aliases ~/.bash_aliases; \
-		echo "✅ Installed .bash_aliases"; \
-	else \
-		echo "❌ dotfiles/.bash_aliases not found"; \
+		echo "✅ Dotfiles already sourced in ~/.bashrc"; \
 	fi
 	@if [ -f dotfiles/.tmux.conf ]; then \
 		cp dotfiles/.tmux.conf ~/.tmux.conf; \
@@ -319,8 +247,22 @@ install-dotfiles:
 		echo "❌ dotfiles/.tmux.conf not found"; \
 	fi
 	@echo ""
-	@echo "✅ Dotfiles installation complete!"
-	@echo "Run 'source ~/.bashrc' or open a new terminal to apply changes."
+	@echo "🔄 To activate CLI in this terminal, run:"
+	@echo "   source ~/.bashrc"
+	@echo ""
+	@echo "💡 In NEW terminals, CLI will be auto-loaded from ~/.bashrc"
+	@echo ""
+	@echo "Available commands:"
+	@echo "  al   - Launch argo service (with 30s monitoring)"
+	@echo "  aq   - Quit argo service"
+	@echo "  ar   - Record data"
+	@echo "  ac   - Close recording"
+	@echo "  as   - Show Argo status (via argo_status function)"
+	@echo "  ars  - Restart argo service"
+	@echo "  argo_status - Show detailed Argo status"
+	@echo "  argo_help - Show detailed help"
+	@echo ""
+	@echo "✅ Argo CLI installation complete!"
 
 install_power_control:
 	@echo "Installing power control GPIO permissions..."
@@ -358,69 +300,3 @@ install_power_control:
 	@echo "  - Added user '$$(whoami)' to gpio group"
 	@echo "  - Reloaded udev rules to apply changes"
 
-aliases-force:
-	@echo "Force updating shell aliases..."
-	@touch ~/.bash_aliases
-	@# Remove existing Argo aliases section
-	@sed -i '/^# Argo Robot Control Aliases/,/^$$/d' ~/.bash_aliases
-	@# Add updated aliases
-	@echo "" >> ~/.bash_aliases
-	@echo "# Argo Robot Control Aliases" >> ~/.bash_aliases
-	@echo "alias al='make -C $(ARGO_DIR) start'" >> ~/.bash_aliases
-	@echo "alias aq='make -C $(ARGO_DIR) stop'" >> ~/.bash_aliases
-	@echo "alias ar='make -C $(ARGO_DIR) record'" >> ~/.bash_aliases
-	@echo "alias ac='make -C $(ARGO_DIR) stop-record'" >> ~/.bash_aliases
-	@echo "alias as='make -C $(ARGO_DIR) status && echo \"\" && echo \"🔍 Recent Argo Errors (last 5m):\" && echo \"===============================================\" && journalctl --since \"5 minutes ago\" -u argo-launch.service -u argo-record.service --priority=err --no-pager -n 20 2>/dev/null || echo \"No recent errors found\"'" >> ~/.bash_aliases
-	@echo "alias ars='make -C $(ARGO_DIR) restart'" >> ~/.bash_aliases
-	@echo "alias argo_help='bash $(ARGO_DIR)/scripts/argo_help.sh'" >> ~/.bash_aliases
-	@echo "alias af='ros2 launch $(ARGO_DIR)/launch/argo_launch.py'" >> ~/.bash_aliases
-	@echo "alias afb='ros2 run foxglove_bridge foxglove_bridge'" >> ~/.bash_aliases
-	@echo "" >> ~/.bash_aliases
-	@echo "✅ Aliases force-updated in ~/.bash_aliases"
-	@if ! grep -q "source.*\.bash_aliases" ~/.bashrc 2>/dev/null; then \
-		echo "" >> ~/.bashrc; \
-		echo "# Source bash aliases if available" >> ~/.bashrc; \
-		echo "if [ -f ~/.bash_aliases ]; then" >> ~/.bashrc; \
-		echo "    . ~/.bash_aliases" >> ~/.bashrc; \
-		echo "fi" >> ~/.bashrc; \
-		echo "✅ Added .bash_aliases sourcing to ~/.bashrc"; \
-	else \
-		echo "✅ .bash_aliases already sourced in ~/.bashrc"; \
-	fi
-	@echo ""
-	@echo "🔄 To activate aliases in this terminal, run:"
-	@echo "   eval \$$(make aliases-activate)"
-	@echo ""
-	@echo "💡 In NEW terminals, aliases will be auto-loaded from ~/.bashrc"
-	@echo ""
-	@echo "Available aliases:"
-	@echo "  al   - Launch argo service (with 30s monitoring)"
-	@echo "  aq   - Quit argo service"
-	@echo "  ar   - Record data"
-	@echo "  ac   - Close recording"
-	@echo "  as   - Show service status"
-	@echo "  ars  - Restart argo service"
-	@echo "  af   - Launch argo with integrated Foxglove Bridge"
-	@echo "  afb  - Launch Foxglove Bridge (recommended)"
-	@echo "  argo_help - Show detailed help"
-
-aliases-install: aliases-force
-	@echo ""
-	@echo "🔄 Creating activation script..."
-	@echo '#!/bin/bash' > /tmp/argo_activate_aliases.sh
-	@echo 'source ~/.bash_aliases' >> /tmp/argo_activate_aliases.sh
-	@echo 'echo "🚀 Aliases activated! Try these commands:"' >> /tmp/argo_activate_aliases.sh
-	@echo 'echo "  afb  # Start Foxglove Bridge"' >> /tmp/argo_activate_aliases.sh
-	@echo 'echo "  al   # Launch Argo"' >> /tmp/argo_activate_aliases.sh
-	@echo 'echo "  aq   # Quit Argo"' >> /tmp/argo_activate_aliases.sh
-	@echo 'echo ""' >> /tmp/argo_activate_aliases.sh
-	@echo 'echo "💡 Aliases are now available in this terminal session!"' >> /tmp/argo_activate_aliases.sh
-	@chmod +x /tmp/argo_activate_aliases.sh
-	@echo ""
-	@echo "🚀 To activate aliases in this terminal, run:"
-	@echo "   source /tmp/argo_activate_aliases.sh"
-	@echo ""
-	@echo "⚡ Quick activation: \$$SHELL -c 'source ~/.bash_aliases && \$$SHELL'"
-
-aliases-activate:
-	@echo "source ~/.bash_aliases"

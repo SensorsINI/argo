@@ -93,6 +93,9 @@ HUMAN_CONTROL_THRESHOLD = 0.2
 # Throttle logging for clamped values to once per minute
 CLAMP_LOG_THROTTLE_S = 60.0
 
+# Throttle logging for outlier radio PWM messages to once every 10 seconds
+OUTLIER_LOG_THROTTLE_S = 10.0
+
 # Test mode configuration
 TEST_MIN_PW = 900
 TEST_MAX_PW = 2100
@@ -148,6 +151,9 @@ class PwmNode(Node):
         
         # Throttling for clamp warning logs
         self.last_clamp_warning_time = 0.0
+        
+        # Throttling for outlier radio PWM warning logs
+        self.last_outlier_warning_time = 0.0
 
         self.get_logger().info(f"Human control timeout={HUMAN_CONTROL_TIMEOUT_S:.1f}s, threshold={HUMAN_CONTROL_THRESHOLD:.1f}")
 
@@ -198,7 +204,11 @@ class PwmNode(Node):
 
         # 2. Validate and normalize radio inputs
         if not (500 < radio_rudder_pw_us < 2500 and 500 < radio_sail_pw_us < 2500):
-            self.get_logger().warn(f"Outlier radio PWM: rudder={radio_rudder_pw_us:.1f}us, sail={radio_sail_pw_us:.1f}us")
+            # Throttle outlier warning logs to once every 10 seconds
+            now = time.time()
+            if now - self.last_outlier_warning_time > OUTLIER_LOG_THROTTLE_S:
+                self.get_logger().warn(f"Outlier radio PWM: rudder={radio_rudder_pw_us:.1f}us, sail={radio_sail_pw_us:.1f}us")
+                self.last_outlier_warning_time = now
             return
 
         # The original script inverted the rudder command. Let's preserve that.
@@ -417,6 +427,24 @@ Hardware:
     
     # Parse known args to allow ROS2 arguments to pass through
     parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Check for invalid arguments that aren't ROS2-related
+    # ROS2 arguments typically start with --ros-args, -r, or are node-specific
+    valid_ros2_prefixes = ['--ros-args', '-r', '--node-name', '--namespace', '--remap', '--param']
+    invalid_args = []
+    
+    for arg in unknown_args:
+        # Skip ROS2 arguments
+        is_ros2_arg = any(arg.startswith(prefix) for prefix in valid_ros2_prefixes)
+        # Also skip single character flags that might be ROS2 related
+        if not is_ros2_arg and (arg.startswith('-') or arg.startswith('--')):
+            invalid_args.append(arg)
+    
+    if invalid_args:
+        parser.print_usage()
+        print(f"error: unrecognized arguments: {' '.join(invalid_args)}")
+        print("Use --help for more information.")
+        sys.exit(2)
     
     # Check if test mode is requested
     if parsed_args.test:

@@ -3,7 +3,7 @@
 # - Reads MAX11612 ADC: AIN0=battery via 27k/18k divider, AIN1=saltwater probe, AIN2=sail winch shunt
 # - Reads SHT45 temperature/humidity sensor
 # Publishes (Float32):
-# - battery_voltage (V), saltwater_voltage (V), sail_current (A), temperature (C), relative_humidity (%)
+# - battery_voltage (V), saltwater_voltage (V), sail_current (A), pcb_temperature (C), relative_humidity (%)
 # - battery_remaining_pct (%) using per‑cell LiPo formula: soc% = S − S/(1 + (v/V0)^A)^B
 # Alerts (Bool):
 # - battery_low_alert (hysteresis 50 mV around battery_low_threshold_v; warning on low, info on recover)
@@ -68,7 +68,7 @@ class BatteryWaterNode(Node):
         self.pub_battery_voltage = self.create_publisher(Float32, 'battery_voltage', 10)
         self.pub_saltwater_voltage = self.create_publisher(Float32, 'saltwater_voltage', 10)
         self.pub_sail_current = self.create_publisher(Float32, 'sail_current', 10)
-        self.pub_temperature = self.create_publisher(Float32, 'temperature', 10)
+        self.pub_temperature = self.create_publisher(Float32, 'pcb_temperature', 10)
         self.pub_humidity = self.create_publisher(Float32, 'relative_humidity', 10)
         # Alert publishers
         self.pub_battery_low_alert = self.create_publisher(Bool, 'battery_low_alert', 10)
@@ -330,7 +330,7 @@ class BatteryWaterNode(Node):
                 # Map temp to 0..range for bar
                 temp_span = max(1e-6, t_max - t_min)
                 temp_norm = (max(t_min, min(t_max, temp_c)) - t_min) / temp_span * 100.0
-                lines.append(f"Temp  {temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
+                lines.append(f"PCB   {temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
             if humid_pct is not None:
                 lines.append(f"Humid {humid_pct:7.2f} %  " + self._bar(humid_pct, 100.0))
             lines.append("Ctrl-C to exit")
@@ -431,7 +431,7 @@ class BatteryWaterNode(Node):
             if time_since_last_log >= 5.0:
                 # Build sensor state message
                 battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
-                temp_humid_str = f"Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "Temp/Humidity unavailable"
+                temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
                 
                 self.get_logger().info(
                     f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
@@ -535,7 +535,7 @@ Topics:
     /battery_voltage: Float32 - Battery voltage in volts
     /saltwater_voltage: Float32 - Saltwater probe voltage in volts  
     /sail_current: Float32 - Sail winch current in amperes
-    /temperature: Float32 - Temperature in Celsius
+    /pcb_temperature: Float32 - PCB temperature in Celsius (from SHT45 sensor)
     /relative_humidity: Float32 - Relative humidity percentage
     /battery_remaining_pct: Float32 - Battery state-of-charge percentage
     /battery_low_alert: Bool - Battery low voltage alert

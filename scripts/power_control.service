@@ -1,16 +1,16 @@
 [Unit]
 Description=Orange Pi Zero 2W Power Control System
 Documentation=file://%h/argo/scripts/POWER_CONTROL_README.md
-After=multi-user.target
-Wants=multi-user.target
+After=basic.target sysinit.target dev-gpiochip0.device
+Wants=basic.target dev-gpiochip0.device
 DefaultDependencies=no
 Before=shutdown.target
 
 [Service]
 Type=simple
-User=%i
-WorkingDirectory=%h/argo/scripts
-ExecStart=/usr/bin/python3 %h/argo/scripts/power_control.py
+User=root
+WorkingDirectory=/home/orangepi/argo/scripts
+ExecStart=/usr/bin/python3 /home/orangepi/argo/scripts/power_control.py
 ExecStop=/bin/bash -c 'echo "System shutting down, de-energizing relay as final action..." && /usr/bin/python3 -c "import gpiod; chip=gpiod.Chip(\"/dev/gpiochip0\"); line=chip.get_line(18); line.request(consumer=\"final_power_off\", type=gpiod.LINE_REQ_DIR_OUT); line.set_value(1); line.release(); chip.close(); print(\"Relay de-energized - system shutdown complete\")"'
 Restart=no
 RestartSec=5
@@ -26,4 +26,4 @@ NoNewPrivileges=false
 PrivateTmp=false
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=basic.target

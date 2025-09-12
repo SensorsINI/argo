@@ -137,6 +137,13 @@ def generate_launch_description():
             name='battery_water',
             output='screen'
         ),
+        
+        # Temperature Monitor node
+        ExecuteProcess(
+            cmd=[os.path.join(script_dir, 'temp_monitor.py')],
+            name='temp_monitor',
+            output='screen'
+        ),
     ]
     
     # Conditionally add foxglove_bridge if available
