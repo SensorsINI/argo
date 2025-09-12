@@ -15,9 +15,9 @@ Features:
 - Keystroke commands for quick control
 
 Usage:
-    sudo python3 scripts/argo_gui.py
-    sudo ./scripts/argo_gui.sh
-    python3 scripts/argo_gui.py --help
+    sudo python3 launch/argo_gui.py
+    sudo ./launch/argo_gui.sh
+    python3 launch/argo_gui.py --help
 
 Key Commands:
     s - Start Argo service
@@ -59,8 +59,8 @@ def require_sudo():
     """Exit if not running with sudo privileges"""
     if not check_sudo_privileges():
         print(f"{Colors.RED}Error: This GUI requires sudo privileges to control systemd services{Colors.RESET}")
-        print(f"{Colors.YELLOW}Please run with: sudo python3 scripts/argo_gui.py{Colors.RESET}")
-        print(f"{Colors.DIM}Or use: sudo ./scripts/argo_gui.sh{Colors.RESET}")
+        print(f"{Colors.YELLOW}Please run with: sudo python3 launch/argo_gui.py{Colors.RESET}")
+        print(f"{Colors.DIM}Or use: sudo ./launch/argo_gui.sh{Colors.RESET}")
         sys.exit(1)
 
 # Color codes for terminal output
@@ -189,7 +189,11 @@ class ArgoGUI:
         """Get the formatted status output from the Python argo_status_check script"""
         try:
             # Call the Python script directly with timeout for responsiveness
-            result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_status_check.py', '--manual'], 
+            # Determine the correct path to argo_status_check.py
+            status_check_path = f'{self.argo_dir}/launch/argo_status_check.py'
+            if not os.path.exists(status_check_path):
+                status_check_path = f'{self.argo_dir}/argo_status_check.py'
+            result = subprocess.run(['python3', status_check_path, '--manual'], 
                                   capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 # Filter out screen clearing sequences that conflict with GUI
@@ -794,8 +798,8 @@ class ArgoGUI:
         print()
         print(f"{Colors.BOLD}Prerequisites:{Colors.RESET}")
         print(f"  {Colors.YELLOW}⚠ Requires sudo privileges to control systemd services{Colors.RESET}")
-        print(f"  Run with: {Colors.BOLD}sudo python3 scripts/argo_gui.py{Colors.RESET}")
-        print(f"  Or use: {Colors.BOLD}sudo ./scripts/argo_gui.sh{Colors.RESET}")
+        print(f"  Run with: {Colors.BOLD}sudo python3 launch/argo_gui.py{Colors.RESET}")
+        print(f"  Or use: {Colors.BOLD}sudo ./launch/argo_gui.sh{Colors.RESET}")
         print()
         print(f"{Colors.BOLD}Service Control:{Colors.RESET}")
         print(f"  {Colors.BOLD}{Colors.GREEN}l{Colors.RESET} - Launch Argo service (with 30s monitoring)")
@@ -868,7 +872,8 @@ class ArgoGUI:
                         key = sys.stdin.read(1)
                         
                         if key == '\x03':  # Ctrl+C
-                            print(f'\033[1;1H{Colors.YELLOW}Ctrl+C detected, exiting...{Colors.RESET}', end='')
+                            print('\033[2J\033[H', end='')  # Clear screen
+                            print(f'{Colors.YELLOW}Ctrl+C detected, exiting...{Colors.RESET}')
                             sys.stdout.flush()
                             break
                         elif key in 'lhrcR?':
@@ -929,6 +934,9 @@ class ArgoGUI:
                         # Don't redraw screen during auto-refresh to avoid clearing status
                         
                 except KeyboardInterrupt:
+                    print('\033[2J\033[H', end='')  # Clear screen
+                    print(f'{Colors.YELLOW}Ctrl+C detected, exiting...{Colors.RESET}')
+                    sys.stdout.flush()
                     break
                 except Exception as e:
                     # Continue running even if there's an error
@@ -947,9 +955,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 scripts/argo_gui.py     # Start GUI (requires sudo)
-  sudo ./scripts/argo_gui.sh           # Start GUI using launcher script
-  python3 scripts/argo_gui.py --help   # Show help
+  sudo python3 launch/argo_gui.py     # Start GUI (requires sudo)
+  sudo ./launch/argo_gui.sh           # Start GUI using launcher script
+  python3 launch/argo_gui.py --help   # Show help
 
 Key Commands:
   s - Start Argo service
@@ -966,10 +974,7 @@ Note: This GUI requires sudo privileges to control systemd services.
     
     args = parser.parse_args()
     
-    # Check if we're in the right directory
-    if not os.path.exists('launch/argo_launch.py'):
-        print(f"{Colors.RED}Error: Please run from the argo directory{Colors.RESET}")
-        sys.exit(1)
+    # No directory check needed - script uses absolute paths for all operations
     
     # Check for sudo privileges
     require_sudo()

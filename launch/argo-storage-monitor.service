@@ -8,7 +8,7 @@ Type=simple
 User=%i
 Group=%i
 WorkingDirectory=%h/argo
-ExecStart=/usr/bin/python3 %h/argo/scripts/storage_notifications.py check
+ExecStart=/usr/bin/python3 %h/argo/launch/storage_notifications.py check
 Restart=on-failure
 RestartSec=300
 # Only run if we have a display (GUI environment)

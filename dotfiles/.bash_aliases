@@ -20,5 +20,5 @@ alias ar='make -C /home/orangepi/argo record'
 alias ac='make -C /home/orangepi/argo stop-record'
 alias as=argo_status_check
 alias ars='make -C /home/orangepi/argo restart'
-alias argo_help='bash /home/orangepi/argo/scripts/argo_help.sh'
-alias ag='sudo python3 /home/orangepi/argo/scripts/argo_gui.py'
+alias argo_help='bash /home/orangepi/argo/launch/argo_help.sh'
+alias ag='sudo python3 /home/orangepi/argo/launch/argo_gui.py'

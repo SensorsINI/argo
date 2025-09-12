@@ -2,7 +2,7 @@
 # Argo Startup Notification Script
 # Sends GUI notification when Argo system starts
 
-SCRIPT_DIR="/home/orangepi/argo/scripts"
+SCRIPT_DIR="/home/orangepi/argo/launch"
 NOTIFICATION_SCRIPT="$SCRIPT_DIR/storage_notifications.py"
 
 # Wait a bit for the system to fully boot and display to be ready

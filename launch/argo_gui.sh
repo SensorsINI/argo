@@ -6,7 +6,7 @@
 # Check if running with sudo
 if [ "$EUID" -ne 0 ]; then
     echo "Error: This GUI requires sudo privileges to control systemd services"
-    echo "Please run with: sudo ./scripts/argo_gui.sh"
+    echo "Please run with: sudo ./launch/argo_gui.sh"
     exit 1
 fi
 
@@ -24,4 +24,4 @@ source /opt/ros/humble/setup.bash 2>/dev/null || {
 }
 
 # Launch the GUI
-python3 scripts/argo_gui.py "$@"
+python3 launch/argo_gui.py "$@"

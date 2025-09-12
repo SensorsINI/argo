@@ -125,7 +125,7 @@ sudo systemctl enable argo-launch.service
 sudo systemctl enable argo-record.service
 
 # Setup GUI storage notifications (optional)
-./scripts/setup_gui_notifications.sh
+./launch/setup_gui_notifications.sh
 ```
 
 ## Running the System
@@ -162,13 +162,13 @@ ros2 topic echo /rudder_sail_radio
 ### Storage Monitoring
 ```bash
 # Check storage status manually
-python3 scripts/storage_monitor.py --check
+python3 launch/storage_monitor.py --check
 
 # Setup terminal warnings (shows storage status in new terminals)
-./scripts/setup_terminal_warning.sh
+./launch/setup_terminal_warning.sh
 
 # Setup GUI notifications (desktop notifications)
-./scripts/setup_gui_notifications.sh
+./launch/setup_gui_notifications.sh
 ```
 
 The system includes comprehensive storage monitoring:
