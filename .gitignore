@@ -95,3 +95,5 @@ pcb/**/*-backups/**
 scripts/power_control.log
 scripts/__pycache__/anem.cpython-310.pyc
 scripts/__pycache__/gps.cpython-310.pyc
+power_control.log
+scripts/power-test-pins.py
