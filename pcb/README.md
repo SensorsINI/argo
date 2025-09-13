@@ -133,5 +133,5 @@ When modifying PCB designs:
 ## Related Documentation
 
 - **Main Project README**: `/README.md` - Overall system documentation
-- **Scripts README**: `/scripts/README.md` - Software documentation
-- **Power Control README**: `/scripts/POWER_CONTROL_README.md` - Power management details
+- **Nodes README**: `/nodes/README.md` - Software documentation
+- **Power Control README**: `/launch/ARGO_POWER_CONTROL_README.md` - Power management details

@@ -21,6 +21,18 @@ The Argo system consists of multiple sensor and control nodes that work together
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
 - **PWM I/O**: Custom kernel module for radio control and servo interfaces
 
+### I2C Bus Configuration
+**Exclusive I2C Bus 0 Usage**: All sensor nodes exclusively use I2C bus 0 (Orange Pi Zero 2W default I2C interface)
+- **I2C Bus 0 Pins**: SDA=PI6 (twi0-sda), SCL=PI5 (twi0-sck)
+- **Configuration**: Enabled via `pi-i2c0` overlay in `/boot/orangepiEnv.txt`
+- **Address Map**:
+  - 0x21, 0x22, 0x23: Wind sensors (SDP3x differential pressure)
+  - 0x34: MAX11612 ADC (battery/water monitoring)
+  - 0x44: SHT45 temperature/humidity sensor
+  - 0x69: ICM-20948 IMU
+- **Bus Speed**: Standard 100kHz I2C operation
+- **Power**: 3.3V logic levels, pull-up resistors on PCB
+
 ## ROS2 Nodes
 
 ### Core Navigation Nodes
@@ -275,6 +287,7 @@ Key packages:
    overlays=pi-i2c0 disable-uart0 ph-uart5 pi-pwm2 pi-pwm4
    user_overlays=argo_radio_servo_overlay
    ```
+   Note: `pi-i2c0` overlay configures I2C bus 0 on pins SDA=PI6 (twi0-sda), SCL=PI5 (twi0-sck)
 
 2. **Install PWM capture module** (see `pwm_capture_module/README.md`)
 
@@ -282,6 +295,7 @@ Key packages:
    ```bash
    sudo i2cdetect -y 0
    # Should show: 21 22 23 (wind), 34 (ADC), 44 (humidity), 69 (IMU)
+   # All sensors are on I2C bus 0 exclusively
    ```
 
 ## Debugging and Testing
@@ -294,8 +308,9 @@ ros2 run argo <node_name>.py --debug
 
 ### System Health Check
 ```bash
-# Check I2C devices
+# Check I2C devices on bus 0 (all sensors use this bus exclusively)
 sudo i2cdetect -y 0
+# Expected devices: 21 22 23 (wind), 34 (ADC), 44 (humidity), 69 (IMU)
 
 # Check PWM kernel module
 lsmod | grep argo
