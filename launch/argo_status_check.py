@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
-Argo Status Check - Python implementation of the bash argo_status_check function
+Optimized Argo Status Check - Fast version with performance improvements
 
-This script provides comprehensive status monitoring for the Argo autonomous sailboat system,
-including systemd services, ROS2 nodes, system resources, and storage information.
-
-Usage:
-    python3 argo_status_check.py [--manual] [--hourly] [--help]
-
-Options:
-    --manual    Force full detailed output (equivalent to argo_status_check true)
-    --hourly    Run hourly timer check (equivalent to argo_hourly_timer)
-    --help      Show this help message
+Key optimizations:
+1. Replace slow systemctl list-unit-files with direct service status check
+2. Batch process information gathering
+3. Reduce subprocess calls by combining commands
+4. Cache service existence checks
 """
 
 import os
@@ -35,13 +30,14 @@ class Colors:
     CYAN = '\033[36m'
     WHITE = '\033[37m'
 
-class ArgoStatusChecker:
+class OptimizedArgoStatusChecker:
     def __init__(self):
         self.home_dir = os.path.expanduser('~')
         self.argo_scripts_dir = os.path.join(self.home_dir, 'argo', 'scripts')
         self.ros_nodes = ["anem.py", "pwm.py", "gps.py", "imu.py", "control.py", "battery_water.py", "foxglove_bridge"]
+        self._service_cache = {}
         
-    def run_command(self, cmd, timeout=5):
+    def run_command(self, cmd, timeout=3):
         """Run a command and return stdout, stderr, returncode"""
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=True)
@@ -51,15 +47,29 @@ class ArgoStatusChecker:
         except Exception as e:
             return "", str(e), 1
     
-    def get_service_status(self, service_name):
-        """Get systemd service status"""
+    def get_service_status_fast(self, service_name):
+        """Get systemd service status - optimized version"""
+        # Check cache first
+        if service_name in self._service_cache:
+            return self._service_cache[service_name]
+        
+        # Use systemctl is-active which is much faster than list-unit-files
         stdout, stderr, returncode = self.run_command(f"systemctl is-active {service_name}")
-        return stdout if returncode == 0 else "inactive"
-    
-    def service_exists(self, service_name):
-        """Check if systemd service exists"""
-        stdout, stderr, returncode = self.run_command(f"systemctl list-unit-files | grep -q '{service_name}'")
-        return returncode == 0
+        
+        if returncode == 0:
+            status = stdout if stdout else "inactive"
+        else:
+            # If service doesn't exist, is-active returns non-zero
+            # Check if it's because service doesn't exist or is just inactive
+            stdout2, stderr2, returncode2 = self.run_command(f"systemctl show {service_name} --property=LoadState --value")
+            if returncode2 == 0 and stdout2 == "not-found":
+                status = "not-found"
+            else:
+                status = "inactive"
+        
+        # Cache the result
+        self._service_cache[service_name] = status
+        return status
     
     def get_service_pid(self, service_name):
         """Get main PID of a systemd service"""
@@ -82,22 +92,44 @@ class ArgoStatusChecker:
                 }
         return None
     
-    def find_ros_node_pids(self, node_name):
-        """Find PIDs for ROS nodes from argo scripts directory"""
-        stdout, stderr, returncode = self.run_command(f"pgrep -f '/{node_name}'")
-        if returncode != 0:
-            return []
+    def get_all_ros_processes(self):
+        """Get all ROS processes in one batch - major optimization"""
+        # Get all processes that might be ROS nodes in one command
+        stdout, stderr, returncode = self.run_command("ps aux | grep -E '(anem\.py|pwm\.py|gps\.py|imu\.py|/control\.py|battery_water\.py|foxglove_bridge)' | grep -v grep")
         
-        pids = stdout.split()
-        valid_pids = []
+        if returncode != 0 or not stdout:
+            return {}
         
-        for pid in pids:
-            # Check if the process is from argo scripts directory
-            stdout, stderr, returncode = self.run_command(f"ps -p {pid} -o cmd --no-headers")
-            if returncode == 0 and self.argo_scripts_dir in stdout:
-                valid_pids.append(pid)
+        processes = {}
+        for line in stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+                
+            parts = line.split()
+            if len(parts) < 11:
+                continue
+                
+            pid = parts[1]
+            cpu = float(parts[2].replace('%', ''))
+            mem = float(parts[3].replace('%', ''))
+            cmd = ' '.join(parts[10:])
+            
+            # Check if it's from argo scripts directory
+            if self.argo_scripts_dir in cmd:
+                # Extract node name from command
+                for node in self.ros_nodes:
+                    if f"/{node}" in cmd or node in cmd:
+                        if node not in processes:
+                            processes[node] = []
+                        processes[node].append({
+                            'pid': pid,
+                            'cpu': cpu,
+                            'mem': mem,
+                            'cmd': cmd
+                        })
+                        break
         
-        return valid_pids
+        return processes
     
     def get_color_for_usage(self, value, thresholds):
         """Get color code based on usage thresholds"""
@@ -108,8 +140,32 @@ class ArgoStatusChecker:
         else:
             return Colors.GREEN
     
-    def get_system_info(self):
-        """Get system load, memory, and storage information"""
+    def get_system_info_fast(self):
+        """Get system load, memory, and storage information - optimized"""
+        # Get all system info in one command to reduce subprocess overhead
+        cmd = """
+        uptime | sed 's/.*load average: *//' | cut -d',' -f1 | tr -d ' ';
+        free | grep Mem | awk '{printf "%.1f", $3/$2*100}';
+        df / | awk 'NR==2 {printf "%.1f", $4/1024/1024}';
+        df / | awk 'NR==2 {printf "%.1f", $3/($3+$4)*100}'
+        """
+        
+        stdout, stderr, returncode = self.run_command(cmd)
+        if returncode == 0:
+            lines = stdout.strip().split('\n')
+            if len(lines) >= 4:
+                return {
+                    'load_avg': lines[0].strip(),
+                    'mem_usage': lines[1].strip(),
+                    'free_gb': lines[2].strip(),
+                    'used_percent': lines[3].strip()
+                }
+        
+        # Fallback to individual commands if batch fails
+        return self.get_system_info_fallback()
+    
+    def get_system_info_fallback(self):
+        """Fallback system info gathering"""
         # Load average
         stdout, stderr, returncode = self.run_command("uptime")
         load_avg = "unknown"
@@ -146,8 +202,11 @@ class ArgoStatusChecker:
             'used_percent': used_percent
         }
     
-    def check_ros_nodes(self):
-        """Check ROS nodes and collect statistics"""
+    def check_ros_nodes_fast(self):
+        """Check ROS nodes and collect statistics - optimized version"""
+        # Get all ROS processes in one batch
+        all_processes = self.get_all_ros_processes()
+        
         running_nodes = 0
         total_cpu = 0.0
         total_mem = 0.0
@@ -155,18 +214,16 @@ class ArgoStatusChecker:
         node_details = {}
         
         for node in self.ros_nodes:
-            pids = self.find_ros_node_pids(node)
-            
-            if pids:
+            if node in all_processes:
                 running_nodes += 1
                 node_cpu = 0.0
                 node_mem = 0.0
+                pids = []
                 
-                for pid in pids:
-                    stats = self.get_process_stats(pid)
-                    if stats:
-                        node_cpu += stats['cpu']
-                        node_mem += stats['mem']
+                for proc in all_processes[node]:
+                    node_cpu += proc['cpu']
+                    node_mem += proc['mem']
+                    pids.append(proc['pid'])
                 
                 total_cpu += node_cpu
                 total_mem += node_mem
@@ -175,7 +232,8 @@ class ArgoStatusChecker:
                     'pids': pids,
                     'cpu': node_cpu,
                     'mem': node_mem,
-                    'running': True
+                    'running': True,
+                    'processes': all_processes[node]
                 }
             else:
                 missing_nodes.append(node)
@@ -183,7 +241,8 @@ class ArgoStatusChecker:
                     'pids': [],
                     'cpu': 0.0,
                     'mem': 0.0,
-                    'running': False
+                    'running': False,
+                    'processes': []
                 }
         
         return {
@@ -199,39 +258,39 @@ class ArgoStatusChecker:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"{Colors.BOLD}{Colors.YELLOW}🚢 ARGO STATUS CHECK - {timestamp}{Colors.RESET}")
         
-        # Get service statuses
-        launch_status = self.get_service_status("argo-launch.service")
-        record_status = self.get_service_status("argo-record.service")
-        launch_exists = self.service_exists("argo-launch.service")
+        # Get service statuses (optimized)
+        launch_status = self.get_service_status_fast("argo-launch.service")
+        record_status = self.get_service_status_fast("argo-record.service")
         
-        # Check ROS nodes
-        ros_info = self.check_ros_nodes()
+        # Check ROS nodes (optimized)
+        ros_info = self.check_ros_nodes_fast()
         
-        # System information
-        sys_info = self.get_system_info()
+        # System information (optimized)
+        sys_info = self.get_system_info_fast()
         
         # Print systemd services
         print(f"{Colors.BOLD}{Colors.GREEN}📋 SYSTEMD SERVICES:{Colors.RESET}")
         
         # argo-launch service
-        if launch_exists:
-            if launch_status == "active":
-                launch_pid = self.get_service_pid("argo-launch.service")
-                if launch_pid:
-                    stats = self.get_process_stats(launch_pid)
-                    if stats:
-                        print(f"  {Colors.GREEN}argo-launch:{Colors.RESET} {stats['pid']} {stats['cpu']:.1f}% {stats['mem']:.1f}% {stats['cmd']}")
-                    else:
-                        print(f"  {Colors.GREEN}argo-launch:{Colors.RESET} {Colors.YELLOW}ACTIVE{Colors.RESET} (no stats available)")
-                else:
-                    print(f"  {Colors.GREEN}argo-launch:{Colors.RESET} {Colors.YELLOW}ACTIVE{Colors.RESET} (no main PID)")
-            else:
-                print(f"  {Colors.RED}argo-launch:{Colors.RESET} {Colors.RED}{launch_status}{Colors.RESET}")
-        else:
+        if launch_status == "not-found":
             print(f"  {Colors.RED}argo-launch:{Colors.RESET} {Colors.RED}SERVICE NOT FOUND{Colors.RESET}")
+        elif launch_status == "active":
+            launch_pid = self.get_service_pid("argo-launch.service")
+            if launch_pid:
+                stats = self.get_process_stats(launch_pid)
+                if stats:
+                    print(f"  {Colors.GREEN}argo-launch:{Colors.RESET} {stats['pid']} {stats['cpu']:.1f}% {stats['mem']:.1f}% {stats['cmd']}")
+                else:
+                    print(f"  {Colors.GREEN}argo-launch:{Colors.RESET} {Colors.YELLOW}ACTIVE{Colors.RESET} (no stats available)")
+            else:
+                print(f"  {Colors.GREEN}argo-launch:{Colors.RESET} {Colors.YELLOW}ACTIVE{Colors.RESET} (no main PID)")
+        else:
+            print(f"  {Colors.RED}argo-launch:{Colors.RESET} {Colors.RED}{launch_status}{Colors.RESET}")
         
         # argo-record service
-        if record_status == "active":
+        if record_status == "not-found":
+            print(f"  {Colors.RED}argo-record:{Colors.RESET} {Colors.RED}SERVICE NOT FOUND{Colors.RESET}")
+        elif record_status == "active":
             record_pid = self.get_service_pid("argo-record.service")
             if record_pid:
                 stats = self.get_process_stats(record_pid)
@@ -251,12 +310,10 @@ class ArgoStatusChecker:
             node_info = ros_info['node_details'][node]
             
             if node_info['running']:
-                for pid in node_info['pids']:
-                    stats = self.get_process_stats(pid)
-                    if stats:
-                        cpu_color = self.get_color_for_usage(stats['cpu'], {'high': 50, 'medium': 20})
-                        mem_color = self.get_color_for_usage(stats['mem'], {'high': 10, 'medium': 5})
-                        print(f"  {Colors.GREEN}{node}:{Colors.RESET} PID:{pid} CPU:{cpu_color}{stats['cpu']:.1f}%{Colors.RESET} MEM:{mem_color}{stats['mem']:.1f}%{Colors.RESET}")
+                for proc in node_info['processes']:
+                    cpu_color = self.get_color_for_usage(proc['cpu'], {'high': 50, 'medium': 20})
+                    mem_color = self.get_color_for_usage(proc['mem'], {'high': 10, 'medium': 5})
+                    print(f"  {Colors.GREEN}{node}:{Colors.RESET} PID:{proc['pid']} CPU:{cpu_color}{proc['cpu']:.1f}%{Colors.RESET} MEM:{mem_color}{proc['mem']:.1f}%{Colors.RESET}")
             else:
                 print(f"  {Colors.RED}{node}:{Colors.RESET} {Colors.RED}NOT RUNNING{Colors.RESET}")
         
@@ -276,8 +333,8 @@ class ArgoStatusChecker:
     
     def print_condensed_status(self):
         """Print condensed single-line status"""
-        ros_info = self.check_ros_nodes()
-        sys_info = self.get_system_info()
+        ros_info = self.check_ros_nodes_fast()
+        sys_info = self.get_system_info_fast()
         
         print(f"{Colors.BOLD}{Colors.YELLOW}🚢 ARGO:{Colors.RESET} {Colors.GREEN}{ros_info['running_nodes']}{Colors.RESET}/{Colors.YELLOW}{len(self.ros_nodes)}{Colors.RESET} nodes | "
               f"CPU:{Colors.GREEN}{ros_info['total_cpu']:.1f}%{Colors.RESET} MEM:{Colors.GREEN}{ros_info['total_mem']:.1f}%{Colors.RESET} | "
@@ -307,13 +364,13 @@ class ArgoStatusChecker:
         return False
 
 def main():
-    parser = argparse.ArgumentParser(description='Argo Status Check - Monitor Argo sailboat system status')
+    parser = argparse.ArgumentParser(description='Optimized Argo Status Check - Fast monitoring for Argo sailboat system')
     parser.add_argument('--manual', action='store_true', help='Force full detailed output')
     parser.add_argument('--hourly', action='store_true', help='Run hourly timer check')
     
     args = parser.parse_args()
     
-    checker = ArgoStatusChecker()
+    checker = OptimizedArgoStatusChecker()
     
     if args.hourly:
         # Run hourly timer check

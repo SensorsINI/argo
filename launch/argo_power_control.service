@@ -1,0 +1,29 @@
+[Unit]
+Description=Argo Power Control System
+Documentation=file://%h/argo/launch/ARGO_POWER_CONTROL_README.md
+After=basic.target sysinit.target dev-gpiochip0.device
+Wants=basic.target dev-gpiochip0.device
+DefaultDependencies=no
+Before=shutdown.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/orangepi/argo/launch
+ExecStart=/usr/bin/python3 /home/orangepi/argo/launch/argo_power_control.py
+ExecStop=/bin/bash -c 'echo "System shutting down - GPIO pins will automatically revert to input state, de-energizing relay..."'
+Restart=no
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+
+# Security settings
+NoNewPrivileges=false
+PrivateTmp=false
+
+[Install]
+WantedBy=basic.target

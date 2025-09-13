@@ -87,7 +87,7 @@ user_overlays=argo_radio_servo_overlay
 
 #### Install PWM Capture Module
 ```bash
-cd /home/orangepi/argo/scripts/pwm_capture_module
+cd /home/orangepi/argo/nodes/pwm_capture_module
 sudo make install
 sudo depmod -a
 sudo modprobe argo_radio_servo_module

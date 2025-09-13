@@ -4,7 +4,7 @@ ROS2 Package Setup for Argo Sailboat
 NOTE: This setup.py is currently NOT used in the project's deployment.
 
 CURRENT DEPLOYMENT METHOD:
-- Scripts are executed directly from the project's scripts/ directory
+- Scripts are executed directly from the project's nodes/ directory
 - Launch uses relative paths, not installed packages
 - Managed via systemd services (see Makefile and launch/*.service files)
 - No colcon build process required
@@ -44,7 +44,7 @@ setup(
         (os.path.join('share', package_name, 'config'), glob('config/*.ini')),
         (os.path.join('share', package_name, 'config'), glob('config/*.json')),
         # Install scripts as executables
-        (os.path.join('share', package_name, 'scripts'), glob('scripts/*.py')),
+        (os.path.join('share', package_name, 'nodes'), glob('nodes/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

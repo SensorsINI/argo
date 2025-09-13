@@ -7,7 +7,7 @@ RECORD_SERVICE = argo-record.service
 BAGFILES_DIR = $(HOME)/bagfiles
 ARGO_DIR = $(HOME)/argo
 
-.PHONY: help install uninstall enable disable start stop restart clean install-argo-cli install_power_control install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install
+.PHONY: help install-services uninstall enable-services disable-services start stop restart clean install-argo-cli install_argo_power_control install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps
 
 help:
 	@echo "Argo Robot Services Management"
@@ -16,11 +16,14 @@ help:
 	@echo "Installation:"
 	@echo "  install-deps         - Install all ROS2 dependencies (foxglove-bridge, etc.)"
 	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
+	@echo "  install-python-deps  - Install Python runtime dependencies (smbus2, pyserial, etc.)"
 	@echo "  check-deps           - Check status of all dependencies"
-	@echo "  install              - Install service files to systemd"
+	@echo "  install-hardware     - Install PWM capture module and hardware configuration"
+	@echo "  install-services     - Install service files to systemd"
+	@echo "  install-all          - Install hardware and services (complete setup)"
 	@echo "  uninstall            - Remove service files from systemd"
-	@echo "  enable               - Enable services for automatic startup"
-	@echo "  disable              - Disable automatic startup"
+	@echo "  enable-services      - Enable services for automatic startup"
+	@echo "  disable-services     - Disable automatic startup"
 	@echo ""
 	@echo "Service Control:"
 	@echo "  start       - Start argo-launch service with 30s monitoring"
@@ -37,7 +40,7 @@ help:
 	@echo "  aliases-force - Force reinstall/update aliases (overwrites existing)"
 	@echo "  aliases-activate - Print command to activate aliases in current shell"
 	@echo "  install-argo-cli - Install Argo CLI (aliases, functions, dotfiles) to ~/.bashrc"
-	@echo "  install_power_control - Install GPIO permissions for power control (udev rules, gpio group)"
+	@echo "  install_argo_power_control - Install GPIO permissions for power control (udev rules, gpio group)"
 	@echo ""
 	@echo "Quick Commands (after installing CLI):"
 	@echo "  al  - Launch argo service (with 30s monitoring)"
@@ -73,7 +76,7 @@ install-foxglove-bridge:
 	@echo "✅ Foxglove Bridge installed successfully!"
 	@echo ""
 	@echo "🔧 Quick Start:"
-	@echo "  1. Run your Python ROS2 node: python3 scripts/battery_water.py"
+	@echo "  1. Run your Python ROS2 node: python3 nodes/battery_water.py"
 	@echo "  2. In another terminal: ros2 run foxglove_bridge foxglove_bridge"
 	@echo "  3. Connect Foxglove Studio to: ws://$(shell hostname -I | awk '{print $$1}'):8765"
 
@@ -105,130 +108,37 @@ check-deps:
 	@echo "   Test foxglove-bridge: ros2 run foxglove_bridge foxglove_bridge --help"
 
 # ==================== SERVICE MANAGEMENT ====================
+# These targets delegate to the launch Makefile
 
-install:
-	@echo "Installing Argo services..."
-	sudo cp launch/$(LAUNCH_SERVICE) $(SERVICE_DIR)/
-	sudo cp launch/$(RECORD_SERVICE) $(SERVICE_DIR)/
-	sudo systemctl daemon-reload
-	mkdir -p $(BAGFILES_DIR)
-	@echo "Services installed successfully!"
-	@echo "Run 'make enable' to enable automatic startup"
+install-services:
+	@$(MAKE) -C launch install
 
 uninstall:
-	@echo "Uninstalling Argo services..."
-	sudo systemctl stop $(LAUNCH_SERVICE) $(RECORD_SERVICE) 2>/dev/null || true
-	sudo systemctl disable $(LAUNCH_SERVICE) $(RECORD_SERVICE) 2>/dev/null || true
-	sudo rm -f $(SERVICE_DIR)/$(LAUNCH_SERVICE)
-	sudo rm -f $(SERVICE_DIR)/$(RECORD_SERVICE)
-	sudo systemctl daemon-reload
-	@echo "Services uninstalled successfully!"
+	@$(MAKE) -C launch uninstall
 
-enable:
-	@echo "Enabling Argo services for automatic startup..."
-	sudo systemctl enable $(LAUNCH_SERVICE)
-	sudo systemctl enable $(RECORD_SERVICE)
-	@echo "Services enabled!"
+enable-services:
+	@$(MAKE) -C launch enable
 
-disable:
-	@echo "Disabling automatic startup..."
-	sudo systemctl disable $(LAUNCH_SERVICE)
-	sudo systemctl disable $(RECORD_SERVICE)
-	@echo "Automatic startup disabled!"
+disable-services:
+	@$(MAKE) -C launch disable
 
 start:
-	@echo "Starting Argo launch service with monitoring..."
-	sudo systemctl start $(LAUNCH_SERVICE)
-	@echo "✅ Service started! Monitoring for node failures (30s timeout)..."
-	@echo "================================================"
-	@echo "🔍 Monitoring journal for errors in real-time..."
-	@# Monitor journal for 30 seconds, consuming output and checking for errors
-	@timeout 30s journalctl -u $(LAUNCH_SERVICE) -f --no-pager | \
-		( \
-			ERRORS_FOUND=0; \
-			PROCESS_DEATHS=0; \
-			CRITICAL_ERRORS=0; \
-			DEAD_NODES=""; \
-			FAILURE_CAUSES=""; \
-			while IFS= read -r line; do \
-				echo "$$line"; \
-				if echo "$$line" | grep -i "process has died" > /dev/null 2>&1; then \
-					PROCESS_DEATHS=1; \
-					ERRORS_FOUND=1; \
-					NODE_NAME=$$(echo "$$line" | sed -n 's/.*\[\([^-]*\)-[0-9]*\]:.*process has died.*/\1/p'); \
-					EXIT_CODE=$$(echo "$$line" | sed -n 's/.*exit code \([0-9]*\).*/\1/p'); \
-					if [ -n "$$NODE_NAME" ]; then \
-						DEAD_NODES="$$DEAD_NODES $$NODE_NAME"; \
-					fi; \
-				fi; \
-				if echo "$$line" | grep -i -E "(CRITICAL|error.*exiting|failed.*exiting)" | grep -v -i "gps.*satellite" | grep -v -i "gps.*fix" > /dev/null 2>&1; then \
-					CRITICAL_ERRORS=1; \
-					ERRORS_FOUND=1; \
-					ERROR_MSG=$$(echo "$$line" | sed 's/.*\[[^-]*-[0-9]*\]:[[:space:]]*//'); \
-					if [ -n "$$ERROR_MSG" ]; then \
-						FAILURE_CAUSES="$$FAILURE_CAUSES\n  - $$ERROR_MSG"; \
-					fi; \
-				fi; \
-			done; \
-			echo ""; \
-			echo "================================================"; \
-			echo "📊 Monitoring Summary:"; \
-			if [ "$$PROCESS_DEATHS" -eq 1 ]; then \
-				echo "❌ CRITICAL: Node processes have died!"; \
-				echo ""; \
-				echo "Failed nodes:"; \
-				for node in $$DEAD_NODES; do \
-					echo "  - $$node"; \
-				done; \
-				if [ -n "$$FAILURE_CAUSES" ]; then \
-					echo ""; \
-					echo "Failure causes:"; \
-					echo -e "$$FAILURE_CAUSES"; \
-				fi; \
-			elif [ "$$CRITICAL_ERRORS" -eq 1 ]; then \
-				echo "❌ WARNING: Critical errors detected!"; \
-				if [ -n "$$FAILURE_CAUSES" ]; then \
-					echo ""; \
-					echo "Error details:"; \
-					echo -e "$$FAILURE_CAUSES"; \
-				fi; \
-			else \
-				echo "✅ No critical errors detected during 30s monitoring"; \
-			fi; \
-		) || \
-		( \
-			echo ""; \
-			echo "================================================"; \
-			echo "📊 Monitoring Summary (timeout reached):"; \
-			echo "✅ 30-second monitoring completed"; \
-		)
-
+	@$(MAKE) -C launch start
 
 stop:
-	@echo "Stopping all Argo services..."
-	sudo systemctl stop $(RECORD_SERVICE) 2>/dev/null || true
-	sudo systemctl stop $(LAUNCH_SERVICE) 2>/dev/null || true
-	@echo "All Argo services stopped!"
+	@$(MAKE) -C launch stop
 
 restart:
-	@echo "Restarting Argo launch service..."
-	sudo systemctl restart $(LAUNCH_SERVICE)
-	@echo "Argo service restarted!"
+	@$(MAKE) -C launch restart
 
 record:
-	@echo "Starting ROS2 bag recording..."
-	sudo systemctl start $(RECORD_SERVICE)
-	@echo "Recording started!"
+	@$(MAKE) -C launch record
 
 stop-record:
-	@echo "Stopping ROS2 bag recording..."
-	sudo systemctl stop $(RECORD_SERVICE)
-	@echo "Recording stopped!"
+	@$(MAKE) -C launch stop-record
 
 clean:
-	@echo "Cleaning old bag files (>7 days)..."
-	find $(BAGFILES_DIR) -name "argo_*" -type d -mtime +7 -exec rm -rf {} \; 2>/dev/null || true
-	@echo "Old bag files cleaned!"
+	@$(MAKE) -C launch clean
 
 install-argo-cli:
 	@echo "Installing Argo CLI (aliases, functions, and dotfiles)..."
@@ -264,39 +174,34 @@ install-argo-cli:
 	@echo ""
 	@echo "✅ Argo CLI installation complete!"
 
-install_power_control:
-	@echo "Installing power control GPIO permissions..."
-	@echo "Creating gpio group (if it doesn't exist)..."
-	@sudo groupadd gpio 2>/dev/null || echo "gpio group already exists"
-	@echo "Installing udev rules for GPIO access..."
-	@echo "# GPIO permissions for Orange Pi Zero 2W" | sudo tee /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo "# Allow members of the 'gpio' group to access GPIO devices" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo "# GPIO chip devices" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo 'SUBSYSTEM=="gpio", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo "# GPIO character devices (gpiochip)" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo 'KERNEL=="gpiochip*", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo "" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo "# GPIO sysfs interface" | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo 'SUBSYSTEM=="gpio", KERNEL=="export", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo 'SUBSYSTEM=="gpio", KERNEL=="unexport", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo 'SUBSYSTEM=="gpio", KERNEL=="gpio*", GROUP="gpio", MODE="0664"' | sudo tee -a /etc/udev/rules.d/99-gpio-permissions.rules > /dev/null
-	@echo "Adding current user to gpio group..."
-	@sudo usermod -a -G gpio $$(whoami)
-	@echo "Reloading udev rules..."
-	@sudo udevadm control --reload-rules
-	@sudo udevadm trigger
+install_argo_power_control:
+	@$(MAKE) -C launch install_argo_power_control
+
+install-python-deps:
+	@echo "Installing Python runtime dependencies..."
+	@echo "Installing packages from requirements-runtime.txt..."
+	pip3 install -r requirements-runtime.txt
+	@echo "✅ Python dependencies installed successfully!"
 	@echo ""
-	@echo "✅ Power control GPIO permissions installed successfully!"
-	@echo ""
-	@echo "📋 Next steps:"
-	@echo "  1. Log out and log back in, OR run: newgrp gpio"
-	@echo "  2. Test with: ./scripts/power_control.py --test-mode"
-	@echo ""
-	@echo "🔧 What was installed:"
-	@echo "  - Created 'gpio' group"
-	@echo "  - Added udev rules for GPIO device access"
-	@echo "  - Added user '$$(whoami)' to gpio group"
-	@echo "  - Reloaded udev rules to apply changes"
+	@echo "Installed packages:"
+	@echo "  - rclpy: ROS2 Python client library"
+	@echo "  - std-msgs, geometry-msgs: ROS2 message types"
+	@echo "  - smbus2: I2C communication for sensors"
+	@echo "  - pyserial: Serial communication for GPS"
+	@echo "  - numpy: Numerical computations"
+	@echo "  - PyYAML: Configuration file parsing"
+	@echo "  - matplotlib: Optional package (ADC testing plots)"
+
+install-hardware:
+	@echo "Installing PWM capture module and hardware configuration..."
+	@$(MAKE) -C nodes/pwm_capture_module all
+	@echo "✅ Hardware installation complete!"
+	@echo "⚠️  Reboot required to apply hardware configuration changes."
+
+install-all: install-python-deps install-hardware install-services
+	@echo "✅ Complete Argo installation finished!"
+	@echo "Next steps:"
+	@echo "1. Reboot to apply hardware configuration"
+	@echo "2. Run 'make enable-services' to enable automatic startup"
+	@echo "3. Run 'make start' to launch the system"
 

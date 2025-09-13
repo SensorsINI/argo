@@ -26,6 +26,8 @@ argo_hourly_timer() {
     fi
 }
 
+PATH="$HOME/argo/launch:$HOME/argo/nodes:$PATH"
+
 # Run Argo status check on shell startup (with hourly timer)
 # This will only show status if it's been more than an hour since last check
 argo_hourly_timer
