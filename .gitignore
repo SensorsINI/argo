@@ -93,3 +93,4 @@ pcb/**/*-backups/**
 **/power_control.log
 nodes/power-test-pins.py
 **/__pycache__/**
+**/argo_power_control.log
