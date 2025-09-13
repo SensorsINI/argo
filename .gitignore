@@ -94,3 +94,4 @@ pcb/**/*-backups/**
 nodes/power-test-pins.py
 **/__pycache__/**
 **/argo_power_control.log
+nodes/ain3_decay_20250905_103931.png
