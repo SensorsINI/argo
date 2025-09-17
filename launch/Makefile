@@ -9,7 +9,7 @@ ARGO_DIR = $(HOME)/argo
 
 # Power control configuration moved to power_control/ directory
 
-.PHONY: help install uninstall enable disable start stop restart clean record stop-record install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor
+.PHONY: help install uninstall enable disable start stop restart clean install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor
 
 # Default target
 all: install
@@ -43,27 +43,6 @@ disable: disable_storage_monitor
 	@echo "Automatic startup disabled!"
 
 
-record:
-	@echo "Starting ROS2 bag recording via ROS2 service..."
-	@if systemctl is-active --quiet $(LAUNCH_SERVICE); then \
-		ros2 service call /argo/recording/start std_srvs/srv/Empty; \
-		echo "Recording started via ROS2 service!"; \
-	else \
-		echo "❌ Error: Argo launch service is not running"; \
-		echo "   Start it first with: make start"; \
-		exit 1; \
-	fi
-
-stop-record:
-	@echo "Stopping ROS2 bag recording via ROS2 service..."
-	@if systemctl is-active --quiet $(LAUNCH_SERVICE); then \
-		ros2 service call /argo/recording/stop std_srvs/srv/Empty; \
-		echo "Recording stopped via ROS2 service!"; \
-	else \
-		echo "❌ Error: Argo launch service is not running"; \
-		echo "   Start it first with: make start"; \
-		exit 1; \
-	fi
 
 clean:
 	@echo "Cleaning old bag files (>7 days)..."
@@ -134,15 +113,13 @@ help:
 	@echo "Argo Launch Services Makefile"
 	@echo ""
 	@echo "Service Management:"
-	@echo "  install              - Install ALL services (launch, record, storage monitor)"
+	@echo "  install              - Install ALL services (launch, storage monitor)"
 	@echo "  uninstall            - Remove ALL services from systemd"
 	@echo "  enable               - Enable ALL services for automatic startup"
 	@echo "  disable              - Disable automatic startup for ALL services"
 	@echo "  start                - Start argo-launch service with 30s monitoring"
 	@echo "  stop                 - Stop ALL argo services"
 	@echo "  restart              - Restart argo-launch service"
-	@echo "  record               - Start ROS2 bag recording (via ROS2 service)"
-	@echo "  stop-record          - Stop ROS2 bag recording (via ROS2 service)"
 	@echo "  clean                - Clean old bag files (>7 days)"
 	@echo ""
 	@echo "Storage Monitoring System:"

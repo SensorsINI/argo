@@ -1,6 +1,6 @@
-# Argo Power Control (Orange Pi Zero 2W)
+# Argo Power Control System - ROS2 Node
 
-This system provides intelligent power control for Argo: safe shutdown, power button monitoring, LED control, and a reliable power-cut pulse at shutdown.
+This package provides a ROS2 node for the Argo power control system, which manages power button functionality, LED indicators, and system health monitoring.
 
 ## Hardware
 - PI3 (pin 40) `!POW`: open-drain output to power relay (line 259)
@@ -10,7 +10,8 @@ This system provides intelligent power control for Argo: safe shutdown, power bu
 - PI3 (pin 40) shutdown pulse to external cutoff (line 259)
 
 ## Components
-- `argo_power_control.py` + `argo_power_control.service`: button monitoring, LEDs, relay control, graceful shutdown
+- `argo_power_control.py`: ROS2 node for button monitoring, LEDs, relay control, graceful shutdown, and recording control integration
+- `argo_power_control.service`: systemd service that runs independently of argo-launch.service
 - `argo_poweroff.shutdown`: late shutdown hook that asserts PI3 HIGH briefly to cut power
 - `Makefile`: install helpers for the service and shutdown hook
 
