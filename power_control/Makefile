@@ -8,7 +8,7 @@ SCRIPT_DIR = /home/orangepi/argo/power_control
 PYTHON_SCRIPT = argo_power_control.py
 POWER_SERVICE_FILE = argo_power_control.service
 
-.PHONY: help install uninstall enable disable start stop restart clean check_deps install_service enable_service clean_power_control install_shutdown_hook install_startup_hook
+.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook install_startup_hook
 
 # Default target
 all: install
@@ -92,63 +92,39 @@ install_startup_hook:
 # Enable and start service
 enable_service:
 	@echo "🚀 Enabling argo power control service..."
-	@echo "⚠️  WARNING: Enabling this service may take 30-60 seconds"
-	@echo "   The power control service needs to:"
-	@echo "   - Initialize GPIO hardware"
-	@echo "   - Set up button monitoring"
-	@echo "   - Configure power relay control"
-	@echo "   - Start background monitoring threads"
-	@echo ""
-	@echo "📊 Monitoring service startup progress (press Ctrl+C to skip monitoring)..."
 	@sudo systemctl enable $(POWER_SERVICE_NAME)
 	@echo "🔄 Starting argo power control service..."
 	@if systemctl is-active --quiet $(POWER_SERVICE_NAME); then \
 		echo "✅ Service is already running"; \
 	else \
-		( \
-			echo "Starting service..."; \
-			sudo systemctl start $(POWER_SERVICE_NAME) & \
-			START_PID=$$!; \
-			echo "Service start command issued (PID: $$START_PID)"; \
-			echo "Monitoring service status..."; \
-			echo ""; \
-			timeout 60s journalctl -u $(POWER_SERVICE_NAME) -f --no-pager | \
-			( \
-				STARTED=0; \
-				while IFS= read -r line; do \
-					echo "$$line"; \
-					if echo "$$line" | grep -q "Power controller starting" || \
-					   echo "$$line" | grep -q "Button monitoring active" || \
-					   echo "$$line" | grep -q "Power relay set to ON"; then \
-						STARTED=1; \
-					fi; \
-					if echo "$$line" | grep -q "Starting green LED heartbeat thread"; then \
-						echo ""; \
-						echo "✅ Service startup completed successfully!"; \
-						break; \
-					fi; \
-				done; \
-				if [ "$$STARTED" -eq 0 ]; then \
-					echo ""; \
-					echo "⚠️  Service may still be starting up..."; \
-					echo "   Check status with: sudo systemctl status $(POWER_SERVICE_NAME)"; \
-				fi; \
-			) || \
-			( \
-				echo ""; \
-				echo "📊 Monitoring timeout reached (60s)"; \
-				echo "Checking final service status..."; \
-				if systemctl is-active --quiet $(POWER_SERVICE_NAME); then \
-					echo "✅ Service is running"; \
-				else \
-					echo "❌ Service may have failed to start"; \
-					sudo systemctl status $(POWER_SERVICE_NAME) --no-pager; \
-					exit 1; \
-				fi; \
-			); \
-		); \
+		sudo systemctl start $(POWER_SERVICE_NAME); \
+		echo "⏳ Waiting for service to initialize..."; \
+		sleep 1; \
 	fi
-	@echo "✅ Service enabled and running"
+	@echo "📊 Checking service status..."
+	@if systemctl is-active --quiet $(POWER_SERVICE_NAME); then \
+		echo "✅ Service is active"; \
+		if systemctl is-failed --quiet $(POWER_SERVICE_NAME); then \
+			echo "❌ Service is in failed state"; \
+			sudo systemctl status $(POWER_SERVICE_NAME) --no-pager; \
+			exit 1; \
+		fi; \
+		if pgrep -f "argo_power_control.py" > /dev/null; then \
+			echo "✅ argo_power_control.py process is running"; \
+			echo "✅ Service enabled and running successfully"; \
+		else \
+			echo "❌ argo_power_control.py process not found"; \
+			echo "📋 Service status:"; \
+			sudo systemctl status $(POWER_SERVICE_NAME) --no-pager; \
+			echo "📋 Recent logs:"; \
+			sudo journalctl -u $(POWER_SERVICE_NAME) -n 10 --no-pager; \
+			exit 1; \
+		fi; \
+	else \
+		echo "❌ Service failed to start or is not active"; \
+		sudo systemctl status $(POWER_SERVICE_NAME) --no-pager; \
+		exit 1; \
+	fi
 
 # Start service
 start:
@@ -203,13 +179,6 @@ uninstall: clean_power_control
 	@echo "🗑️  Uninstalling power control system..."
 	@echo "✅ Power control uninstall complete"
 
-# Clean build artifacts
-clean:
-	@echo "🧹 Cleaning build artifacts..."
-	@rm -f $(SCRIPT_DIR)/gpio_poweroff_overlay.dts.cpp
-	@rm -f $(SCRIPT_DIR)/gpio_poweroff_overlay.dtbo
-	@echo "✅ Build artifacts cleaned"
-
 # Show help
 help:
 	@echo "Argo Power Control System Makefile"
@@ -231,7 +200,6 @@ help:
 	@echo "  install_shutdown_hook        - Install late shutdown hook"
 	@echo "  install_startup_hook - Install early boot startup hook (!POW low)"
 	@echo "  clean_power_control  - Stop and disable service, remove service file"
-	@echo "  clean                - Clean build artifacts"
 	@echo ""
 	@echo "Usage examples:"
 	@echo "  make install         # Install complete power control system"
