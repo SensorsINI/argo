@@ -3,44 +3,53 @@
 
 SERVICE_DIR = /etc/systemd/system
 LAUNCH_SERVICE = argo-launch.service
-RECORD_SERVICE = argo-record.service
+# Recording is now handled via ROS2 service, not systemd
 BAGFILES_DIR = $(HOME)/bagfiles
 ARGO_DIR = $(HOME)/argo
 
-.PHONY: help install-services uninstall enable-services disable-services start stop restart clean install-argo-cli install_argo_power_control install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control
 
 help:
 	@echo "Argo Robot Services Management"
 	@echo "=============================="
 	@echo ""
-	@echo "Installation:"
+	@echo "Hardware & Dependencies:"
 	@echo "  install-deps         - Install all ROS2 dependencies (foxglove-bridge, etc.)"
 	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
 	@echo "  install-python-deps  - Install Python runtime dependencies (smbus2, pyserial, etc.)"
 	@echo "  check-deps           - Check status of all dependencies"
 	@echo "  install-hardware     - Install PWM capture module and hardware configuration"
-	@echo "  install-services     - Install service files to systemd"
-	@echo "  install-all          - Install hardware and services (complete setup)"
-	@echo "  uninstall            - Remove service files from systemd"
-	@echo "  enable-services      - Enable services for automatic startup"
-	@echo "  disable-services     - Disable automatic startup"
+	@echo "  install-all          - Install hardware and dependencies (complete setup)"
 	@echo ""
-	@echo "Service Control:"
-	@echo "  start       - Start argo-launch service with 30s monitoring"
-	@echo "  stop        - Stop all argo services"
-	@echo "  restart     - Restart argo-launch service"
+	@echo "Service Management (in launch/ directory):"
+	@echo "  make -C launch install     - Install all services (launch, record, storage)"
+	@echo "  make -C launch start       - Start argo-launch service with 30s monitoring"
+	@echo "  make -C launch stop        - Stop all argo services"
+	@echo "  make -C launch restart     - Restart argo-launch service"
+	@echo "  make -C launch record      - Start ROS2 bag recording"
+	@echo "  make -C launch stop-record - Stop ROS2 bag recording"
+	@echo "  make -C launch clean       - Clean old bag files (>7 days)"
+	@echo "  make -C launch help        - Show detailed service management help"
 	@echo ""
-	@echo "Recording Control:"
-	@echo "  record      - Start ROS2 bag recording"
-	@echo "  stop-record - Stop ROS2 bag recording"
+	@echo "Power Control System (in power_control/ directory):"
+	@echo "  make -C power_control install  - Install power control system"
+	@echo "  make -C power_control start    - Start power control service"
+	@echo "  make -C power_control stop     - Stop power control service"
+	@echo "  make -C power_control status   - Show power control status"
+	@echo "  make -C power_control help     - Show power control help"
+	@echo ""
+	@echo "Power Control Convenience Targets:"
+	@echo "  install-power-control  - Install power control system"
+	@echo "  start-power-control    - Start power control service"
+	@echo "  stop-power-control     - Stop power control service"
+	@echo "  status-power-control   - Show power control status"
+	@echo "  uninstall-power-control - Uninstall power control system"
 	@echo ""
 	@echo "Utilities:"
-	@echo "  clean       - Clean old bag files (>7 days)"
 	@echo "  aliases-install - Install/update aliases and activate them immediately"
 	@echo "  aliases-force - Force reinstall/update aliases (overwrites existing)"
 	@echo "  aliases-activate - Print command to activate aliases in current shell"
 	@echo "  install-argo-cli - Install Argo CLI (aliases, functions, dotfiles) to ~/.bashrc"
-	@echo "  install_argo_power_control - Install GPIO permissions for power control (udev rules, gpio group)"
 	@echo ""
 	@echo "Quick Commands (after installing CLI):"
 	@echo "  al  - Launch argo service (with 30s monitoring)"
@@ -108,37 +117,8 @@ check-deps:
 	@echo "   Test foxglove-bridge: ros2 run foxglove_bridge foxglove_bridge --help"
 
 # ==================== SERVICE MANAGEMENT ====================
-# These targets delegate to the launch Makefile
-
-install-services:
-	@$(MAKE) -C launch install
-
-uninstall:
-	@$(MAKE) -C launch uninstall
-
-enable-services:
-	@$(MAKE) -C launch enable
-
-disable-services:
-	@$(MAKE) -C launch disable
-
-start:
-	@$(MAKE) -C launch start
-
-stop:
-	@$(MAKE) -C launch stop
-
-restart:
-	@$(MAKE) -C launch restart
-
-record:
-	@$(MAKE) -C launch record
-
-stop-record:
-	@$(MAKE) -C launch stop-record
-
-clean:
-	@$(MAKE) -C launch clean
+# Service management targets are now in launch/Makefile
+# Use 'make -C launch <target>' to run service targets directly
 
 install-argo-cli:
 	@echo "Installing Argo CLI (aliases, functions, and dotfiles)..."
@@ -174,8 +154,8 @@ install-argo-cli:
 	@echo ""
 	@echo "✅ Argo CLI installation complete!"
 
-install_argo_power_control:
-	@$(MAKE) -C launch install_argo_power_control
+# Power control installation is now in power_control/Makefile
+# Use 'make -C power_control install' to install power control
 
 install-python-deps:
 	@echo "Installing Python runtime dependencies..."
@@ -198,10 +178,33 @@ install-hardware:
 	@echo "✅ Hardware installation complete!"
 	@echo "⚠️  Reboot required to apply hardware configuration changes."
 
-install-all: install-python-deps install-hardware install-services
-	@echo "✅ Complete Argo installation finished!"
+install-all: install-python-deps install-hardware
+	@echo "✅ Complete Argo hardware installation finished!"
 	@echo "Next steps:"
 	@echo "1. Reboot to apply hardware configuration"
-	@echo "2. Run 'make enable-services' to enable automatic startup"
-	@echo "3. Run 'make start' to launch the system"
+	@echo "2. Run 'make -C launch install' to install services"
+	@echo "3. Run 'make -C launch enable' to enable automatic startup"
+	@echo "4. Run 'make -C launch start' to launch the system"
+
+# ==================== POWER CONTROL CONVENIENCE TARGETS ====================
+
+install-power-control:
+	@echo "Installing power control system..."
+	@$(MAKE) -C power_control install
+
+start-power-control:
+	@echo "Starting power control service..."
+	@$(MAKE) -C power_control start
+
+stop-power-control:
+	@echo "Stopping power control service..."
+	@$(MAKE) -C power_control stop
+
+status-power-control:
+	@echo "Checking power control status..."
+	@$(MAKE) -C power_control status
+
+uninstall-power-control:
+	@echo "Uninstalling power control system..."
+	@$(MAKE) -C power_control uninstall
 

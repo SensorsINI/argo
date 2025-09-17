@@ -1,6 +1,7 @@
 [Unit]
 Description=Set permissions for Argo Radio Servo sysfs files
-After=sys-kernel-argo_radio_servo.mount
+After=multi-user.target
+Wants=multi-user.target
 
 [Service]
 Type=oneshot

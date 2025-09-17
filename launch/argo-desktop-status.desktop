@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Argo Desktop Status
+Comment=Monitor Argo ROS2 services and nodes with desktop notifications
+Exec=python3 /home/orangepi/argo/launch/argo_desktop_status.py
+Icon=boat
+Terminal=false
+StartupNotify=false
+Categories=System;Monitor;
+Keywords=argo;ros2;monitor;status;notification;

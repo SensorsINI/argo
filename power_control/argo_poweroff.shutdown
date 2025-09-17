@@ -1,0 +1,47 @@
+#!/usr/bin/bash
+
+# argo_poweroff.shutdown
+# ---------------------------------
+# Purpose:
+#   Late shutdown hook invoked by systemd in the system-shutdown phase.
+#   It asserts Orange Pi Zero 2W pin PI3 (GPIO line 259) briefly to
+#   signal the external power control to cut power. This should be one
+#   of the last actions before the kernel powers off.
+#
+# Invocation:
+#   Placed at /lib/systemd/system-shutdown/argo_poweroff (installed by Makefile).
+#   systemd runs scripts here with a single argument indicating mode:
+#   { poweroff | reboot | halt | kexec }. We do not branch on the mode.
+#
+# Notes:
+#   - Minimal dependencies: do not rely on any systemd services.
+#   - Prefer Python libgpiod if available; otherwise fall back to gpioset.
+#   - Keep the pulse short; external circuit should cut power quickly.
+#   - Exit 0 regardless, to never block shutdown.
+
+set -euo pipefail
+
+MODE="${1:-}"
+
+if command -v python3 >/dev/null 2>&1; then
+python3 - <<'PY'
+import gpiod, time
+chip = gpiod.Chip("/dev/gpiochip0")
+line = chip.get_line(259)
+line.request(consumer="shutdown", type=gpiod.LINE_REQ_DIR_OUT)
+line.set_value(1)
+time.sleep(0.5)
+# External circuit will typically remove power immediately after level goes high.
+PY
+    exit 0
+fi
+
+if command -v gpioset >/dev/null 2>&1; then
+    gpioset gpiochip0 259=1
+    sleep 0.5
+    exit 0
+fi
+
+exit 0
+
+

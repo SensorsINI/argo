@@ -7,10 +7,11 @@ This directory contains all the launch scripts, systemd services, and management
 ### 🚀 **Core Launch Files**
 
 #### **ROS2 Launch System**
-- **`argo_launch.py`** - Main ROS2 launch file that starts all sensor nodes, control systems, and Foxglove Bridge
-  - Supports launch arguments for Foxglove Bridge configuration
-  - Includes storage space warnings before launch
-  - Usage: `ros2 launch launch/argo_launch.py`
+- **`argo_lifecycle_manager.py`** - Main ROS2 lifecycle manager that directly launches all sensor nodes and control systems
+  - Dynamic node discovery from the `nodes/` directory
+  - Fault-tolerant operation with partial node failure support
+  - Direct node launching without intermediate launch files
+  - Usage: `python3 launch/argo_lifecycle_manager.py start|continuous|stop|status`
 
 #### **Interactive Control**
 - **`argo_gui.py`** - Interactive CLI GUI for real-time monitoring and control
@@ -86,11 +87,12 @@ This directory contains all the launch scripts, systemd services, and management
 #### **Core Services**
 - **`argo-launch.service`** - Main ROS2 launch service
   - Starts the complete Argo system
-  - Uses `argo_launch.py` as entry point
+  - Uses `argo_lifecycle_manager.py` as entry point
   - Configured for user service (not auto-start by default)
 
-- **`argo-record.service`** - ROS2 bag recording service
-  - Records system data using `argo_record.sh`
+- **Recording** - ROS2 service-based recording (no separate systemd service)
+  - Records system data using `record.py` ROS2 node
+  - Controlled via ROS2 services: `/argo/recording/start` and `/argo/recording/stop`
   - Depends on `argo-launch.service`
   - Manual start only
 
@@ -127,7 +129,7 @@ This directory contains all the launch scripts, systemd services, and management
 ### **Manual Launch**
 ```bash
 # Start the complete Argo system
-ros2 launch launch/argo_launch.py
+python3 launch/argo_lifecycle_manager.py start
 
 # Launch interactive GUI
 sudo ./launch/argo_gui.sh
@@ -166,9 +168,9 @@ sudo systemctl --user stop argo-record
 ```
 argo-launch.service
 ├── argo.env (environment)
-└── argo_launch.py (main launch file)
+└── argo_lifecycle_manager.py (main lifecycle manager)
 
-argo-record.service
+recording (ROS2 service)
 ├── argo-launch.service (dependency)
 ├── argo.env (environment)
 └── argo_record.sh (recording script)
@@ -198,7 +200,7 @@ make install_argo_power_control
 ```bash
 # Install services
 sudo systemctl --user link /home/orangepi/argo/launch/argo-launch.service
-sudo systemctl --user link /home/orangepi/argo/launch/argo-record.service
+sudo systemctl --user link /home/orangepi/argo/launch/recording (ROS2 service)
 sudo systemctl --user link /home/orangepi/argo/launch/argo-storage-monitor.service
 
 # Install power control (requires sudo)
@@ -251,3 +253,5 @@ sudo systemctl status argo-power-control
 - Services are automatically reloaded when files change
 - Use `sudo systemctl daemon-reload` after service file modifications
 - Restart services after configuration changes
+
+

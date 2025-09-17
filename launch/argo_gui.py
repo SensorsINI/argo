@@ -15,9 +15,9 @@ Features:
 - Keystroke commands for quick control
 
 Usage:
-    sudo python3 launch/argo_gui.py
+    sudo python3 /path/to/argo/launch/argo_gui.py
     sudo ./launch/argo_gui.sh
-    python3 launch/argo_gui.py --help
+    python3 /path/to/argo/launch/argo_gui.py --help
 
 Key Commands:
     s - Start Argo service
@@ -42,14 +42,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import json
 
-# ROS2 imports
-try:
-    import rclpy
-    from rclpy.node import Node
-    from rclpy.executors import SingleThreadedExecutor
-    ROS2_AVAILABLE = True
-except ImportError:
-    ROS2_AVAILABLE = False
+# Note: ROS2 imports removed - using argo_status_check.py for status monitoring
+from argo_node_utils import ArgoNodeManager
 
 def check_sudo_privileges():
     """Check if running with sudo privileges"""
@@ -59,7 +53,7 @@ def require_sudo():
     """Exit if not running with sudo privileges"""
     if not check_sudo_privileges():
         print(f"{Colors.RED}Error: This GUI requires sudo privileges to control systemd services{Colors.RESET}")
-        print(f"{Colors.YELLOW}Please run with: sudo python3 launch/argo_gui.py{Colors.RESET}")
+        print(f"{Colors.YELLOW}Please run with: sudo python3 /path/to/argo/launch/argo_gui.py{Colors.RESET}")
         print(f"{Colors.DIM}Or use: sudo ./launch/argo_gui.sh{Colors.RESET}")
         sys.exit(1)
 
@@ -85,9 +79,12 @@ class ArgoGUI:
         self.running = True
         self.argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.launch_service = "argo-launch.service"
-        self.record_service = "argo-record.service"
+        # Note: Recording is now handled via ROS2 service, not systemd service
         self.refresh_interval = 10.0  # seconds
         self.last_update = 0
+        
+        # Initialize centralized node manager
+        self.node_manager = ArgoNodeManager(self.argo_dir)
         
         # Set up signal handler for immediate Ctrl+C response
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -123,7 +120,7 @@ class ArgoGUI:
         """Handle shutdown signals gracefully"""
         self.running = False
         self.cleanup_screen()
-        print(f"\n{Colors.YELLOW}Argo GUI shutting down...{Colors.RESET}")
+        print(f"{Colors.YELLOW}Argo GUI shutting down...{Colors.RESET}")
         sys.exit(0)
         
     def init_screen(self):
@@ -142,16 +139,17 @@ class ArgoGUI:
         sys.stdout.flush()
         
     def cleanup_screen(self):
-        """Restore terminal settings"""
-        print('\033[?25h\033[0m', end='')  # Show cursor and reset colors
+        """Restore terminal settings and position cursor after output"""
+        # Show cursor and reset colors
+        print('\033[?25h\033[0m', end='')
         sys.stdout.flush()
         
-        # Cleanup ROS2 if it was initialized
-        if ROS2_AVAILABLE and rclpy.ok():
-            try:
-                rclpy.shutdown()
-            except:
-                pass
+        # Position cursor after the screen output
+        # Move to the bottom of the terminal and add a newline
+        print(f'\033[{self.terminal_height};1H\n', end='')
+        sys.stdout.flush()
+        
+        # Cleanup completed
         
     def clear_screen(self):
         """Clear the screen - optimized for raw mode"""
@@ -174,10 +172,17 @@ class ArgoGUI:
                                   capture_output=True, text=True, timeout=5)
             status['launch'] = result.stdout.strip()
             
-            # Check record service  
-            result = subprocess.run(['systemctl', 'is-active', self.record_service], 
-                                  capture_output=True, text=True, timeout=5)
-            status['record'] = result.stdout.strip()
+            # Recording is now handled via ROS2 service, not systemd
+            # Check if ROS2 recording service is available
+            try:
+                result = subprocess.run(['ros2', 'service', 'list'], 
+                                      capture_output=True, text=True, timeout=3)
+                if '/argo/recording/start' in result.stdout:
+                    status['record'] = 'ros2-available'
+                else:
+                    status['record'] = 'ros2-unavailable'
+            except:
+                status['record'] = 'ros2-unavailable'
             
         except Exception as e:
             status['launch'] = 'unknown'
@@ -189,11 +194,7 @@ class ArgoGUI:
         """Get the formatted status output from the Python argo_status_check script"""
         try:
             # Call the Python script directly with timeout for responsiveness
-            # Determine the correct path to argo_status_check.py
-            status_check_path = f'{self.argo_dir}/launch/argo_status_check.py'
-            if not os.path.exists(status_check_path):
-                status_check_path = f'{self.argo_dir}/argo_status_check.py'
-            result = subprocess.run(['python3', status_check_path, '--manual'], 
+            result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_status_check.py', '--manual'], 
                                   capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 # Filter out screen clearing sequences that conflict with GUI
@@ -219,11 +220,12 @@ class ArgoGUI:
             # Check systemd services
             launch_result = subprocess.run(['systemctl', '--no-pager', 'is-active', 'argo-launch.service'], 
                                          capture_output=True, text=True, timeout=5)
-            record_result = subprocess.run(['systemctl', '--no-pager', 'is-active', 'argo-record.service'], 
-                                         capture_output=True, text=True, timeout=5)
+            # Recording is now handled via ROS2 service
+            record_result = subprocess.run(['ros2', 'service', 'list'], 
+                                         capture_output=True, text=True, timeout=3)
             
             launch_status = "active" if launch_result.returncode == 0 else "inactive"
-            record_status = "active" if record_result.returncode == 0 else "inactive"
+            record_status = "ros2-available" if record_result.returncode == 0 and '/argo/recording/start' in record_result.stdout else "ros2-unavailable"
             
             # Get ROS nodes
             ros_nodes = self._get_ros_nodes_simple()
@@ -278,55 +280,11 @@ class ArgoGUI:
         return "Unknown"
     
     def _get_ros_nodes_simple(self) -> str:
-        """Get ROS node status using simple process checks"""
+        """Get ROS node status using centralized node manager"""
         try:
-            # List of expected ROS nodes
-            expected_nodes = ['anem.py', 'pwm.py', 'gps.py', 'imu.py', 'control.py', 'battery_water.py', 'foxglove_bridge']
-            node_status = []
-            
-            for node in expected_nodes:
-                # Check if process is running - use same pattern as original find_ros_node_pids
-                search_pattern = f"/{node}"  # This matches the original: pgrep -f '/{node_name}'
-                result = subprocess.run(['pgrep', '-f', search_pattern], 
-                                      capture_output=True, text=True, timeout=2)
-                if result.returncode == 0:
-                    # Get CPU and memory usage
-                    try:
-                        pids = result.stdout.strip().split('\n')
-                        pid = pids[0] if pids else None  # Take first PID if multiple
-                        if not pid:
-                            node_status.append(f"  {node}: 🟢 RUNNING")
-                            continue
-                            
-                        ps_result = subprocess.run(['ps', '-o', 'pid,pcpu,pmem,cmd', '-p', pid], 
-                                                 capture_output=True, text=True, timeout=2)
-                        if ps_result.returncode == 0:
-                            lines = ps_result.stdout.strip().split('\n')
-                            if len(lines) > 1:
-                                # Find the line that matches our PID
-                                for line in lines[1:]:  # Skip header
-                                    parts = line.split(None, 3)  # Split into max 4 parts
-                                    if len(parts) >= 4 and parts[0] == pid:
-                                        cpu = parts[1] if parts[1] != '-' else '0.0'
-                                        mem = parts[2] if parts[2] != '-' else '0.0'
-                                        node_status.append(f"  {node}: 🟢 RUNNING (CPU: {cpu}%, MEM: {mem}%)")
-                                        break
-                                else:
-                                    # PID not found in ps output, just show running
-                                    node_status.append(f"  {node}: 🟢 RUNNING")
-                            else:
-                                node_status.append(f"  {node}: 🟢 RUNNING")
-                        else:
-                            node_status.append(f"  {node}: 🟢 RUNNING")
-                    except Exception as e:
-                        # If parsing fails, just show running without stats
-                        node_status.append(f"  {node}: 🟢 RUNNING")
-                else:
-                    node_status.append(f"  {node}: 🔴 NOT RUNNING")
-            
-            return '\n'.join(node_status) if node_status else "  No ROS nodes found"
+            return self.node_manager.format_node_status(show_pids=True, show_stats=True)
         except Exception as e:
-            return f"  Error checking ROS nodes: {str(e)}"
+            return f"  Error getting node status: {str(e)}"
     
     def get_cached_status_output(self) -> str:
         """Get cached status output or fetch new one if cache is stale"""
@@ -371,78 +329,14 @@ class ArgoGUI:
         """Handle Ctrl+C signal for immediate exit"""
         self.running = False
         print(f"\n{Colors.YELLOW}Received interrupt signal, shutting down...{Colors.RESET}")
-        # Don't call sys.exit() here as it can interfere with cleanup
-        # Let the main loop handle the exit
-        
-    def get_ros_nodes(self) -> Dict[str, Dict]:
-        """Get ROS2 node information using Python APIs"""
-        nodes = {}
-        
-        if not ROS2_AVAILABLE:
-            return nodes
-            
+        # Force cleanup and exit
         try:
-            # Initialize ROS2 if not already initialized
-            if not rclpy.ok():
-                rclpy.init()
-            
-            # Create a temporary node to query the graph
-            temp_node = Node('argo_gui_temp')
-            
-            try:
-                # Get list of node names
-                node_names = temp_node.get_node_names()
-                
-                for node_name in node_names:
-                    if node_name and not node_name.startswith('argo_gui_temp'):
-                        try:
-                            # Get node info
-                            node_info = temp_node.get_node_names_and_namespaces()
-                            
-                            # Find this specific node
-                            node_found = False
-                            for name, namespace in node_info:
-                                if name == node_name.split('/')[-1]:  # Remove namespace prefix
-                                    nodes[node_name] = {
-                                        'status': 'active',
-                                        'info': f'Namespace: {namespace}'
-                                    }
-                                    node_found = True
-                                    break
-                            
-                            if not node_found:
-                                nodes[node_name] = {
-                                    'status': 'active',
-                                    'info': 'Node active'
-                                }
-                                
-                        except Exception as e:
-                            nodes[node_name] = {
-                                'status': 'error',
-                                'info': f'Error: {str(e)}'
-                            }
-                            
-            finally:
-                temp_node.destroy_node()
-                
-        except Exception as e:
-            # Fallback to subprocess method if ROS2 APIs fail
-            try:
-                cmd = 'source /opt/ros/humble/setup.bash && ros2 node list'
-                result = subprocess.run(['bash', '-i', '-c', cmd], 
-                                      capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    node_names = result.stdout.strip().split('\n')
-                    for node_name in node_names:
-                        if node_name:
-                            nodes[node_name] = {
-                                'status': 'active',
-                                'info': 'Node active'
-                            }
-            except:
-                pass
-            
-        return nodes
+            self.cleanup_screen()
+        except:
+            pass
+        sys.exit(0)
+        
+    # ROS2 node monitoring removed - using argo_status_check.py instead
         
     def get_recording_info(self) -> Dict[str, str]:
         """Get recording status and information"""
@@ -576,7 +470,7 @@ class ArgoGUI:
         try:
             self.service_status = self.get_service_status()
             self.recording_status = self.get_recording_info()
-            self.ros_nodes = self.get_ros_nodes()
+            # ROS2 node monitoring removed - using argo_status_check.py instead
             self.system_info = self.get_system_info()
             self.last_errors = self.get_recent_errors()
             self.last_update = time.time()
@@ -659,19 +553,19 @@ class ArgoGUI:
         """Execute a command and return (success_status, message)"""
         try:
             if cmd == 'l':  # Launch service
-                result = subprocess.run(['make', '-C', self.argo_dir, 'start'], 
+                result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_lifecycle_manager.py', 'start'], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
-                    return True, "Service launched successfully"
+                    return True, "Argo nodes started successfully"
                 else:
-                    return False, f"Launch failed: {result.stderr.strip() or 'Unknown error'}"
+                    return False, f"Launch failed: {result.stderr.strip() or result.stdout.strip() or 'Unknown error'}"
             elif cmd == 'h':  # Halt service
-                result = subprocess.run(['make', '-C', self.argo_dir, 'stop'], 
+                result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_lifecycle_manager.py', 'stop'], 
                                       capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
-                    return True, "Service halted successfully"
+                    return True, "Argo nodes stopped successfully"
                 else:
-                    return False, f"Halt failed: {result.stderr.strip() or 'Unknown error'}"
+                    return False, f"Halt failed: {result.stderr.strip() or result.stdout.strip() or 'Unknown error'}"
             elif cmd == 'r':  # Start recording
                 result = subprocess.run(['make', '-C', self.argo_dir, 'record'], 
                                       capture_output=True, text=True, timeout=10)
@@ -687,12 +581,12 @@ class ArgoGUI:
                 else:
                     return False, f"Recording stop failed: {result.stderr.strip() or 'Unknown error'}"
             elif cmd == 'R':  # Restart service
-                result = subprocess.run(['make', '-C', self.argo_dir, 'restart'], 
+                result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_lifecycle_manager.py', 'restart'], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
-                    return True, "Service restarted successfully"
+                    return True, "Argo nodes restarted successfully"
                 else:
-                    return False, f"Restart failed: {result.stderr.strip() or 'Unknown error'}"
+                    return False, f"Restart failed: {result.stderr.strip() or result.stdout.strip() or 'Unknown error'}"
             elif cmd == '?':  # Show help
                 self.show_help()
                 return True, "Help displayed"
@@ -707,31 +601,31 @@ class ArgoGUI:
         """Execute a command with progress feedback and return (success_status, message)"""
         try:
             if cmd == 'l':  # Launch service
-                result = self._execute_with_progress(['make', '-C', self.argo_dir, 'start'], 
+                result = self._execute_with_progress(['sudo', 'systemctl', 'start', 'argo-launch.service'], 
                                                    "Launching argo ros nodes", 30)
                 # Force status update after command execution
                 self.force_status_update()
                 return result
             elif cmd == 'h':  # Halt service
-                result = self._execute_with_progress(['make', '-C', self.argo_dir, 'stop'], 
+                result = self._execute_with_progress(['sudo', 'systemctl', 'stop', 'argo-launch.service'], 
                                                    "Halting service", 10)
                 # Force status update after command execution
                 self.force_status_update()
                 return result
             elif cmd == 'r':  # Start recording
-                result = self._execute_with_progress(['make', '-C', self.argo_dir, 'record'], 
+                result = self._execute_with_progress(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 service call /argo/recording/start std_srvs/srv/Empty'], 
                                                    "Starting recording", 10)
                 # Force status update after command execution
                 self.force_status_update()
                 return result
             elif cmd == 'c':  # Stop recording
-                result = self._execute_with_progress(['make', '-C', self.argo_dir, 'stop-record'], 
+                result = self._execute_with_progress(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 service call /argo/recording/stop std_srvs/srv/Empty'], 
                                                    "Stopping recording", 10)
                 # Force status update after command execution
                 self.force_status_update()
                 return result
             elif cmd == 'R':  # Restart service
-                result = self._execute_with_progress(['make', '-C', self.argo_dir, 'restart'], 
+                result = self._execute_with_progress(['sudo', 'systemctl', 'restart', 'argo-launch.service'], 
                                                    "Relaunching argo nodes", 30)
                 # Force status update after command execution
                 self.force_status_update()
@@ -798,7 +692,7 @@ class ArgoGUI:
         print()
         print(f"{Colors.BOLD}Prerequisites:{Colors.RESET}")
         print(f"  {Colors.YELLOW}⚠ Requires sudo privileges to control systemd services{Colors.RESET}")
-        print(f"  Run with: {Colors.BOLD}sudo python3 launch/argo_gui.py{Colors.RESET}")
+        print(f"  Run with: {Colors.BOLD}sudo python3 /path/to/argo/launch/argo_gui.py{Colors.RESET}")
         print(f"  Or use: {Colors.BOLD}sudo ./launch/argo_gui.sh{Colors.RESET}")
         print()
         print(f"{Colors.BOLD}Service Control:{Colors.RESET}")
@@ -872,9 +766,9 @@ class ArgoGUI:
                         key = sys.stdin.read(1)
                         
                         if key == '\x03':  # Ctrl+C
-                            print('\033[2J\033[H', end='')  # Clear screen
-                            print(f'{Colors.YELLOW}Ctrl+C detected, exiting...{Colors.RESET}')
+                            print(f'\033[1;1H{Colors.YELLOW}Ctrl+C detected, exiting...{Colors.RESET}', end='')
                             sys.stdout.flush()
+                            self.running = False
                             break
                         elif key in 'lhrcR?':
                             # Show command confirmation after current status output
@@ -934,9 +828,6 @@ class ArgoGUI:
                         # Don't redraw screen during auto-refresh to avoid clearing status
                         
                 except KeyboardInterrupt:
-                    print('\033[2J\033[H', end='')  # Clear screen
-                    print(f'{Colors.YELLOW}Ctrl+C detected, exiting...{Colors.RESET}')
-                    sys.stdout.flush()
                     break
                 except Exception as e:
                     # Continue running even if there's an error
@@ -955,9 +846,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 launch/argo_gui.py     # Start GUI (requires sudo)
-  sudo ./launch/argo_gui.sh           # Start GUI using launcher script
-  python3 launch/argo_gui.py --help   # Show help
+  sudo python3 /path/to/argo/launch/argo_gui.py     # Start GUI from anywhere (requires sudo)
+  sudo ./launch/argo_gui.sh                         # Start GUI using launcher script
+  python3 /path/to/argo/launch/argo_gui.py --help   # Show help
 
 Key Commands:
   s - Start Argo service
@@ -974,7 +865,9 @@ Note: This GUI requires sudo privileges to control systemd services.
     
     args = parser.parse_args()
     
-    # No directory check needed - script uses absolute paths for all operations
+    # Check if we're in the right directory by finding the script's location
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    argo_dir = os.path.dirname(script_dir)
     
     # Check for sudo privileges
     require_sudo()

@@ -5,10 +5,10 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=%i
-Group=%i
-WorkingDirectory=%h/argo
-ExecStart=/usr/bin/python3 %h/argo/launch/storage_notifications.py check
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/argo
+ExecStart=/usr/bin/python3 /home/orangepi/argo/launch/argo_storage_notifications.py check
 Restart=on-failure
 RestartSec=300
 # Only run if we have a display (GUI environment)

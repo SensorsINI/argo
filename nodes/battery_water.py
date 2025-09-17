@@ -35,6 +35,9 @@ from rclpy.executors import ExternalShutdownException
 # Hardware configuration constants
 I2C_BUS_NUMBER = 0  # Orange Pi Zero 2W default I2C bus
 
+# Sample rate configuration
+SAMPLE_RATE_HZ = 0.1  # 0.1Hz = 10 second intervals
+
 try:
     import smbus2 as smbus2
     from smbus2 import i2c_msg
@@ -49,15 +52,8 @@ try:
 except Exception:
     _HAS_TQDM = False
 
-# matplotlib for plotting RC-decay capture
-try:
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from datetime import datetime
-    _HAS_MPL = True
-except Exception:
-    _HAS_MPL = False
+# matplotlib for plotting RC-decay capture (only imported when needed)
+_HAS_MPL = False
 
 class BatteryWaterNode(Node):
     def __init__(self):
@@ -169,14 +165,14 @@ class BatteryWaterNode(Node):
                 if png_path:
                     self.get_logger().info(f'RC-decay capture saved: {png_path}')
                 else:
-                    self.get_logger().warn('RC-decay capture completed but matplotlib is not available to save a plot.')
+                    self.get_logger().warn('RC-decay capture completed but matplotlib could not be imported to save a plot.')
             except Exception as e:
                 self.get_logger().error(f'RC-decay capture failed: {e}')
             # Keep node idle; no periodic publishing in test mode
             self.get_logger().info('Battery/Water node is idle after --test-adc capture. Press Ctrl+C to exit.')
         else:
-            self.timer = self.create_timer(1.0, self.read_and_publish)
-            self.get_logger().info('Battery/Water node initialized and reading at 1 Hz.')
+            self.timer = self.create_timer(1.0 / SAMPLE_RATE_HZ, self.read_and_publish)
+            self.get_logger().info(f'Battery/Water node initialized and reading at {SAMPLE_RATE_HZ} Hz.')
 
     # ---------- I2C helpers ----------
     def _i2c_write(self, addr: int, byte_val: int) -> None:
@@ -316,8 +312,13 @@ class BatteryWaterNode(Node):
             rem = sample_dt - (time.monotonic() - t0 - t)
             if rem > 0:
                 time.sleep(rem)
-        # Save PNG if matplotlib is available
-        if _HAS_MPL:
+        # Save PNG if matplotlib is available (import only when needed)
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from datetime import datetime
+            
             plt.figure(figsize=(8, 4))
             plt.plot(times, volts, '-', linewidth=1.5)
             plt.title('AIN3 RC Decay (REFOUT -> Analog Input)')
@@ -331,7 +332,8 @@ class BatteryWaterNode(Node):
             finally:
                 plt.close()
             return path
-        return None
+        except Exception:
+            return None
 
     def _scale_pct(self, value, vmin, vmax):
         if vmax == vmin:

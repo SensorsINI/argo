@@ -13,12 +13,13 @@ alias mount1="mount | grep -E '^/'|grep -v snapd"
 alias sd="sudo shutdown now"
 
 
-# Argo Robot Control Aliases
-alias al='make -C /home/orangepi/argo start'
-alias aq='make -C /home/orangepi/argo stop'
-alias ar='make -C /home/orangepi/argo record'
-alias ac='make -C /home/orangepi/argo stop-record'
-alias as=argo_status_check
-alias ars='make -C /home/orangepi/argo restart'
+# Argo Robot Control Aliases - Improved ROS2 Native Approach
+alias al='/home/orangepi/argo/launch/argo_start.sh'           # Start Argo nodes
+alias aq='/home/orangepi/argo/launch/argo_stop.sh'            # Stop Argo nodes  
+alias ars='/home/orangepi/argo/launch/argo_restart.sh'        # Restart Argo nodes
+alias as='/home/orangepi/argo/launch/argo_status.sh'          # Show Argo status
+alias am='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py monitor'  # Monitor mode
+alias ar='if systemctl is-active --quiet argo-launch.service; then ros2 service call /argo/recording/start std_srvs/srv/Empty; else echo "❌ Error: argo-launch.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo-launch.service)"; fi'  # Start recording
+alias ac='if systemctl is-active --quiet argo-launch.service; then ros2 service call /argo/recording/stop std_srvs/srv/Empty; else echo "❌ Error: argo-launch.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo-launch.service)"; fi'   # Stop recording
 alias argo_help='bash /home/orangepi/argo/launch/argo_help.sh'
 alias ag='sudo python3 /home/orangepi/argo/launch/argo_gui.py'

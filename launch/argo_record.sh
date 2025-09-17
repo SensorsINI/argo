@@ -26,6 +26,11 @@ cleanup() {
     else
         log_message "⚠️  Warning: Bag directory not found at ${BAG_PATH}"
     fi
+    
+    # Remove recording status files
+    rm -f /tmp/argo_recording_status /tmp/argo_current_bag
+    log_message "📡 Removed recording status files for ROS2 nodes"
+    
     exit 0
 }
 
@@ -42,6 +47,11 @@ log_message "📦 Bag name: ${BAG_NAME}"
 log_message "📍 Full path: ${BAG_PATH}"
 log_message "🕐 Start time: $(date)"
 
+# Create recording status file
+echo "true" > /tmp/argo_recording_status
+echo "${BAG_NAME}" > /tmp/argo_current_bag
+log_message "📡 Created recording status files for ROS2 nodes"
+
 # Source ROS2 environment
 source /opt/ros/humble/setup.bash
 
@@ -50,5 +60,5 @@ log_message "🎬 Executing: ros2 bag record -a -o ${BAG_NAME}"
 ros2 bag record -a -o "${BAG_NAME}"
 
 # If we reach here, recording completed normally
-log_message "✅ Recording completed successfully"
+log_message "✅ Recording argo ${BAG_NAME} to ${BAG_PATH}completed successfully"
 

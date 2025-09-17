@@ -1,33 +1,26 @@
 <?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>argo</name>
-  <version>0.0.1</version>
-  <description>The argo robot sailboat package</description>
+  <name>argo_power_control</name>
+  <version>1.0.0</version>
+  <description>Argo Power Control System - ROS2 node for power management and LED control</description>
+  <maintainer email="argo@example.com">Argo Team</maintainer>
+  <license>MIT</license>
 
-  <maintainer email="tobi@ini.uzh.ch">Tobi Delbruck</maintainer>
-  <author email="tobi@ini.uzh.ch">Tobi Delbruck</author>
-  <author email="ikertesz@student.ethz.ch">Imre Kertesz</author>
-  <author>Andrea Mock Caceres,Imre Kertesz,Tobi Delbruck</author>
-
-  <license>BSD</license>
-
-  <url type="website">https://github.com/SensorsINI/argo.git</url>
-
-  <!-- ROS2 build tools -->
   <buildtool_depend>ament_python</buildtool_depend>
 
-  <!-- ROS2 dependencies -->
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
-  <depend>geometry_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>diagnostic_updater</depend>
 
-  <!-- Python dependencies -->
-  <exec_depend>python3-smbus2</exec_depend>
-  <exec_depend>python3-serial</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
 
-  <!-- Test dependencies -->
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
-
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
 </package>

@@ -1,0 +1,44 @@
+#!/usr/bin/bash
+
+# argo_poweron.startup
+# ---------------------------------
+# Purpose:
+#   Early boot hook to assert Orange Pi Zero 2W pin PI3 (GPIO line 259)
+#   LOW during normal operation so the external power relay remains
+#   energized. This runs once at boot and exits.
+#
+# Notes:
+#   - Keep minimal dependencies. Prefer Python libgpiod; fallback to gpioset.
+#   - We set the line to output LOW (open-drain if using Python).
+#   - On this system, pin configuration persists after the process exits.
+#   - Exit 0 regardless to avoid blocking boot.
+
+set -euo pipefail
+
+if command -v python3 >/dev/null 2>&1; then
+python3 - <<'PY'
+import gpiod
+chip = gpiod.Chip("/dev/gpiochip0")
+line = chip.get_line(259)
+# Request as open-drain output held LOW
+line.request(
+    consumer="startup",
+    type=gpiod.LINE_REQ_DIR_OUT,
+    flags=gpiod.LINE_REQ_FLAG_OPEN_DRAIN,
+    default_vals=[0]
+)
+# Intentionally exit immediately. On this platform the configured
+# output state persists until changed by another controller.
+PY
+    exit 0
+fi
+
+if command -v gpioset >/dev/null 2>&1; then
+    # Fallback: drive LOW once
+    gpioset gpiochip0 259=0
+    exit 0
+fi
+
+exit 0
+
+

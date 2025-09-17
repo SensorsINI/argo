@@ -45,16 +45,18 @@
 #   5. GPIO pins will automatically revert to input state on halt, de-energizing relay
 #
 # USAGE:
-#   ./argo_power_control.py [--help] [--test-mode] [--threshold SECONDS]
+#   ./argo_power_control.py [--help] [--test-mode] [--threshold SECONDS] [--keyboard-test]
 #
 # OPTIONS:
 #   --help              Show this help message and exit
 #   --test-mode         Run in test mode (disable actual shutdown and power control)
 #   --threshold SECONDS Set button press threshold for shutdown (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})
+#   --keyboard-test     Enable keyboard test mode (s/e keys simulate button press/release)
 #
 # EXAMPLES:
 #   ./argo_power_control.py                         # Normal operation
 #   ./argo_power_control.py --test-mode             # Test mode (safe)
+#   ./argo_power_control.py --keyboard-test         # Keyboard test mode with colored LED output
 #   ./argo_power_control.py --threshold 2.0         # 2-second threshold
 #
 # REQUIREMENTS:
@@ -84,10 +86,29 @@ import os
 import argparse
 from pathlib import Path
 from datetime import datetime
+import select
+import tty
+import termios
 
 # =============================================================================
 # CONSTANTS
 # =============================================================================
+
+# ANSI Color codes for LED visualization
+class Colors:
+    GREEN = '\033[92m'      # Green LED
+    BLUE = '\033[94m'       # Blue LED
+    RED = '\033[91m'        # Red LED (not GPIO controlled)
+    YELLOW = '\033[93m'     # Warning/Info
+    CYAN = '\033[96m'       # Info
+    MAGENTA = '\033[95m'    # Debug
+    WHITE = '\033[97m'      # Normal text
+    BLACK = '\033[30m'      # Black text
+    BOLD = '\033[1m'        # Bold text
+    RESET = '\033[0m'       # Reset all formatting
+    BG_GREEN = '\033[42m'   # Green background
+    BG_BLUE = '\033[44m'    # Blue background
+    BG_RED = '\033[41m'     # Red background
 
 # Button Press Configuration
 DEFAULT_SHUTDOWN_THRESHOLD_S = 5.0      # Default button hold time for shutdown (seconds)
@@ -97,33 +118,27 @@ BUTTON_ERROR_RECOVERY_DELAY_S = 0.1     # Delay on button read error (seconds)
 # Button Detection Configuration
 # No boot delay - only detect new button presses after service starts
 
-# LED Blink Frequencies (Hz)
-LED_BLINK_FAST_HZ = 10.0                # Fast blink frequency (10 Hz)
-LED_BLINK_SLOW_HZ = 2.0                 # Slow blink frequency (2 Hz)
+# LED Heartbeat Configuration
 LED_HEARTBEAT_HZ = 1.0                  # Green LED heartbeat frequency (1 Hz)
-LED_SHUTDOWN_BLINK_HZ = 10.0            # Shutdown warning blink frequency (10 Hz)
 
-# Countdown Pattern Configuration
-LED_COUNTDOWN_FREQUENCY_HZ = 3.0        # Countdown flash frequency (3 Hz)
-LED_COUNTDOWN_PAUSE_S = 0.5             # Pause between countdown groups (0.5 seconds)
-LED_FINAL_WARNING_FREQUENCY_HZ = 10.0   # Final warning flash frequency (10 Hz)
-LED_FINAL_WARNING_DURATION_S = 2.0      # Final warning duration (2 seconds)
+# Button Press Pattern Configuration
+LED_PRESS_START_FREQUENCY_HZ = 2.0      # Starting flash frequency (2 Hz)
+LED_PRESS_END_FREQUENCY_HZ = 20.0       # Ending flash frequency (20 Hz)
+LED_PRESS_DUTY_CYCLE = 0.5              # 50% duty cycle during button press
 
-# Shutdown LED Pattern (seconds)
-LED_SHUTDOWN_SHORT_ON_S = 0.2           # Short flash duration (on)
-LED_SHUTDOWN_SHORT_OFF_S = 0.2          # Short flash duration (off)
-LED_SHUTDOWN_LONG_ON_S = 0.8            # Long flash duration (on)
-LED_SHUTDOWN_LONG_OFF_S = 0.4           # Long flash duration (off)
+# Shutdown Pattern Configuration
+LED_SHUTDOWN_FREQUENCY_HZ = 1.0         # Shutdown flash frequency (1 Hz)
+LED_SHUTDOWN_DUTY_CYCLE = 0.05           # 5% duty cycle during shutdown
 
 # Shutdown Sequence Timing
-SHUTDOWN_NOTIFICATION_DELAY_S = 5       # Wait time for users to see notification (seconds)
-SHUTDOWN_RELAY_DELAY_S = 10              # Delay before de-energizing relay (seconds)
-SHUTDOWN_CACHE_FLUSH_TIMEOUT_S = 10     # SD card cache flush timeout (seconds)
+# No delay - shutdown immediately after wall message
+TEST_MODE_SHUTDOWN_DELAY_S = 5          # Simulated shutdown delay in test mode (seconds)
 
 # Notification Timeouts
 DESKTOP_NOTIFICATION_TIMEOUT_S = 5      # Desktop notification timeout (seconds)
 WALL_MESSAGE_TIMEOUT_S = 5              # Wall message timeout (seconds)
-NOTIFICATION_EXPIRE_TIME_MS = 5000      # Notification expire time (milliseconds)
+NOTIFICATION_EXPIRE_TIME_MS = 5000      # Standard notification expire time (5 seconds)
+FINAL_SHUTDOWN_NOTIFICATION_MS = 0      # Final shutdown notification (no timeout - stays until dismissed)
 
 # Main Loop Timing
 MAIN_LOOP_SLEEP_S = 1                   # Main control loop sleep interval (seconds)
@@ -157,15 +172,22 @@ setup_logging()
 logger = logging.getLogger('argo_power_control')
 
 class PowerController:
-    def __init__(self, test_mode=False, threshold=1.0):
+    def __init__(self, test_mode=False, threshold=1.0, keyboard_test=False):
         self.running = True
         self.power_button_pressed = False
         self.button_press_start_time = None
         self.shutdown_initiated = False
         self.test_mode = test_mode
+        self.keyboard_test = keyboard_test
         
         # Button state tracking
         self.initial_button_state = None
+        self.button_detection_active = False  # Flag to track when button detection should be active
+        
+        # LED state tracking for colored output
+        self.green_led_state = False
+        self.blue_led_state = False
+        self.red_led_state = False  # Not GPIO controlled, but tracked for display
         
         # GPIO Configuration
         self.GPIO_CHIP = '/dev/gpiochip0'
@@ -192,6 +214,14 @@ class PowerController:
         # Record initial button state during boot
         self.initial_button_state = self.read_power_button()
         logger.info(f"Initial button state recorded: {self.initial_button_state}")
+        
+        # Set button detection flag based on initial state
+        if self.initial_button_state == 1:  # Button not pressed at startup
+            self.button_detection_active = True  # Can detect presses immediately
+            logger.info("Button detection active - ready to detect presses")
+        else:  # Button pressed at startup
+            self.button_detection_active = False  # Wait for first release
+            logger.info("Button pressed at startup - waiting for release before detection starts")
 
 
     def init_gpio(self):
@@ -270,7 +300,12 @@ class PowerController:
         """Control green LED"""
         try:
             value = 1 if state else 0
-            self.green_led_line.set_value(value)
+            if not self.keyboard_test:
+                self.green_led_line.set_value(value)
+            self.green_led_state = state
+            if self.keyboard_test:
+                self.print_led_status()
+            logger.debug(f"Green LED set to {'ON' if state else 'OFF'}")
         except Exception as e:
             logger.error(f"Error controlling green LED: {e}")
 
@@ -278,9 +313,137 @@ class PowerController:
         """Control blue LED"""
         try:
             value = 1 if state else 0
-            self.blue_led_line.set_value(value)
+            if not self.keyboard_test:
+                self.blue_led_line.set_value(value)
+            self.blue_led_state = state
+            if self.keyboard_test:
+                self.print_led_status()
         except Exception as e:
             logger.error(f"Error controlling blue LED: {e}")
+
+    def print_led_status(self):
+        """Print LED status with colored output for keyboard test mode"""
+        if not self.keyboard_test:
+            return
+            
+        # Clear line and print LED status
+        print(f"\r{Colors.RESET}", end="", flush=True)
+        
+        # Green LED status
+        green_status = f"{Colors.BG_GREEN}{Colors.BLACK}GREEN{Colors.RESET}" if self.green_led_state else f"{Colors.GREEN}GREEN{Colors.RESET}"
+        
+        # Blue LED status  
+        blue_status = f"{Colors.BG_BLUE}{Colors.WHITE}BLUE{Colors.RESET}" if self.blue_led_state else f"{Colors.BLUE}BLUE{Colors.RESET}"
+        
+        # Red LED status (not GPIO controlled, but shown for completeness)
+        red_status = f"{Colors.BG_RED}{Colors.WHITE}RED{Colors.RESET}" if self.red_led_state else f"{Colors.RED}RED{Colors.RESET}"
+        
+        print(f"LEDs: {green_status} {blue_status} {red_status}", end="", flush=True)
+
+    def print_test_instructions(self):
+        """Print keyboard test mode instructions"""
+        if not self.keyboard_test:
+            return
+            
+        print(f"\n{Colors.CYAN}{Colors.BOLD}=== KEYBOARD TEST MODE ==={Colors.RESET}")
+        print(f"{Colors.YELLOW}Instructions:{Colors.RESET}")
+        print(f"  • Press {Colors.BOLD}s{Colors.RESET} to start button press simulation")
+        print(f"  • Press {Colors.BOLD}e{Colors.RESET} to end button press simulation")
+        print(f"  • Hold for {self.SHUTDOWN_THRESHOLD}s to trigger shutdown sequence")
+        print(f"  • Press {Colors.BOLD}q{Colors.RESET} to quit")
+        print(f"  • Press {Colors.BOLD}r{Colors.RESET} to test recording function")
+        print(f"  • LED status shown in colored text below")
+        print(f"{Colors.CYAN}=============================={Colors.RESET}\n")
+
+    def get_keyboard_input(self):
+        """Get keyboard input for test mode"""
+        if not self.keyboard_test:
+            return None
+            
+        try:
+            # Check if input is available
+            if select.select([sys.stdin], [], [], 0.01)[0]:
+                key = sys.stdin.read(1)
+                return key
+        except:
+            pass
+        return None
+
+    def simulate_button_press(self):
+        """Simulate button press for keyboard test mode"""
+        if not self.keyboard_test:
+            return
+            
+        self.button_press_start_time = time.time()
+        self.power_button_pressed = True
+        print(f"\n{Colors.YELLOW}🔘 Button PRESSED (simulated){Colors.RESET}")
+        
+        # Send desktop notification for button press
+        self.send_desktop_notification(
+            "Power Button Pressed (Test)", 
+            "Power button pressed - hold for shutdown",
+            "normal"
+        )
+        
+        # Start gradual frequency LED pattern
+        threading.Thread(
+            target=self.gradual_frequency_pattern,
+            daemon=True
+        ).start()
+
+    def simulate_button_release(self):
+        """Simulate button release for keyboard test mode"""
+        if not self.keyboard_test or not self.power_button_pressed:
+            return
+            
+        press_duration = time.time() - self.button_press_start_time
+        print(f"\n{Colors.YELLOW}🔘 Button RELEASED after {press_duration:.2f}s{Colors.RESET}")
+        
+        if press_duration >= self.SHUTDOWN_THRESHOLD:
+            print(f"{Colors.RED}🔴 Long press detected - initiating shutdown...{Colors.RESET}")
+            self.initiate_shutdown()
+        else:
+            print(f"{Colors.CYAN}🔵 Short press detected - no action{Colors.RESET}")
+            # Send notification for short press
+            self.send_desktop_notification(
+                "Power Button Released (Test)", 
+                f"Short press detected ({press_duration:.1f}s) - no action",
+                "low"
+            )
+        
+        self.power_button_pressed = False
+        self.button_press_start_time = None
+
+    def test_recording_function(self):
+        """Test the recording function with visual feedback"""
+        if not self.keyboard_test:
+            return
+            
+        print(f"\n{Colors.MAGENTA}🎬 Testing Recording Function{Colors.RESET}")
+        print(f"{Colors.CYAN}Starting recording simulation...{Colors.RESET}")
+        
+        # Simulate recording start with LED patterns
+        for i in range(3):
+            self.set_green_led(True)
+            self.set_blue_led(True)
+            time.sleep(0.2)
+            self.set_green_led(False)
+            self.set_blue_led(False)
+            time.sleep(0.2)
+        
+        print(f"{Colors.GREEN}✅ Recording started (simulated){Colors.RESET}")
+        print(f"{Colors.YELLOW}Recording indicators: Both LEDs flashing{Colors.RESET}")
+        
+        # Simulate recording in progress
+        for i in range(10):
+            self.set_green_led(True)
+            time.sleep(0.5)
+            self.set_green_led(False)
+            time.sleep(0.5)
+            print(f"{Colors.CYAN}Recording... {i+1}/10{Colors.RESET}", end="\r", flush=True)
+        
+        print(f"\n{Colors.RED}⏹️  Recording stopped (simulated){Colors.RESET}")
+        print(f"{Colors.CYAN}Recording test completed{Colors.RESET}\n")
 
     def led_blink_pattern(self, led_func, duration, blink_frequency_hz):
         """Blink LED with specified pattern
@@ -301,7 +464,7 @@ class PowerController:
 
     def green_led_heartbeat(self):
         """Green LED heartbeat during normal operation"""
-        led_state = False
+        led_state = True  # Start with LED ON for immediate visual feedback
         heartbeat_interval = 1.0 / LED_HEARTBEAT_HZ  # 1 second interval
         while self.running:
             self.set_green_led(led_state)
@@ -312,56 +475,42 @@ class PowerController:
                 time.sleep(0.1)  # Sleep in 100ms increments
                 sleep_time += 0.1
 
-    def cyan_shutdown_blink(self):
-        """Blink both LEDs together rapidly for cyan effect during shutdown"""
-        led_state = False
-        blink_interval = 1.0 / LED_SHUTDOWN_BLINK_HZ
-        for _ in range(20):  # Blink for about 2 seconds (20 * blink_interval)
-            self.set_green_led(led_state)
-            self.set_blue_led(led_state)
-            led_state = not led_state
-            time.sleep(blink_interval)
 
-    def shutdown_alternating_pattern(self):
-        """Alternating short-long LED pattern during shutdown sequence"""
-        logger.info("Starting shutdown alternating LED pattern")
-        pattern_count = 0
+    def shutdown_led_pattern(self):
+        """1Hz LED pattern with configurable duty cycle during shutdown sequence"""
+        logger.info(f"Starting shutdown LED pattern (1Hz, {LED_SHUTDOWN_DUTY_CYCLE*100:.0f}% duty cycle)")
+        
+        # Calculate timing for 1Hz with configurable duty cycle
+        period = 1.0 / LED_SHUTDOWN_FREQUENCY_HZ  # 1 second
+        on_time = period * LED_SHUTDOWN_DUTY_CYCLE  # Configurable on time
+        off_time = period * (1.0 - LED_SHUTDOWN_DUTY_CYCLE)  # Remaining off time
         
         while self.running and self.shutdown_initiated:
             try:
-                # Short flash
-                logger.debug("Shutdown LED: Short flash ON")
+                # Turn on both LEDs
+                logger.debug("Shutdown LED: ON")
                 self.set_green_led(True)
                 self.set_blue_led(True)
-                time.sleep(LED_SHUTDOWN_SHORT_ON_S)
+                
+                # Sleep in small increments to allow for responsive shutdown
+                sleep_time = 0
+                while sleep_time < on_time and self.running and self.shutdown_initiated:
+                    time.sleep(0.01)  # Sleep in 10ms increments
+                    sleep_time += 0.01
                 
                 if not self.running or not self.shutdown_initiated:
                     break
                     
-                logger.debug("Shutdown LED: Short flash OFF")
+                # Turn off both LEDs
+                logger.debug("Shutdown LED: OFF")
                 self.set_green_led(False)
                 self.set_blue_led(False)
-                time.sleep(LED_SHUTDOWN_SHORT_OFF_S)
                 
-                if not self.running or not self.shutdown_initiated:
-                    break
-                
-                # Long flash
-                logger.debug("Shutdown LED: Long flash ON")
-                self.set_green_led(True)
-                self.set_blue_led(True)
-                time.sleep(LED_SHUTDOWN_LONG_ON_S)
-                
-                if not self.running or not self.shutdown_initiated:
-                    break
-                    
-                logger.debug("Shutdown LED: Long flash OFF")
-                self.set_green_led(False)
-                self.set_blue_led(False)
-                time.sleep(LED_SHUTDOWN_LONG_OFF_S)
-                
-                pattern_count += 1
-                logger.info(f"Completed shutdown LED pattern cycle {pattern_count}")
+                # Sleep in small increments to allow for responsive shutdown
+                sleep_time = 0
+                while sleep_time < off_time and self.running and self.shutdown_initiated:
+                    time.sleep(0.01)  # Sleep in 10ms increments
+                    sleep_time += 0.01
                 
             except Exception as e:
                 logger.error(f"Error in shutdown LED pattern: {e}")
@@ -372,72 +521,48 @@ class PowerController:
         self.set_blue_led(False)
         logger.info("Shutdown LED pattern completed")
 
-    def countdown_warning_pattern(self):
-        """Countdown LED pattern during button press - 5,4,3,2,1 flashes then final warning"""
+    def gradual_frequency_pattern(self):
+        """Gradual frequency increase LED pattern during button press - 2Hz to 20Hz over threshold time"""
         start_time = time.time()
-        blink_interval = 1.0 / LED_COUNTDOWN_FREQUENCY_HZ
-        final_warning_interval = 1.0 / LED_FINAL_WARNING_FREQUENCY_HZ
+        logger.debug(f"Starting gradual frequency pattern for {self.SHUTDOWN_THRESHOLD}s threshold")
         
-        logger.debug(f"Starting countdown pattern for {self.SHUTDOWN_THRESHOLD}s threshold")
-        
-        # Calculate timing for countdown pattern
-        countdown_duration = self.SHUTDOWN_THRESHOLD - LED_FINAL_WARNING_DURATION_S
-        if countdown_duration < 0:
-            countdown_duration = 0
-        
-        # Countdown pattern: 5, 4, 3, 2, 1 flashes
-        countdown_groups = [5, 4, 3, 2, 1]
-        group_duration = (countdown_duration - (len(countdown_groups) - 1) * LED_COUNTDOWN_PAUSE_S) / len(countdown_groups)
-        
-        if group_duration > 0:
-            for group_num, flash_count in enumerate(countdown_groups):
-                if not self.running or not self.power_button_pressed:
-                    break
-                    
-                logger.debug(f"Countdown group {group_num + 1}: {flash_count} flashes")
+        while self.running and self.power_button_pressed and not self.shutdown_initiated:
+            # Calculate elapsed time and progress (0.0 to 1.0)
+            elapsed_time = time.time() - start_time
+            progress = min(elapsed_time / self.SHUTDOWN_THRESHOLD, 1.0)
+            
+            # Calculate current frequency (2Hz to 20Hz)
+            current_frequency = LED_PRESS_START_FREQUENCY_HZ + (LED_PRESS_END_FREQUENCY_HZ - LED_PRESS_START_FREQUENCY_HZ) * progress
+            
+            # Calculate timing for 50% duty cycle
+            period = 1.0 / current_frequency
+            on_time = period * LED_PRESS_DUTY_CYCLE
+            off_time = period * (1.0 - LED_PRESS_DUTY_CYCLE)
+            
+            # Turn on both LEDs
+            self.set_green_led(True)
+            self.set_blue_led(True)
+            
+            # Sleep in small increments to allow for responsive shutdown
+            sleep_time = 0
+            while sleep_time < on_time and self.running and self.power_button_pressed and not self.shutdown_initiated:
+                time.sleep(0.01)  # Sleep in 10ms increments
+                sleep_time += 0.01
+            
+            if not self.running or not self.power_button_pressed or self.shutdown_initiated:
+                break
                 
-                # Flash the specified number of times
-                for flash in range(flash_count):
-                    if not self.running or not self.power_button_pressed:
-                        break
-                    
-                    # Turn on both LEDs
-                    self.set_green_led(True)
-                    self.set_blue_led(True)
-                    time.sleep(blink_interval / 2)
-                    
-                    if not self.running or not self.power_button_pressed:
-                        break
-                    
-                    # Turn off both LEDs
-                    self.set_green_led(False)
-                    self.set_blue_led(False)
-                    time.sleep(blink_interval / 2)
-                
-                # Pause between groups (except after the last group)
-                if group_num < len(countdown_groups) - 1:
-                    if self.running and self.power_button_pressed:
-                        time.sleep(LED_COUNTDOWN_PAUSE_S)
+            # Turn off both LEDs
+            self.set_green_led(False)
+            self.set_blue_led(False)
+            
+            # Sleep in small increments to allow for responsive shutdown
+            sleep_time = 0
+            while sleep_time < off_time and self.running and self.power_button_pressed and not self.shutdown_initiated:
+                time.sleep(0.01)  # Sleep in 10ms increments
+                sleep_time += 0.01
         
-        # Final warning: 10 rapid flashes at 10Hz for 2 seconds
-        if self.running and self.power_button_pressed:
-            logger.debug("Final warning: 10 rapid flashes")
-            final_start = time.time()
-            while (time.time() - final_start < LED_FINAL_WARNING_DURATION_S and 
-                   self.running and 
-                   self.power_button_pressed):
-                self.set_green_led(True)
-                self.set_blue_led(True)
-                time.sleep(final_warning_interval / 2)
-                
-                if not self.running or not self.power_button_pressed:
-                    break
-                    
-                self.set_green_led(False)
-                self.set_blue_led(False)
-                time.sleep(final_warning_interval / 2)
-        
-        # Turn off LEDs when warning pattern stops
+        # Turn off LEDs when pattern stops
         self.set_green_led(False)
         self.set_blue_led(False)
 
@@ -451,10 +576,9 @@ class PowerController:
             try:
                 current_button_state = self.read_power_button()
                 
-                # Detect button press (falling edge) - only if it's a new press from initial state
+                # Detect button press (falling edge) - only if detection is active
                 if last_button_state == 1 and current_button_state == 0:
-                    # Only process if this is a new press (not the initial state)
-                    if last_button_state != self.initial_button_state or self.initial_button_state == 0:
+                    if self.button_detection_active:
                         self.button_press_start_time = time.time()
                         self.power_button_pressed = True
                         logger.info("Power button pressed (polling)")
@@ -466,16 +590,21 @@ class PowerController:
                             "normal"
                         )
                         
-                        # Start countdown warning LED pattern
+                        # Start gradual frequency LED pattern
                         threading.Thread(
-                            target=self.countdown_warning_pattern,
+                            target=self.gradual_frequency_pattern,
                             daemon=True
                         ).start()
                     else:
-                        logger.info("Power button already pressed at startup - ignoring until release")
+                        logger.debug("Button press detected but detection not yet active - ignoring")
                 
                 # Detect button release (rising edge)
                 elif last_button_state == 0 and current_button_state == 1:
+                    # If button was pressed at startup and this is the first release, activate detection
+                    if not self.button_detection_active and self.initial_button_state == 0:
+                        self.button_detection_active = True
+                        logger.info("Button released after startup - button detection now active")
+                    
                     if self.power_button_pressed:
                         press_duration = time.time() - self.button_press_start_time
                         logger.info(f"Power button released after {press_duration:.2f} seconds (polling)")
@@ -514,7 +643,7 @@ class PowerController:
                 logger.error(f"Error in polling-based button monitoring: {e}")
                 time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
 
-    def send_desktop_notification(self, title, message, urgency="normal"):
+    def send_desktop_notification(self, title, message, urgency="normal", expire_time_ms=None):
         """Send desktop notification using notify-send"""
         try:
             # Set up environment for desktop notifications
@@ -552,11 +681,14 @@ class PowerController:
                 test_title = title
                 test_message = message
             
+            # Use custom expire time or default
+            expire_time = expire_time_ms if expire_time_ms is not None else NOTIFICATION_EXPIRE_TIME_MS
+            
             # Try to send desktop notification
             subprocess.run([
                 'notify-send', 
                 '--urgency', urgency,
-                '--expire-time', str(NOTIFICATION_EXPIRE_TIME_MS),
+                '--expire-time', str(expire_time),
                 test_title, 
                 test_message
             ], check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S, env=env)
@@ -578,14 +710,7 @@ class PowerController:
         try:
             # Create shutdown message with timestamp
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"SYSTEM SHUTDOWN INITIATED by power button at {timestamp}\nThe system will shutdown in 5 seconds."
-            
-            # Send desktop notification
-            self.send_desktop_notification(
-                "System Shutdown", 
-                f"Power button pressed - system will shutdown in 5 seconds",
-                "critical"
-            )
+            message = f"SYSTEM SHUTDOWN INITIATED by power button at {timestamp}\nShutting down now..."
             
             # Use wall command to broadcast message to all users
             try:
@@ -617,33 +742,28 @@ class PowerController:
         
         logger.info("Initiating shutdown sequence...")
         
-        # Start alternating short-long LED pattern immediately to show shutdown initiated
+        # Start 1Hz LED pattern immediately to show shutdown initiated
         threading.Thread(
-            target=self.shutdown_alternating_pattern,
+            target=self.shutdown_led_pattern,
             daemon=True
         ).start()
-        
         
         # Broadcast wall message to all users
         self.broadcast_shutdown_message()
         
-        # Give users time to see the wall message before shutdown
-        logger.info(f"Waiting {SHUTDOWN_NOTIFICATION_DELAY_S} seconds for users to see shutdown notification...")
-        time.sleep(SHUTDOWN_NOTIFICATION_DELAY_S)
-        
-        # Send final shutdown notification
+        # Send final desktop notification
         self.send_desktop_notification(
             "System Shutdown", 
-            "Shutting down now...",
+            "Shutdown initiated by power button - system shutting down now",
             "critical"
         )
         
         # Execute shutdown command
         if self.test_mode:
             logger.info("TEST MODE: Shutdown command disabled - would normally execute: shutdown -h now")
-            # In test mode, let the LED pattern run for a while before stopping
-            logger.info("TEST MODE: Running shutdown LED pattern for demonstration...")
-            time.sleep(10)  # Let the pattern run for 10 seconds in test mode
+            # In test mode, let the shutdown LED pattern run for demonstration
+            logger.info(f"TEST MODE: Running shutdown LED pattern for {TEST_MODE_SHUTDOWN_DELAY_S} seconds...")
+            time.sleep(TEST_MODE_SHUTDOWN_DELAY_S)  # Let the pattern run for demonstration
             self.running = False  # Stop running after LED pattern demonstration
         else:
             logger.info("Executing shutdown command: shutdown -h now")
@@ -661,25 +781,61 @@ class PowerController:
         # Ensure relay is energized on startup
         self.set_power_relay(True)
         
-        # Start power button monitoring in separate thread
-        logger.info("Starting polling-based button detection")
-        button_thread = threading.Thread(target=self.monitor_power_button_polling, daemon=True)
-        button_thread.start()
+        # Print test instructions if in keyboard test mode
+        if self.keyboard_test:
+            self.print_test_instructions()
+            # Set up terminal for raw input
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setraw(sys.stdin.fileno())
+        
+        # Start power button monitoring in separate thread (skip if keyboard test mode)
+        if not self.keyboard_test:
+            logger.info("Starting polling-based button detection")
+            button_thread = threading.Thread(target=self.monitor_power_button_polling, daemon=True)
+            button_thread.start()
         
         # Start green LED heartbeat in separate thread
+        logger.info("Starting green LED heartbeat thread")
         heartbeat_thread = threading.Thread(target=self.green_led_heartbeat, daemon=True)
         heartbeat_thread.start()
         
         try:
-            # Main loop - just keep alive
+            # Main loop
             while self.running:
-                time.sleep(MAIN_LOOP_SLEEP_S)
+                if self.keyboard_test:
+                    # Handle keyboard input in test mode
+                    key = self.get_keyboard_input()
+                    if key:
+                        if key == 's' and not self.power_button_pressed:
+                            # 's' key pressed - start button press simulation
+                            self.simulate_button_press()
+                        elif key == 'e' and self.power_button_pressed:
+                            # 'e' key pressed - end button press simulation
+                            self.simulate_button_release()
+                        elif key == 'q':
+                            # Quit
+                            print(f"\n{Colors.YELLOW}Quitting keyboard test mode...{Colors.RESET}")
+                            self.running = False
+                        elif key == 'r':
+                            # Test recording function
+                            self.test_recording_function()
+                        elif key == '\x03':  # Ctrl+C
+                            print(f"\n{Colors.YELLOW}Received Ctrl+C, quitting...{Colors.RESET}")
+                            self.running = False
+                    
+                    time.sleep(0.1)  # Small delay for responsive input
+                else:
+                    # Normal mode - just keep alive
+                    time.sleep(MAIN_LOOP_SLEEP_S)
                 
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
             self.running = False
         
         finally:
+            # Restore terminal settings if in keyboard test mode
+            if self.keyboard_test:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
             self.cleanup()
 
     def cleanup(self):
@@ -700,48 +856,59 @@ class PowerController:
         
         logger.info("Power controller cleanup complete")
 
-def test_countdown_pattern(threshold):
-    """Test the countdown pattern by controlling actual LEDs"""
-    print(f"Testing countdown pattern for {threshold}s threshold...")
+def test_gradual_frequency_pattern(threshold):
+    """Test the gradual frequency pattern"""
+    print(f"Testing gradual frequency pattern for {threshold}s threshold...")
+    print(f"Frequency will increase from {LED_PRESS_START_FREQUENCY_HZ}Hz to {LED_PRESS_END_FREQUENCY_HZ}Hz")
+    print(f"Duty cycle: {LED_PRESS_DUTY_CYCLE * 100}%")
     
-    # Calculate timing for countdown pattern
-    countdown_duration = threshold - LED_FINAL_WARNING_DURATION_S
-    if countdown_duration < 0:
-        countdown_duration = 0
+    start_time = time.time()
     
-    blink_interval = 1.0 / LED_COUNTDOWN_FREQUENCY_HZ
-    final_warning_interval = 1.0 / LED_FINAL_WARNING_FREQUENCY_HZ
-    
-    # Countdown pattern: 5, 4, 3, 2, 1 flashes
-    countdown_groups = [5, 4, 3, 2, 1]
-    group_duration = (countdown_duration - (len(countdown_groups) - 1) * LED_COUNTDOWN_PAUSE_S) / len(countdown_groups)
-    
-    if group_duration > 0:
-        for group_num, flash_count in enumerate(countdown_groups):
-            # Flash the specified number of times
-            for flash in range(flash_count):
-                # Turn on both LEDs
-                print("LED ON", flush=True)
-                time.sleep(blink_interval / 2)
-                
-                # Turn off both LEDs
-                print("LED OFF", flush=True)
-                time.sleep(blink_interval / 2)
-            
-            # Pause between groups (except after the last group)
-            if group_num < len(countdown_groups) - 1:
-                time.sleep(LED_COUNTDOWN_PAUSE_S)
-    
-    # Final warning: 10 rapid flashes at 10Hz for 2 seconds
-    final_start = time.time()
-    while time.time() - final_start < LED_FINAL_WARNING_DURATION_S:
-        # print("LED ON", flush=True)
-        time.sleep(final_warning_interval / 2)
+    while time.time() - start_time < threshold:
+        # Calculate elapsed time and progress (0.0 to 1.0)
+        elapsed_time = time.time() - start_time
+        progress = min(elapsed_time / threshold, 1.0)
         
-        # print("LED OFF", flush=True)
-        time.sleep(final_warning_interval / 2)
+        # Calculate current frequency (2Hz to 20Hz)
+        current_frequency = LED_PRESS_START_FREQUENCY_HZ + (LED_PRESS_END_FREQUENCY_HZ - LED_PRESS_START_FREQUENCY_HZ) * progress
+        
+        # Calculate timing for 50% duty cycle
+        period = 1.0 / current_frequency
+        on_time = period * LED_PRESS_DUTY_CYCLE
+        off_time = period * (1.0 - LED_PRESS_DUTY_CYCLE)
+        
+        # Show current frequency every 0.5 seconds
+        if int(elapsed_time * 2) != int((elapsed_time - 0.01) * 2):
+            print(f"Time: {elapsed_time:.1f}s, Frequency: {current_frequency:.1f}Hz", flush=True)
+        
+        # Turn on both LEDs
+        print("LED ON", flush=True)
+        time.sleep(on_time)
+        
+        # Turn off both LEDs
+        print("LED OFF", flush=True)
+        time.sleep(off_time)
     
     print("LED OFF - Pattern complete")
+
+def test_shutdown_pattern():
+    """Test the shutdown LED pattern"""
+    print("Testing shutdown LED pattern (1Hz, 20% duty cycle)...")
+    
+    # Calculate timing for 1Hz with 20% duty cycle
+    period = 1.0 / LED_SHUTDOWN_FREQUENCY_HZ  # 1 second
+    on_time = period * LED_SHUTDOWN_DUTY_CYCLE  # 0.2 seconds
+    off_time = period * (1.0 - LED_SHUTDOWN_DUTY_CYCLE)  # 0.8 seconds
+    
+    print(f"Period: {period}s, On time: {on_time}s, Off time: {off_time}s")
+    
+    for cycle in range(5):  # Show 5 cycles
+        print(f"Cycle {cycle + 1}: LED ON", flush=True)
+        time.sleep(on_time)
+        print(f"Cycle {cycle + 1}: LED OFF", flush=True)
+        time.sleep(off_time)
+    
+    print("LED OFF - Shutdown pattern complete")
 
 def print_help():
     """Print help message"""
@@ -779,6 +946,7 @@ USAGE:
 OPTIONS:
   --help, -h          Show this help message and exit
   --test-mode, -t     Run in test mode (disable actual shutdown and power control)
+  --keyboard-test, -k Enable keyboard test mode (s/e keys simulate button press/release)
   --threshold, -T     Set button press threshold for shutdown (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})
   --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
   --test-notification, -n  Test desktop notification functionality and exit (safe for testing)
@@ -787,6 +955,8 @@ EXAMPLES:
   ./argo_power_control.py                         # Normal operation
   ./argo_power_control.py --test-mode             # Test mode (safe)
   ./argo_power_control.py -t                      # Test mode (short form)
+  ./argo_power_control.py --keyboard-test         # Keyboard test mode with colored LED output
+  ./argo_power_control.py -k                      # Keyboard test mode (short form)
   ./argo_power_control.py --threshold 2.0         # 2-second threshold
   ./argo_power_control.py -T 2.0                  # 2-second threshold (short form)
   ./argo_power_control.py --test-wall-message     # Test wall message (safe)
@@ -821,6 +991,8 @@ def main():
                        help='Show help message and exit')
     parser.add_argument('--test-mode', '-t', action='store_true',
                        help='Run in test mode (disable actual shutdown and power control)')
+    parser.add_argument('--keyboard-test', '-k', action='store_true',
+                       help='Enable keyboard test mode (s/e keys simulate button press/release)')
     parser.add_argument('--threshold', '-T', type=float, default=DEFAULT_SHUTDOWN_THRESHOLD_S,
                        help=f'Set button press threshold for shutdown in seconds (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})')
     parser.add_argument('--test-wall-message', '-w', action='store_true',
@@ -843,7 +1015,7 @@ def main():
         try:
             # Test wall message without GPIO initialization
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"TEST: SYSTEM SHUTDOWN INITIATED by power button at {timestamp}\nThis is a test message - the system will NOT shutdown (would wait 5 seconds)."
+            message = f"TEST: SYSTEM SHUTDOWN INITIATED by power button at {timestamp}\nThis is a test message - the system will NOT shutdown (would shutdown immediately)."
             
             print(f"Broadcasting test message: {message}")
             subprocess.run(['wall', message], check=True, timeout=WALL_MESSAGE_TIMEOUT_S)
@@ -912,21 +1084,26 @@ def main():
     
     # Handle debug shutdown flashing test
     if args.debug_shutdown_flashing:
-        print("Testing shutdown countdown LED pattern...")
+        print("Testing LED patterns...")
         try:
-            # Test different thresholds
-            test_thresholds = [1.0, 2.0, 3.0, 5.0, 10.0]
+            # Test gradual frequency pattern with different thresholds
+            test_thresholds = [2.0, 3.0, 5.0]
             
             for threshold in test_thresholds:
-                print(f"\n=== Testing with {threshold}s threshold ===")
-                test_countdown_pattern(threshold)
+                print(f"\n=== Testing gradual frequency pattern with {threshold}s threshold ===")
+                test_gradual_frequency_pattern(threshold)
                 print(f"=== End {threshold}s threshold test ===\n")
                 time.sleep(1)  # Brief pause between tests
             
-            print("Shutdown countdown LED pattern test completed successfully!")
-            print("Check the output above to verify the countdown pattern works correctly.")
+            # Test shutdown pattern
+            print("\n=== Testing shutdown LED pattern ===")
+            test_shutdown_pattern()
+            print("=== End shutdown pattern test ===\n")
+            
+            print("LED pattern tests completed successfully!")
+            print("Check the output above to verify the patterns work correctly.")
         except Exception as e:
-            print(f"Error during countdown pattern test: {e}")
+            print(f"Error during LED pattern test: {e}")
             sys.exit(1)
         sys.exit(0)
     
@@ -955,7 +1132,13 @@ def main():
         sys.exit(1)
     
     # Show startup information
-    if args.test_mode:
+    if args.keyboard_test:
+        print("Starting power control system in KEYBOARD TEST MODE")
+        print("  - 's' key starts button press simulation")
+        print("  - 'e' key ends button press simulation")
+        print("  - Colored LED output displayed")
+        print("  - Safe for testing")
+    elif args.test_mode:
         print("Starting power control system in TEST MODE")
         print("  - Shutdown commands disabled")
         print("  - Power relay control disabled")
@@ -966,11 +1149,12 @@ def main():
         print("  - System will shutdown and cut power on long button press")
     
     print(f"  - Button press threshold: {args.threshold} seconds")
-    print(f"  - Button detection mode: Polling ({BUTTON_POLLING_HZ} Hz)")
+    if not args.keyboard_test:
+        print(f"  - Button detection mode: Polling ({BUTTON_POLLING_HZ} Hz)")
     print("  - Press Ctrl+C to stop")
     print()
     
-    controller = PowerController(test_mode=args.test_mode, threshold=args.threshold)
+    controller = PowerController(test_mode=args.test_mode, threshold=args.threshold, keyboard_test=args.keyboard_test)
     controller.run()
 
 if __name__ == "__main__":

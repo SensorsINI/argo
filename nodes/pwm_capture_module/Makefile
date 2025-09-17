@@ -12,10 +12,10 @@ KDIR := /lib/modules/$(shell uname -r)/build
 MDIR := /lib/modules/$(shell uname -r)/kernel/drivers/misc/argo
 PWD := $(shell pwd)
 
-.PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup # Ensure all targets are listed here
+.PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup install_module_service # Ensure all targets are listed here
 
 # all target does everything needed to build the module and overlay
-all: module overlay install_module install_overlay install_boot_env install_rules install_permissions_service
+all: module overlay install_module install_overlay install_boot_env install_rules install_permissions_service install_module_service
 
 module:
 	# bulding kernel module for PWM input and output
@@ -118,3 +118,13 @@ watch:
 test_pwm:
 	@echo "Starting PWM test script. Press Ctrl+C to stop."
 	./test_pwm_loop.sh
+
+install_module_service:
+	@echo "--- Installing kernel module loading service ---"
+	# Copy the kernel module service file
+	sudo cp $(PWD)/argo-radio-servo-module.service /etc/systemd/system/
+	# Reload systemd manager configuration
+	sudo systemctl daemon-reload
+	# Enable the service to start on boot
+	sudo systemctl enable argo-radio-servo-module.service
+	@echo "Kernel module service installed and enabled"

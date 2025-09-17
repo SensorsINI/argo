@@ -24,4 +24,4 @@ source /opt/ros/humble/setup.bash 2>/dev/null || {
 }
 
 # Launch the GUI
-python3 launch/argo_gui.py "$@"
+python3 "$SCRIPT_DIR/argo_gui.py" "$@"
