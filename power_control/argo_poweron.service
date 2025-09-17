@@ -1,8 +1,7 @@
 [Unit]
 Description=Argo Power-On GPIO Init (!POW low)
 DefaultDependencies=no
-After=local-fs.target sysinit.target dev-gpiochip0.device
-Wants=dev-gpiochip0.device
+After=local-fs.target sysinit.target
 Before=basic.target
 
 [Service]
