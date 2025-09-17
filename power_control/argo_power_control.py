@@ -316,12 +316,17 @@ class PowerController(Node):
                 qos_profile
             )
             
-            # Subscriber for recording status
+            # Subscriber for recording status (match publisher's TRANSIENT_LOCAL QoS)
+            recording_qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                depth=10
+            )
             self.recording_status_sub = self.create_subscription(
                 Bool,
-                '/argo/recording/bagfile_status',
+                '/argo/recording/status',
                 self.recording_status_callback,
-                qos_profile
+                recording_qos
             )
             
             # Service clients for recording control
@@ -343,6 +348,7 @@ class PowerController(Node):
 
     def recording_status_callback(self, msg):
         """Callback for recording status updates"""
+        self.get_logger().info(f"📡 Recording status callback received: {msg.data}")
         was_recording = self.recording_active
         self.recording_active = msg.data
         
@@ -351,6 +357,8 @@ class PowerController(Node):
                 self.get_logger().info("🎬 Recording started - LED heartbeat shows 3-flash pattern")
             else:
                 self.get_logger().info("⏹️ Recording stopped - LED heartbeat returns to normal pulse")
+        else:
+            self.get_logger().info(f"📡 Recording status unchanged: {self.recording_active}")
 
     def publish_status(self):
         """Publish LED status information"""
@@ -1436,8 +1444,8 @@ def main():
         executor = MultiThreadedExecutor()
         executor.add_node(controller)
         
-        # Start ROS2 executor in a separate thread
-        executor_thread = threading.Thread(target=executor.spin, daemon=True)
+        # Start ROS2 executor in a separate thread (not daemon so it stays alive)
+        executor_thread = threading.Thread(target=executor.spin, daemon=False)
         executor_thread.start()
         
         # Run the main GPIO monitoring loop
