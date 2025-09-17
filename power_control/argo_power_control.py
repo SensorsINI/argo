@@ -7,9 +7,9 @@
 #
 # DESCRIPTION:
 #   Intelligent power control system for Orange Pi Zero 2W using external relays
-#   and GPIO pins. Implements safe shutdown procedures, power button monitoring,
-#   and LED status indicators. Relay de-energization is handled automatically
-#   by GPIO pin state reversion on system halt.
+#   and GPIO pins. Implements safe shutdown procedures, hardware interrupt-based
+#   power button monitoring, and LED status indicators. Relay de-energization is 
+#   handled automatically by GPIO pin state reversion on system halt.
 #
 # HARDWARE CONFIGURATION:
 #   - PI3 (Pin 40): !POW - Open drain output to control power relay
@@ -45,18 +45,16 @@
 #   5. GPIO pins will automatically revert to input state on halt, de-energizing relay
 #
 # USAGE:
-#   ./argo_power_control.py [--help] [--test-mode] [--threshold SECONDS] [--keyboard-test]
+#   ./argo_power_control.py [--help] [--test-mode] [--threshold SECONDS]
 #
 # OPTIONS:
 #   --help              Show this help message and exit
-#   --test-mode         Run in test mode (disable actual shutdown and power control)
+#   --test-mode         Run in test mode (disable actual shutdown and power control, reports actions)
 #   --threshold SECONDS Set button press threshold for shutdown (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})
-#   --keyboard-test     Enable keyboard test mode (s/e keys simulate button press/release)
 #
 # EXAMPLES:
 #   ./argo_power_control.py                         # Normal operation
-#   ./argo_power_control.py --test-mode             # Test mode (safe)
-#   ./argo_power_control.py --keyboard-test         # Keyboard test mode with colored LED output
+#   ./argo_power_control.py --test-mode             # Test mode (safe, reports button actions)
 #   ./argo_power_control.py --threshold 2.0         # 2-second threshold
 #
 # REQUIREMENTS:
@@ -90,6 +88,15 @@ import select
 import tty
 import termios
 
+# ROS2 imports
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Empty
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -112,8 +119,9 @@ class Colors:
 
 # Button Press Configuration
 DEFAULT_SHUTDOWN_THRESHOLD_S = 5.0      # Default button hold time for shutdown (seconds)
-BUTTON_POLLING_HZ = 1.0                 # Button state polling frequency (1 Hz - reduced for lower CPU usage)
+BUTTON_POLLING_HZ = 10.0                # Button release polling frequency during press (10 Hz - only used during button press)
 BUTTON_ERROR_RECOVERY_DELAY_S = 0.1     # Delay on button read error (seconds)
+TRIPLE_TAP_MAX_DURATION_S = 1.5         # Maximum duration for 3 quick taps to toggle recording (seconds)
 
 # Button Detection Configuration
 # No boot delay - only detect new button presses after service starts
@@ -171,23 +179,27 @@ def setup_logging():
 setup_logging()
 logger = logging.getLogger('argo_power_control')
 
-class PowerController:
-    def __init__(self, test_mode=False, threshold=1.0, keyboard_test=False):
+class PowerController(Node):
+    def __init__(self, test_mode=False, threshold=1.0):
+        super().__init__('argo_power_control')
         self.running = True
         self.power_button_pressed = False
         self.button_press_start_time = None
         self.shutdown_initiated = False
         self.test_mode = test_mode
-        self.keyboard_test = keyboard_test
         
         # Button state tracking
         self.initial_button_state = None
         self.button_detection_active = False  # Flag to track when button detection should be active
         
-        # LED state tracking for colored output
+        # Triple tap detection for recording toggle
+        self.tap_times = []  # List to store tap timestamps
+        self.max_tap_count = 3  # Number of taps needed
+        self.last_tap_time = 0  # Time of last tap
+        
+        # LED state tracking
         self.green_led_state = False
         self.blue_led_state = False
-        self.red_led_state = False  # Not GPIO controlled, but tracked for display
         
         # GPIO Configuration
         self.GPIO_CHIP = '/dev/gpiochip0'
@@ -201,8 +213,8 @@ class PowerController:
         # Button press threshold (seconds)
         self.SHUTDOWN_THRESHOLD = threshold
         
-        # Initialize GPIO
-        self.init_gpio()
+        # ROS2 Setup
+        self.setup_ros2()
         
         # Setup signal handlers for graceful service shutdown
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -211,8 +223,11 @@ class PowerController:
         
         logger.info("Power controller initialized")
         
-        # Record initial button state during boot
-        self.initial_button_state = self.read_power_button()
+        # Initialize GPIO first to read initial button state
+        self.init_gpio()
+        
+        # Record initial button state during boot (must be done after GPIO init but before event config)
+        self.initial_button_state = self.read_initial_button_state()
         logger.info(f"Initial button state recorded: {self.initial_button_state}")
         
         # Set button detection flag based on initial state
@@ -222,6 +237,9 @@ class PowerController:
         else:  # Button pressed at startup
             self.button_detection_active = False  # Wait for first release
             logger.info("Button pressed at startup - waiting for release before detection starts")
+            
+        # Now reconfigure the button line for interrupt monitoring
+        self.configure_button_for_interrupts()
 
 
     def init_gpio(self):
@@ -245,7 +263,8 @@ class PowerController:
                 default_vals=[0]  # Start with relay energized (low = on)
             )
 
-            # Request power button line
+            # Initially request power button line as input to read initial state
+            # Will be reconfigured for interrupts after reading initial state
             self.power_button_line.request(
                 consumer="argo_power_control.py",
                 type=gpiod.LINE_REQ_DIR_IN,
@@ -272,14 +291,179 @@ class PowerController:
             logger.error(f"Full error details: {type(e).__name__}: {e}")
             raise
 
+    def setup_ros2(self):
+        """Setup ROS2 publishers, subscribers, and service clients"""
+        try:
+            self.get_logger().info("Setting up ROS2 components...")
+            
+            # QoS profile for reliable communication
+            qos_profile = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                depth=10
+            )
+            
+            # Publishers
+            self.led_status_pub = self.create_publisher(
+                String, 
+                '/argo/power_control/led_status', 
+                qos_profile
+            )
+            
+            self.node_health_pub = self.create_publisher(
+                DiagnosticArray,
+                '/argo/power_control/node_health',
+                qos_profile
+            )
+            
+            # Subscriber for recording status
+            self.recording_status_sub = self.create_subscription(
+                Bool,
+                '/argo/recording/bagfile_status',
+                self.recording_status_callback,
+                qos_profile
+            )
+            
+            # Service clients for recording control
+            self.start_recording_client = self.create_client(Empty, '/argo/recording/start')
+            self.stop_recording_client = self.create_client(Empty, '/argo/recording/stop')
+            
+            # Recording state tracking
+            self.recording_active = False
+            
+            # ROS2 timers for periodic tasks
+            self.status_timer = self.create_timer(1.0, self.publish_status)  # 1Hz status updates
+            self.health_timer = self.create_timer(5.0, self.publish_health)  # 5s health checks
+            
+            self.get_logger().info("ROS2 components initialized successfully")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to setup ROS2 components: {e}")
+            raise
+
+    def recording_status_callback(self, msg):
+        """Callback for recording status updates"""
+        was_recording = self.recording_active
+        self.recording_active = msg.data
+        
+        if was_recording != self.recording_active:
+            if self.recording_active:
+                self.get_logger().info("🎬 Recording started - LED heartbeat shows 3-flash pattern")
+            else:
+                self.get_logger().info("⏹️ Recording stopped - LED heartbeat returns to normal pulse")
+
+    def publish_status(self):
+        """Publish LED status information"""
+        try:
+            status_msg = String()
+            led_states = []
+            if hasattr(self, 'green_led_state') and self.green_led_state:
+                led_states.append("GREEN")
+            if hasattr(self, 'blue_led_state') and self.blue_led_state:
+                led_states.append("BLUE")
+            
+            status_msg.data = f"LEDs: {','.join(led_states) if led_states else 'OFF'} | Recording: {'ON' if self.recording_active else 'OFF'}"
+            self.led_status_pub.publish(status_msg)
+            
+        except Exception as e:
+            self.get_logger().error(f"Error publishing status: {e}")
+
+    def publish_health(self):
+        """Publish node health diagnostics"""
+        try:
+            diag_array = DiagnosticArray()
+            diag_array.header.stamp = self.get_clock().now().to_msg()
+            
+            # Power control health status
+            status = DiagnosticStatus()
+            status.name = "argo_power_control"
+            status.level = DiagnosticStatus.OK
+            status.message = "Power control system operational"
+            
+            # Add key-value pairs
+            status.values.append(KeyValue(key="test_mode", value=str(self.test_mode)))
+            status.values.append(KeyValue(key="shutdown_threshold", value=str(self.SHUTDOWN_THRESHOLD)))
+            status.values.append(KeyValue(key="recording_active", value=str(self.recording_active)))
+            status.values.append(KeyValue(key="button_detection_active", value=str(self.button_detection_active)))
+            
+            diag_array.status.append(status)
+            self.node_health_pub.publish(diag_array)
+            
+        except Exception as e:
+            self.get_logger().error(f"Error publishing health: {e}")
+
+    def start_recording(self):
+        """Start recording via ROS2 service"""
+        try:
+            if not self.start_recording_client.wait_for_service(timeout_sec=2.0):
+                self.get_logger().warn("Recording start service not available")
+                return False
+                
+            request = Empty.Request()
+            future = self.start_recording_client.call_async(request)
+            self.get_logger().info("🎬 Requesting recording start...")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Error starting recording: {e}")
+            return False
+
+    def stop_recording(self):
+        """Stop recording via ROS2 service"""
+        try:
+            if not self.stop_recording_client.wait_for_service(timeout_sec=2.0):
+                self.get_logger().warn("Recording stop service not available")
+                return False
+                
+            request = Empty.Request()
+            future = self.stop_recording_client.call_async(request)
+            self.get_logger().info("⏹️ Requesting recording stop...")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Error stopping recording: {e}")
+            return False
+
     def signal_handler(self, signum, frame):
         """Handle shutdown signals"""
         logger.info(f"Received signal {signum}, stopping power controller...")
         self.running = False
 
 
+    def read_initial_button_state(self):
+        """Read initial power button state during startup (before interrupt configuration)"""
+        try:
+            state = self.power_button_line.get_value()
+            logger.info(f"Initial button state read: {state} ({'pressed' if state == 0 else 'released'})")
+            return state
+        except Exception as e:
+            logger.error(f"Error reading initial button state: {e}")
+            return 1  # Assume released on error
+    
+    def configure_button_for_interrupts(self):
+        """Reconfigure button line for interrupt-based monitoring"""
+        try:
+            # Release the current configuration
+            self.power_button_line.release()
+            
+            # Reconfigure for falling edge interrupts
+            # Currently configured for falling edge (POW_BUT going low)
+            # TODO: Change to gpiod.LINE_REQ_EV_RISING_EDGE for future PCB changes where POW_BUT goes high on press
+            self.power_button_line.request(
+                consumer="argo_power_control.py",
+                type=gpiod.LINE_REQ_EV_FALLING_EDGE,  # Detect POW_BUT going low
+                flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE
+            )
+            logger.info("Button line reconfigured for falling edge interrupt monitoring")
+            
+        except Exception as e:
+            logger.error(f"Error configuring button for interrupts: {e}")
+            raise
+
     def read_power_button(self):
-        """Read power button state"""
+        """Read power button state - NOTE: Limited use with interrupt-based monitoring"""
+        # This method is kept for compatibility but has limited use in interrupt mode
+        # In interrupt mode, we primarily rely on events, but this can be used for release detection
         try:
             return self.power_button_line.get_value()
         except Exception as e:
@@ -297,126 +481,33 @@ class PowerController:
             logger.error(f"Error controlling power relay: {e}")
 
     def set_green_led(self, state):
-        """Control green LED"""
+        """Control green LED (system running indicator)"""
         try:
             value = 1 if state else 0
-            if not self.keyboard_test:
-                self.green_led_line.set_value(value)
+            self.green_led_line.set_value(value)
             self.green_led_state = state
-            if self.keyboard_test:
-                self.print_led_status()
             logger.debug(f"Green LED set to {'ON' if state else 'OFF'}")
         except Exception as e:
             logger.error(f"Error controlling green LED: {e}")
 
     def set_blue_led(self, state):
-        """Control blue LED"""
+        """Control blue LED (status/warning indicator)"""
         try:
             value = 1 if state else 0
-            if not self.keyboard_test:
-                self.blue_led_line.set_value(value)
+            self.blue_led_line.set_value(value)
             self.blue_led_state = state
-            if self.keyboard_test:
-                self.print_led_status()
+            logger.debug(f"Blue LED set to {'ON' if state else 'OFF'}")
         except Exception as e:
             logger.error(f"Error controlling blue LED: {e}")
 
-    def print_led_status(self):
-        """Print LED status with colored output for keyboard test mode"""
-        if not self.keyboard_test:
-            return
-            
-        # Clear line and print LED status
-        print(f"\r{Colors.RESET}", end="", flush=True)
-        
-        # Green LED status
-        green_status = f"{Colors.BG_GREEN}{Colors.BLACK}GREEN{Colors.RESET}" if self.green_led_state else f"{Colors.GREEN}GREEN{Colors.RESET}"
-        
-        # Blue LED status  
-        blue_status = f"{Colors.BG_BLUE}{Colors.WHITE}BLUE{Colors.RESET}" if self.blue_led_state else f"{Colors.BLUE}BLUE{Colors.RESET}"
-        
-        # Red LED status (not GPIO controlled, but shown for completeness)
-        red_status = f"{Colors.BG_RED}{Colors.WHITE}RED{Colors.RESET}" if self.red_led_state else f"{Colors.RED}RED{Colors.RESET}"
-        
-        print(f"LEDs: {green_status} {blue_status} {red_status}", end="", flush=True)
 
-    def print_test_instructions(self):
-        """Print keyboard test mode instructions"""
-        if not self.keyboard_test:
-            return
-            
-        print(f"\n{Colors.CYAN}{Colors.BOLD}=== KEYBOARD TEST MODE ==={Colors.RESET}")
-        print(f"{Colors.YELLOW}Instructions:{Colors.RESET}")
-        print(f"  • Press {Colors.BOLD}s{Colors.RESET} to start button press simulation")
-        print(f"  • Press {Colors.BOLD}e{Colors.RESET} to end button press simulation")
-        print(f"  • Hold for {self.SHUTDOWN_THRESHOLD}s to trigger shutdown sequence")
-        print(f"  • Press {Colors.BOLD}q{Colors.RESET} to quit")
-        print(f"  • Press {Colors.BOLD}r{Colors.RESET} to test recording function")
-        print(f"  • LED status shown in colored text below")
-        print(f"{Colors.CYAN}=============================={Colors.RESET}\n")
 
-    def get_keyboard_input(self):
-        """Get keyboard input for test mode"""
-        if not self.keyboard_test:
-            return None
-            
-        try:
-            # Check if input is available
-            if select.select([sys.stdin], [], [], 0.01)[0]:
-                key = sys.stdin.read(1)
-                return key
-        except:
-            pass
-        return None
 
-    def simulate_button_press(self):
-        """Simulate button press for keyboard test mode"""
-        if not self.keyboard_test:
-            return
-            
-        self.button_press_start_time = time.time()
-        self.power_button_pressed = True
-        print(f"\n{Colors.YELLOW}🔘 Button PRESSED (simulated){Colors.RESET}")
-        
-        # Send desktop notification for button press
-        self.send_desktop_notification(
-            "Power Button Pressed (Test)", 
-            "Power button pressed - hold for shutdown",
-            "normal"
-        )
-        
-        # Start gradual frequency LED pattern
-        threading.Thread(
-            target=self.gradual_frequency_pattern,
-            daemon=True
-        ).start()
 
-    def simulate_button_release(self):
-        """Simulate button release for keyboard test mode"""
-        if not self.keyboard_test or not self.power_button_pressed:
-            return
-            
-        press_duration = time.time() - self.button_press_start_time
-        print(f"\n{Colors.YELLOW}🔘 Button RELEASED after {press_duration:.2f}s{Colors.RESET}")
-        
-        if press_duration >= self.SHUTDOWN_THRESHOLD:
-            print(f"{Colors.RED}🔴 Long press detected - initiating shutdown...{Colors.RESET}")
-            self.initiate_shutdown()
-        else:
-            print(f"{Colors.CYAN}🔵 Short press detected - no action{Colors.RESET}")
-            # Send notification for short press
-            self.send_desktop_notification(
-                "Power Button Released (Test)", 
-                f"Short press detected ({press_duration:.1f}s) - no action",
-                "low"
-            )
-        
-        self.power_button_pressed = False
-        self.button_press_start_time = None
 
     def test_recording_function(self):
         """Test the recording function with visual feedback"""
-        if not self.keyboard_test:
+        if True:
             return
             
         print(f"\n{Colors.MAGENTA}🎬 Testing Recording Function{Colors.RESET}")
@@ -463,17 +554,58 @@ class PowerController:
             time.sleep(blink_interval)
 
     def green_led_heartbeat(self):
-        """Green LED heartbeat during normal operation"""
-        led_state = True  # Start with LED ON for immediate visual feedback
-        heartbeat_interval = 1.0 / LED_HEARTBEAT_HZ  # 1 second interval
+        """Green LED heartbeat - normal pulse when idle, 3-flash pattern when recording"""
         while self.running:
-            self.set_green_led(led_state)
-            led_state = not led_state
-            # Sleep in small increments to allow for responsive shutdown
-            sleep_time = 0
-            while sleep_time < heartbeat_interval and self.running:
-                time.sleep(0.1)  # Sleep in 100ms increments
-                sleep_time += 0.1
+            if self.recording_active:
+                # Recording mode: 3 quick flashes followed by pause
+                # Total period matches normal heartbeat (1 second)
+                
+                # 3 quick flashes (150ms on, 50ms off each = 200ms per flash)
+                for flash in range(3):
+                    if not self.running:
+                        break
+                    
+                    # Flash on (150ms)
+                    self.set_green_led(True)
+                    self._heartbeat_sleep(0.15)  # 150ms on
+                    
+                    if not self.running:
+                        break
+                    
+                    # Flash off (50ms between flashes, except after last flash)
+                    self.set_green_led(False)
+                    if flash < 2:  # Don't add gap after last flash
+                        self._heartbeat_sleep(0.05)  # 50ms off between flashes
+                
+                # Longer pause to complete the 1-second period
+                # 3 flashes took: 3 * (150ms + 50ms) - 50ms = 550ms
+                # Remaining time: 1000ms - 550ms = 450ms
+                if self.running:
+                    self._heartbeat_sleep(0.45)  # 450ms pause
+                    
+            else:
+                # Normal mode: simple on/off heartbeat at 1Hz
+                heartbeat_interval = 1.0 / LED_HEARTBEAT_HZ  # 1 second period
+                half_period = heartbeat_interval / 2.0  # 500ms on, 500ms off
+                
+                # LED on for first half
+                self.set_green_led(True)
+                self._heartbeat_sleep(half_period)
+                
+                if not self.running:
+                    break
+                    
+                # LED off for second half
+                self.set_green_led(False)
+                self._heartbeat_sleep(half_period)
+    
+    def _heartbeat_sleep(self, duration):
+        """Sleep for heartbeat timing with responsive shutdown checking"""
+        sleep_time = 0
+        increment = 0.05  # Check every 50ms for responsive shutdown
+        while sleep_time < duration and self.running:
+            time.sleep(increment)
+            sleep_time += increment
 
 
     def shutdown_led_pattern(self):
@@ -566,82 +698,204 @@ class PowerController:
         self.set_green_led(False)
         self.set_blue_led(False)
 
-    def monitor_power_button_polling(self):
-        """Polling-based button monitoring - only detects new button presses after service starts"""
-        logger.info("Using polling-based button monitoring")
-        last_button_state = self.initial_button_state  # Start with initial state
-        poll_interval = 1.0 / BUTTON_POLLING_HZ  # Calculate once
+    def monitor_power_button_interrupts(self):
+        """Hardware interrupt-based button monitoring - efficient edge detection with minimal CPU usage"""
+        logger.info("Using hardware interrupt-based button monitoring")
+        logger.info("Monitoring for falling edge events (POW_BUT going low)")
+        
+        # IMPORTANT: Do NOT override button_detection_active here!
+        # The __init__ method already set this correctly based on initial button state
+        # If button was pressed at startup, detection remains inactive until first release
+        logger.info(f"Button detection active status: {self.button_detection_active}")
         
         while self.running:
             try:
-                current_button_state = self.read_power_button()
+                # Wait for GPIO interrupt events using select() - this is the key to low CPU usage!
+                # The process sleeps until a hardware interrupt occurs
+                ready, _, _ = select.select([self.power_button_line.event_get_fd()], [], [], 1.0)
                 
-                # Detect button press (falling edge) - only if detection is active
-                if last_button_state == 1 and current_button_state == 0:
-                    if self.button_detection_active:
-                        self.button_press_start_time = time.time()
-                        self.power_button_pressed = True
-                        logger.info("Power button pressed (polling)")
+                if ready:
+                    # Hardware interrupt occurred - read the event
+                    try:
+                        event = self.power_button_line.event_read()
                         
-                        # Send desktop notification for button press
-                        self.send_desktop_notification(
-                            "Power Button Pressed", 
-                            "Power button pressed - hold for shutdown",
-                            "normal"
-                        )
-                        
-                        # Start gradual frequency LED pattern
-                        threading.Thread(
-                            target=self.gradual_frequency_pattern,
-                            daemon=True
-                        ).start()
-                    else:
-                        logger.debug("Button press detected but detection not yet active - ignoring")
-                
-                # Detect button release (rising edge)
-                elif last_button_state == 0 and current_button_state == 1:
-                    # If button was pressed at startup and this is the first release, activate detection
-                    if not self.button_detection_active and self.initial_button_state == 0:
-                        self.button_detection_active = True
-                        logger.info("Button released after startup - button detection now active")
-                    
-                    if self.power_button_pressed:
-                        press_duration = time.time() - self.button_press_start_time
-                        logger.info(f"Power button released after {press_duration:.2f} seconds (polling)")
-                        
-                        if press_duration >= self.SHUTDOWN_THRESHOLD:
-                            logger.info("Long press detected, initiating shutdown...")
-                            self.initiate_shutdown()
+                        # We're configured for falling edge, so this is a button press
+                        if event.type == gpiod.LineEvent.FALLING_EDGE:
+                            if self.button_detection_active:
+                                self.button_press_start_time = time.time()
+                                self.power_button_pressed = True
+                                logger.info("Power button pressed (hardware interrupt)")
+                                
+                                # Start gradual frequency LED pattern
+                                threading.Thread(
+                                    target=self.gradual_frequency_pattern,
+                                    daemon=True
+                                ).start()
+                                
+                                # Start monitoring for button release or long press timeout
+                                threading.Thread(
+                                    target=self.monitor_button_release_timeout,
+                                    daemon=True
+                                ).start()
+                            else:
+                                logger.debug("Button press detected but detection not yet active - ignoring")
                         else:
-                            logger.info("Short press detected, no action taken")
-                            # Send notification for short press
-                            self.send_desktop_notification(
-                                "Power Button Released", 
-                                f"Short press detected ({press_duration:.1f}s) - no action",
-                                "low"
-                            )
+                            logger.warning(f"Unexpected event type: {event.type}")
+                            
+                    except Exception as e:
+                        logger.error(f"Error reading GPIO event: {e}")
+                        
+                else:
+                    # Timeout - no events, check if we need to activate button detection
+                    # If button was pressed at startup and detection is inactive, check for release
+                    if not self.button_detection_active:
+                        try:
+                            current_state = self.get_current_button_state()
+                            if current_state == 1:  # Button released
+                                self.button_detection_active = True
+                                logger.info("Button released after startup - button detection now active")
+                        except Exception as e:
+                            logger.error(f"Error checking button state for activation: {e}")
+                    
+                    # This timeout happens every 1 second and uses minimal CPU
+                    
+            except Exception as e:
+                logger.error(f"Error in interrupt-based button monitoring: {e}")
+                time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
+    
+    def monitor_button_release_timeout(self):
+        """Monitor for button release by checking current state and handle long press timeout"""
+        # Since we only get falling edge interrupts, we need to poll for release
+        # But this thread only runs during button press, so overall CPU usage is still very low
+        poll_interval = 0.1  # 10Hz polling during button press only
+        
+        while self.running and self.power_button_pressed:
+            try:
+                # Read current button state to detect release
+                # Note: This requires switching the line back to input mode temporarily
+                current_state = self.get_current_button_state()
+                
+                # Check for button release (rising edge - button goes high)
+                if current_state == 1:  # Button released
+                    press_duration = time.time() - self.button_press_start_time
+                    logger.info(f"Power button released after {press_duration:.2f} seconds (interrupt + polling)")
+                    
+                    if press_duration >= self.SHUTDOWN_THRESHOLD:
+                        logger.info("Long press detected, initiating shutdown...")
+                        self.initiate_shutdown()
+                    else:
+                        # Short press - check for triple tap
+                        if self.handle_triple_tap_detection(press_duration):
+                            # Triple tap detected - toggle recording
+                            self.toggle_recording()
+                        else:
+                            logger.info(f"Short press detected ({len(self.tap_times)}/3 taps)")
                     
                     self.power_button_pressed = False
                     self.button_press_start_time = None
+                    break  # Exit this monitoring thread
                 
-                # Check for long press while button is held
-                elif self.power_button_pressed and current_button_state == 0:
-                    if time.time() - self.button_press_start_time >= self.SHUTDOWN_THRESHOLD:
+                # Check for long press timeout while button is still held
+                else:
+                    press_duration = time.time() - self.button_press_start_time
+                    if press_duration >= self.SHUTDOWN_THRESHOLD:
                         if not self.shutdown_initiated:
                             logger.info("Long press threshold reached, initiating shutdown...")
                             self.initiate_shutdown()
+                        break  # Exit monitoring loop
                 
-                last_button_state = current_button_state
-                
-                # Sleep in small increments to allow for responsive shutdown
-                sleep_time = 0
-                while sleep_time < poll_interval and self.running:
-                    time.sleep(0.01)  # Sleep in 10ms increments
-                    sleep_time += 0.01
+                time.sleep(poll_interval)
                 
             except Exception as e:
-                logger.error(f"Error in polling-based button monitoring: {e}")
+                logger.error(f"Error in button release monitoring: {e}")
                 time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
+                break
+    
+    def get_current_button_state(self):
+        """Get current button state - works with interrupt-configured line"""
+        try:
+            # The line is configured for events, but we can still read the current value
+            # This is needed to detect button release since we only get falling edge interrupts
+            return self.power_button_line.get_value()
+        except Exception as e:
+            logger.error(f"Error reading current button state: {e}")
+            return 1  # Assume released on error
+    
+    def handle_triple_tap_detection(self, press_duration):
+        """Handle triple tap detection for recording toggle"""
+        current_time = time.time()
+        
+        # Only consider short presses as taps (< 0.5 seconds)
+        if press_duration > 0.5:
+            # Long press - clear tap history
+            self.tap_times.clear()
+            logger.debug("Long press detected - clearing tap history")
+            return False
+        
+        # Add this tap to the history
+        self.tap_times.append(current_time)
+        self.last_tap_time = current_time
+        
+        logger.debug(f"Tap {len(self.tap_times)} detected (duration: {press_duration:.2f}s)")
+        
+        # Check if we have 3 or more taps - check for triple tap BEFORE cleanup
+        if len(self.tap_times) >= self.max_tap_count:
+            # Check that the last 3 taps occurred within the time window
+            last_three_taps = self.tap_times[-self.max_tap_count:]
+            oldest_tap = min(last_three_taps)
+            newest_tap = max(last_three_taps)
+            
+            if newest_tap - oldest_tap <= TRIPLE_TAP_MAX_DURATION_S + 0.01:  # Add small tolerance for floating point precision
+                logger.info(f"Triple tap detected! ({newest_tap - oldest_tap:.2f}s duration)")
+                self.tap_times.clear()  # Clear history after successful detection
+                return True
+        
+        # Clean up old taps outside the time window (only if no triple tap detected)
+        cutoff_time = current_time - TRIPLE_TAP_MAX_DURATION_S
+        old_count = len(self.tap_times)
+        self.tap_times = [t for t in self.tap_times if t > cutoff_time]
+        
+        if old_count != len(self.tap_times):
+            logger.debug(f"Cleaned up {old_count - len(self.tap_times)} old taps")
+        
+        return False
+    
+    def toggle_recording(self):
+        """Toggle rosbag recording on/off"""
+        if self.test_mode:
+            # Test mode - just show what would happen
+            new_state = not self.recording_active
+            logger.info(f"TEST MODE: Would toggle recording from {self.recording_active} to {new_state}")
+            print(f"🎬 TEST: Recording would be {'STARTED' if new_state else 'STOPPED'}")
+            
+            # Send test notification
+            self.send_desktop_notification(
+                "Recording Toggle (Test)",
+                f"Recording would be {'started' if new_state else 'stopped'} by triple tap",
+                "normal"
+            )
+            
+            # Update state for testing
+            self.recording_active = new_state
+            return
+        
+        # Real mode - actually toggle recording
+        if self.recording_active:
+            logger.info("Triple tap detected - stopping recording")
+            self.stop_recording()
+            self.send_desktop_notification(
+                "Recording Stopped",
+                "Recording stopped by triple tap",
+                "normal"
+            )
+        else:
+            logger.info("Triple tap detected - starting recording")
+            self.start_recording()
+            self.send_desktop_notification(
+                "Recording Started", 
+                "Recording started by triple tap",
+                "normal"
+            )
 
     def send_desktop_notification(self, title, message, urgency="normal", expire_time_ms=None):
         """Send desktop notification using notify-send"""
@@ -836,18 +1090,10 @@ class PowerController:
         # Ensure relay is energized on startup
         self.set_power_relay(True)
         
-        # Print test instructions if in keyboard test mode
-        if self.keyboard_test:
-            self.print_test_instructions()
-            # Set up terminal for raw input
-            old_settings = termios.tcgetattr(sys.stdin)
-            tty.setraw(sys.stdin.fileno())
-        
-        # Start power button monitoring in separate thread (skip if keyboard test mode)
-        if not self.keyboard_test:
-            logger.info("Starting polling-based button detection")
-            button_thread = threading.Thread(target=self.monitor_power_button_polling, daemon=True)
-            button_thread.start()
+        # Start power button monitoring in separate thread
+        logger.info("Starting hardware interrupt-based button detection")
+        button_thread = threading.Thread(target=self.monitor_power_button_interrupts, daemon=True)
+        button_thread.start()
         
         # Start green LED heartbeat in separate thread
         logger.info("Starting green LED heartbeat thread")
@@ -855,42 +1101,15 @@ class PowerController:
         heartbeat_thread.start()
         
         try:
-            # Main loop
+            # Main loop - just keep running while monitoring threads handle GPIO
             while self.running:
-                if self.keyboard_test:
-                    # Handle keyboard input in test mode
-                    key = self.get_keyboard_input()
-                    if key:
-                        if key == 's' and not self.power_button_pressed:
-                            # 's' key pressed - start button press simulation
-                            self.simulate_button_press()
-                        elif key == 'e' and self.power_button_pressed:
-                            # 'e' key pressed - end button press simulation
-                            self.simulate_button_release()
-                        elif key == 'q':
-                            # Quit
-                            print(f"\n{Colors.YELLOW}Quitting keyboard test mode...{Colors.RESET}")
-                            self.running = False
-                        elif key == 'r':
-                            # Test recording function
-                            self.test_recording_function()
-                        elif key == '\x03':  # Ctrl+C
-                            print(f"\n{Colors.YELLOW}Received Ctrl+C, quitting...{Colors.RESET}")
-                            self.running = False
-                    
-                    time.sleep(0.1)  # Small delay for responsive input
-                else:
-                    # Normal mode - just keep alive
-                    time.sleep(MAIN_LOOP_SLEEP_S)
+                time.sleep(1.0)  # Sleep and let the interrupt threads do the work
                 
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
             self.running = False
         
         finally:
-            # Restore terminal settings if in keyboard test mode
-            if self.keyboard_test:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
             self.cleanup()
 
     def cleanup(self):
@@ -905,6 +1124,13 @@ class PowerController:
             # Close GPIO chip
             if hasattr(self, 'chip'):
                 self.chip.close()
+            
+            # ROS2 cleanup
+            try:
+                self.get_logger().info("Shutting down ROS2 components...")
+                self.destroy_node()
+            except Exception as e:
+                logger.error(f"Error during ROS2 cleanup: {e}")
                 
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
@@ -1001,7 +1227,6 @@ USAGE:
 OPTIONS:
   --help, -h          Show this help message and exit
   --test-mode, -t     Run in test mode (disable actual shutdown and power control)
-  --keyboard-test, -k Enable keyboard test mode (s/e keys simulate button press/release)
   --threshold, -T     Set button press threshold for shutdown (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})
   --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
   --test-notification, -n  Test desktop notification functionality and exit (safe for testing)
@@ -1010,8 +1235,6 @@ EXAMPLES:
   ./argo_power_control.py                         # Normal operation
   ./argo_power_control.py --test-mode             # Test mode (safe)
   ./argo_power_control.py -t                      # Test mode (short form)
-  ./argo_power_control.py --keyboard-test         # Keyboard test mode with colored LED output
-  ./argo_power_control.py -k                      # Keyboard test mode (short form)
   ./argo_power_control.py --threshold 2.0         # 2-second threshold
   ./argo_power_control.py -T 2.0                  # 2-second threshold (short form)
   ./argo_power_control.py --test-wall-message     # Test wall message (safe)
@@ -1046,8 +1269,6 @@ def main():
                        help='Show help message and exit')
     parser.add_argument('--test-mode', '-t', action='store_true',
                        help='Run in test mode (disable actual shutdown and power control)')
-    parser.add_argument('--keyboard-test', '-k', action='store_true',
-                       help='Enable keyboard test mode (s/e keys simulate button press/release)')
     parser.add_argument('--threshold', '-T', type=float, default=DEFAULT_SHUTDOWN_THRESHOLD_S,
                        help=f'Set button press threshold for shutdown in seconds (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})')
     parser.add_argument('--test-wall-message', '-w', action='store_true',
@@ -1187,30 +1408,52 @@ def main():
         sys.exit(1)
     
     # Show startup information
-    if args.keyboard_test:
-        print("Starting power control system in KEYBOARD TEST MODE")
-        print("  - 's' key starts button press simulation")
-        print("  - 'e' key ends button press simulation")
-        print("  - Colored LED output displayed")
-        print("  - Safe for testing")
-    elif args.test_mode:
+    if args.test_mode:
         print("Starting power control system in TEST MODE")
-        print("  - Shutdown commands disabled")
-        print("  - Power relay control disabled")
-        print("  - Safe for testing")
+        print("  - Shutdown commands will be simulated (not executed)")
+        print("  - Power relay control is DISABLED")
+        print("  - Desktop notifications will be sent")
+        print("  - Button presses and actions will be reported")
+        print("  - Triple tap (3 quick taps within 1.5s) toggles recording")
     else:
         print("Starting power control system in NORMAL MODE")
         print("  - Full power control enabled")
         print("  - System will shutdown and cut power on long button press")
+        print("  - Triple tap (3 quick taps within 1.5s) toggles recording")
     
     print(f"  - Button press threshold: {args.threshold} seconds")
-    if not args.keyboard_test:
-        print(f"  - Button detection mode: Polling ({BUTTON_POLLING_HZ} Hz)")
+    print(f"  - Button detection mode: Hardware interrupts (efficient)")
     print("  - Press Ctrl+C to stop")
     print()
     
-    controller = PowerController(test_mode=args.test_mode, threshold=args.threshold, keyboard_test=args.keyboard_test)
-    controller.run()
+    # Initialize ROS2
+    rclpy.init()
+    
+    try:
+        controller = PowerController(test_mode=args.test_mode, threshold=args.threshold)
+        
+        # Use MultiThreadedExecutor to handle ROS2 callbacks while running GPIO monitoring
+        executor = MultiThreadedExecutor()
+        executor.add_node(controller)
+        
+        # Start ROS2 executor in a separate thread
+        executor_thread = threading.Thread(target=executor.spin, daemon=True)
+        executor_thread.start()
+        
+        # Run the main GPIO monitoring loop
+        controller.run()
+        
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received, shutting down...")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+    finally:
+        # Cleanup
+        try:
+            controller.cleanup()
+        except:
+            pass
+        rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
