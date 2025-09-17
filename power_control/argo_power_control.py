@@ -646,32 +646,6 @@ class PowerController:
     def send_desktop_notification(self, title, message, urgency="normal", expire_time_ms=None):
         """Send desktop notification using notify-send"""
         try:
-            # Set up environment for desktop notifications
-            env = os.environ.copy()
-            
-            # Try to find the display for logged-in users
-            try:
-                # Get list of logged-in users and their displays
-                result = subprocess.run(['who'], capture_output=True, text=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                if result.returncode == 0:
-                    for line in result.stdout.strip().split('\n'):
-                        if line and ':' in line:
-                            parts = line.split()
-                            for part in parts:
-                                if part.startswith(':'):
-                                    display = part[1:]  # Remove the leading ':'
-                                    if display.isdigit() or '.' in display:
-                                        env['DISPLAY'] = f':{display}'
-                                        break
-                            if 'DISPLAY' in env:
-                                break
-            except Exception as e:
-                logger.debug(f"Could not determine display from 'who' command: {e}")
-            
-            # If no display found, try common defaults
-            if 'DISPLAY' not in env:
-                env['DISPLAY'] = ':0'
-            
             # Modify title and message for test mode
             if self.test_mode:
                 test_title = f"[TEST] {title}"
@@ -684,14 +658,95 @@ class PowerController:
             # Use custom expire time or default
             expire_time = expire_time_ms if expire_time_ms is not None else NOTIFICATION_EXPIRE_TIME_MS
             
-            # Try to send desktop notification
-            subprocess.run([
-                'notify-send', 
-                '--urgency', urgency,
-                '--expire-time', str(expire_time),
-                test_title, 
-                test_message
-            ], check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S, env=env)
+            # Check if we're running as root (systemd service)
+            if os.geteuid() == 0:
+                # Running as root - need to send notification as the desktop user
+                # Find the user who owns the desktop session
+                desktop_user = None
+                display_env = None
+                
+                try:
+                    # Look for X server processes to find the desktop user and display
+                    result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        for line in result.stdout.split('\n'):
+                            # Look for Xorg process to get display and user
+                            if 'Xorg' in line and ':0' in line:
+                                parts = line.split()
+                                if len(parts) > 0:
+                                    # Get user from first column
+                                    potential_user = parts[0]
+                                    if potential_user != 'root':
+                                        desktop_user = potential_user
+                                        # Extract display from Xorg command line
+                                        if ':0' in line:
+                                            display_env = ':0'
+                                        break
+                except Exception as e:
+                    logger.debug(f"Could not determine desktop user from ps: {e}")
+                
+                # Fallback to common user if not found
+                if not desktop_user:
+                    desktop_user = 'orangepi'  # Default user for Orange Pi
+                if not display_env:
+                    display_env = ':0'  # Default display
+                
+                # Run notify-send as the desktop user with proper environment
+                cmd = [
+                    'sudo', '-u', desktop_user,
+                    'DISPLAY=' + display_env,
+                    'notify-send',
+                    '--urgency', urgency,
+                    '--expire-time', str(expire_time),
+                    test_title,
+                    test_message
+                ]
+                
+                logger.debug(f"Sending notification as user {desktop_user} with DISPLAY={display_env}")
+                
+            else:
+                # Running as regular user - use normal method
+                # Set up environment for desktop notifications
+                env = os.environ.copy()
+                
+                # Try to find the display for logged-in users
+                try:
+                    # Get list of logged-in users and their displays
+                    result = subprocess.run(['who'], capture_output=True, text=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                    if result.returncode == 0:
+                        for line in result.stdout.strip().split('\n'):
+                            if line and ':' in line:
+                                parts = line.split()
+                                for part in parts:
+                                    if part.startswith(':'):
+                                        display = part[1:]  # Remove the leading ':'
+                                        if display.isdigit() or '.' in display:
+                                            env['DISPLAY'] = f':{display}'
+                                            break
+                                if 'DISPLAY' in env:
+                                    break
+                except Exception as e:
+                    logger.debug(f"Could not determine display from 'who' command: {e}")
+                
+                # If no display found, try common defaults
+                if 'DISPLAY' not in env:
+                    env['DISPLAY'] = ':0'
+                
+                cmd = [
+                    'notify-send', 
+                    '--urgency', urgency,
+                    '--expire-time', str(expire_time),
+                    test_title, 
+                    test_message
+                ]
+            
+            # Execute the notification command
+            if os.geteuid() == 0:
+                # For root execution, don't use env parameter with sudo
+                subprocess.run(cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+            else:
+                # For user execution, use env parameter
+                subprocess.run(cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S, env=env)
             
             if self.test_mode:
                 logger.info(f"TEST MODE: Desktop notification sent: {title}")
