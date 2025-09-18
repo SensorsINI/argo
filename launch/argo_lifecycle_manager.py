@@ -438,11 +438,24 @@ class ArgoLifecycleManager:
         for node, status in node_status.items():
             print(f"  {node}: {status}")
         
+        # If nothing is running, provide I2C bus health info to help diagnostics
+        try:
+            launch_stopped = not self._is_launch_running()
+            all_nodes_stopped = all("STOPPED" in s for s in node_status.values()) if node_status else True
+            if launch_stopped or all_nodes_stopped:
+                print("\n🔌 I2C BUS HEALTH (bus 0):")
+                self._print_i2c_health(bus=0)
+        except Exception as e:
+            print(f"⚠️  I2C health check failed: {e}")
+        
         # System info
         try:
             cpu_percent = psutil.cpu_percent(interval=1)
             memory = psutil.virtual_memory()
-            print(f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Memory {memory.percent:.1f}%")
+            # add free disk space
+            disk = psutil.disk_usage("/")
+            free_disk = disk.free / (1024**3)
+            print(f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Memory {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used)  ")
         except:
             print("📊 SYSTEM: Unable to get system info")
         
@@ -482,6 +495,81 @@ class ArgoLifecycleManager:
             print("\n🛑 Monitor mode stopped by user")
         finally:
             self.monitoring = False
+
+    def _get_i2c_addresses(self, bus: int = 0) -> List[int]:
+        """Run i2cdetect and parse detected device addresses on the given bus."""
+        try:
+            proc = subprocess.run(
+                ["i2cdetect", "-y", str(bus)],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=True,
+            )
+            output = proc.stdout
+        except FileNotFoundError:
+            raise RuntimeError("i2cdetect not found. Install i2c-tools or ensure it's in PATH.")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"i2cdetect failed (exit {e.returncode}). stderr: {e.stderr}")
+        except subprocess.TimeoutExpired:
+            raise TimeoutError("i2cdetect timed out after 1s")
+
+        detected: List[int] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # lines with rows look like: "10: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --"
+            if ":" not in line:
+                continue
+            try:
+                _, cells_str = line.split(":", 1)
+            except ValueError:
+                continue
+            cells = [c.strip() for c in cells_str.strip().split()]
+            for cell in cells:
+                # Valid device entries are two-hex-digit addresses; '--' is empty; 'UU' is in-use by driver
+                if cell == "--" or cell == "UU":
+                    continue
+                # Accept hex like '34', '69'
+                if len(cell) == 2:
+                    try:
+                        addr = int(cell, 16)
+                        detected.append(addr)
+                    except ValueError:
+                        continue
+        return sorted(set(detected))
+
+    def _print_i2c_health(self, bus: int = 0) -> None:
+        """Print a summary of I2C device presence vs expected sensors."""
+        try:
+            detected = self._get_i2c_addresses(bus)
+        except TimeoutError as e:
+            print(f"  I2C bus {bus} is malfunctioning ({e})")
+            return
+        except Exception as e:
+            print(f"  I2C scan failed: {e}")
+            return
+        hex_list = ", ".join([f"0x{a:02x}" for a in detected]) if detected else "<none>"
+        print(f"  Detected addresses: {hex_list}")
+
+        expected_map = {
+            "anem": [0x21, 0x22, 0x23],
+            "battery_water": [0x34, 0x44],  # 0x34: ADC, 0x44: humidity
+            "imu": [0x69],
+        }
+
+        for sensor, addrs in expected_map.items():
+            present = [a for a in addrs if a in detected]
+            missing = [a for a in addrs if a not in detected]
+            if present and not missing:
+                print(f"  {sensor}: 🟢 present ({', '.join([f'0x{x:02x}' for x in present])})")
+            elif present and missing:
+                print(
+                    f"  {sensor}: 🟡 partially present (found {', '.join([f'0x{x:02x}' for x in present])}; missing {', '.join([f'0x{x:02x}' for x in missing])})"
+                )
+            else:
+                print(f"  {sensor}: 🔴 not present (expected {', '.join([f'0x{x:02x}' for x in addrs])})")
 
 def main():
     parser = argparse.ArgumentParser(description='Argo ROS2 Lifecycle Manager')
