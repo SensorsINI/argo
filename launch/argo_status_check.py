@@ -259,8 +259,8 @@ class OptimizedArgoStatusChecker:
               f"Load:{Colors.GREEN}{sys_info['load_avg']}{Colors.RESET} SysMem:{Colors.GREEN}{sys_info['mem_usage']}%{Colors.RESET} | "
               f"Storage:{Colors.GREEN}{sys_info['free_gb']}GB{Colors.RESET} free")
     
-    def check_hourly_timer(self):
-        """Check if hourly timer should run"""
+    def check_quick_timer(self):
+        """Check if quick timer should run"""
         last_check_file = os.path.join(self.home_dir, ".argo_last_check")
         current_time = int(time.time())
         last_check_time = 0
@@ -272,27 +272,50 @@ class OptimizedArgoStatusChecker:
             except (ValueError, IOError):
                 last_check_time = 0
         
-        # Run check if it's been more than 1 hour (3600 seconds)
+        # Run check if it's been more than 5 minutes (300 seconds)
         time_diff = current_time - last_check_time
-        if time_diff >= 3600:
+        if time_diff >= 300:
             self.print_condensed_status()
             with open(last_check_file, 'w') as f:
                 f.write(str(current_time))
             return True
-        return False
+        else:
+            # For automation: exit with code 0 but no output when timer condition not met
+            # This allows cron/systemd to know the script ran successfully
+            return True
 
 def main():
-    parser = argparse.ArgumentParser(description='Optimized Argo Status Check - Fast monitoring for Argo sailboat system')
-    parser.add_argument('--manual', action='store_true', help='Force full detailed output')
-    parser.add_argument('--hourly', action='store_true', help='Run hourly timer check')
+    parser = argparse.ArgumentParser(
+        description='Optimized Argo Status Check - Fast monitoring for Argo sailboat system',
+        epilog='''
+EXAMPLES:
+  %(prog)s                    # Show detailed status output (default)
+  %(prog)s --manual          # Force full detailed output (same as default)
+  %(prog)s --quick           # Run quick timer check (condensed output if 5+ min since last check)
+
+BEHAVIOR:
+  Default mode shows comprehensive status including systemd services, ROS nodes, 
+  and system metrics with colored output for easy monitoring.
+  
+  Quick mode is designed for automated/cron usage - it only displays condensed 
+  single-line status if more than 5 minutes have passed since the last check.
+  This prevents spam in logs while still providing periodic status updates.
+  When timer condition is not met, script exits silently with code 0.
+        ''',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument('--manual', action='store_true', 
+                       help='Force full detailed status output (same as default behavior)')
+    parser.add_argument('--quick', action='store_true', 
+                       help='Run quick timer check - shows condensed status only if 5+ minutes since last check')
     
     args = parser.parse_args()
     
     checker = OptimizedArgoStatusChecker()
     
-    if args.hourly:
-        # Run hourly timer check
-        checker.check_hourly_timer()
+    if args.quick:
+        # Run quick timer check
+        checker.check_quick_timer()
     elif args.manual:
         # Force detailed output
         checker.print_detailed_status(manual_call=True)

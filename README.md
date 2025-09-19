@@ -113,7 +113,7 @@ If any of these nodes are detected as missing, the blue LED will flash an SOS pa
 ```bash
 cd /home/orangepi/argo
 colcon build --packages-select argo_power_control
-source install/setup.bash
+# Note: Pure Python ROS2 packages can be run directly without sourcing install/
 ```
 
 ## Requirements

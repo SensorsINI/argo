@@ -32,7 +32,7 @@ This directory contains all the launch scripts, systemd services, and management
   - Systemd services status
   - ROS2 nodes status
   - System resources and storage
-  - Usage: `python3 argo_status_check.py [--manual] [--hourly]`
+  - Usage: `python3 argo_status_check.py [--manual] [--quick]`
 
 - **`storage_monitor.py`** - Storage space monitoring for recording
   - Calculates remaining recording hours
@@ -66,9 +66,6 @@ This directory contains all the launch scripts, systemd services, and management
 ### 🔔 **Notification System**
 
 #### **Startup and Warnings**
-- **`argo_startup_notification.sh`** - Startup notification script
-  - Displays system startup messages
-  - Service status notifications
 
 - **`argo_terminal_warning.sh`** - Terminal warning system
   - Displays important system warnings
@@ -96,9 +93,6 @@ This directory contains all the launch scripts, systemd services, and management
   - Depends on `argo-launch.service`
   - Manual start only
 
-- **`argo-startup-notification.service`** - Startup notification service
-  - Displays startup messages and status
-  - Runs at system startup
 
 - **`argo-storage-monitor.service`** - Storage monitoring service
   - Monitors storage space and sends GUI notifications

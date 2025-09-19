@@ -16,13 +16,13 @@ argo_status() {
     argo_status_check true
 }
 
-# Hourly timer for automatic status checks
-argo_hourly_timer() {
-    # Call the Python implementation for hourly timer
+# Quick timer for automatic status checks
+argo_quick_timer() {
+    # Call the Python implementation for quick timer
     if [ "$1" = "force" ]; then
-        python3 ~/argo/launch/argo_status_check.py --hourly
+        python3 ~/argo/launch/argo_status_check.py --quick
     else
-        python3 ~/argo/launch/argo_status_check.py --hourly
+        python3 ~/argo/launch/argo_status_check.py --quick
     fi
 }
 
@@ -30,4 +30,4 @@ PATH="$HOME/argo/launch:$HOME/argo/nodes:$PATH"
 
 # Run Argo status check on shell startup (with hourly timer)
 # This will only show status if it's been more than an hour since last check
-argo_hourly_timer
+argo_quick_timer
