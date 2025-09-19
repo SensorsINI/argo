@@ -5,7 +5,11 @@ SERVICE_DIR = /etc/systemd/system
 LAUNCH_SERVICE = argo-launch.service
 # Recording is now handled via ROS2 service, not systemd
 BAGFILES_DIR = $(HOME)/bagfiles
-ARGO_DIR = $(HOME)/argo
+# Resolve repository directory and installing user
+REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else id -un; fi)
+INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
+ARGO_DIR = $(REPO_DIR)
 
 .PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control
 

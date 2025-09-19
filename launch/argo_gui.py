@@ -348,7 +348,7 @@ class ArgoGUI:
             info['status'] = result.stdout.strip()
             
             # Get bag files directory info
-            bagfiles_dir = "/home/orangepi/bagfiles"
+            bagfiles_dir = os.path.join(os.path.expanduser('~'), 'bagfiles')
             if os.path.exists(bagfiles_dir):
                 # Get latest bag file
                 try:

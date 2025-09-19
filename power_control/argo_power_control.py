@@ -8,8 +8,8 @@
 # DESCRIPTION:
 #   Intelligent power control system for Orange Pi Zero 2W using external relays
 #   and GPIO pins. Implements safe shutdown procedures, hardware interrupt-based
-#   power button monitoring, and LED status indicators. Relay de-energization is 
-#   handled automatically by GPIO pin state reversion on system halt.
+#   power button monitoring, and LED status indicators. Power relay control is
+#   handled by dedicated startup/shutdown hooks for safety.
 #
 # HARDWARE CONFIGURATION:
 #   - PI3 (Pin 40): !POW - Open drain output to control power relay
@@ -42,7 +42,7 @@
 #   2. Wait 5 seconds for users to see notification
 #   3. Start alternating short-long LED pattern (shutdown indicator)
 #   4. Execute 'sudo shutdown -h now' for graceful shutdown
-#   5. GPIO pins will automatically revert to input state on halt, de-energizing relay
+#   5. argo_poweroff.shutdown hook handles final power relay control during shutdown
 #
 # USAGE:
 #   ./argo_power_control.py [--help] [--test-mode] [--threshold SECONDS]
@@ -64,7 +64,7 @@
 #   - Proper hardware connections as described above
 #
 # SAFETY FEATURES:
-#   - Open drain configuration prevents damage from multiple control sources
+#   - Power relay control separated from this service to prevent accidental power cuts
 #   - Graceful shutdown ensures proper system shutdown before cutting power
 #   - External pullup resistor requirement prevents floating inputs
 #   - GPIO group membership requirement for controlled GPIO access
@@ -250,18 +250,11 @@ class PowerController(Node):
             logger.info(f"Successfully opened GPIO chip: {self.GPIO_CHIP}")
 
             # Get line objects
-            self.power_relay_line = self.chip.get_line(self.POWER_RELAY_LINE)
+            # NOTE: power_relay_line (GPIO 259) is NOT controlled by this service
+            # Power relay control is handled exclusively by the shutdown hook
             self.power_button_line = self.chip.get_line(self.POWER_BUTTON_LINE)
             self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE)
             self.blue_led_line = self.chip.get_line(self.BLUE_LED_LINE)
-
-            # Request power relay line
-            self.power_relay_line.request(
-                consumer="argo_power_control.py",
-                type=gpiod.LINE_REQ_DIR_OUT,
-                flags=gpiod.LINE_REQ_FLAG_OPEN_DRAIN,
-                default_vals=[0]  # Start with relay energized (low = on)
-            )
 
             # Initially request power button line as input to read initial state
             # Will be reconfigured for interrupts after reading initial state
@@ -478,15 +471,23 @@ class PowerController(Node):
             logger.error(f"Error reading power button: {e}")
             return 1  # Assume not pressed on error
 
-    def set_power_relay(self, state):
-        """Control power relay (True = energized/on, False = de-energized/off)"""
-        try:
-            # For open drain: 0 = energized (relay on), 1 = de-energized (relay off)
-            value = 0 if state else 1
-            self.power_relay_line.set_value(value)
-            logger.info(f"Power relay set to {'ON' if state else 'OFF'}")
-        except Exception as e:
-            logger.error(f"Error controlling power relay: {e}")
+    # def set_power_relay(self, state):
+    #     """Control power relay (True = energized/on, False = de-energized/off)"""
+    #     """
+    #     DISABLED: Power relay control removed from this service for safety.
+    #     Power relay (GPIO line 259) is now controlled exclusively by:
+    #     - argo_poweron.startup: Sets relay ON during boot
+    #     - argo_poweroff.shutdown: Sets relay OFF during shutdown only
+    #     This prevents accidental power cuts during normal operation or reboots.
+    #     """
+    #     try:
+    #         # For open drain: 0 = energized (relay on), 1 = de-energized (relay off)
+    #         value = 0 if state else 1
+    #         self.power_relay_line.set_value(value)
+    #         logger.info(f"Power relay set to {'ON' if state else 'OFF'}")
+    #     except Exception as e:
+    #         logger.error(f"Error controlling power relay: {e}")
+    pass
 
     def set_green_led(self, state):
         """Control green LED (system running indicator)"""
@@ -947,9 +948,9 @@ class PowerController(Node):
                 except Exception as e:
                     logger.debug(f"Could not determine desktop user from ps: {e}")
                 
-                # Fallback to common user if not found
+                # Fallback to the user who invoked sudo or the current user
                 if not desktop_user:
-                    desktop_user = 'orangepi'  # Default user for Orange Pi
+                    desktop_user = os.environ.get('SUDO_USER') or os.environ.get('USER') or os.environ.get('LOGNAME') or 'root'
                 if not display_env:
                     display_env = ':0'  # Default display
                 
@@ -1095,8 +1096,8 @@ class PowerController(Node):
         logger.info("Power controller starting...")
         logger.info("Button monitoring active - only new button presses after startup will trigger shutdown")
         
-        # Ensure relay is energized on startup
-        self.set_power_relay(True)
+        # NOTE: Power relay control removed from this service
+        # Relay is energized by argo_poweron.startup during boot
         
         # Start power button monitoring in separate thread
         logger.info("Starting hardware interrupt-based button detection")

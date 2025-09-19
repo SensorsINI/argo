@@ -44,7 +44,7 @@ class ArgoRecordingNode(Node):
         super().__init__('record')
         
         # Configuration
-        self.bagfiles_dir = "/home/orangepi/bagfiles"
+        self.bagfiles_dir = os.path.join(os.path.expanduser('~'), 'bagfiles')
         self.current_bag_name = None
         self.recording_process = None
         self.is_recording = False

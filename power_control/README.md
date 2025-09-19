@@ -12,7 +12,7 @@ This package provides a ROS2 node for the Argo power control system, which manag
 ## Components
 - `argo_power_control.py`: ROS2 node for button monitoring, LEDs, relay control, graceful shutdown, and recording control integration
 - `argo_power_control.service`: systemd service that runs independently of argo-launch.service
-- `argo_poweroff.shutdown`: late shutdown hook that asserts PI3 HIGH briefly to cut power
+- `argo_poweroff.shutdown`: late shutdown hook that asserts PI3 HIGH briefly to cut power (only during poweroff/halt, not reboot)
 - `Makefile`: install helpers for the service and shutdown hook
 
 ## Important: Why not gpio-poweroff overlay on Zero 2W?
@@ -21,6 +21,9 @@ This package provides a ROS2 node for the Argo power control system, which manag
   - `poweroff-gpio: gpio_poweroff_probe: pm_power_off function already registered`
 - Result: any `gpio-poweroff` DT node (including overlays) will not take effect.
 - Solution: a systemd late shutdown hook claims PI3 and pulses it HIGH just before poweroff. This avoids conflicts and is reliably last.
+- The shutdown hook intelligently differentiates between shutdown modes:
+  - **Poweroff/Halt**: Triggers power cut sequence (PI3 HIGH pulse)
+  - **Reboot**: Skips power cut to allow normal restart
 
 ## Prerequisites
 - Tools: `python3-libgpiod` or `gpiod`/`libgpiod-tools` (installed by `make check_deps`).
@@ -35,9 +38,13 @@ make install_shutdown_hook
 - Service controls buttons/LEDs/relay; the shutdown hook handles final power cut on PI3.
 
 ## Test
-- Manual hook pulse:
+- Manual hook pulse (poweroff mode):
 ```bash
 /home/orangepi/argo/power_control/argo_poweroff.shutdown poweroff
+```
+- Manual hook test (reboot mode - should exit without pulse):
+```bash
+/home/orangepi/argo/power_control/argo_poweroff.shutdown reboot
 ```
 - Shutdown test (watch PI3 on pin 40):
 ```bash
@@ -45,6 +52,12 @@ sync
 sudo systemctl poweroff
 ```
 You should see PI3 go HIGH for ~0.5 s just before power is cut.
+- Reboot test (PI3 should remain LOW):
+```bash
+sync
+sudo systemctl reboot
+```
+System should reboot normally without triggering power cut.
 
 ## CLI for the daemon
 ```bash

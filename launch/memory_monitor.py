@@ -34,8 +34,13 @@ class MemoryMonitor:
         discovered_nodes = node_manager.discover_nodes()
         self.expected_nodes = [f"{node}.py" for node in discovered_nodes if node != 'foxglove_bridge']
         
-        # CSV file setup
-        self.csv_file = f"/home/orangepi/argo/memory_usage_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        # CSV file setup (save alongside repo root)
+        home_dir = os.path.expanduser('~')
+        # Prefer repo root derived from this file; fallback to $HOME/argo
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if not os.path.isdir(repo_root):
+            repo_root = os.path.join(home_dir, 'argo')
+        self.csv_file = os.path.join(repo_root, f"memory_usage_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         self.setup_csv()
         
         print(f"🔍 Starting memory monitor for {duration_minutes} minutes")

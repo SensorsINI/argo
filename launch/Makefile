@@ -7,6 +7,11 @@ LAUNCH_SERVICE = argo-launch.service
 BAGFILES_DIR = $(HOME)/bagfiles
 ARGO_DIR = $(HOME)/argo
 
+# Detect installing user and repo directory
+INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else id -un; fi)
+INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
+REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+
 # Power control configuration moved to power_control/ directory
 
 .PHONY: help install uninstall enable disable start stop restart clean install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor
@@ -18,7 +23,14 @@ all: install
 
 install: install_storage_monitor
 	@echo "Installing Argo services..."
-	sudo cp $(LAUNCH_SERVICE) $(SERVICE_DIR)/
+	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
+	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
+	    -e "s#^WorkingDirectory=.*#WorkingDirectory=$(REPO_DIR)#" \
+	    -e "s#^EnvironmentFile=.*#EnvironmentFile=$(REPO_DIR)/launch/argo.env#" \
+	    -e "s#/home/orangepi/argo#$(REPO_DIR)#g" \
+	    $(LAUNCH_SERVICE) > /tmp/$(LAUNCH_SERVICE)
+	@sudo cp /tmp/$(LAUNCH_SERVICE) $(SERVICE_DIR)/
+	@rm -f /tmp/$(LAUNCH_SERVICE)
 	sudo systemctl daemon-reload
 	mkdir -p $(BAGFILES_DIR)
 	@echo "Services installed successfully!"
@@ -58,7 +70,13 @@ STORAGE_SERVICE_FILE = argo-storage-monitor.service
 # Install storage monitoring service
 install_storage_monitor:
 	@echo "📋 Installing argo storage monitor systemd service..."
-	@sudo cp $(STORAGE_SERVICE_FILE) $(SERVICE_DIR)/
+	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
+	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
+	    -e "s#^WorkingDirectory=.*#WorkingDirectory=$(REPO_DIR)#" \
+	    -e "s#/home/orangepi/argo#$(REPO_DIR)#g" \
+	    $(STORAGE_SERVICE_FILE) > /tmp/$(STORAGE_SERVICE_FILE)
+	@sudo cp /tmp/$(STORAGE_SERVICE_FILE) $(SERVICE_DIR)/
+	@rm -f /tmp/$(STORAGE_SERVICE_FILE)
 	@sudo systemctl daemon-reload
 	@echo "✅ Storage monitor service installed"
 

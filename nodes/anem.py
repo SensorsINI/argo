@@ -130,7 +130,7 @@ class AnemNode(Node):
 
         if self.bus is not None:
             if not self.setup_sensors():
-                self.get_logger().error("CRITICAL: Failed to setup anemometer sensors. Exiting.")
+                self.get_logger().fatal("FATAL: Failed to setup anemometer sensors. Exiting.")
                 sys.exit(1)
             else:
                 self.sensors_ready = True

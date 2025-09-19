@@ -6,7 +6,13 @@
 set -e  # Exit on any error
 
 # Configuration
-BAGFILES_DIR="/home/orangepi/bagfiles"
+# Resolve HOME from environment (supports sudo)
+if [ -n "$SUDO_USER" ]; then
+    USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    USER_HOME="$HOME"
+fi
+BAGFILES_DIR="${USER_HOME}/bagfiles"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BAG_NAME="argo_${TIMESTAMP}"
 BAG_PATH="${BAGFILES_DIR}/${BAG_NAME}"

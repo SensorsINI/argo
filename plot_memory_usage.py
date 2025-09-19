@@ -184,16 +184,18 @@ Variation: {memory_variation:.1f} GB"""
     print("="*60)
 
 def main():
-    # Find the most recent CSV file
-    csv_files = [f for f in os.listdir('/home/orangepi/argo/') if f.startswith('memory_usage_') and f.endswith('.csv')]
+    # Find the most recent CSV file in repo root (derived from this file)
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(repo_root)
+    csv_files = [f for f in os.listdir(repo_root) if f.startswith('memory_usage_') and f.endswith('.csv')]
     
     if not csv_files:
-        print("❌ No memory usage CSV files found in /home/orangepi/argo/")
+        print(f"❌ No memory usage CSV files found in {repo_root}/")
         return 1
     
     # Use the most recent file
     csv_files.sort(reverse=True)
-    csv_file = f"/home/orangepi/argo/{csv_files[0]}"
+    csv_file = os.path.join(repo_root, csv_files[0])
     
     print(f"🔍 Found CSV file: {csv_file}")
     

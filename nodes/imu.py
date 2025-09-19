@@ -155,7 +155,7 @@ class ImuNode(Node):
             time.sleep(0.01)
             self.get_logger().info("ICM-20948 init complete (raw mode)")
         except Exception as e:
-            self.get_logger().error(f"IMU init failed: {e}")
+            self.get_logger().fatal(f"FATAL: IMU init failed: {e}")
             self.destroy_node()
             rclpy.shutdown()
             return

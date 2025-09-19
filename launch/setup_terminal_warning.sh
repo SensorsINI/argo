@@ -1,7 +1,8 @@
 #!/bin/bash
 # Setup script to add Argo storage warning to terminal
 
-SCRIPT_DIR="/home/orangepi/argo/scripts"
+# Determine scripts directory relative to this file
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WARNING_SCRIPT="$SCRIPT_DIR/argo_terminal_warning.sh"
 
 # Make the warning script executable

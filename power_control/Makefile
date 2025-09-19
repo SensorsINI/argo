@@ -4,9 +4,14 @@
 # Service configuration
 SERVICE_DIR = /etc/systemd/system
 POWER_SERVICE_NAME = argo_power_control
-SCRIPT_DIR = /home/orangepi/argo/power_control
+# Directory containing this Makefile (power_control directory in repo)
+SCRIPT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PYTHON_SCRIPT = argo_power_control.py
 POWER_SERVICE_FILE = argo_power_control.service
+
+# Detect the user performing installation (supports sudo)
+INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else id -un; fi)
+INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 
 .PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook install_startup_hook
 
@@ -54,20 +59,24 @@ check_deps:
 	else \
 		echo "✅ gpio group already exists"; \
 	fi
-	@if ! groups $(USER) | grep -q gpio; then \
-		echo "👤 Adding $(USER) to gpio group..."; \
-		sudo usermod -a -G gpio $(USER); \
+	@if ! groups $(INSTALL_USER) | grep -q gpio; then \
+		echo "👤 Adding $(INSTALL_USER) to gpio group..."; \
+		sudo usermod -a -G gpio $(INSTALL_USER); \
 		echo "⚠️  IMPORTANT: You must log out and log back in for group changes to take effect!"; \
 		echo "   Or run: newgrp gpio"; \
 	else \
-		echo "✅ $(USER) is already a member of gpio group"; \
+		echo "✅ $(INSTALL_USER) is already a member of gpio group"; \
 	fi
 
 # Install systemd service
 install_service:
 	@echo "📋 Installing argo power control systemd service..."
-	@echo "🔧 Configuring service for user: $(USER)"
-	@sed "s/User=orangepi/User=$(USER)/g" $(SCRIPT_DIR)/$(POWER_SERVICE_FILE) > /tmp/$(POWER_SERVICE_FILE)
+	@echo "🔧 Configuring service for user: $(INSTALL_USER)"
+	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
+	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
+	    -e "s#^WorkingDirectory=.*#WorkingDirectory=$(INSTALL_HOME)/argo/power_control#" \
+	    -e "s#/home/orangepi#$(INSTALL_HOME)#g" \
+	    $(SCRIPT_DIR)/$(POWER_SERVICE_FILE) > /tmp/$(POWER_SERVICE_FILE)
 	@sudo cp /tmp/$(POWER_SERVICE_FILE) /etc/systemd/system/$(POWER_SERVICE_FILE)
 	@rm -f /tmp/$(POWER_SERVICE_FILE)
 	@sudo chmod +x $(SCRIPT_DIR)/$(PYTHON_SCRIPT)
@@ -84,7 +93,10 @@ install_shutdown_hook:
 install_startup_hook:
 	@echo "📋 Installing early boot startup hook..."
 	@sudo install -m 0755 $(SCRIPT_DIR)/argo_poweron.startup /usr/local/sbin/argo_poweron
-	@sudo install -m 0644 $(SCRIPT_DIR)/argo_poweron.service /etc/systemd/system/argo_poweron.service
+	@sed -e "s|^ExecStart=.*|ExecStart=/usr/local/sbin/argo_poweron|" \
+	    $(SCRIPT_DIR)/argo_poweron.service > /tmp/argo_poweron.service
+	@sudo install -m 0644 /tmp/argo_poweron.service /etc/systemd/system/argo_poweron.service
+	@rm -f /tmp/argo_poweron.service
 	@sudo systemctl daemon-reload
 	@sudo systemctl enable argo_poweron.service
 	@echo "✅ Early boot startup hook installed and enabled"
@@ -197,7 +209,7 @@ help:
 	@echo "  check_deps           - Check and install required dependencies"
 	@echo "  install_service      - Install systemd service only"
 	@echo "  enable_service       - Enable and start the service"
-	@echo "  install_shutdown_hook        - Install late shutdown hook"
+	@echo "  install_shutdown_hook        - Install late shutdown hook (poweroff/halt only, not reboot)"
 	@echo "  install_startup_hook - Install early boot startup hook (!POW low)"
 	@echo "  clean_power_control  - Stop and disable service, remove service file"
 	@echo ""

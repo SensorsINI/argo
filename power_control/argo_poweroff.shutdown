@@ -11,19 +11,74 @@
 # Invocation:
 #   Placed at /lib/systemd/system-shutdown/argo_poweroff (installed by Makefile).
 #   systemd runs scripts here with a single argument indicating mode:
-#   { poweroff | reboot | halt | kexec }. We do not branch on the mode.
+#   { poweroff | reboot | halt | kexec }. We only run power-off sequence
+#   for poweroff and halt modes, not for reboot or kexec.
 #
 # Notes:
 #   - Minimal dependencies: do not rely on any systemd services.
 #   - Prefer Python libgpiod if available; otherwise fall back to gpioset.
 #   - Keep the pulse short; external circuit should cut power quickly.
 #   - Exit 0 regardless, to never block shutdown.
+# 
+# The hook is working correctly. The system powers off after it because it goes into HALT 
+# state and the pin goes into high impedance mode. 
+# Because of a bug in the PCB design, this causes the relay to open. 
+# This bug will be fixed in next PCB revision.
 
 set -euo pipefail
 
 MODE="${1:-}"
+MODE_LC="$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')"
+
+# Console logging helper (postfix with 50 * and pause 1s)
+STARS="**************************************************"
+c_echo() {
+    echo "$(date): argo_poweroff: $* $STARS" > /dev/console 2>/dev/null || true
+    sleep 1
+}
+
+# Announce invocation
+c_echo "invoked with args: $* (MODE='${MODE}', mode_lc='${MODE_LC}')"
+
+# If no MODE was provided, do nothing (safety)
+if [ -z "${MODE}" ]; then
+    c_echo "No MODE argument provided; exiting safely"
+    # Give operator a moment to read console
+    sleep 2
+    exit 0
+fi
+# Only run power-off sequence for actual shutdowns, not reboots
+# Be extra conservative - only proceed if we explicitly get 'poweroff' or 'halt'
+case "$MODE_LC" in
+    poweroff|halt)
+        # Proceed with power-off sequence
+        c_echo "MODE='${MODE_LC}' -> proceeding with power-off sequence"
+        sleep 2
+        ;;
+    reboot|kexec|*)
+        # Skip power-off sequence for reboots, kexec, or any unknown mode
+        c_echo "MODE='${MODE_LC}' -> skipping (no power cut)"
+        sleep 2
+        exit 0
+        ;;
+esac
+
+# Additional safety check - verify we're not in a reboot scenario
+# Check if systemctl is available and if we can determine the target
+if command -v systemctl >/dev/null 2>&1; then
+    # Check if reboot target is active
+    if systemctl list-jobs | grep -q reboot; then
+        c_echo "Detected reboot job active -> skipping power cut"
+        exit 0
+    fi
+fi
+
+# Final notice and pause before asserting GPIO so operator can see console
+c_echo "Finalizing shutdown power cut in 5s..."
+sleep 5
 
 if command -v python3 >/dev/null 2>&1; then
+    c_echo "Using python3 method to assert GPIO 259 HIGH for 0.5s"
 python3 - <<'PY'
 import gpiod, time
 chip = gpiod.Chip("/dev/gpiochip0")
@@ -37,10 +92,14 @@ PY
 fi
 
 if command -v gpioset >/dev/null 2>&1; then
+    c_echo "Using gpioset fallback to assert GPIO 259=1 for 0.5s"
     gpioset gpiochip0 259=1
+    c_echo "gpioset executed; sleeping 0.5s"
     sleep 0.5
     exit 0
 fi
+
+c_echo "No GPIO method available; nothing to do"
 
 exit 0
 

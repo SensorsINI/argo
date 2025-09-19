@@ -15,9 +15,13 @@ else
     echo "✅ rosbridge_server already installed"
 fi
 
+# Determine repo directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Create a launch file for rosbridge
 echo "📝 Creating rosbridge launch file..."
-cat > /home/orangepi/argo/foxglove/rosbridge_launch.py << 'EOF'
+cat > "$REPO_DIR/foxglove/rosbridge_launch.py" << 'EOF'
 #!/usr/bin/env python3
 """
 Launch file for rosbridge_server to enable Foxglove connection
@@ -36,13 +40,13 @@ def generate_launch_description():
     ])
 EOF
 
-chmod +x /home/orangepi/argo/foxglove/rosbridge_launch.py
+chmod +x "$REPO_DIR/foxglove/rosbridge_launch.py"
 
 echo "✅ rosbridge launch file created"
 
 # Create a combined launch file that includes rosbridge
 echo "📝 Creating combined argo + rosbridge launch file..."
-cat > /home/orangepi/argo/foxglove/argo_with_foxglove_launch.py << 'EOF'
+cat > "$REPO_DIR/foxglove/argo_with_foxglove_launch.py" << 'EOF'
 #!/usr/bin/env python3
 """
 Combined launch file for Argo sailboat with Foxglove support
@@ -65,7 +69,8 @@ def generate_launch_description():
     )
     
     # Get script directory
-    script_dir = '/home/orangepi/argo/scripts'
+    import os
+    script_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts')
     
     # Define all argo nodes
     argo_nodes = [
@@ -127,13 +132,13 @@ def generate_launch_description():
     ])
 EOF
 
-chmod +x /home/orangepi/argo/foxglove/argo_with_foxglove_launch.py
+chmod +x "$REPO_DIR/foxglove/argo_with_foxglove_launch.py"
 
 echo "✅ Combined launch file created"
 
 # Create a simple connection test script
 echo "📝 Creating connection test script..."
-cat > /home/orangepi/argo/foxglove/test_connection.py << 'EOF'
+cat > "$REPO_DIR/foxglove/test_connection.py" << 'EOF'
 #!/usr/bin/env python3
 """
 Test script to verify Foxglove connection
@@ -174,7 +179,7 @@ if __name__ == '__main__':
     main()
 EOF
 
-chmod +x /home/orangepi/argo/foxglove/test_connection.py
+chmod +x "$REPO_DIR/foxglove/test_connection.py"
 
 echo "✅ Connection test script created"
 
@@ -183,7 +188,7 @@ echo "🎉 Foxglove setup complete!"
 echo ""
 echo "📋 Next steps:"
 echo "1. Start your argo system with Foxglove support:"
-echo "   ros2 launch /home/orangepi/argo/foxglove/argo_with_foxglove_launch.py"
+echo "   ros2 launch $REPO_DIR/foxglove/argo_with_foxglove_launch.py"
 echo ""
 echo "2. Open Foxglove Studio in your browser:"
 echo "   https://studio.foxglove.dev/"
@@ -197,10 +202,10 @@ echo ""
 echo "4. Load the layout:"
 echo "   - Click 'Layout' in the top menu"
 echo "   - Select 'Import layout'"
-echo "   - Choose: /home/orangepi/argo/foxglove/argo_comprehensive_layout.json"
+echo "   - Choose: $REPO_DIR/foxglove/argo_comprehensive_layout.json"
 echo ""
 echo "5. Test the connection:"
-echo "   ros2 run argo /home/orangepi/argo/foxglove/test_connection.py"
+echo "   ros2 run argo $REPO_DIR/foxglove/test_connection.py"
 echo ""
 echo "🔍 To find your robot's IP address:"
 echo "   ip addr show | grep 'inet ' | grep -v '127.0.0.1'"

@@ -107,19 +107,21 @@ class ArgoLifecycleManager:
         
         # Launch each node in a separate process
         self.node_processes = []
+        self.node_output_threads = []
+        
         for script in node_scripts:
             script_path = os.path.join(nodes_dir, script)
             if os.path.exists(script_path):
                 print(f"🔧 DEBUG: Launching {script}...")
                 # Launch each node with proper ROS2 environment
+                # Use None for stdout/stderr so output goes directly to systemd journal
                 cmd = ['bash', '-c', f'source /opt/ros/humble/setup.bash && python3 {script_path}']
                 proc = subprocess.Popen(
                     cmd,
                     cwd=self.argo_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    universal_newlines=True,
-                    bufsize=1
+                    stdout=None,  # Let output go to systemd journal
+                    stderr=None,  # Let errors go to systemd journal
+                    universal_newlines=True
                 )
                 self.node_processes.append(proc)
                 print(f"✅ Launched {script} (PID: {proc.pid})")
@@ -195,35 +197,13 @@ class ArgoLifecycleManager:
                 if not self._is_launch_running():
                     print("❌ Launch process died during startup")
                     
-                    # Capture and display subprocess output for debugging
+                    # Log that process died (output is now in systemd journal)
                     if self.process and self.process.poll() is not None:
-                        print("🔧 DEBUG: Subprocess output:")
-                        try:
-                            output, _ = self.process.communicate(timeout=5)
-                            if output:
-                                print("--- STDOUT/STDERR ---")
-                                print(output)
-                                print("--- END OUTPUT ---")
-                            else:
-                                print("(No output captured)")
-                        except subprocess.TimeoutExpired:
-                            print("(Output capture timed out)")
-                        except Exception as e:
-                            print(f"(Error capturing output: {e})")
+                        print("🔧 DEBUG: Process died - check systemd journal for detailed output")
                     
                     return False
                 
-                # Check for subprocess output in real-time (non-blocking)
-                if self.process and self.process.poll() is None:
-                    try:
-                        # Try to read a line without blocking
-                        import select
-                        if select.select([self.process.stdout], [], [], 0)[0]:
-                            line = self.process.stdout.readline()
-                            if line:
-                                print(f"🔧 DEBUG: {line.strip()}")
-                    except:
-                        pass  # Ignore errors in real-time output capture
+                # Output is now handled directly by systemd journal
                 
                 # Check which nodes are running
                 node_status = self._get_node_status()
@@ -435,8 +415,93 @@ class ArgoLifecycleManager:
         # Individual node status
         print("🤖 ROS NODES:")
         node_status = self._get_node_status()
+        stopped_nodes = []
         for node, status in node_status.items():
             print(f"  {node}: {status}")
+            if "STOPPED" in status:
+                stopped_nodes.append(node)
+        
+        # Show key error messages for stopped nodes
+        if stopped_nodes:
+            print(f"\n⚠️  KEY ERROR MESSAGES (last 5 minutes):")
+            try:
+                # Get recent error messages from systemd journal
+                result = subprocess.run([
+                    'journalctl', '-u', 'argo-launch.service', '--since', '5 minutes ago',
+                    '--grep', '(FATAL|ERROR|CRITICAL)', '--no-pager'
+                ], capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0 and result.stdout:
+                    # Parse and show relevant error messages
+                    lines = result.stdout.strip().split('\n')
+                    recent_errors = []
+                    
+                    for line in lines:
+                        # Check if this line contains errors from any stopped node
+                        node_match = False
+                        matched_node = None
+                        for node in stopped_nodes:
+                            node_name = node.replace('.py', '_node')
+                            if node_name in line:
+                                node_match = True
+                                matched_node = node
+                                break
+                        
+                        if node_match:
+                            # Extract timestamp and message more robustly
+                            if ']: ' in line:
+                                parts = line.split(']: ', 1)
+                                if len(parts) == 2:
+                                    # Get timestamp (first 3 parts: month, day, time)
+                                    timestamp_parts = parts[0].split(' ')[0:3]
+                                    timestamp = ' '.join(timestamp_parts)
+                                    message = parts[1]
+                                    recent_errors.append(f"  {matched_node}: {timestamp} - {message}")
+                            else:
+                                # Fallback if parsing fails
+                                recent_errors.append(f"  {matched_node}: {line}")
+                    
+                    if recent_errors:
+                        # Group errors by node to ensure we show at least one error per stopped node
+                        errors_by_node = {}
+                        for error in recent_errors:
+                            # Extract node name from error line
+                            node_name = None
+                            for node in stopped_nodes:
+                                if node in error:
+                                    node_name = node
+                                    break
+                            if node_name:
+                                if node_name not in errors_by_node:
+                                    errors_by_node[node_name] = []
+                                errors_by_node[node_name].append(error)
+                        
+                        # Show errors, prioritizing FATAL messages and ensuring each stopped node is represented
+                        display_errors = []
+                        
+                        # First, collect all FATAL errors
+                        for node_errors in errors_by_node.values():
+                            fatal_node_errors = [e for e in node_errors if 'FATAL' in e]
+                            if fatal_node_errors:
+                                display_errors.append(fatal_node_errors[-1])  # Most recent FATAL per node
+                        
+                        # Then add other errors if we have space (max 8 total)
+                        for node_errors in errors_by_node.values():
+                            other_errors = [e for e in node_errors if 'FATAL' not in e]
+                            if other_errors and len(display_errors) < 8:
+                                display_errors.append(other_errors[-1])  # Most recent other error per node
+                        
+                        # Sort by timestamp (newest first) and limit to 8 errors
+                        display_errors = display_errors[-8:]
+                        
+                        for error in display_errors:
+                            print(error)
+                    else:
+                        print("  No specific node errors found in recent logs")
+                else:
+                    print("  Unable to retrieve error messages from systemd journal")
+            except Exception as e:
+                print(f"  Error retrieving messages: {e}")
         
         # If nothing is running, provide I2C bus health info to help diagnostics
         try:

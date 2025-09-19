@@ -136,13 +136,15 @@ def main():
     print("Creating temperature plot...")
     fig = create_temperature_plot(timestamps, gpu_temps, ve_temps, cpu_temps, ddr_temps)
     
-    # Save the plot
-    output_file = '/home/orangepi/argo/temperature_plot.png'
+    # Save the plot under repo root derived from this file
+    import os
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    output_file = os.path.join(repo_root, 'temperature_plot.png')
     fig.savefig(output_file, dpi=300, bbox_inches='tight')
     print(f"Temperature plot saved to: {output_file}")
     
     # Also save as PDF for better quality
-    output_pdf = '/home/orangepi/argo/temperature_plot.pdf'
+    output_pdf = os.path.join(repo_root, 'temperature_plot.pdf')
     fig.savefig(output_pdf, bbox_inches='tight')
     print(f"Temperature plot also saved as PDF: {output_pdf}")
     
