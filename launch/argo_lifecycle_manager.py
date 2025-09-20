@@ -48,8 +48,19 @@ class ArgoLifecycleManager:
         
         # Discover expected nodes dynamically
         discovered_nodes = self.node_manager.discover_nodes()
-        # Convert to .py format for process matching
-        self.expected_nodes = [f"{node}.py" for node in discovered_nodes if node != 'foxglove_bridge']
+        
+        # Convert to .py format for process matching and handle special nodes
+        self.expected_nodes = []
+        self.special_nodes = []
+        
+        for node in discovered_nodes:
+            if node == 'foxglove_bridge':
+                self.special_nodes.append(node)  # Special handling needed
+            else:
+                self.expected_nodes.append(f"{node}.py")  # Regular Python nodes
+        
+        # Combine all expected nodes for monitoring
+        self.all_expected_nodes = self.expected_nodes + self.special_nodes
         
         # Define critical nodes (essential for boat operation)
         self.critical_nodes = ['pwm.py', 'control.py']
@@ -95,7 +106,7 @@ class ArgoLifecycleManager:
     
     def _launch_nodes_directly(self):
         """Launch all expected nodes directly without using ros2 launch"""
-        print("🔧 DEBUG: Launching nodes directly...")
+        print("🚀 Launching nodes directly...")
         
         # Get the nodes directory
         nodes_dir = os.path.join(self.argo_dir, 'nodes')
@@ -104,16 +115,15 @@ class ArgoLifecycleManager:
         discovered_nodes = self.node_manager.discover_nodes()
         node_scripts = [f"{node}.py" for node in discovered_nodes if node != 'foxglove_bridge']
         
-        print(f"🔧 DEBUG: Found {len(node_scripts)} nodes to launch: {node_scripts}")
-        
         # Launch each node in a separate process
         self.node_processes = []
         self.node_output_threads = []
         
+        # Launch regular Python nodes
         for script in node_scripts:
             script_path = os.path.join(nodes_dir, script)
             if os.path.exists(script_path):
-                print(f"🔧 DEBUG: Launching {script}...")
+                print(f"✅ Launching {script}...")
                 # Launch each node with proper ROS2 environment
                 # Use None for stdout/stderr so output goes directly to systemd journal
                 cmd = ['bash', '-c', f'source /opt/ros/humble/setup.bash && python3 {script_path}']
@@ -129,6 +139,22 @@ class ArgoLifecycleManager:
             else:
                 print(f"⚠️  Warning: {script} not found at {script_path}")
         
+        # Launch special nodes (like foxglove_bridge)
+        for special_node in discovered_nodes:
+            if special_node == 'foxglove_bridge':
+                print(f"✅ Launching {special_node}...")
+                # Launch foxglove_bridge as a ROS2 package
+                cmd = ['bash', '-c', f'source /opt/ros/humble/setup.bash && ros2 run foxglove_bridge foxglove_bridge']
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=self.argo_dir,
+                    stdout=None,  # Let output go to systemd journal
+                    stderr=None,  # Let errors go to systemd journal
+                    universal_newlines=True
+                )
+                self.node_processes.append(proc)
+                print(f"✅ Launched {special_node} (PID: {proc.pid})")
+        
         # Set the main process to the first node process for compatibility
         if self.node_processes:
             self.process = self.node_processes[0]
@@ -141,14 +167,23 @@ class ArgoLifecycleManager:
         status = {}
         processes = self._get_ros2_processes()
         
-        for node in self.expected_nodes:
+        # Check all expected nodes (regular Python nodes + special nodes)
+        for node in self.all_expected_nodes:
             node_running = False
             for proc in processes:
                 try:
                     cmdline = ' '.join(proc.cmdline() or [])
-                    if node in cmdline:
-                        node_running = True
-                        break
+                    # Handle different node types
+                    if node == 'foxglove_bridge':
+                        # Special case: foxglove_bridge runs as "ros2 run foxglove_bridge foxglove_bridge"
+                        if 'foxglove_bridge' in cmdline and 'ros2 run' in cmdline:
+                            node_running = True
+                            break
+                    else:
+                        # Regular Python nodes: look for the .py filename
+                        if node in cmdline:
+                            node_running = True
+                            break
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
             status[node] = "🟢 RUNNING" if node_running else "🔴 STOPPED"
@@ -200,7 +235,7 @@ class ArgoLifecycleManager:
                     
                     # Log that process died (output is now in systemd journal)
                     if self.process and self.process.poll() is not None:
-                        print("🔧 DEBUG: Process died - check systemd journal for detailed output")
+                        print("💀 Process died - check systemd journal for detailed output")
                     
                     return False
                 
@@ -215,15 +250,15 @@ class ArgoLifecycleManager:
                 elapsed = time.time() - start_time
                 if elapsed > 0 and int(elapsed * 10) % 10 == 0:  # Print every second
                     if running_nodes and stopped_nodes:
-                        print(f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.expected_nodes)} running: {', '.join(running_nodes)}")
+                        print(f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.all_expected_nodes)} running: {', '.join(running_nodes)}")
                         print(f"   Not started: {', '.join(stopped_nodes)}")
                     elif running_nodes:
-                        print(f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.expected_nodes)} running: {', '.join(running_nodes)}")
+                        print(f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.all_expected_nodes)} running: {', '.join(running_nodes)}")
                     else:
                         print(f"⏳ Waiting for nodes to start... (no nodes detected yet)")
                 
                 # If all expected nodes are running, wait for stabilization with monitoring
-                if len(running_nodes) == len(self.expected_nodes):
+                if len(running_nodes) == len(self.all_expected_nodes):
                     print(f"\n✅ All {len(running_nodes)} nodes detected: {', '.join(running_nodes)}")
                     print(f"⏳ Monitoring nodes during {self.stabilization_wait}s stabilization period...")
                     
@@ -253,7 +288,7 @@ class ArgoLifecycleManager:
                         # Show progress during stabilization (journal-friendly)
                         remaining_time = self.stabilization_wait - (time.time() - stabilization_start)
                         if remaining_time > 0 and int(remaining_time) % 2 == 0:  # Only print every 2 seconds
-                            print(f"⏳ Stabilizing... {remaining_time:.1f}s remaining ({len(current_running)}/{len(self.expected_nodes)} nodes)")
+                            print(f"⏳ Stabilizing... {remaining_time:.1f}s remaining ({len(current_running)}/{len(self.all_expected_nodes)} nodes)")
                         
                         time.sleep(stabilization_check_interval)
                     
@@ -261,12 +296,12 @@ class ArgoLifecycleManager:
                     final_node_status = self._get_node_status()
                     final_running_nodes = [node for node, status in final_node_status.items() if "RUNNING" in status]
                     
-                    if len(final_running_nodes) == len(self.expected_nodes):
+                    if len(final_running_nodes) == len(self.all_expected_nodes):
                         print(f"✅ Argo launch process started successfully")
                         print(f"✅ All {len(final_running_nodes)} nodes running and stable: {', '.join(final_running_nodes)}")
                         return True
                     else:
-                        failed_nodes = [node for node in self.expected_nodes if node not in final_running_nodes]
+                        failed_nodes = [node for node in self.all_expected_nodes if node not in final_running_nodes]
                         print(f"⚠️  Some nodes failed during stabilization period")
                         print(f"   Still running: {', '.join(final_running_nodes)}")
                         print(f"   Failed nodes: {', '.join(failed_nodes)}")
@@ -276,14 +311,14 @@ class ArgoLifecycleManager:
                         
                         if len(critical_running) == len(self.critical_nodes):
                             print(f"✅ Critical nodes operational: {', '.join(critical_running)}")
-                            print(f"✅ Argo will continue operating with {len(final_running_nodes)}/{len(self.expected_nodes)} nodes")
+                            print(f"✅ Argo will continue operating with {len(final_running_nodes)}/{len(self.all_expected_nodes)} nodes")
                             return True
                         elif len(final_running_nodes) >= 3:  # At least 3 nodes running
-                            print(f"✅ Sufficient nodes running ({len(final_running_nodes)}/{len(self.expected_nodes)})")
+                            print(f"✅ Sufficient nodes running ({len(final_running_nodes)}/{len(self.all_expected_nodes)})")
                             print(f"✅ Argo will continue operating with available sensors")
                             return True
                         else:
-                            print(f"❌ Insufficient nodes running ({len(final_running_nodes)}/{len(self.expected_nodes)})")
+                            print(f"❌ Insufficient nodes running ({len(final_running_nodes)}/{len(self.all_expected_nodes)})")
                             print(f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in final_running_nodes])}")
                             return False
                 
@@ -296,7 +331,7 @@ class ArgoLifecycleManager:
             stopped_nodes = [node for node, status in node_status.items() if "STOPPED" in status]
             
             if running_nodes:
-                failed_nodes = [node for node in self.expected_nodes if node not in running_nodes]
+                failed_nodes = [node for node in self.all_expected_nodes if node not in running_nodes]
                 print(f"✅ {len(running_nodes)} nodes running: {', '.join(running_nodes)}")
                 if failed_nodes:
                     print(f"⚠️  {len(failed_nodes)} nodes not started: {', '.join(failed_nodes)}")
@@ -306,14 +341,14 @@ class ArgoLifecycleManager:
                 
                 if len(critical_running) == len(self.critical_nodes):
                     print(f"✅ Critical nodes operational: {', '.join(critical_running)}")
-                    print(f"✅ Argo will continue operating with {len(running_nodes)}/{len(self.expected_nodes)} nodes")
+                    print(f"✅ Argo will continue operating with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
                     return True
                 elif len(running_nodes) >= 3:  # At least 3 nodes running
-                    print(f"✅ Sufficient nodes running ({len(running_nodes)}/{len(self.expected_nodes)})")
+                    print(f"✅ Sufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
                     print(f"✅ Argo will continue operating with available sensors")
                     return True
                 else:
-                    print(f"❌ Insufficient nodes running ({len(running_nodes)}/{len(self.expected_nodes)})")
+                    print(f"❌ Insufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
                     print(f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in running_nodes])}")
                     return False
             else:
@@ -400,15 +435,14 @@ class ArgoLifecycleManager:
         # Stop individual node processes
         try:
             if hasattr(self, 'node_processes') and self.node_processes:
-                print(f"🔧 DEBUG: Stopping {len(self.node_processes)} node processes...")
+                print(f"🛑 Stopping {len(self.node_processes)} node processes...")
                 for proc in self.node_processes:
                     if proc and proc.poll() is None:
-                        print(f"🔧 DEBUG: Terminating process {proc.pid}")
                         proc.terminate()
                         try:
                             proc.wait(timeout=5)
                         except subprocess.TimeoutExpired:
-                            print(f"🔧 DEBUG: Force killing process {proc.pid}")
+                            print(f"⚡ Force killing process {proc.pid}")
                             proc.kill()
                             proc.wait()
                 self.node_processes = []
