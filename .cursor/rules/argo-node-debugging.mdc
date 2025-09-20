@@ -1,0 +1,81 @@
+---
+globs: launch/*.py,nodes/*.py
+description: "Debugging patterns for Argo ROS2 node failures and status issues"
+---
+
+# Argo Node Debugging Guide
+
+## Status Detection Issues
+
+When debugging node status problems, follow this systematic approach:
+
+### 1. Check Process Detection
+```bash
+# Test raw process detection
+ps aux | grep -E '(anem\.py|battery_water\.py|control\.py)' | grep -v grep
+
+# Test node manager detection
+python3 -c "
+import sys; sys.path.append('launch')
+from argo_node_utils import ArgoNodeManager
+manager = ArgoNodeManager()
+status = manager.get_node_status()
+for node, info in status.items():
+    print(f'{node}: {\"RUNNING\" if info[\"running\"] else \"STOPPED\"}')"
+```
+
+### 2. Timing Analysis
+```bash
+# Check node startup timing
+journalctl -u argo-launch.service --since "2 minutes ago" | grep -E "(Launched|FATAL|Started)"
+
+# Monitor real-time failures
+journalctl -u argo-launch.service -f | grep -E "(FATAL|ERROR|Node failure)"
+```
+
+### 3. Common Node Failure Patterns
+
+#### Hardware Sensor Failures (anem.py, imu.py, battery_water.py)
+- **Symptom**: FATAL errors about I2C device detection
+- **Timing**: Usually fail 2-10 seconds after initialization
+- **Detection**: Check I2C bus health with `i2cdetect -y 0`
+
+#### Communication Failures (gps.py)
+- **Symptom**: Serial port access issues
+- **Timing**: Can fail immediately or after timeout
+- **Detection**: Check device permissions and port availability
+
+#### Resource Failures (pwm.py, control.py)
+- **Symptom**: GPIO or hardware access denied
+- **Timing**: Usually immediate
+- **Detection**: Check user permissions and hardware availability
+
+### 4. Lifecycle Manager Debug Mode
+
+Always test with debug output when investigating:
+```bash
+python3 launch/argo_lifecycle_manager.py start --debug
+```
+
+### 5. Status Check Timing Rules
+
+- **Never check status < 10 seconds** after service start
+- **Allow 15+ seconds** for full stabilization
+- **Monitor continuously** during startup, don't rely on single checks
+- **Check systemd journal** for truncated output issues
+
+## Error Message Extraction
+
+The system extracts FATAL messages from systemd journal:
+```python
+# Pattern for extracting node-specific errors
+fatal_messages = self._get_fatal_messages_for_nodes()
+for node in stopped_nodes:
+    if node in fatal_messages:
+        print(f"   {node}: {fatal_messages[node]}")
+```
+
+Always ensure error messages are:
+1. Node-specific (contain node name patterns)
+2. Timestamped for correlation
+3. Concise but informative (< 50 chars for display)

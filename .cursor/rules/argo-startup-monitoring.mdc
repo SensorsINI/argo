@@ -1,0 +1,127 @@
+---
+globs: launch/argo_lifecycle_manager.py
+description: "Startup monitoring and stabilization patterns for ROS2 node management"
+---
+
+# Argo Startup Monitoring Patterns
+
+## Active Stabilization Monitoring
+
+### The Problem
+Static sleep during startup stabilization misses node failures:
+```python
+# ❌ BAD: Misses failures during sleep
+print("⏳ Waiting for stabilization...")
+time.sleep(15.0)  # Nodes can fail during this time
+final_status = self._get_node_status()
+```
+
+### The Solution
+Active monitoring with failure detection:
+```python
+# ✅ GOOD: Monitors continuously during stabilization
+stabilization_start = time.time()
+while time.time() - stabilization_start < self.stabilization_wait:
+    current_status = self._get_node_status()
+    current_stopped = [node for node, status in current_status.items() if "STOPPED" in status]
+    
+    if current_stopped:
+        print(f"\n⚠️  Node failure detected during stabilization: {', '.join(current_stopped)}")
+        # Get and display error messages
+        fatal_messages = self._get_fatal_messages_for_nodes()
+        for failed_node in current_stopped:
+            if failed_node in fatal_messages:
+                print(f"   {failed_node}: {fatal_messages[failed_node]}")
+        break
+    
+    time.sleep(1.0)  # Check every second
+```
+
+## Startup Flow Pattern
+
+### 1. Node Launch Phase
+```python
+def _launch_nodes_directly(self):
+    for script in node_scripts:
+        cmd = ['bash', '-c', f'source /opt/ros/humble/setup.bash && python3 {script_path}']
+        proc = subprocess.Popen(cmd, cwd=self.argo_dir, stdout=None, stderr=None)
+        self.node_processes.append(proc)
+```
+
+### 2. Initial Detection Phase
+```python
+timeout = 30
+check_interval = 0.3
+while time.time() - start_time < timeout:
+    node_status = self._get_node_status()
+    running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
+    
+    # Progress reporting (journal-friendly)
+    if int(elapsed * 10) % 10 == 0:
+        print(f"⏳ Waiting for nodes... {len(running_nodes)}/{len(self.expected_nodes)} running")
+    
+    if len(running_nodes) == len(self.expected_nodes):
+        break  # All nodes detected, proceed to stabilization
+```
+
+### 3. Stabilization Monitoring Phase
+```python
+# Monitor during stabilization - don't just sleep!
+stabilization_start = time.time()
+while time.time() - stabilization_start < self.stabilization_wait:
+    current_status = self._get_node_status()
+    # Check for failures and handle immediately
+```
+
+### 4. Final Validation Phase
+```python
+final_node_status = self._get_node_status()
+final_running_nodes = [node for node, status in final_node_status.items() if "RUNNING" in status]
+
+# Determine success based on critical nodes and minimum thresholds
+critical_running = [node for node in self.critical_nodes if node in final_running_nodes]
+if len(critical_running) == len(self.critical_nodes):
+    return True  # Success
+elif len(final_running_nodes) >= 3:
+    return True  # Sufficient nodes
+else:
+    return False  # Insufficient nodes
+```
+
+## Critical Node Management
+
+### Define Critical Nodes
+```python
+self.critical_nodes = ['pwm.py', 'control.py']  # Essential for boat operation
+```
+
+### Success Criteria
+1. **Ideal**: All expected nodes running
+2. **Acceptable**: All critical nodes + minimum 3 total nodes
+3. **Failure**: Missing critical nodes or < 3 total nodes
+
+## Error Message Integration
+
+### Extract FATAL Messages
+```python
+def _get_fatal_messages_for_nodes(self) -> Dict[str, str]:
+    result = subprocess.run([
+        'journalctl', '-u', 'argo-launch.service', '--since', self.journal_since,
+        '--grep', 'FATAL', '--no-pager', '-o', 'short-precise'
+    ], capture_output=True, text=True, timeout=5)
+    
+    # Parse and extract node-specific FATAL messages
+    # Return concise error descriptions for display
+```
+
+### Display Failures
+```python
+if current_stopped:
+    print(f"\n⚠️  Node failure detected during stabilization: {', '.join(current_stopped)}")
+    fatal_messages = self._get_fatal_messages_for_nodes()
+    for failed_node in current_stopped:
+        if failed_node in fatal_messages:
+            print(f"   {failed_node}: {fatal_messages[failed_node]}")
+```
+
+This pattern ensures immediate detection and reporting of node failures during the critical startup period.

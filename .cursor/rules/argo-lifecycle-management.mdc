@@ -1,0 +1,53 @@
+---
+alwaysApply: true
+description: "Argo ROS2 lifecycle management system architecture and patterns"
+---
+
+# Argo Lifecycle Management System
+
+## Core Architecture
+
+The Argo system uses a centralized lifecycle management approach with these key components:
+
+### Main Components
+- **[launch/argo_lifecycle_manager.py](mdc:launch/argo_lifecycle_manager.py)** - Primary lifecycle controller with startup monitoring, node health checking, and failure detection
+- **[launch/argo_node_utils.py](mdc:launch/argo_node_utils.py)** - Centralized node discovery and process management utilities
+- **[launch/argo_start.sh](mdc:launch/argo_start.sh)** - Start script with proper timing for node initialization
+- **[launch/argo-launch.service](mdc:launch/argo-launch.service)** - Systemd service configuration
+
+### Key Design Patterns
+
+1. **Real-time Monitoring**: The lifecycle manager actively monitors nodes during startup stabilization periods rather than using static sleeps
+2. **Process Detection**: Uses `ps aux | grep` with node-specific patterns for reliable process detection
+3. **Failure Handling**: Detects and reports FATAL errors immediately during startup, not just on manual status checks
+4. **Journal Integration**: Output is designed to work properly with systemd journal logging (no carriage returns)
+
+## Critical Timing Considerations
+
+- **Startup Monitoring**: 15-second stabilization period with 1-second check intervals
+- **Status Check Delay**: Allow 10+ seconds after service start before checking final status
+- **Node Failure Detection**: Some nodes (like anem.py) can take 8-9 seconds to fail after initialization
+
+## Node Health Patterns
+
+```python
+# Always check node status with proper timing
+node_status = self._get_node_status()
+running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
+stopped_nodes = [node for node, status in node_status.items() if "STOPPED" in status]
+
+# Monitor during stabilization, don't just sleep
+while time.time() - start_time < timeout:
+    current_status = self._get_node_status()
+    if stopped_nodes:
+        # Handle failures immediately
+        break
+    time.sleep(check_interval)
+```
+
+## Common Issues to Avoid
+
+1. **False Positive Status**: Don't check node status too quickly after startup - allow time for failures
+2. **Missing Failures**: Always monitor during stabilization periods, never use static sleep
+3. **Journal Truncation**: Avoid `\r` carriage returns in progress output for systemd compatibility
+4. **Process Detection**: Use consistent node naming patterns for reliable process matching

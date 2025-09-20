@@ -1,0 +1,98 @@
+---
+globs: launch/*.sh,launch/*.service
+description: "Systemd service integration patterns for Argo ROS2 system"
+---
+
+# Argo Systemd Integration Patterns
+
+## Service Configuration
+
+The [launch/argo-launch.service](mdc:launch/argo-launch.service) follows these patterns:
+
+### Key Service Properties
+```ini
+[Service]
+Type=simple                    # Foreground process
+User=orangepi                  # Non-root user
+WorkingDirectory=/home/orangepi/argo
+EnvironmentFile=/home/orangepi/argo/launch/argo.env
+ExecStart=... python3 launch/argo_lifecycle_manager.py continuous
+StandardOutput=journal         # Direct to systemd journal
+StandardError=journal
+```
+
+### Environment Setup
+Always source ROS2 environment in service commands:
+```bash
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 launch/argo_lifecycle_manager.py continuous'
+```
+
+## Shell Script Integration
+
+### Timing Patterns in [launch/argo_start.sh](mdc:launch/argo_start.sh)
+
+```bash
+# Start service
+sudo systemctl start argo-launch.service
+
+# CRITICAL: Allow sufficient time for node initialization and potential failures
+echo "⏳ Waiting for nodes to initialize..."
+sleep 10  # Minimum 10 seconds - some nodes take 8-9s to fail
+
+# Then check status
+python3 launch/argo_lifecycle_manager.py status
+```
+
+### Service State Checking
+```bash
+# Check both user and system service contexts
+if systemctl --user is-active --quiet argo-launch.service 2>/dev/null || 
+   systemctl is-active --quiet argo-launch.service 2>/dev/null; then
+    echo "✅ Service is active"
+fi
+```
+
+## Journal Output Compatibility
+
+### Avoid Carriage Returns
+❌ **Wrong**: `print(f"\r⏳ Progress...", end='', flush=True)`
+✅ **Correct**: `print(f"⏳ Progress...")`
+
+Systemd journal truncates carriage return sequences as "blob data", making debugging impossible.
+
+### Progress Reporting
+```python
+# Journal-friendly progress updates
+if elapsed > 0 and int(elapsed * 10) % 10 == 0:  # Every second
+    print(f"⏳ Status update: {progress_info}")
+```
+
+## Service Lifecycle Patterns
+
+### Graceful Shutdown
+```python
+def _signal_handler(self, signum, frame):
+    print(f"\n🛑 Received signal {signum}, shutting down...")
+    self.monitoring = False
+    self.stop()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, self._signal_handler)
+signal.signal(signal.SIGTERM, self._signal_handler)
+```
+
+### Restart Policies
+```ini
+[Service]
+Restart=on-failure
+RestartSec=5
+```
+
+Use `on-failure` rather than `always` to prevent restart loops on persistent hardware issues.
+
+## Common Integration Issues
+
+1. **Permission Problems**: Ensure service user has access to GPIO, I2C, serial devices
+2. **Environment Missing**: Always source ROS2 setup in service commands
+3. **Working Directory**: Set correct WorkingDirectory for relative path access
+4. **Output Truncation**: Avoid interactive output patterns in systemd services
