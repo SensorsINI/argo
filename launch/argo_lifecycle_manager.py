@@ -406,18 +406,40 @@ class ArgoLifecycleManager:
         print(f"🚢 ARGO STATUS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)
         
+        # Check if argo-launch.service is running
+        service_running = False
+        try:
+            result = subprocess.run(['systemctl', 'is-active', 'argo-launch.service'], 
+                                  capture_output=True, text=True, timeout=2)
+            service_running = result.returncode == 0 and result.stdout.strip() == 'active'
+        except Exception:
+            service_running = False
+        
         # Main launch process status
         if self._is_launch_running():
             print("📋 LAUNCH PROCESS: 🟢 RUNNING")
         else:
             print("📋 LAUNCH PROCESS: 🔴 STOPPED")
         
+        if service_running:
+            print("📋 SYSTEMD SERVICE: 🟢 RUNNING")
+        else:
+            print("📋 SYSTEMD SERVICE: 🔴 STOPPED")
+        
+        # Get FATAL messages for stopped nodes if service is running
+        node_fatal_messages = {}
+        if service_running:
+            node_fatal_messages = self._get_fatal_messages_for_nodes()
+        
         # Individual node status
         print("🤖 ROS NODES:")
         node_status = self._get_node_status()
         stopped_nodes = []
         for node, status in node_status.items():
-            print(f"  {node}: {status}")
+            if "STOPPED" in status and node in node_fatal_messages:
+                print(f"  {node}: {status} - {node_fatal_messages[node]}")
+            else:
+                print(f"  {node}: {status}")
             if "STOPPED" in status:
                 stopped_nodes.append(node)
         
@@ -604,6 +626,71 @@ class ArgoLifecycleManager:
                     except ValueError:
                         continue
         return sorted(set(detected))
+    
+    def _get_fatal_messages_for_nodes(self) -> Dict[str, str]:
+        """Get the most recent FATAL message for each node from systemd journal"""
+        fatal_messages = {}
+        
+        try:
+            # Get recent FATAL messages from systemd journal for argo-launch.service
+            # Look back further to catch initial startup failures
+            result = subprocess.run([
+                'journalctl', '-u', 'argo-launch.service', '--since', '1 hour ago',
+                '--grep', 'FATAL', '--no-pager', '-o', 'short-precise'
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout:
+                lines = result.stdout.strip().split('\n')
+                
+                # Parse lines to extract node-specific FATAL messages
+                # Process in reverse order to get the most recent message for each node
+                for line in reversed(lines):
+                    if 'FATAL' in line:
+                        # Try to identify which node this FATAL message belongs to
+                        for node in self.expected_nodes:
+                            node_name = node.replace('.py', '')
+                            # Look for node name patterns in the log line
+                            if (f'{node_name}_node' in line or 
+                                f'/{node_name}' in line or 
+                                f'{node_name}.py' in line or
+                                f'[{node_name}]' in line or
+                                f'anemometer' in line.lower() and node_name == 'anem'):
+                                
+                                # Skip if we already have a message for this node (most recent)
+                                if node in fatal_messages:
+                                    continue
+                                
+                                # Extract the FATAL message part
+                                if 'FATAL:' in line:
+                                    # Find the FATAL message and extract a concise version
+                                    fatal_part = line.split('FATAL:', 1)
+                                    if len(fatal_part) > 1:
+                                        message = fatal_part[1].strip()
+                                        # Clean up the message - take first meaningful sentence
+                                        if '.' in message:
+                                            message = message.split('.')[0].strip()
+                                        # Limit message length for display
+                                        if len(message) > 50:
+                                            message = message[:47] + "..."
+                                        
+                                        # Store the most recent FATAL for this node
+                                        fatal_messages[node] = f"FATAL: {message}"
+                                elif 'fatal(' in line.lower():
+                                    # Handle ROS2 logger format: .fatal("message")
+                                    import re
+                                    match = re.search(r'fatal\("([^"]*)"', line, re.IGNORECASE)
+                                    if match:
+                                        message = match.group(1)
+                                        if len(message) > 50:
+                                            message = message[:47] + "..."
+                                        fatal_messages[node] = f"FATAL: {message}"
+                                break
+                
+        except Exception as e:
+            # Silently fail - this is just for enhanced display
+            pass
+            
+        return fatal_messages
 
     def _print_i2c_health(self, bus: int = 0) -> None:
         """Print a summary of I2C device presence vs expected sensors."""
