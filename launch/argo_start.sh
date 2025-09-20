@@ -28,9 +28,9 @@ fi
 
 echo "📊 Monitoring service status..."
 
-# Wait for service to start and nodes to initialize
+# Wait for service to start and nodes to initialize (allow time for failures)
 echo "⏳ Waiting for nodes to initialize..."
-sleep 5
+sleep 10
 
 # Check if service is running
 if systemctl --user is-active --quiet argo-launch.service 2>/dev/null || systemctl is-active --quiet argo-launch.service 2>/dev/null; then

@@ -40,7 +40,8 @@ class ArgoLifecycleManager:
         self.restart_count = 0
         self.max_restarts = 5
         self.restart_delay = 2.0
-        self.stabilization_wait = 5.0  # Additional wait time for nodes to stabilize
+        self.stabilization_wait = 15.0  # Additional wait time for nodes to stabilize
+        self.journal_since = 'today'
         
         # Initialize node manager for discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
@@ -210,19 +211,51 @@ class ArgoLifecycleManager:
                 running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
                 stopped_nodes = [node for node, status in node_status.items() if "STOPPED" in status]
                 
-                # Show progress with a single line that updates
-                if running_nodes and stopped_nodes:
-                    print(f"\r⏳ Waiting for nodes to start... {', '.join(running_nodes)} (not started: {', '.join(stopped_nodes)})", end='', flush=True)
-                elif running_nodes:
-                    print(f"\r⏳ Waiting for nodes to start... {', '.join(running_nodes)}", end='', flush=True)
-                else:
-                    print(f"\r⏳ Waiting for nodes to start... (no nodes detected yet)", end='', flush=True)
+                # Show progress periodically (journal-friendly)
+                elapsed = time.time() - start_time
+                if elapsed > 0 and int(elapsed * 10) % 10 == 0:  # Print every second
+                    if running_nodes and stopped_nodes:
+                        print(f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.expected_nodes)} running: {', '.join(running_nodes)}")
+                        print(f"   Not started: {', '.join(stopped_nodes)}")
+                    elif running_nodes:
+                        print(f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.expected_nodes)} running: {', '.join(running_nodes)}")
+                    else:
+                        print(f"⏳ Waiting for nodes to start... (no nodes detected yet)")
                 
-                # If all expected nodes are running, wait for stabilization
+                # If all expected nodes are running, wait for stabilization with monitoring
                 if len(running_nodes) == len(self.expected_nodes):
                     print(f"\n✅ All {len(running_nodes)} nodes detected: {', '.join(running_nodes)}")
-                    print(f"⏳ Waiting {self.stabilization_wait}s for nodes to stabilize...")
-                    time.sleep(self.stabilization_wait)
+                    print(f"⏳ Monitoring nodes during {self.stabilization_wait}s stabilization period...")
+                    
+                    # Monitor nodes during stabilization period
+                    stabilization_start = time.time()
+                    stabilization_check_interval = 1.0  # Check every second during stabilization
+                    
+                    while time.time() - stabilization_start < self.stabilization_wait:
+                        # Check for node failures during stabilization
+                        current_status = self._get_node_status()
+                        current_running = [node for node, status in current_status.items() if "RUNNING" in status]
+                        current_stopped = [node for node, status in current_status.items() if "STOPPED" in status]
+                        
+                        if current_stopped:
+                            # Node(s) failed during stabilization
+                            print(f"\n⚠️  Node failure detected during stabilization: {', '.join(current_stopped)}")
+                            
+                            # Get error messages for failed nodes
+                            fatal_messages = self._get_fatal_messages_for_nodes()
+                            for failed_node in current_stopped:
+                                if failed_node in fatal_messages:
+                                    print(f"   {failed_node}: {fatal_messages[failed_node]}")
+                            
+                            # Break out of stabilization to handle the failure
+                            break
+                        
+                        # Show progress during stabilization (journal-friendly)
+                        remaining_time = self.stabilization_wait - (time.time() - stabilization_start)
+                        if remaining_time > 0 and int(remaining_time) % 2 == 0:  # Only print every 2 seconds
+                            print(f"⏳ Stabilizing... {remaining_time:.1f}s remaining ({len(current_running)}/{len(self.expected_nodes)} nodes)")
+                        
+                        time.sleep(stabilization_check_interval)
                     
                     # Final check after stabilization period
                     final_node_status = self._get_node_status()
@@ -445,7 +478,7 @@ class ArgoLifecycleManager:
         
         # Show key error messages for stopped nodes
         if stopped_nodes:
-            print(f"\n⚠️  KEY ERROR MESSAGES (last 5 minutes):")
+            print(f"\n⚠️  KEY ERROR MESSAGES (since {self.journal_since}):")
             try:
                 # Get recent error messages from systemd journal
                 result = subprocess.run([
@@ -635,7 +668,7 @@ class ArgoLifecycleManager:
             # Get recent FATAL messages from systemd journal for argo-launch.service
             # Look back further to catch initial startup failures
             result = subprocess.run([
-                'journalctl', '-u', 'argo-launch.service', '--since', '1 hour ago',
+                'journalctl', '-u', 'argo-launch.service', '--since', self.journal_since,
                 '--grep', 'FATAL', '--no-pager', '-o', 'short-precise'
             ], capture_output=True, text=True, timeout=5)
             
