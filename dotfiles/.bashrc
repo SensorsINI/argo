@@ -28,6 +28,6 @@ argo_quick_timer() {
 
 PATH="$HOME/argo/launch:$HOME/argo/nodes:$PATH"
 
-# Run Argo status check on shell startup (with hourly timer)
-# This will only show status if it's been more than an hour since last check
+# Run Argo status check on shell startup (with quick timer)
+# This will only show status if it's been more few minutes since last check
 argo_quick_timer
