@@ -12,6 +12,7 @@ diagnostic-msgs
 # Hardware communication
 smbus2          # I2C communication for sensors (MAX11612, SHT45, ICM-20948)
 pyserial        # Serial communication for GPS (u-blox NEO-M9N)
+pynmea2         # NMEA sentence parsing for GPS NavSatFix messages
 
 # Scientific computing
 numpy           # Numerical computations for sensor data processing

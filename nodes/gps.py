@@ -6,6 +6,7 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import String, Float64
 from geometry_msgs.msg import Vector3
+from sensor_msgs.msg import NavSatFix, NavSatStatus
 import serial
 import time
 import operator
@@ -13,6 +14,7 @@ import argparse
 import re
 import math
 from functools import reduce
+import pynmea2
 
 class GpsNode(Node):
     """
@@ -56,6 +58,9 @@ class GpsNode(Node):
         self.pub_cog = self.create_publisher(Float64, 'gps_cog', 10)  # Course Over Ground (degrees)
         self.pub_velocity = self.create_publisher(Vector3, 'gps_velocity', 10)  # Combined velocity vector
         
+        # Publisher for standard ROS NavSatFix messages (for mapping)
+        self.pub_navsat = self.create_publisher(NavSatFix, 'fix', 10)  # Standard GPS fix for mapping
+        
         # Navigation data storage
         self.current_sog = None  # Speed in knots
         self.current_cog = None  # Course in degrees true
@@ -63,6 +68,13 @@ class GpsNode(Node):
         self.current_latitude = None  # Latitude in decimal degrees
         self.current_longitude = None  # Longitude in decimal degrees
         self.satellites_used = 0  # Number of satellites used in fix
+        
+        # NavSatFix data storage
+        self.current_altitude = None  # Altitude in meters above WGS84 ellipsoid
+        self.position_covariance = [0.0] * 9  # Position covariance matrix
+        self.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
+        self.navsat_status = NavSatStatus.STATUS_NO_FIX
+        self.navsat_service = NavSatStatus.SERVICE_GPS
         
         # Periodic logging control
         self.debug_mode = debug_mode
@@ -215,6 +227,7 @@ class GpsNode(Node):
         self.get_logger().info("Publishing SOG (Speed Over Ground) to /gps_sog topic")
         self.get_logger().info("Publishing COG (Course Over Ground) to /gps_cog topic")
         self.get_logger().info("Publishing combined velocity vector to /gps_velocity topic")
+        self.get_logger().info("Publishing standard NavSatFix messages to /fix topic (for mapping)")
 
     def enable_nmea_sentences(self):
         """Enable RMC and VTG NMEA sentences on u-blox NEO-N9M for SOG/COG data."""
@@ -297,10 +310,14 @@ class GpsNode(Node):
                     self.current_sog = float(speed_knots)
                     self.current_cog = float(course_true)
                     self.gps_fix_valid = True
+                    # Set NavSat status to indicate we have a fix
+                    if self.navsat_status == NavSatStatus.STATUS_NO_FIX:
+                        self.navsat_status = NavSatStatus.STATUS_FIX
                     self.get_logger().debug(f"RMC: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
                     return True
                 else:
                     self.gps_fix_valid = False
+                    self.navsat_status = NavSatStatus.STATUS_NO_FIX
         except (ValueError, IndexError) as e:
             self.get_logger().debug(f"Error parsing RMC sentence: {e}")
         return False
@@ -337,6 +354,9 @@ class GpsNode(Node):
                 lon_dir = parts[5]       # E or W
                 fix_quality = parts[6]   # 0=invalid, 1=GPS, 2=DGPS, etc.
                 num_sats = parts[7]      # Number of satellites used
+                hdop = parts[8]          # Horizontal dilution of precision
+                altitude_raw = parts[9]  # Altitude above mean sea level
+                alt_unit = parts[10]     # Altitude units (usually M for meters)
                 
                 if fix_quality and int(fix_quality) > 0 and latitude_raw and longitude_raw and num_sats:
                     # Convert DDMM.MMMM to decimal degrees
@@ -354,8 +374,37 @@ class GpsNode(Node):
                         if lon_dir == 'W':
                             self.current_longitude = -self.current_longitude
                     
+                    # Extract altitude
+                    if altitude_raw:
+                        self.current_altitude = float(altitude_raw)
+                        # Convert to meters if needed (usually already in meters)
+                        if alt_unit != 'M':
+                            self.get_logger().debug(f"Unexpected altitude unit: {alt_unit}")
+                    
                     self.satellites_used = int(num_sats)
-                    self.get_logger().debug(f"GGA: Position {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, {self.satellites_used} sats")
+                    
+                    # Update NavSat status based on fix quality
+                    if int(fix_quality) == 1:
+                        self.navsat_status = NavSatStatus.STATUS_FIX
+                    elif int(fix_quality) == 2:
+                        self.navsat_status = NavSatStatus.STATUS_SBAS_FIX
+                    elif int(fix_quality) >= 4:
+                        self.navsat_status = NavSatStatus.STATUS_GBAS_FIX
+                    else:
+                        self.navsat_status = NavSatStatus.STATUS_FIX
+                    
+                    # Update position covariance based on HDOP if available
+                    if hdop:
+                        hdop_val = float(hdop)
+                        # Rough conversion from HDOP to position variance (in meters^2)
+                        # This is a simplified approximation
+                        variance = (hdop_val * 2.0) ** 2
+                        self.position_covariance[0] = variance  # East-East
+                        self.position_covariance[4] = variance  # North-North  
+                        self.position_covariance[8] = variance * 2  # Up-Up (usually worse than horizontal)
+                        self.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
+                    
+                    self.get_logger().debug(f"GGA: Position {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt {self.current_altitude}m, {self.satellites_used} sats")
                     return True
                     
         except (ValueError, IndexError) as e:
@@ -379,9 +428,10 @@ class GpsNode(Node):
                 lat_str = f"{abs(self.current_latitude):.6f}°{'N' if self.current_latitude >= 0 else 'S'}"
                 lon_str = f"{abs(self.current_longitude):.6f}°{'E' if self.current_longitude >= 0 else 'W'}"
                 
+                alt_str = f", Alt: {self.current_altitude:.1f}m" if self.current_altitude is not None else ""
                 self.get_logger().info(
                     f"GPS Fix: {self.satellites_used} satellites, "
-                    f"Position: {lat_str} {lon_str}, "
+                    f"Position: {lat_str} {lon_str}{alt_str}, "
                     f"COG: {self.current_cog:.1f}°, SOG: {sog_ms:.2f} m/s"
                 )
                 self.last_fix_log_time = current_time
@@ -427,6 +477,37 @@ class GpsNode(Node):
             
             self.get_logger().debug(f"Published nav data: SOG={self.current_sog:.2f}kt, COG={self.current_cog:.1f}°")
 
+    def publish_navsat_fix(self):
+        """Publish NavSatFix message for mapping applications."""
+        if (self.current_latitude is not None and 
+            self.current_longitude is not None and 
+            self.gps_fix_valid):
+            
+            # Create NavSatFix message
+            navsat_msg = NavSatFix()
+            
+            # Header
+            navsat_msg.header.stamp = self.get_clock().now().to_msg()
+            navsat_msg.header.frame_id = self.gps_frame_id
+            
+            # Status
+            navsat_msg.status.status = self.navsat_status
+            navsat_msg.status.service = self.navsat_service
+            
+            # Position
+            navsat_msg.latitude = self.current_latitude
+            navsat_msg.longitude = self.current_longitude
+            navsat_msg.altitude = self.current_altitude if self.current_altitude is not None else 0.0
+            
+            # Covariance
+            navsat_msg.position_covariance = self.position_covariance
+            navsat_msg.position_covariance_type = self.position_covariance_type
+            
+            # Publish
+            self.pub_navsat.publish(navsat_msg)
+            
+            self.get_logger().debug(f"Published NavSatFix: {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt: {self.current_altitude}m")
+
     def read_and_publish(self):
         """Reads data from the serial port and publishes it."""
         # Check for GPS communication timeout
@@ -464,7 +545,8 @@ class GpsNode(Node):
                         if self.parse_vtg_sentence(data_str):
                             self.publish_navigation_data()
                     elif data_str.startswith('$GNGGA') or data_str.startswith('$GPGGA'):
-                        self.parse_gga_sentence(data_str)
+                        if self.parse_gga_sentence(data_str):
+                            self.publish_navsat_fix()
                     
                     # Handle periodic status logging for normal operation
                     self.periodic_status_logging()

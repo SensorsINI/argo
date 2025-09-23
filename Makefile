@@ -170,6 +170,7 @@ install-python-deps:
 	@echo "  - std-msgs, geometry-msgs: ROS2 message types"
 	@echo "  - smbus2: I2C communication for sensors"
 	@echo "  - pyserial: Serial communication for GPS"
+	@echo "  - pynmea2: NMEA sentence parsing for GPS NavSatFix messages"
 	@echo "  - numpy: Numerical computations"
 	@echo "  - PyYAML: Configuration file parsing"
 	@echo "  - matplotlib: Optional package (ADC testing plots)"
