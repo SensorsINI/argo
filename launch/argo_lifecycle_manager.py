@@ -609,7 +609,27 @@ class ArgoLifecycleManager:
             # add free disk space
             disk = psutil.disk_usage("/")
             free_disk = disk.free / (1024**3)
-            print(f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Memory {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used)  ")
+            # INSERT_YOUR_CODE
+            # Try to get CPU temperature from sensors (cpu_thermal-virtual-0)
+            cpu_temp = None
+            try:
+                sensors_output = subprocess.check_output(['sensors'], text=True)
+                lines = sensors_output.splitlines()
+                for i, line in enumerate(lines):
+                    if 'cpu_thermal-virtual-0' in line:
+                        # Look for the next line with 'temp1'
+                        for j in range(i+1, min(i+4, len(lines))):
+                            if 'temp1:' in lines[j]:
+                                parts = lines[j].split()
+                                for part in parts:
+                                    if part.startswith('+') and part.endswith('°C'):
+                                        cpu_temp = part.strip('+°C')
+                                        break
+                                break
+                        break
+            except Exception:
+                cpu_temp = None
+            print(f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Memory {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temperature {cpu_temp}°C")
         except:
             print("📊 SYSTEM: Unable to get system info")
         
