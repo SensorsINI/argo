@@ -26,6 +26,105 @@ See the Argo autonomous sailboat in action at the 2024 CCNW (before current wate
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
 - **PWM I/O**: Custom kernel module for radio control and servo interfaces
 
+## ROS2 Software Architecture
+
+### Project Organization
+
+The Argo system follows a modular ROS2 architecture with clear separation of concerns:
+
+**Directory Structure:**
+- **`nodes/`** - Individual ROS2 nodes (Python-based sensor interfaces)
+- **`launch/`** - Lifecycle management, systemd services, and launch configurations
+- **`power_control/`** - Power management system (separate ROS2 package)
+- **`foxglove/`** - Visualization layouts for Foxglove Studio
+
+## Directory Overview
+
+### `launch/` - System Management & Services
+Central control hub for the entire Argo system:
+- **`argo_lifecycle_manager.py`** - Core lifecycle management with intelligent monitoring
+- **`argo_*.sh`** - Shell scripts for start/stop/restart/status operations
+- **`argo-launch.service`** - Systemd service configuration
+- **`argo_gui.py`** - GTK-based status monitoring GUI
+- **`argo_storage_monitor.py`** - Storage space monitoring and notifications
+- **`Makefile`** - Service installation and management automation
+
+### `nodes/` - ROS2 Node Implementations
+Hardware interface and control nodes:
+- **Sensor Nodes**: `gps.py`, `imu.py`, `anem.py`, `battery_water.py`, `temp_monitor.py`
+- **Control Nodes**: `pwm.py`, `controller.py`, `record.py`
+- **`pwm_capture_module/`** - Custom kernel module for radio control and servo interfaces
+- **`RTIMULib2/`** - IMU sensor fusion library
+- **Configuration files**: `argo.yaml`, calibration data, and support utilities
+
+### `power_control/` - Hardware Power Management
+Standalone ROS2 package for power button and LED control:
+- **`argo_power_control.py`** - Main power control node with GPIO management
+- **Hardware Functions**: Power button monitoring, LED patterns (heartbeat/SOS), graceful shutdown
+- **ROS2 Services**: LED control, system health monitoring
+- **`Makefile`** - Independent installation and service management
+
+### `pcb/` - Hardware Design Files
+Custom PCB development for production-ready integration:
+- **`argo-v9-stable/`** - Current stable PCB design (KiCad project files)
+- **`datasheets/`** - Component specifications and reference materials
+- **`orange-pi/`** - Orange Pi Zero 2W integration documentation and pin definitions
+- **Bill of Materials**: Component sourcing and assembly documentation
+
+### `foxglove/` - Real-time Visualization
+Foxglove Studio integration for live system monitoring:
+- **`argo_ros2.json`** - Pre-configured dashboard layout for Argo sailboat
+- **`custom-argo-panel/`** - TypeScript custom panel for specialized boat visualization
+- **`setup_foxglove.sh`** - Automated Foxglove Bridge configuration and startup
+
+**Core ROS2 Nodes:**
+- **`gps.py`** - GPS receiver interface (UART5, u-blox NEO-M9N)
+- **`imu.py`** - 9-DOF IMU sensor fusion (I2C, ICM-20948)
+- **`anem.py`** - Wind sensor array (3x SDP3x pressure sensors)
+- **`battery_water.py`** - Power monitoring and safety systems
+- **`pwm.py`** - Radio control input and servo output interface
+- **`controller.py`** - Autonomous navigation and sail control algorithms
+- **`record.py`** - Data recording management (ROS2 bag files)
+- **`temp_monitor.py`** - System temperature monitoring
+
+### Node Lifecycle Management
+
+The Argo system uses a sophisticated lifecycle management approach centered around **`argo_lifecycle_manager.py`**:
+
+**Key Features:**
+- **Real-time Monitoring**: Active process detection during startup stabilization (not static sleeps)
+- **Failure Detection**: Immediate FATAL error detection and reporting from systemd journal
+- **Auto-restart**: Configurable restart policies with exponential backoff
+- **Graceful Shutdown**: Proper cleanup and process termination
+- **Status Reporting**: Comprehensive system health monitoring
+
+**Lifecycle Management Modes:**
+```bash
+python3 launch/argo_lifecycle_manager.py start      # Launch all nodes
+python3 launch/argo_lifecycle_manager.py stop       # Graceful shutdown
+python3 launch/argo_lifecycle_manager.py restart    # Restart all nodes
+python3 launch/argo_lifecycle_manager.py status     # Show system status
+python3 launch/argo_lifecycle_manager.py monitor    # Continuous monitoring
+python3 launch/argo_lifecycle_manager.py continuous # Production mode (systemd)
+```
+
+**Critical Node Management:**
+- **Critical Nodes**: `pwm.py`, `controller.py` (essential for boat operation)
+- **Success Criteria**: All critical nodes + minimum 3 total nodes running
+- **Failure Handling**: Intelligent restart with failure analysis and error reporting
+
+**Startup Monitoring Pattern:**
+1. **Launch Phase** - Start all node processes
+2. **Detection Phase** - Wait for nodes to register (30s timeout)
+3. **Stabilization Phase** - Active monitoring for failures (15s with 1s intervals)
+4. **Validation Phase** - Final status check and success determination
+
+**Systemd Integration:**
+- **Service**: `argo-launch.service` runs lifecycle manager in continuous mode
+- **Dependencies**: Waits for network and hardware module initialization
+- **Restart Policy**: Automatic restart on failure with 5-second delay
+- **Environment**: ROS2 Humble sourcing and logging configuration
+
 ## Installation on New SD Card
 
 ### 1. Flash Orange Pi OS
