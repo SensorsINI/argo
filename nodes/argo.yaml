@@ -1,6 +1,52 @@
-# parameters for argo control
+# Enhanced parameters for argo control with modular controllers
+# Supports both single-node (control_refactored.py) and two-node (controller.py + rudder_sail_radio.py) systems
+
+# Global parameters (all nodes)
 /**:
   ros__parameters:
     argo:
       mode: autonomous
       rudder_gain: 2
+
+# Single-node system (control_refactored.py)
+control_node:
+  ros__parameters:
+    controller_type: "proportional"  # Options: "proportional", "wind_aware"
+    data_collection_enabled: false
+    rudder_gain: 2.0
+    rudder_full_scale_deg: 60.0
+    param_file_path: "argo.yaml"
+
+# Two-node system: High-level controller (controller.py)
+controller_node:
+  ros__parameters:
+    controller_type: "proportional"  # Options: "proportional", "wind_aware"
+    data_collection_enabled: false
+    rudder_gain: 2.0
+    rudder_full_scale_deg: 60.0
+    param_file_path: "argo.yaml"
+
+# Two-node system: Low-level arbitration (rudder_sail_radio.py)
+rudder_sail_radio_node:
+  ros__parameters:
+    human_override_timeout: 2.0      # Seconds after last human activity before robot can take control
+    deadband_threshold: 0.05         # Minimum change in radio input to count as human activity
+    safety_max_rudder: 1.0          # Maximum rudder command magnitude
+    safety_max_sail: 1.0            # Maximum sail command magnitude
+    param_file_path: "argo.yaml"
+
+# Example configurations:
+# Wind-aware controller:
+# controller_node:
+#   ros__parameters:
+#     controller_type: "wind_aware"
+#     rudder_gain: 1.5
+#     sail_wind_gain: 0.3  # How much to blend wind-based sail control
+#     data_collection_enabled: true
+
+# Conservative human priority:
+# rudder_sail_radio_node:
+#   ros__parameters:
+#     human_override_timeout: 5.0     # Longer timeout
+#     deadband_threshold: 0.02        # More sensitive
+#     safety_max_rudder: 0.8          # Conservative limits

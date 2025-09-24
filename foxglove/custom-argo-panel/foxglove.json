@@ -1,0 +1,28 @@
+{
+  "name": "argo-sailboat-panel",
+  "version": "1.0.0",
+  "description": "Custom Foxglove panel for Argo sailboat visualization with compass, wind, rudder, and sail indicators",
+  "main": "dist/extension.js",
+  "author": "Argo Sailboat Team",
+  "license": "MIT",
+  "keywords": ["foxglove", "ros2", "sailboat", "argo", "visualization"],
+  "homepage": "https://github.com/your-org/argo-sailboat-panel",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/argo-sailboat-panel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/argo-sailboat-panel/issues"
+  },
+  "foxglove": {
+    "panels": [
+      {
+        "id": "argo-sailboat-panel",
+        "name": "Argo Sailboat Panel",
+        "icon": "🗺️",
+        "description": "Real-time visualization of Argo sailboat state including compass, wind, control, and GPS data"
+      }
+    ]
+  }
+}
+

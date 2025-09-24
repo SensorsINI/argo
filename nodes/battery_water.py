@@ -26,6 +26,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Float32, Bool
 import time
 import sys
@@ -36,7 +37,10 @@ from rclpy.executors import ExternalShutdownException
 I2C_BUS_NUMBER = 0  # Orange Pi Zero 2W default I2C bus
 
 # Sample rate configuration
-SAMPLE_RATE_HZ = 0.1  # 0.1Hz = 10 second intervals
+SAMPLE_RATE_HZ = 1/3.0  # 1/3 Hz = 3 second intervals
+
+# only publish if the change is greater than this percentage
+THRESHOLD_CHANGE_PCT = 1.0
 
 try:
     import smbus2 as smbus2
@@ -67,18 +71,26 @@ class BatteryWaterNode(Node):
         self._test_state = 'decay'  # not used in one-shot capture
         self._test_t0 = time.monotonic()
 
-        # Publishers
-        self.pub_battery_voltage = self.create_publisher(Float32, 'battery_voltage', 10)
-        self.pub_saltwater_voltage = self.create_publisher(Float32, 'saltwater_voltage', 10)
-        self.pub_sail_current = self.create_publisher(Float32, 'sail_current', 10)
-        self.pub_temperature = self.create_publisher(Float32, 'pcb_temperature', 10)
-        self.pub_humidity = self.create_publisher(Float32, 'relative_humidity', 10)
-        # Alert publishers
-        self.pub_battery_low_alert = self.create_publisher(Bool, 'battery_low_alert', 10)
-        self.pub_saltwater_alert = self.create_publisher(Bool, 'saltwater_alert', 10)
-        self.pub_humidity_alert = self.create_publisher(Bool, 'humidity_alert', 10)
-        # Battery remaining percentage publisher
-        self.pub_battery_remaining_pct = self.create_publisher(Float32, 'battery_remaining_pct', 10)
+        # QoS profile for persistent sensor data and alerts
+        # This ensures late-joining nodes get the latest values immediately
+        persistent_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1  # Keep only the latest value
+        )
+
+        # Publishers with persistent QoS for critical battery/water monitoring
+        self.pub_battery_voltage = self.create_publisher(Float32, 'battery_voltage', persistent_qos)
+        self.pub_saltwater_voltage = self.create_publisher(Float32, 'saltwater_voltage', persistent_qos)
+        self.pub_sail_current = self.create_publisher(Float32, 'sail_current', persistent_qos)
+        self.pub_temperature = self.create_publisher(Float32, 'pcb_temperature', persistent_qos)
+        self.pub_humidity = self.create_publisher(Float32, 'relative_humidity', persistent_qos)
+        # Alert publishers with persistent QoS for safety-critical alerts
+        self.pub_battery_low_alert = self.create_publisher(Bool, 'battery_low_alert', persistent_qos)
+        self.pub_saltwater_alert = self.create_publisher(Bool, 'saltwater_alert', persistent_qos)
+        self.pub_humidity_alert = self.create_publisher(Bool, 'humidity_alert', persistent_qos)
+        # Battery remaining percentage publisher with persistent QoS
+        self.pub_battery_remaining_pct = self.create_publisher(Float32, 'battery_remaining_pct', persistent_qos)
         # Alert previous-state flags for edge-triggered logging
         self._batt_low_prev = False
         self._salt_alert_prev = False
@@ -412,7 +424,7 @@ class BatteryWaterNode(Node):
         if hasattr(self, 'timer'):
             self.timer.cancel()
     
-    def _has_significant_change(self, current_value, previous_value, threshold_pct=5.0):
+    def _has_significant_change(self, current_value, previous_value, threshold_pct=THRESHOLD_CHANGE_PCT):
         """Check if current value has changed by more than threshold_pct from previous value"""
         if previous_value is None or current_value is None:
             return True  # Always publish if we don't have previous data

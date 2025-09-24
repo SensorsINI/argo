@@ -1,0 +1,57 @@
+# Configuration for two-node Argo control system
+# - controller.py: High-level autonomous control 
+# - rudder_sail_radio.py: Low-level hardware control and human/robot arbitration
+
+# High-level controller node
+controller_node:
+  ros__parameters:
+    # Controller selection - easily switch between different algorithms
+    controller_type: "proportional"  # Options: "proportional", "wind_aware"
+    
+    # Data collection for training
+    data_collection_enabled: false  # Set to true to collect training data during human control
+    
+    # Basic control parameters
+    rudder_gain: 2.0
+    rudder_full_scale_deg: 60.0
+    
+    # Parameter file path (for dynamic reloading)
+    param_file_path: "argo_two_node.yaml"
+
+# Low-level rudder/sail control and arbitration node
+rudder_sail_radio_node:
+  ros__parameters:
+    # Human/robot arbitration timing
+    human_override_timeout: 2.0      # Seconds after last human activity before robot can take control
+    deadband_threshold: 0.05         # Minimum change in radio input to count as human activity
+    
+    # Safety limits
+    safety_max_rudder: 1.0          # Maximum rudder command magnitude
+    safety_max_sail: 1.0            # Maximum sail command magnitude
+    
+    # Parameter file path
+    param_file_path: "argo_two_node.yaml"
+
+# Alternative configurations for different scenarios:
+
+# Example: Wind-aware controller with data collection
+# controller_node:
+#   ros__parameters:
+#     controller_type: "wind_aware"
+#     rudder_gain: 1.5
+#     rudder_full_scale_deg: 60.0
+#     sail_wind_gain: 0.3             # How much to blend wind-based sail control
+#     data_collection_enabled: true   # Collect training data
+#     param_file_path: "argo_two_node.yaml"
+
+# Example: Conservative human priority settings
+# rudder_sail_radio_node:
+#   ros__parameters:
+#     human_override_timeout: 5.0     # Longer timeout before robot takes control
+#     deadband_threshold: 0.02        # More sensitive to human input
+#     safety_max_rudder: 0.8          # Conservative safety limits
+#     safety_max_sail: 0.8
+#     param_file_path: "argo_two_node.yaml"
+
+
+

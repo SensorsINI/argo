@@ -1,0 +1,44 @@
+# Enhanced parameters for refactored argo control with modular controllers
+
+# Global parameters (all nodes)
+/**:
+  ros__parameters:
+    argo:
+      mode: autonomous
+      rudder_gain: 2
+
+# Control node specific parameters
+control_node:
+  ros__parameters:
+    # Controller selection - easily switch between different algorithms
+    controller_type: "proportional"  # Options: "proportional", "wind_aware"
+    
+    # Data collection for training
+    data_collection_enabled: false  # Set to true to collect training data during human control
+    
+    # Basic control parameters
+    rudder_gain: 2.0
+    rudder_full_scale_deg: 60.0
+    
+    # Parameter file path (for dynamic reloading)
+    param_file_path: "argo_refactored.yaml"
+
+# Example configuration for wind-aware controller
+# Uncomment and modify controller_type above to use this
+# control_node:
+#   ros__parameters:
+#     controller_type: "wind_aware"
+#     rudder_gain: 1.5
+#     rudder_full_scale_deg: 60.0
+#     sail_wind_gain: 0.3  # How much to blend wind-based sail control (0=radio only, 1=wind only)
+#     data_collection_enabled: true  # Collect training data
+#     param_file_path: "argo_refactored.yaml"
+
+# Example configuration for data collection session
+# control_node:
+#   ros__parameters:
+#     controller_type: "proportional"
+#     data_collection_enabled: true  # Enable automatic training data collection
+#     rudder_gain: 2.0
+#     rudder_full_scale_deg: 60.0
+#     param_file_path: "argo_refactored.yaml"

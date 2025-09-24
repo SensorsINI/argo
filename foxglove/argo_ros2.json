@@ -1,5 +1,40 @@
 {
   "configById": {
+    "RosOut!t6nn7i": {
+      "searchTerms": [],
+      "minLogLevel": 1,
+      "nameFilter": {}
+    },
+    "Plot!wind": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/anem_speed_angle_temp.x",
+          "enabled": true,
+          "color": "#00e676"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/anem_speed_angle_temp.y",
+          "enabled": true,
+          "color": "#ff1744"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/anem_speed_angle_temp.z",
+          "enabled": true,
+          "color": "#2979ff"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
+    },
     "Plot!56ofaa": {
       "paths": [
         {
@@ -20,110 +55,33 @@
     },
     "Plot!gpsVel": {
       "paths": [
-        { "timestampMethod": "receiveTime", "value": "/gps_velocity.x", "enabled": true, "color": "#00c853" },
-        { "timestampMethod": "receiveTime", "value": "/gps_velocity.y", "enabled": true, "color": "#0091ea" },
-        { "timestampMethod": "receiveTime", "value": "/gps_velocity.z", "enabled": true, "color": "#aa00ff" }
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gps_velocity.x",
+          "enabled": true,
+          "color": "#00c853"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gps_velocity.y",
+          "enabled": true,
+          "color": "#0091ea"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gps_velocity.z",
+          "enabled": true,
+          "color": "#aa00ff"
+        }
       ],
       "showXAxisLabels": true,
       "showYAxisLabels": true,
       "showLegend": true,
       "legendDisplay": "floating",
       "isSynced": true,
-      "xAxisVal": "timestamp"
-    },
-    "Plot!imuAccel": {
-      "paths": [
-        { "timestampMethod": "receiveTime", "value": "/accel.x", "enabled": true, "color": "#ff5252" },
-        { "timestampMethod": "receiveTime", "value": "/accel.y", "enabled": true, "color": "#ffd740" },
-        { "timestampMethod": "receiveTime", "value": "/accel.z", "enabled": true, "color": "#40c4ff" }
-      ],
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "isSynced": true,
-      "xAxisVal": "timestamp"
-    },
-    "Plot!imuGyro": {
-      "paths": [
-        { "timestampMethod": "receiveTime", "value": "/gyro.x", "enabled": true, "color": "#8e24aa" },
-        { "timestampMethod": "receiveTime", "value": "/gyro.y", "enabled": true, "color": "#43a047" },
-        { "timestampMethod": "receiveTime", "value": "/gyro.z", "enabled": true, "color": "#fb8c00" }
-      ],
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "isSynced": true,
-      "xAxisVal": "timestamp"
-    },
-    "Plot!wind": {
-      "paths": [
-        { "timestampMethod": "receiveTime", "value": "/anem_speed_angle_temp.x", "enabled": true, "color": "#00e676" },
-        { "timestampMethod": "receiveTime", "value": "/anem_speed_angle_temp.y", "enabled": true, "color": "#ff1744" },
-        { "timestampMethod": "receiveTime", "value": "/anem_speed_angle_temp.z", "enabled": true, "color": "#2979ff" }
-      ],
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "isSynced": true,
-      "xAxisVal": "timestamp"
-    },
-    "Plot!power": {
-      "paths": [
-        { "timestampMethod": "receiveTime", "value": "/battery_voltage.data", "enabled": true, "color": "#00c853" },
-        { "timestampMethod": "receiveTime", "value": "/sail_current.data", "enabled": true, "color": "#ff6d00" },
-        { "timestampMethod": "receiveTime", "value": "/saltwater_voltage.data", "enabled": true, "color": "#2962ff" }
-      ],
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "isSynced": true,
-      "xAxisVal": "timestamp"
-    },
-    "Plot!env": {
-      "paths": [
-        { "timestampMethod": "receiveTime", "value": "/temperature.data", "enabled": true, "color": "#ff7043" },
-        { "timestampMethod": "receiveTime", "value": "/relative_humidity.data", "enabled": true, "color": "#26a69a" }
-      ],
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "isSynced": true,
-      "xAxisVal": "timestamp"
-    },
-    "Plot!control": {
-      "paths": [
-        { "timestampMethod": "receiveTime", "value": "/rudder_sail_radio.x", "enabled": true, "color": "#d50000" },
-        { "timestampMethod": "receiveTime", "value": "/rudder_sail_radio.y", "enabled": true, "color": "#00c853" },
-        { "timestampMethod": "receiveTime", "value": "/rudder_sail_servo.x", "enabled": true, "color": "#2962ff" },
-        { "timestampMethod": "receiveTime", "value": "/rudder_sail_servo.y", "enabled": true, "color": "#ff6d00" },
-        { "timestampMethod": "receiveTime", "value": "/rudder_sail_cmd.x", "enabled": true, "color": "#aa00ff" },
-        { "timestampMethod": "receiveTime", "value": "/rudder_sail_cmd.y", "enabled": true, "color": "#00b8d4" }
-      ],
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "isSynced": true,
-      "xAxisVal": "timestamp"
-    },
-    "Plot!alerts": {
-      "paths": [
-        { "timestampMethod": "receiveTime", "value": "/battery_low_alert.data", "enabled": true, "color": "#c51162" },
-        { "timestampMethod": "receiveTime", "value": "/saltwater_alert.data", "enabled": true, "color": "#01579b" },
-        { "timestampMethod": "receiveTime", "value": "/humidity_alert.data", "enabled": true, "color": "#2e7d32" },
-        { "timestampMethod": "receiveTime", "value": "/human_controlled.data", "enabled": true, "color": "#6d4c41" }
-      ],
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "isSynced": true,
-      "xAxisVal": "timestamp"
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
     },
     "Gauge!40ycg9v": {
       "path": "/battery_remaining_pct.data",
@@ -135,13 +93,231 @@
         "#0000ff",
         "#ff00ff"
       ],
-      "reverse": false
+      "reverse": false,
+      "reverseDirection": false,
+      "foxglovePanelTitle": "battery remaining"
     },
-    "TopicGraph!yqwmmg": {},
-    "RosOut!t6nn7i": {
-      "searchTerms": [],
-      "minLogLevel": 1,
-      "nameFilter": {}
+    "Plot!imuAccel": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/accel.x",
+          "enabled": true,
+          "color": "#ff5252"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/accel.y",
+          "enabled": true,
+          "color": "#ffd740"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/accel.z",
+          "enabled": true,
+          "color": "#40c4ff"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
+    },
+    "Plot!imuGyro": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gyro.x",
+          "enabled": true,
+          "color": "#8e24aa"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gyro.y",
+          "enabled": true,
+          "color": "#43a047"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gyro.z",
+          "enabled": true,
+          "color": "#fb8c00"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
+    },
+    "Plot!power": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/battery_voltage.data",
+          "enabled": true,
+          "color": "#00c853"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/sail_current.data",
+          "enabled": true,
+          "color": "#ff6d00"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/saltwater_voltage.data",
+          "enabled": true,
+          "color": "#2962ff"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
+    },
+    "Plot!env": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/relative_humidity.data",
+          "enabled": true,
+          "color": "#26a69a"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
+    },
+    "Plot!alerts": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/battery_low_alert.data",
+          "enabled": true,
+          "color": "#c51162"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/saltwater_alert.data",
+          "enabled": true,
+          "color": "#01579b"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/humidity_alert.data",
+          "enabled": true,
+          "color": "#2e7d32"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/human_controlled.data",
+          "enabled": true,
+          "color": "#6d4c41"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
+    },
+    "Indicator!4ansdcz": {
+      "path": "/battery_low_alert",
+      "style": "bulb",
+      "fontSize": 36,
+      "fallbackColor": "#a0a0a0",
+      "fallbackLabel": "False",
+      "rules": [
+        {
+          "operator": "=",
+          "rawValue": "true",
+          "color": "#68e24a",
+          "label": "True"
+        }
+      ]
+    },
+    "Indicator!20wh6qn": {
+      "path": "",
+      "style": "bulb",
+      "fontSize": 36,
+      "fallbackColor": "#a0a0a0",
+      "fallbackLabel": "False",
+      "rules": [
+        {
+          "operator": "=",
+          "rawValue": "true",
+          "color": "#68e24a",
+          "label": "True"
+        }
+      ]
+    },
+    "Plot!control": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/rudder_sail_radio.x",
+          "enabled": true,
+          "color": "#d50000"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/rudder_sail_radio.y",
+          "enabled": true,
+          "color": "#00c853"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/rudder_sail_servo.x",
+          "enabled": true,
+          "color": "#2962ff"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/rudder_sail_servo.y",
+          "enabled": true,
+          "color": "#ff6d00"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/rudder_sail_cmd.x",
+          "enabled": true,
+          "color": "#aa00ff"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/rudder_sail_cmd.y",
+          "enabled": true,
+          "color": "#00b8d4"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
     }
   },
   "globalVariables": {},
@@ -151,17 +327,22 @@
   },
   "layout": {
     "direction": "row",
-    "first": "RosOut!t6nn7i",
+    "first": {
+      "first": "RosOut!t6nn7i",
+      "second": "Plot!wind",
+      "direction": "row",
+      "splitPercentage": 59.81450610940689
+    },
     "second": {
       "direction": "column",
       "first": {
         "direction": "row",
-        "first": "Plot!56ofaa",
-        "second": {
-          "direction": "column",
-          "first": "Plot!gpsVel",
-          "second": "Gauge!40ycg9v"
-        }
+        "first": {
+          "first": "Plot!56ofaa",
+          "second": "Plot!gpsVel",
+          "direction": "column"
+        },
+        "second": "Gauge!40ycg9v"
       },
       "second": {
         "direction": "column",
@@ -173,25 +354,29 @@
             "second": "Plot!imuGyro"
           },
           "second": {
+            "first": {
+              "first": "Plot!power",
+              "second": "Plot!env",
+              "direction": "column"
+            },
+            "second": {
+              "first": "Plot!alerts",
+              "second": {
+                "first": "Indicator!4ansdcz",
+                "second": "Indicator!20wh6qn",
+                "direction": "row"
+              },
+              "direction": "row"
+            },
             "direction": "column",
-            "first": "Plot!wind",
-            "second": "Plot!power"
+            "splitPercentage": 70.73170731707316
           }
         },
-        "second": {
-          "direction": "row",
-          "first": "Plot!control",
-          "second": {
-            "direction": "column",
-            "first": "Plot!env",
-            "second": {
-              "direction": "row",
-              "first": "Plot!alerts",
-              "second": "TopicGraph!yqwmmg"
-            }
-          }
-        }
-      }
-    }
+        "second": "Plot!control",
+        "splitPercentage": 65.13844537202576
+      },
+      "splitPercentage": 25.920528331458097
+    },
+    "splitPercentage": 33.608076464565556
   }
 }

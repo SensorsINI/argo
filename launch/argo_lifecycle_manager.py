@@ -482,16 +482,10 @@ class ArgoLifecycleManager:
         except Exception:
             service_running = False
         
-        # Main launch process status
-        if self._is_launch_running():
-            print("📋 LAUNCH PROCESS: 🟢 RUNNING")
-        else:
-            print("📋 LAUNCH PROCESS: 🔴 STOPPED")
-        
         if service_running:
-            print("📋 SYSTEMD SERVICE: 🟢 RUNNING")
+            print("📋 LAUNCH SERVICE: 🟢 RUNNING")
         else:
-            print("📋 SYSTEMD SERVICE: 🔴 STOPPED")
+            print("📋 LAUNCH SERVICE: 🔴 STOPPED")
         
         # Get FATAL messages for stopped nodes if service is running
         node_fatal_messages = {}
@@ -512,7 +506,8 @@ class ArgoLifecycleManager:
         
         # Show key error messages for stopped nodes
         if stopped_nodes:
-            print(f"\n⚠️  KEY ERROR MESSAGES (since {self.journal_since}):")
+            # print with no newline so that if there are no errors, the next line is not indented
+            # use green good symbol if no errors
             try:
                 # Get recent error messages from systemd journal
                 result = subprocess.run([
@@ -551,6 +546,7 @@ class ArgoLifecycleManager:
                                 recent_errors.append(f"  {matched_node}: {line}")
                     
                     if recent_errors:
+                        print("⚠️  Errors found in systemd journal:") # new line before actual errors
                         # Group errors by node to ensure we show at least one error per stopped node
                         errors_by_node = {}
                         for error in recent_errors:
@@ -588,7 +584,7 @@ class ArgoLifecycleManager:
                     else:
                         print("  No specific node errors found in recent logs")
                 else:
-                    print("  Unable to retrieve error messages from systemd journal")
+                    print(f"🟢  No systemd journal errors found since {self.journal_since}")
             except Exception as e:
                 print(f"  Error retrieving messages: {e}")
         
@@ -629,7 +625,22 @@ class ArgoLifecycleManager:
                         break
             except Exception:
                 cpu_temp = None
-            print(f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Memory {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temperature {cpu_temp}°C")
+            
+            # Get battery and alerts in parallel for much faster performance
+            battery_summary, critical_alerts = None, None
+            node_status = self._get_node_status()
+            if "battery_water.py" in node_status and "RUNNING" in node_status["battery_water.py"]:
+                battery_summary, critical_alerts = self._get_battery_and_alerts_parallel()
+            
+            # Build system info line with optional battery info
+            system_info = f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Mem. {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temp. {cpu_temp}°C"
+            if battery_summary:
+                system_info += f" | Batt. {battery_summary}"
+            print(system_info)
+            
+            # Display critical alerts if any
+            if critical_alerts:
+                print(f"⚠️  CRITICAL ALERTS: {critical_alerts}")
         except:
             print("📊 SYSTEM: Unable to get system info")
         
@@ -778,6 +789,83 @@ class ArgoLifecycleManager:
             pass
             
         return fatal_messages
+
+
+
+    def _get_battery_and_alerts_parallel(self) -> tuple[Optional[str], Optional[str]]:
+        """Get battery info and alerts in parallel using persistent QoS"""
+        try:
+            import concurrent.futures
+            
+            # Topics to check in parallel
+            topics = {
+                'voltage': '/battery_voltage',
+                'percent': '/battery_remaining_pct',
+                'battery_low': '/battery_low_alert',
+                'saltwater': '/saltwater_alert',
+                'humidity': '/humidity_alert'
+            }
+            
+            def get_topic_value(topic_name):
+                try:
+                    result = subprocess.run([
+                        'ros2', 'topic', 'echo', topic_name, '--once'
+                    ], capture_output=True, text=True, timeout=5)
+                    
+                    if result.returncode == 0 and result.stdout.strip():
+                        lines = result.stdout.strip().split('\n')
+                        for line in lines:
+                            if line.startswith('data:'):
+                                data_str = line.split(':', 1)[1].strip()
+                                # Try to parse as float first, then boolean
+                                try:
+                                    return float(data_str)
+                                except ValueError:
+                                    return data_str.lower() == 'true'
+                except Exception:
+                    pass
+                return None
+            
+            # Execute all topic queries in parallel
+            results = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_topic = {executor.submit(get_topic_value, topic): key 
+                                  for key, topic in topics.items()}
+                
+                for future in concurrent.futures.as_completed(future_to_topic, timeout=6):
+                    topic_key = future_to_topic[future]
+                    try:
+                        results[topic_key] = future.result()
+                    except Exception:
+                        results[topic_key] = None
+            
+            # Format battery summary
+            battery_summary = None
+            if results.get('voltage') is not None and results.get('percent') is not None:
+                battery_summary = f"{results['voltage']:.1f}V ({results['percent']:.0f}%)"
+            elif results.get('voltage') is not None:
+                battery_summary = f"{results['voltage']:.1f}V"
+            elif results.get('percent') is not None:
+                battery_summary = f"{results['percent']:.0f}%"
+            
+            # Format critical alerts
+            active_alerts = []
+            alert_descriptions = {
+                'battery_low': '🔋 LOW BATTERY',
+                'saltwater': '💧 SALTWATER INTRUSION',
+                'humidity': '💦 HIGH HUMIDITY'
+            }
+            
+            for alert_key in ['battery_low', 'saltwater', 'humidity']:
+                if results.get(alert_key) is True:
+                    active_alerts.append(alert_descriptions[alert_key])
+            
+            alerts_summary = " | ".join(active_alerts) if active_alerts else None
+            
+            return battery_summary, alerts_summary
+            
+        except Exception:
+            return None, None
 
     def _print_i2c_health(self, bus: int = 0) -> None:
         """Print a summary of I2C device presence vs expected sensors."""
