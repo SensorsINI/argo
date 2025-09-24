@@ -62,6 +62,7 @@ Version: 2.0 - Added pulse width clamping and improved error handling
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Vector3
 
@@ -131,10 +132,22 @@ class PwmNode(Node):
             rclpy.shutdown()
             return
 
+        # QoS Profiles
+        # Standard QoS for real-time data
+        self.standard_qos = 10
+        
+        # Persistent QoS for critical control status
+        # Late-joining nodes get immediate access to current control authority
+        self.persistent_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1  # Keep only the latest value
+        )
+
         # Publishers
-        self.pub_rudder_sail_radio = self.create_publisher(Vector3, 'rudder_sail_radio', 10)
-        self.pub_rudder_sail_servo = self.create_publisher(Vector3, 'rudder_sail_servo', 10)
-        self.pub_human_controlled = self.create_publisher(Bool, 'human_controlled', 10)
+        self.pub_rudder_sail_radio = self.create_publisher(Vector3, 'rudder_sail_radio', self.standard_qos)
+        self.pub_rudder_sail_servo = self.create_publisher(Vector3, 'rudder_sail_servo', self.standard_qos)
+        self.pub_human_controlled = self.create_publisher(Bool, 'human_controlled', self.persistent_qos)
 
         # Subscriber
         self.sub_rudder_sail_cmd = self.create_subscription(
@@ -462,8 +475,15 @@ Hardware:
             # The rclpy signal handler initiates shutdown on Ctrl+C.
             # We can't use the logger here as the context may be invalid.
             print("\nKeyboard interrupt, shutting down.")
+        except rclpy.executors.ExternalShutdownException:
+            # External shutdown (e.g., systemd service stop) - this is normal
+            print("External shutdown signal received, exiting gracefully.")
         finally:
-            pwm_node.destroy_node()
+            try:
+                pwm_node.destroy_node()
+            except Exception:
+                # Node may already be destroyed
+                pass
             # rclpy.shutdown() is not called here to avoid the "context already shutdown" error.
 
 if __name__ == '__main__':

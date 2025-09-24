@@ -378,9 +378,14 @@ Topics Published:
             rclpy.spin(anem_node)
         except KeyboardInterrupt:
             print("\nKeyboard interrupt, shutting down anemometer node.")
+        except rclpy.executors.ExternalShutdownException:
+            print("External shutdown signal received, exiting gracefully.")
         finally:
-            # Cleanup is handled in destroy_node
-            anem_node.destroy_node()
+            try:
+                # Cleanup is handled in destroy_node
+                anem_node.destroy_node()
+            except Exception:
+                pass  # Ignore errors during shutdown
             # rclpy.shutdown() is not called here to avoid "context already shutdown" error
             # when rclpy.spin is interrupted.
 

@@ -11,12 +11,6 @@ WorkingDirectory=/home/orangepi/argo
 EnvironmentFile=/home/orangepi/argo/launch/argo.env
 ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 launch/argo_lifecycle_manager.py continuous'
 ExecStop=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 launch/argo_lifecycle_manager.py stop'
-Restart=on-failure
-RestartSec=5
+Restart=no
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=60
-TimeoutStopSec=30
-
-[Install]
-WantedBy=multi-user.target

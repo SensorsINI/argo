@@ -37,9 +37,8 @@ class ArgoLifecycleManager:
         self.process = None
         self.node_processes = []
         self.monitoring = False
-        self.restart_count = 0
-        self.max_restarts = 5
-        self.restart_delay = 2.0
+        # Removed restart logic - nodes should not be restarted automatically
+        # Failures should be preserved for debugging
         self.stabilization_wait = 15.0  # Additional wait time for nodes to stabilize
         self.journal_since = 'today'
         
@@ -194,22 +193,8 @@ class ArgoLifecycleManager:
         """Check if a node is critical for boat operation"""
         return node in self.critical_nodes
     
-    def _should_restart_node(self, node: str, running_nodes: List[str]) -> bool:
-        """Determine if a failed node should be restarted"""
-        # Don't restart critical nodes if they're running
-        if self._is_critical_node(node) and node in running_nodes:
-            return False
-        
-        # Don't restart if we have too few total nodes
-        if len(running_nodes) < 3:
-            return False
-            
-        # Restart non-critical nodes if we have enough critical ones
-        critical_running = [n for n in self.critical_nodes if n in running_nodes]
-        if len(critical_running) == len(self.critical_nodes):
-            return True
-            
-        return False
+    # Removed _should_restart_node method - nodes are not restarted automatically
+    # Node failures are preserved for debugging purposes
 
     def start(self) -> bool:
         """Start the Argo launch process"""
@@ -369,17 +354,11 @@ class ArgoLifecycleManager:
         
         print("🔄 Starting continuous monitoring...")
         print("   Press Ctrl+C to stop")
+        print("   NOTE: Node failures will be logged but NOT restarted for debugging")
         
         try:
             while True:
-                time.sleep(10)  # Check every 10 seconds
-                
-                # Check if launch process is still running
-                if not self._is_launch_running():
-                    print("❌ Launch process died, restarting...")
-                    if not self.start():
-                        print("❌ Failed to restart launch process")
-                        return False
+                time.sleep(30)  # Check every 30 seconds (less frequent)
                 
                 # Check node status
                 node_status = self._get_node_status()
@@ -387,22 +366,25 @@ class ArgoLifecycleManager:
                 stopped_nodes = [node for node, status in node_status.items() if "STOPPED" in status]
                 
                 if stopped_nodes:
+                    # Log stopped nodes but do NOT restart them
                     print(f"⚠️  {len(stopped_nodes)} nodes stopped: {', '.join(stopped_nodes)}")
                     
-                    # Check if we need to restart
+                    # Check if critical nodes are still running
                     critical_running = [n for n in self.critical_nodes if n in running_nodes]
+                    critical_stopped = [n for n in self.critical_nodes if n in stopped_nodes]
                     
-                    if len(critical_running) < len(self.critical_nodes):
-                        print(f"❌ Critical nodes missing, restarting system...")
-                        self.stop()
-                        time.sleep(2)
-                        if not self.start():
-                            print("❌ Failed to restart system")
-                            return False
-                    elif len(running_nodes) < 3:
-                        print(f"⚠️  Too few nodes running ({len(running_nodes)}), but critical nodes OK")
+                    if critical_stopped:
+                        print(f"❌ CRITICAL NODES STOPPED: {', '.join(critical_stopped)}")
+                        print(f"   System will continue with remaining nodes for debugging")
+                        print(f"   Check systemd journal for error details")
                     else:
-                        print(f"✅ System operational with {len(running_nodes)}/{len(self.expected_nodes)} nodes")
+                        print(f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                    
+                    # Show system status
+                    if len(running_nodes) >= 3:
+                        print(f"✅ System operational with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                    else:
+                        print(f"⚠️  Low node count: {len(running_nodes)}/{len(self.all_expected_nodes)} nodes running")
                 
         except KeyboardInterrupt:
             print("\n🛑 Stopping continuous monitoring...")
@@ -658,16 +640,6 @@ class ArgoLifecycleManager:
         try:
             while self.monitoring:
                 current_time = time.time()
-                
-                # Check if we need to restart
-                if not self._is_launch_running() and self.restart_count < self.max_restarts:
-                    print(f"⚠️  Launch process died, restarting... (attempt {self.restart_count + 1}/{self.max_restarts})")
-                    if self.start():
-                        self.restart_count += 1
-                        print(f"✅ Restarted successfully (restart count: {self.restart_count})")
-                    else:
-                        print("❌ Restart failed")
-                        time.sleep(self.restart_delay)
                 
                 # Periodic status check
                 if current_time - last_status_check >= status_interval:

@@ -5,7 +5,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-from std_msgs.msg import Bool, Float64
+from std_msgs.msg import Bool, Float64, Float32
 from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
 
@@ -21,6 +21,7 @@ from typing import Optional, Dict, Any, List
 import json
 import threading
 import os
+import psutil
 
 def signed_angle_difference_degrees(angle1_deg, angle2_deg):
     """
@@ -199,9 +200,19 @@ class WindAwareController(BaseController):
 class DataCollector:
     """Collects state-action pairs for training data."""
     
-    def __init__(self, data_dir: str = "training_data"):
-        self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(exist_ok=True)
+    def __init__(self, data_dir: str = None):
+        if data_dir is None:
+            # Default to user's home directory + argo_data for write permissions
+            self.data_dir = Path.home() / "argo_data" / "training_data"
+        else:
+            self.data_dir = Path(data_dir)
+        
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError as e:
+            print(f"Warning: Cannot create training data directory {self.data_dir}: {e}")
+            print("Training data collection will be disabled.")
+            self.data_dir = None
         self.current_session_data = []
         self.session_start_time = None
         self.lock = threading.Lock()
@@ -210,6 +221,10 @@ class DataCollector:
     def start_session(self):
         """Start a new data collection session."""
         with self.lock:
+            if self.data_dir is None:
+                print("Warning: Training data directory not available. Data collection disabled.")
+                self.enabled = False
+                return
             self.session_start_time = time.time()
             self.current_session_data = []
             self.enabled = True
@@ -218,7 +233,7 @@ class DataCollector:
     def stop_session(self):
         """Stop current session and save data."""
         with self.lock:
-            if not self.enabled or not self.current_session_data:
+            if not self.enabled or not self.current_session_data or self.data_dir is None:
                 return
             
             # Save session data
@@ -264,8 +279,10 @@ class ControllerNode(Node):
         self.declare_parameter('param_file_path', 'argo.yaml')
         self.declare_parameter('controller_type', 'proportional')
         self.declare_parameter('data_collection_enabled', False)
+        self.declare_parameter('training_data_dir', '')  # Empty = use default
         self.declare_parameter('rudder_gain', 1.0)
         self.declare_parameter('rudder_full_scale_deg', 60.0)
+        self.declare_parameter('enable_param_reload', True)  # Allow disabling param file monitoring
         
         self.param_file = Path(self.get_parameter('param_file_path').get_parameter_value().string_value)
         self._last_param_mtime = 0
@@ -274,8 +291,8 @@ class ControllerNode(Node):
         self.check_and_reload_params(is_initial=True)
         
         # --- QoS Profiles ---
-        # Standard QoS for real-time data
-        self.standard_qos = 10
+        # Standard QoS for real-time data (reduced depth for lower memory usage)
+        self.standard_qos = 5  # Reduced from 10 to 5 for lower memory/CPU overhead
         
         # Persistent QoS for critical status and configuration data
         # Late-joining nodes get immediate access to current state
@@ -288,8 +305,19 @@ class ControllerNode(Node):
         # --- State and Control ---
         self.boat_state = BoatState()
         self.controller = None
-        self.data_collector = DataCollector()
+        
+        # Initialize data collector with configurable directory
+        training_data_dir = self.get_parameter('training_data_dir').get_parameter_value().string_value
+        if not training_data_dir:
+            training_data_dir = None  # Use default
+        self.data_collector = DataCollector(training_data_dir)
+        
         self.last_logged_human_control = None
+        
+        # CPU monitoring
+        self.cpu_monitor_enabled = True
+        self.last_cpu_check = time.time()
+        self.cpu_check_interval = 30.0  # Check CPU usage every 30 seconds
         
         # Initialize controller
         self._initialize_controller()
@@ -328,11 +356,16 @@ class ControllerNode(Node):
         self.create_subscription(Bool, '/humidity_alert', self.humidity_alert_callback, self.persistent_qos)
         
         # --- Timers ---
-        self.control_loop_period = 0.1  # 10 Hz
+        self.control_loop_period = 0.2  # 5 Hz (reduced from 10 Hz for lower CPU usage)
         self.timer = self.create_timer(self.control_loop_period, self.timer_callback)
         
-        self.param_reload_check_period = 3.0
-        self.param_timer = self.create_timer(self.param_reload_check_period, self.check_and_reload_params)
+        # Only create parameter reload timer if enabled (CPU optimization)
+        if self.get_parameter('enable_param_reload').get_parameter_value().bool_value:
+            self.param_reload_check_period = 10.0  # Reduced frequency from 3s to 10s for lower CPU usage
+            self.param_timer = self.create_timer(self.param_reload_check_period, self.check_and_reload_params)
+        else:
+            self.param_timer = None
+            self.get_logger().info("Parameter file monitoring disabled for performance")
     
     def _initialize_controller(self):
         """Initialize the controller based on parameters."""
@@ -449,6 +482,17 @@ class ControllerNode(Node):
         """Main control loop - generates autonomous control commands."""
         self.boat_state.timestamp = time.time()
         
+        # CPU monitoring (periodic check)
+        if self.cpu_monitor_enabled and (time.time() - self.last_cpu_check) > self.cpu_check_interval:
+            try:
+                process = psutil.Process()
+                cpu_percent = process.cpu_percent()
+                memory_info = process.memory_info()
+                self.get_logger().info(f"Controller CPU: {cpu_percent:.1f}%, Memory: {memory_info.rss/1024/1024:.1f}MB")
+                self.last_cpu_check = time.time()
+            except Exception as e:
+                self.get_logger().debug(f"CPU monitoring error: {e}")
+        
         # Log human control state changes
         if self.boat_state.human_controlled != self.last_logged_human_control:
             if self.boat_state.human_controlled:
@@ -504,10 +548,12 @@ class ControllerNode(Node):
             if control_command:
                 self.pub_rudder_sail_cmd.publish(control_command.to_vector3())
                 
-                self.get_logger().debug(
-                    f"Target: {self.boat_state.target_heading:.1f}, Current: {self.boat_state.compass_heading:.1f}, "
-                    f"Controller: {self.controller.name}, Rudder: {control_command.rudder:.2f}, Sail: {control_command.sail:.2f}"
-                )
+                # Only format debug string if debug logging is enabled (CPU optimization)
+                if self.get_logger().get_effective_level() <= 10:  # DEBUG level
+                    self.get_logger().debug(
+                        f"Target: {self.boat_state.target_heading:.1f}, Current: {self.boat_state.compass_heading:.1f}, "
+                        f"Controller: {self.controller.name}, Rudder: {control_command.rudder:.2f}, Sail: {control_command.sail:.2f}"
+                    )
     
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""
@@ -601,16 +647,25 @@ CONTROL FLOW:
         controller_node = ControllerNode()
         rclpy.spin(controller_node)
     except KeyboardInterrupt:
-        pass
+        print("\nKeyboard interrupt, shutting down controller...")
     except rclpy.executors.ExternalShutdownException:
-        pass
+        print("External shutdown signal received, exiting gracefully.")
     finally:
-        if controller_node and hasattr(controller_node, 'data_collector'):
-            controller_node.data_collector.stop_session()
-        if controller_node:
-            controller_node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            if controller_node and hasattr(controller_node, 'data_collector'):
+                controller_node.data_collector.stop_session()
+        except Exception:
+            pass  # Ignore errors during shutdown
+        try:
+            if controller_node:
+                controller_node.destroy_node()
+        except Exception:
+            pass  # Ignore errors during shutdown
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass  # Ignore errors during shutdown
 
 if __name__ == '__main__':
     main()

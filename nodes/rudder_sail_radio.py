@@ -44,6 +44,12 @@ class RudderSailRadioNode(Node):
         # Load initial parameters
         self.check_and_reload_params(is_initial=True)
         
+        # Initialize parameter values for immediate use
+        self.human_override_timeout = self.get_parameter('human_override_timeout').get_parameter_value().double_value
+        self.deadband_threshold = self.get_parameter('deadband_threshold').get_parameter_value().double_value
+        self.safety_max_rudder = self.get_parameter('safety_max_rudder').get_parameter_value().double_value
+        self.safety_max_sail = self.get_parameter('safety_max_sail').get_parameter_value().double_value
+        
         # --- State Variables ---
         # Radio input (from PWM hardware)
         self.radio_rudder = 0.0

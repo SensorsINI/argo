@@ -29,6 +29,11 @@ import os
 import glob
 from rclpy.executors import ExternalShutdownException
 
+# constants for high and critical temperatures
+HIGH_TEMPERATURE_THRESHOLD_C = 85.0
+CRITICAL_TEMPERATURE_THRESHOLD_C = 100.0
+TEMPERATURE_HYSTERESIS_C = 2.0
+
 class TempMonitorNode(Node):
     def __init__(self):
         super().__init__('temp_monitor_node')
@@ -65,9 +70,9 @@ class TempMonitorNode(Node):
         self._prev_system_temperature = None
 
         # Temperature thresholds
-        self.temp_high_threshold_c = float(self.declare_parameter('temperature_high_threshold_c', 70.0).value)
-        self.temp_critical_threshold_c = float(self.declare_parameter('temperature_critical_threshold_c', 85.0).value)
-        self.temp_hysteresis_c = float(self.declare_parameter('temperature_hysteresis_c', 2.0).value)
+        self.temp_high_threshold_c = float(self.declare_parameter('temperature_high_threshold_c', HIGH_TEMPERATURE_THRESHOLD_C).value)
+        self.temp_critical_threshold_c = float(self.declare_parameter('temperature_critical_threshold_c', CRITICAL_TEMPERATURE_THRESHOLD_C).value)
+        self.temp_hysteresis_c = float(self.declare_parameter('temperature_hysteresis_c', TEMPERATURE_HYSTERESIS_C).value)
 
         # Find thermal zones
         self.thermal_zones = self._find_thermal_zones()

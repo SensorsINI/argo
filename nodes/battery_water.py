@@ -40,7 +40,7 @@ I2C_BUS_NUMBER = 0  # Orange Pi Zero 2W default I2C bus
 SAMPLE_RATE_HZ = 1/3.0  # 1/3 Hz = 3 second intervals
 
 # only publish if the change is greater than this percentage
-THRESHOLD_CHANGE_PCT = 1.0
+THRESHOLD_CHANGE_PCT = 0.1  # Reduced from 1.0 to 0.1% for more frequent publishing
 
 try:
     import smbus2 as smbus2
@@ -137,6 +137,8 @@ class BatteryWaterNode(Node):
         self.saltwater_alert_threshold_v = float(self.declare_parameter('saltwater_alert_threshold_v', 1.0).value)
         # Humidity alert threshold (%)
         self.humidity_alert_threshold_pct = float(self.declare_parameter('humidity_alert_threshold_pct', 75.0).value)
+        # Debug mode - force publishing every cycle for testing
+        self.debug_mode = self.declare_parameter('debug_mode', False).value
         # Battery SOC parameters (per-cell formula; defaults from RC LiPo curve)
         self.batt_series_cells = int(self.declare_parameter('battery_series_cells', 2).value)
         # Formula: soc% = S - S / (1 + (v / V0)^A)^B
@@ -486,8 +488,22 @@ class BatteryWaterNode(Node):
         # Determine if we should publish values
         should_publish = False
         
+        # Debug mode: always publish every cycle
+        if self.debug_mode:
+            should_publish = True
+            if time_since_last_log >= 5.0:
+                # Build sensor state message
+                battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
+                temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
+                
+                self.get_logger().info(
+                    f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
+                    f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
+                    f"{temp_humid_str}"
+                )
+                self._last_log_time = current_time
         # First 30 seconds: publish every cycle (1Hz) and log every 5s
-        if time_since_startup <= 30.0:
+        elif time_since_startup <= 30.0:
             should_publish = True
             if time_since_last_log >= 5.0:
                 # Build sensor state message
@@ -501,7 +517,7 @@ class BatteryWaterNode(Node):
                 )
                 self._last_log_time = current_time
         else:
-            # After 30s: publish only if significant change (>5%) or 60s elapsed
+            # After 30s: publish only if significant change (>0.1%) or 60s elapsed
             significant_change = (
                 self._has_significant_change(battery_voltage, self._prev_battery_voltage) or
                 self._has_significant_change(saltwater_voltage, self._prev_saltwater_voltage) or
@@ -514,19 +530,27 @@ class BatteryWaterNode(Node):
             if significant_change or time_since_last_publish >= 60.0:
                 should_publish = True
         
-        # Publish values if conditions are met
-        if should_publish:
-            self.pub_battery_voltage.publish(Float32(data=battery_voltage))
-            self.pub_saltwater_voltage.publish(Float32(data=saltwater_voltage))
-            self.pub_sail_current.publish(Float32(data=sail_current))
+        # Publish values if conditions are met and ROS context is valid
+        if should_publish and rclpy.ok():
+            try:
+                self.pub_battery_voltage.publish(Float32(data=battery_voltage))
+                self.pub_saltwater_voltage.publish(Float32(data=saltwater_voltage))
+                self.pub_sail_current.publish(Float32(data=sail_current))
+                
+                if battery_remaining_pct is not None:
+                    self.pub_battery_remaining_pct.publish(Float32(data=battery_remaining_pct))
+            except Exception as e:
+                # Silently ignore publish errors during shutdown
+                pass
             
-            if battery_remaining_pct is not None:
-                self.pub_battery_remaining_pct.publish(Float32(data=battery_remaining_pct))
-            
-            if temperature is not None:
-                self.pub_temperature.publish(Float32(data=temperature))
-            if humidity is not None:
-                self.pub_humidity.publish(Float32(data=humidity))
+            try:
+                if temperature is not None:
+                    self.pub_temperature.publish(Float32(data=temperature))
+                if humidity is not None:
+                    self.pub_humidity.publish(Float32(data=humidity))
+            except Exception as e:
+                # Silently ignore publish errors during shutdown
+                pass
             
             # Update previous values and timestamp
             self._prev_battery_voltage = battery_voltage
@@ -548,9 +572,16 @@ class BatteryWaterNode(Node):
                 batt_low = (battery_voltage <= lower)
             salt_alert = saltwater_voltage >= self.saltwater_alert_threshold_v
             humid_alert = (humidity is not None) and (humidity >= self.humidity_alert_threshold_pct)
-            self.pub_battery_low_alert.publish(Bool(data=bool(batt_low)))
-            self.pub_saltwater_alert.publish(Bool(data=bool(salt_alert)))
-            self.pub_humidity_alert.publish(Bool(data=bool(humid_alert)))
+            
+            # Always publish alerts if ROS context is valid (not subject to optimization)
+            if rclpy.ok():
+                try:
+                    self.pub_battery_low_alert.publish(Bool(data=bool(batt_low)))
+                    self.pub_saltwater_alert.publish(Bool(data=bool(salt_alert)))
+                    self.pub_humidity_alert.publish(Bool(data=bool(humid_alert)))
+                except Exception as e:
+                    # Silently ignore publish errors during shutdown
+                    pass
             # Edge-triggered warnings
             if batt_low and not self._batt_low_prev:
                 self.get_logger().warning(
@@ -630,58 +661,23 @@ Hardware:
     
     # Initialize ROS2 with remaining arguments
     rclpy.init(args=unknown_args)
-    node = BatteryWaterNode()
-    if rclpy.ok():
-        try:
-            while rclpy.ok() and not node._shutdown_requested:
-                rclpy.spin_once(node, timeout_sec=0.1)
-            # If we exited due to shutdown request, clean up and exit
-            if node._shutdown_requested:
-                try:
-                    if hasattr(node, '_teardown_ascii_vis'):
-                        node._teardown_ascii_vis()
-                except Exception:
-                    pass
-                node.destroy_node()
-                rclpy.shutdown()
-                sys.exit(1)
-        except KeyboardInterrupt:
-            # Quiet shutdown to avoid traceback
-            try:
-                if hasattr(node, '_teardown_ascii_vis'):
-                    node._teardown_ascii_vis()
-            except Exception:
-                pass
-            try:
-                node.destroy_node()
-            except Exception:
-                pass
-            try:
-                rclpy.shutdown()
-            except Exception:
-                pass
-        except ExternalShutdownException:
-            try:
-                if hasattr(node, '_teardown_ascii_vis'):
-                    node._teardown_ascii_vis()
-            except Exception:
-                pass
-            try:
-                node.destroy_node()
-            except Exception:
-                pass
-            try:
-                rclpy.shutdown()
-            except Exception:
-                pass
-        else:
-            # Normal shutdown path
+    node = None
+    try:
+        node = BatteryWaterNode()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    except rclpy.executors.ExternalShutdownException:
+        pass
+    finally:
+        if node:
             try:
                 if hasattr(node, '_teardown_ascii_vis'):
                     node._teardown_ascii_vis()
             except Exception:
                 pass
             node.destroy_node()
+        if rclpy.ok():
             rclpy.shutdown()
 
 if __name__ == '__main__':

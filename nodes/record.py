@@ -327,12 +327,22 @@ def main(args=None):
         node = ArgoRecordingNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        print("\nRecording node stopped by user.")
+    except rclpy.executors.ExternalShutdownException:
+        print("External shutdown signal received, exiting gracefully.")
     except Exception as e:
         print(f"❌ Error in main: {e}")
     finally:
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            if node:
+                node.destroy_node()
+        except Exception:
+            pass  # Ignore errors during shutdown
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass  # Ignore errors during shutdown
 
 
 if __name__ == '__main__':
