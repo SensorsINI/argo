@@ -10,6 +10,8 @@ import numpy as np
 import time
 import math
 import threading
+import argparse
+import sys
 
 try:
     # Set headless mode for pyglet (no display required)
@@ -274,7 +276,94 @@ class ArgoSimulatorBridge(Node):
                 f'last_cmd={control_age:.1f}s ago'
             )
 
+def print_help():
+    """Print detailed help information and exit."""
+    help_text = """
+Argo Simulator Bridge - Connects Argo control system with sailboat simulator
+
+DESCRIPTION:
+This ROS2 node provides a bridge between the Argo autonomous sailboat control 
+system and a sailboat simulator. It publishes simulated sensor data to Argo 
+topics and receives control commands from the Argo system.
+
+ARCHITECTURE:
+- Uses a mock sailboat simulator for reliable headless operation
+- Publishes sensor data (GPS, IMU, wind) to Argo topics
+- Receives control commands from Argo and applies them to simulator
+- Supports both human and autonomous control modes
+
+PUBLISHED TOPICS (Simulator → Argo):
+  /pose                    - IMU compass heading (Vector3, z=heading degrees)
+  /compass                 - Raw compass data (Vector3, z=heading degrees)
+  /gps_cog                 - Course over ground (Float64, degrees)
+  /gps_sog                 - Speed over ground (Float64, knots)
+  /gps_velocity            - GPS velocity vector (Vector3, x=north, y=east, z=speed knots)
+  /anem_speed_angle_temp   - Wind data (Vector3, x=speed m/s, y=angle degrees, z=temp °C)
+  /rudder_sail_radio       - Mock human input (Vector3, x=rudder, y=sail, z=0)
+
+SUBSCRIBED TOPICS (Argo → Simulator):
+  /rudder_sail_servo       - Control commands from Argo (Vector3, x=rudder, y=sail)
+  /human_controlled        - Control mode status (Bool, true=human, false=robot)
+
+USAGE:
+  python3 nodes/argo_simulator_bridge.py [--help]
+  python3 nodes/argo_simulator_bridge.py --ros-args --params-file nodes/argo.yaml
+
+TESTING WITH ARGO TWO-NODE SYSTEM:
+  1. Start simulator bridge:
+     python3 nodes/argo_simulator_bridge.py
+     
+  2. Start radio control node:
+     python3 nodes/rudder_sail_radio.py --ros-args --params-file nodes/argo.yaml
+     
+  3. Start controller node:
+     python3 nodes/controller.py --ros-args --params-file nodes/argo.yaml
+
+SIMULATOR FEATURES:
+- Mock sailboat physics with wind effects
+- Realistic boat dynamics (speed, turning, wind interaction)
+- Configurable wind conditions (speed: 8 m/s, direction: 45°)
+- Mock human input generation for testing
+- Status reporting every second
+
+CONTROL MODES:
+- Human Control: Mock human input is generated and published
+- Robot Control: Commands from Argo controller are applied to simulator
+
+PARAMETERS:
+- simulation_rate: 10 Hz (configurable via ROS2 parameters)
+- mock_human_input: true (enables mock human control input)
+
+EXAMPLES:
+  # Show this help
+  python3 nodes/argo_simulator_bridge.py --help
+  
+  # Run with default settings
+  python3 nodes/argo_simulator_bridge.py
+  
+  # Run with ROS2 parameters
+  python3 nodes/argo_simulator_bridge.py --ros-args --params-file nodes/argo.yaml
+
+For more information, see the Argo documentation or check the source code.
+"""
+    print(help_text)
+    sys.exit(0)
+
 def main(args=None):
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Argo Simulator Bridge - Connects Argo control system with sailboat simulator',
+        add_help=False  # We'll handle --help manually
+    )
+    parser.add_argument('--help', action='store_true', help='Show this help message and exit')
+    
+    # Parse known args to avoid conflicts with ROS2 args
+    parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Handle --help option
+    if parsed_args.help:
+        print_help()
+    
     print("Starting Argo Simulator Bridge...")
     print("This node bridges between Argo control system and sailboat simulator")
     print("\nPublished topics (Simulator → Argo):")
@@ -292,7 +381,7 @@ def main(args=None):
     print("  3. Run: python3 nodes/controller.py --ros-args --params-file nodes/argo.yaml")
     print("\nPress Ctrl+C to stop\n")
     
-    rclpy.init(args=args)
+    rclpy.init(args=unknown_args)
     bridge = None
     try:
         bridge = ArgoSimulatorBridge()
