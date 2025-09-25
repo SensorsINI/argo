@@ -175,7 +175,7 @@ class ArgoGUI:
             # Recording is now handled via ROS2 service, not systemd
             # Check if ROS2 recording service is available
             try:
-                result = subprocess.run(['ros2', 'service', 'list'], 
+                result = subprocess.run(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 service list'], 
                                       capture_output=True, text=True, timeout=3)
                 if '/argo/recording/start' in result.stdout:
                     status['record'] = 'ros2-available'
@@ -221,7 +221,7 @@ class ArgoGUI:
             launch_result = subprocess.run(['systemctl', '--no-pager', 'is-active', 'argo-launch.service'], 
                                          capture_output=True, text=True, timeout=5)
             # Recording is now handled via ROS2 service
-            record_result = subprocess.run(['ros2', 'service', 'list'], 
+            record_result = subprocess.run(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 service list'], 
                                          capture_output=True, text=True, timeout=3)
             
             launch_status = "active" if launch_result.returncode == 0 else "inactive"
