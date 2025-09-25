@@ -10,11 +10,11 @@ A robust lifecycle manager for Argo ROS2 nodes that provides:
 - Simple command-line interface
 
 Usage:
-    python3 argo_lifecycle_manager.py start    # Start all nodes
+    python3 argo_lifecycle_manager.py run      # Start all nodes and keep running (for systemd)
     python3 argo_lifecycle_manager.py stop     # Stop all nodes
     python3 argo_lifecycle_manager.py restart  # Restart all nodes
     python3 argo_lifecycle_manager.py status   # Show status
-    python3 argo_lifecycle_manager.py monitor  # Monitor mode
+    python3 argo_lifecycle_manager.py monitor  # Monitor mode (watch for failures)
 """
 
 import os
@@ -70,7 +70,7 @@ class ArgoLifecycleManager:
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
-        print(f"\n🛑 Received signal {signum}, shutting down...")
+        print(f"\n🛑 argo_lifecycle_manager: Received signal {signum}, shutting down...")
         self.monitoring = False
         self.stop()
         sys.exit(0)
@@ -196,13 +196,15 @@ class ArgoLifecycleManager:
     # Removed _should_restart_node method - nodes are not restarted automatically
     # Node failures are preserved for debugging purposes
 
-    def start(self) -> bool:
-        """Start the Argo launch process"""
+    
+    def continuous(self) -> bool:
+        """Start Argo and keep it running with fault tolerance"""
+        print("🚀 Starting Argo ROS2 nodes...")
+        
         if self._is_launch_running():
             print("⚠️  Argo launch process is already running")
             return True
         
-        print("🚀 Starting Argo ROS2 nodes...")
         try:
             # Start the nodes directly
             self._launch_nodes_directly()
@@ -223,8 +225,6 @@ class ArgoLifecycleManager:
                         print("💀 Process died - check systemd journal for detailed output")
                     
                     return False
-                
-                # Output is now handled directly by systemd journal
                 
                 # Check which nodes are running
                 node_status = self._get_node_status()
@@ -284,7 +284,7 @@ class ArgoLifecycleManager:
                     if len(final_running_nodes) == len(self.all_expected_nodes):
                         print(f"✅ Argo launch process started successfully")
                         print(f"✅ All {len(final_running_nodes)} nodes running and stable: {', '.join(final_running_nodes)}")
-                        return True
+                        break  # Continue to monitoring phase
                     else:
                         failed_nodes = [node for node in self.all_expected_nodes if node not in final_running_nodes]
                         print(f"⚠️  Some nodes failed during stabilization period")
@@ -297,11 +297,11 @@ class ArgoLifecycleManager:
                         if len(critical_running) == len(self.critical_nodes):
                             print(f"✅ Critical nodes operational: {', '.join(critical_running)}")
                             print(f"✅ Argo will continue operating with {len(final_running_nodes)}/{len(self.all_expected_nodes)} nodes")
-                            return True
+                            break  # Continue to monitoring phase
                         elif len(final_running_nodes) >= 3:  # At least 3 nodes running
                             print(f"✅ Sufficient nodes running ({len(final_running_nodes)}/{len(self.all_expected_nodes)})")
                             print(f"✅ Argo will continue operating with available sensors")
-                            return True
+                            break  # Continue to monitoring phase
                         else:
                             print(f"❌ Insufficient nodes running ({len(final_running_nodes)}/{len(self.all_expected_nodes)})")
                             print(f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in final_running_nodes])}")
@@ -309,47 +309,38 @@ class ArgoLifecycleManager:
                 
                 time.sleep(check_interval)
             
-            # Timeout reached - show final status
-            print(f"\n⚠️  Timeout reached after {timeout}s")
-            node_status = self._get_node_status()
-            running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
-            stopped_nodes = [node for node, status in node_status.items() if "STOPPED" in status]
-            
-            if running_nodes:
-                failed_nodes = [node for node in self.all_expected_nodes if node not in running_nodes]
-                print(f"✅ {len(running_nodes)} nodes running: {', '.join(running_nodes)}")
-                if failed_nodes:
-                    print(f"⚠️  {len(failed_nodes)} nodes not started: {', '.join(failed_nodes)}")
+            # Check if we timed out
+            if time.time() - start_time >= timeout:
+                print(f"\n⚠️  Timeout reached after {timeout}s")
+                node_status = self._get_node_status()
+                running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
+                stopped_nodes = [node for node, status in node_status.items() if "STOPPED" in status]
                 
-                # Check if we have critical nodes running
-                critical_running = [node for node in self.critical_nodes if node in running_nodes]
-                
-                if len(critical_running) == len(self.critical_nodes):
-                    print(f"✅ Critical nodes operational: {', '.join(critical_running)}")
-                    print(f"✅ Argo will continue operating with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
-                    return True
-                elif len(running_nodes) >= 3:  # At least 3 nodes running
-                    print(f"✅ Sufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
-                    print(f"✅ Argo will continue operating with available sensors")
-                    return True
+                if running_nodes:
+                    failed_nodes = [node for node in self.all_expected_nodes if node not in running_nodes]
+                    print(f"✅ {len(running_nodes)} nodes running: {', '.join(running_nodes)}")
+                    if failed_nodes:
+                        print(f"⚠️  {len(failed_nodes)} nodes not started: {', '.join(failed_nodes)}")
+                    
+                    # Check if we have critical nodes running
+                    critical_running = [node for node in self.critical_nodes if node in running_nodes]
+                    
+                    if len(critical_running) == len(self.critical_nodes):
+                        print(f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                        print(f"✅ Argo will continue operating with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                    elif len(running_nodes) >= 3:  # At least 3 nodes running
+                        print(f"✅ Sufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
+                        print(f"✅ Argo will continue operating with available sensors")
+                    else:
+                        print(f"❌ Insufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
+                        print(f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in running_nodes])}")
+                        return False
                 else:
-                    print(f"❌ Insufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
-                    print(f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in running_nodes])}")
+                    print(f"❌ No nodes running after timeout")
                     return False
-            else:
-                print(f"❌ No nodes running after timeout")
-                return False
                 
         except Exception as e:
             print(f"❌ Error starting Argo: {e}")
-            return False
-    
-    def continuous(self) -> bool:
-        """Start Argo and keep it running with fault tolerance"""
-        print("🚀 Starting Argo ROS2 nodes in continuous mode...")
-        
-        # Start the launch process
-        if not self.start():
             return False
         
         print("🔄 Starting continuous monitoring...")
@@ -626,6 +617,18 @@ class ArgoLifecycleManager:
         except:
             print("📊 SYSTEM: Unable to get system info")
         
+        # Update timestamp file to prevent quick timer from running on next terminal startup
+        # This ensures that manual status checks are treated the same as quick timer checks
+        try:
+            home_dir = os.path.expanduser('~')
+            last_check_file = os.path.join(home_dir, ".argo_last_check")
+            current_time = int(time.time())
+            with open(last_check_file, 'w') as f:
+                f.write(str(current_time))
+        except Exception:
+            # Silently fail - this is just for preventing redundant quick timer checks
+            pass
+        
         print("=" * 60)
     
     def monitor(self) -> None:
@@ -782,7 +785,7 @@ class ArgoLifecycleManager:
                 try:
                     result = subprocess.run([
                         'ros2', 'topic', 'echo', topic_name, '--once'
-                    ], capture_output=True, text=True, timeout=5)
+                    ], capture_output=True, text=True, timeout=15)
                     
                     if result.returncode == 0 and result.stdout.strip():
                         lines = result.stdout.strip().split('\n')
@@ -804,7 +807,7 @@ class ArgoLifecycleManager:
                 future_to_topic = {executor.submit(get_topic_value, topic): key 
                                   for key, topic in topics.items()}
                 
-                for future in concurrent.futures.as_completed(future_to_topic, timeout=6):
+                for future in concurrent.futures.as_completed(future_to_topic, timeout=20):
                     topic_key = future_to_topic[future]
                     try:
                         results[topic_key] = future.result()
@@ -836,7 +839,9 @@ class ArgoLifecycleManager:
             
             return battery_summary, alerts_summary
             
-        except Exception:
+        except Exception as e:
+            print(f"Error getting battery and alerts: {e}")
+
             return None, None
 
     def _print_i2c_health(self, bus: int = 0) -> None:
@@ -872,7 +877,7 @@ class ArgoLifecycleManager:
 
 def main():
     parser = argparse.ArgumentParser(description='Argo ROS2 Lifecycle Manager')
-    parser.add_argument('command', choices=['start', 'stop', 'restart', 'status', 'monitor', 'continuous'],
+    parser.add_argument('command', choices=['run', 'stop', 'restart', 'status', 'monitor'],
                        help='Command to execute')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug output')
@@ -883,11 +888,8 @@ def main():
     if args.debug:
         print("🔧 DEBUG: Debug mode enabled")
     
-    if args.command == 'start':
-        success = manager.start()
-        if not success and args.debug:
-            print("🔧 DEBUG: Start failed, showing detailed status...")
-            manager.status()
+    if args.command == 'run':
+        success = manager.continuous()
         sys.exit(0 if success else 1)
     elif args.command == 'stop':
         success = manager.stop()
@@ -899,9 +901,6 @@ def main():
         manager.status()
     elif args.command == 'monitor':
         manager.monitor()
-    elif args.command == 'continuous':
-        success = manager.continuous()
-        sys.exit(0 if success else 1)
 
 if __name__ == '__main__':
     main()

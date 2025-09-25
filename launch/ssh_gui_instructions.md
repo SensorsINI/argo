@@ -111,7 +111,8 @@ cat > /home/orangepi/argo/launch/web_status.py << 'EOF'
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
-from argo_status_check import OptimizedArgoStatusChecker
+# Note: argo_status_check.py is deprecated, use argo_lifecycle_manager.py instead
+# from argo_status_check import OptimizedArgoStatusChecker
 
 class StatusHandler(BaseHTTPRequestHandler):
     def do_GET(self):

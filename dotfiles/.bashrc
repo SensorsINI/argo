@@ -1,28 +1,34 @@
 
 source ~/argo/dotfiles/.bash_aliases
-# Argo service status check and warning
+# Argo service status check and warning (deprecated - use argo_status instead)
 argo_status_check() {
-    # Call the Python implementation
-    local is_manual_call=${1:-false}
-    if [ "$is_manual_call" = "true" ]; then
-        python3 ~/argo/launch/argo_status_check.py --manual
-    else
-        python3 ~/argo/launch/argo_status_check.py
-    fi
+    echo "⚠️  argo_status_check() is deprecated. Use 'argo_status' instead."
+    argo_status
 }
 
 # Manual status check (always shows full details)
 argo_status() {
-    argo_status_check true
+    python3 ~/argo/launch/argo_lifecycle_manager.py status
 }
 
 # Quick timer for automatic status checks
 argo_quick_timer() {
-    # Call the Python implementation for quick timer
-    if [ "$1" = "force" ]; then
-        python3 ~/argo/launch/argo_status_check.py --quick
-    else
-        python3 ~/argo/launch/argo_status_check.py --quick
+    # Check if quick timer should run (5+ minutes since last check)
+    local last_check_file="$HOME/.argo_last_check"
+    local current_time=$(date +%s)
+    local last_check_time=0
+    
+    if [ -f "$last_check_file" ]; then
+        last_check_time=$(cat "$last_check_file" 2>/dev/null || echo "0")
+    fi
+    
+    local time_diff=$((current_time - last_check_time))
+    
+    # Run check if it's been more than 5 minutes (300 seconds)
+    if [ $time_diff -ge 300 ]; then
+        # Show condensed status and update timestamp
+        echo "🚢 ARGO: $(python3 ~/argo/launch/argo_lifecycle_manager.py status | grep -E '(Running nodes|Total CPU|System load)' | tr '\n' ' ')"
+        echo "$current_time" > "$last_check_file"
     fi
 }
 

@@ -32,10 +32,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from argo_status_check import OptimizedArgoStatusChecker
     from argo_node_utils import ArgoNodeManager
+    STATUS_CHECK_AVAILABLE = True
 except ImportError as e:
-    print(f"Error importing Argo modules: {e}")
-    print("Make sure you're running this from the launch directory")
-    sys.exit(1)
+    print(f"⚠️  Warning: argo_status_check.py not found: {e}")
+    print("⚠️  This GUI is deprecated. Use 'argo_status' command or 'argo_lifecycle_manager.py status' instead.")
+    print("⚠️  The GUI will attempt to work with limited functionality.")
+    STATUS_CHECK_AVAILABLE = False
+    try:
+        from argo_node_utils import ArgoNodeManager
+    except ImportError as e2:
+        print(f"Error importing argo_node_utils: {e2}")
+        print("Make sure you're running this from the launch directory")
+        sys.exit(1)
 
 
 class ArgoStatusGUI:
@@ -48,7 +56,10 @@ class ArgoStatusGUI:
         self.root.configure(bg='#2b2b2b')
         
         # Initialize status checker
-        self.status_checker = OptimizedArgoStatusChecker()
+        if STATUS_CHECK_AVAILABLE:
+            self.status_checker = OptimizedArgoStatusChecker()
+        else:
+            self.status_checker = None
         self.node_manager = ArgoNodeManager()
         
         # Status data
@@ -225,6 +236,11 @@ class ArgoStatusGUI:
             self.last_update = datetime.now()
             self.last_update_label.config(text=f"Last Update: {self.last_update.strftime('%H:%M:%S')}")
             
+            if self.status_checker is None:
+                # Fallback mode - show deprecation message
+                self.show_deprecation_message()
+                return
+            
             # Get status data
             ros_info = self.status_checker.check_ros_nodes_fast()
             sys_info = self.status_checker.get_system_info_fast()
@@ -244,9 +260,30 @@ class ArgoStatusGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to refresh status: {e}")
     
+    def show_deprecation_message(self):
+        """Show deprecation message when status_checker is not available"""
+        self.clear_panel(self.services_panel)
+        self.clear_panel(self.nodes_panel)
+        self.clear_panel(self.system_panel)
+        self.clear_panel(self.summary_panel)
+        
+        # Show deprecation message in services panel
+        deprecation_label = tk.Label(
+            self.services_panel,
+            text="⚠️  This GUI is deprecated\n\nUse 'argo_status' command or\n'argo_lifecycle_manager.py status'\nfor current status information",
+            font=('Arial', 12, 'bold'),
+            fg='#ff6b6b',
+            bg='#2b2b2b',
+            justify='center'
+        )
+        deprecation_label.pack(expand=True, fill='both')
+    
     def update_services_panel(self):
         """Update the services status panel"""
         self.clear_panel(self.services_panel)
+        
+        if self.status_checker is None:
+            return
         
         # Check argo-launch service
         launch_status = self.status_checker.get_service_status_fast("argo-launch.service")

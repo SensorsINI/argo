@@ -11,7 +11,7 @@ This directory contains all the launch scripts, systemd services, and management
   - Dynamic node discovery from the `nodes/` directory
   - Fault-tolerant operation with partial node failure support
   - Direct node launching without intermediate launch files
-  - Usage: `python3 launch/argo_lifecycle_manager.py start|continuous|stop|status`
+  - Usage: `python3 launch/argo_lifecycle_manager.py run|stop|restart|status|monitor`
 
 #### **Interactive Control**
 - **`argo_gui.py`** - Interactive CLI GUI for real-time monitoring and control
@@ -28,11 +28,11 @@ This directory contains all the launch scripts, systemd services, and management
 ### 🔧 **System Management**
 
 #### **Status and Monitoring**
-- **`argo_status_check.py`** - Comprehensive system status checker
+- **`argo_lifecycle_manager.py`** - Main lifecycle management and status system
   - Systemd services status
   - ROS2 nodes status
   - System resources and storage
-  - Usage: `python3 argo_status_check.py [--manual] [--quick]`
+  - Usage: `python3 argo_lifecycle_manager.py status`
 
 - **`storage_monitor.py`** - Storage space monitoring for recording
   - Calculates remaining recording hours
@@ -123,13 +123,13 @@ This directory contains all the launch scripts, systemd services, and management
 ### **Manual Launch**
 ```bash
 # Start the complete Argo system
-python3 launch/argo_lifecycle_manager.py start
+python3 launch/argo_lifecycle_manager.py run
 
 # Launch interactive GUI
 sudo ./launch/argo_gui.sh
 
 # Check system status
-python3 launch/argo_status_check.py
+python3 launch/argo_lifecycle_manager.py status
 ```
 
 ### **Service Management**
@@ -219,7 +219,7 @@ sudo systemctl enable argo-power-control
 ### **Status Checking**
 ```bash
 # Comprehensive status check
-python3 launch/argo_status_check.py --manual
+python3 launch/argo_lifecycle_manager.py status
 
 # Storage monitoring
 python3 launch/storage_monitor.py

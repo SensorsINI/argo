@@ -66,10 +66,17 @@ fi
 
 # Check if required Argo modules are available
 cd "$SCRIPT_DIR"
-if ! python3 -c "from argo_status_check import OptimizedArgoStatusChecker; from argo_node_utils import ArgoNodeManager" 2>/dev/null; then
+if ! python3 -c "from argo_node_utils import ArgoNodeManager" 2>/dev/null; then
     echo -e "${RED}❌ Error: Required Argo modules not found${NC}"
-    echo -e "${YELLOW}Make sure argo_status_check.py and argo_node_utils.py are present${NC}"
+    echo -e "${YELLOW}Make sure argo_node_utils.py is present${NC}"
     exit 1
+fi
+
+# Check if argo_status_check.py is available (optional - GUI will show deprecation message if not)
+if ! python3 -c "from argo_status_check import OptimizedArgoStatusChecker" 2>/dev/null; then
+    echo -e "${YELLOW}⚠️  Warning: argo_status_check.py not found${NC}"
+    echo -e "${YELLOW}⚠️  This GUI is deprecated. Use 'argo_status' command instead.${NC}"
+    echo -e "${YELLOW}⚠️  The GUI will show limited functionality.${NC}"
 fi
 
 echo -e "${GREEN}✅ All dependencies satisfied${NC}"

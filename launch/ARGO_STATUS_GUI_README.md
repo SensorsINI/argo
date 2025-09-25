@@ -15,7 +15,7 @@ A lightweight desktop application for monitoring the Argo sailboat system status
 ## 📋 Requirements
 
 - Python 3.x with tkinter support
-- Access to Argo system files (argo_status_check.py, argo_node_utils.py)
+- Access to Argo system files (argo_lifecycle_manager.py, argo_node_utils.py)
 - ROS2 environment (for full functionality)
 
 ## 🎮 Usage
@@ -79,7 +79,7 @@ sudo apt-get install python3-tk
 
 # Check required modules
 cd /home/orangepi/argo/launch
-python3 -c "from argo_status_check import OptimizedArgoStatusChecker"
+python3 -c "from argo_lifecycle_manager import ArgoLifecycleManager"
 ```
 
 ### No Status Data
@@ -94,7 +94,7 @@ python3 -c "from argo_status_check import OptimizedArgoStatusChecker"
 ## 🔗 Integration
 
 This GUI leverages the existing Argo infrastructure:
-- **argo_status_check.py**: Core status checking functionality
+- **argo_lifecycle_manager.py**: Core status checking functionality
 - **argo_node_utils.py**: ROS2 node discovery and management
 - **ROS2 ecosystem**: For real-time node monitoring
 
@@ -110,5 +110,5 @@ This GUI leverages the existing Argo infrastructure:
 
 This GUI is part of the comprehensive Argo launch and monitoring system. For full system control, also see:
 - `argo_gui.py` - Interactive CLI interface
-- `argo_status_check.py` - Command-line status checker
+- `argo_lifecycle_manager.py` - Command-line status checker
 - `argo_lifecycle_manager.py` - Main system launcher

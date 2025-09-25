@@ -42,7 +42,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import json
 
-# Note: ROS2 imports removed - using argo_status_check.py for status monitoring
+# Note: ROS2 imports removed - using argo_lifecycle_manager.py for status monitoring
 from argo_node_utils import ArgoNodeManager
 
 def check_sudo_privileges():
@@ -191,10 +191,10 @@ class ArgoGUI:
         return status
         
     def get_argo_status_output(self) -> str:
-        """Get the formatted status output from the Python argo_status_check script"""
+        """Get the formatted status output from the argo_lifecycle_manager script"""
         try:
-            # Call the Python script directly with timeout for responsiveness
-            result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_status_check.py', '--manual'], 
+            # Call the lifecycle manager status command directly with timeout for responsiveness
+            result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_lifecycle_manager.py', 'status'], 
                                   capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 # Filter out screen clearing sequences that conflict with GUI
@@ -336,7 +336,7 @@ class ArgoGUI:
             pass
         sys.exit(0)
         
-    # ROS2 node monitoring removed - using argo_status_check.py instead
+    # ROS2 node monitoring removed - using argo_lifecycle_manager.py instead
         
     def get_recording_info(self) -> Dict[str, str]:
         """Get recording status and information"""
@@ -470,7 +470,7 @@ class ArgoGUI:
         try:
             self.service_status = self.get_service_status()
             self.recording_status = self.get_recording_info()
-            # ROS2 node monitoring removed - using argo_status_check.py instead
+            # ROS2 node monitoring removed - using argo_lifecycle_manager.py instead
             self.system_info = self.get_system_info()
             self.last_errors = self.get_recent_errors()
             self.last_update = time.time()
@@ -553,7 +553,7 @@ class ArgoGUI:
         """Execute a command and return (success_status, message)"""
         try:
             if cmd == 'l':  # Launch service
-                result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_lifecycle_manager.py', 'start'], 
+                result = subprocess.run(['python3', f'{self.argo_dir}/launch/argo_lifecycle_manager.py', 'run'], 
                                       capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
                     return True, "Argo nodes started successfully"
