@@ -27,8 +27,8 @@
 #   When !POW goes high, the relay is de-energized, cutting power.
 #
 # POWER BUTTON BEHAVIOR:
-#   - Short press (< threshold): No action
-#   - Long press (>= threshold): Initiate shutdown sequence
+#   - Short press (< threshold DEFAULT_SHUTDOWN_THRESHOLD_S): No action
+#   - Long press (>= threshold DEFAULT_SHUTDOWN_THRESHOLD_S): Initiate shutdown sequence
 #   - Only new button presses after service startup are detected (prevents shutdown during boot)
 #
 # LED INDICATORS:
@@ -119,6 +119,7 @@ class Colors:
 
 # Button Press Configuration
 DEFAULT_SHUTDOWN_THRESHOLD_S = 5.0      # Default button hold time for shutdown (seconds)
+SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S = 3.0       # Warn users this many seconds before shutdown to release the button
 BUTTON_POLLING_HZ = 10.0                # Button release polling frequency during press (10 Hz - only used during button press)
 BUTTON_ERROR_RECOVERY_DELAY_S = 0.1     # Delay on button read error (seconds)
 TRIPLE_TAP_MAX_DURATION_S = 1.5         # Maximum duration for 3 quick taps to toggle recording (seconds)
@@ -191,6 +192,7 @@ class PowerController(Node):
         # Button state tracking
         self.initial_button_state = None
         self.button_detection_active = False  # Flag to track when button detection should be active
+        self.warning_notification_sent = False  # Flag to track if warning notification has been sent for current button press
         
         # Triple tap detection for recording toggle
         self.tap_times = []  # List to store tap timestamps
@@ -733,6 +735,7 @@ class PowerController(Node):
                             if self.button_detection_active:
                                 self.button_press_start_time = time.time()
                                 self.power_button_pressed = True
+                                self.warning_notification_sent = False  # Reset warning flag for new button press
                                 logger.info("Power button pressed (hardware interrupt)")
                                 
                                 # Start gradual frequency LED pattern
@@ -793,20 +796,47 @@ class PowerController(Node):
                         logger.info("Long press detected, initiating shutdown...")
                         self.initiate_shutdown()
                     else:
-                        # Short press - check for triple tap
-                        if self.handle_triple_tap_detection(press_duration):
-                            # Triple tap detected - toggle recording
-                            self.toggle_recording()
+                        # Check if button was released after warning but before shutdown (shutdown cancelled)
+                        if (press_duration >= SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S and 
+                            self.warning_notification_sent and 
+                            not self.shutdown_initiated):
+                            logger.info("Shutdown cancelled - button released after warning threshold")
+                            self.send_desktop_notification(
+                                "Shutdown Cancelled",
+                                f"Power button released - shutdown cancelled!\nButton was held for {press_duration:.1f}s",
+                                "normal"
+                            )
                         else:
-                            logger.info(f"Short press detected ({len(self.tap_times)}/3 taps)")
+                            # Short press - check for triple tap
+                            if self.handle_triple_tap_detection(press_duration):
+                                # Triple tap detected - toggle recording
+                                self.toggle_recording()
+                            else:
+                                logger.info(f"Short press detected ({len(self.tap_times)}/3 taps)")
                     
                     self.power_button_pressed = False
                     self.button_press_start_time = None
+                    self.warning_notification_sent = False  # Reset warning flag when button is released
                     break  # Exit this monitoring thread
                 
                 # Check for long press timeout while button is still held
                 else:
                     press_duration = time.time() - self.button_press_start_time
+                    
+                    # Check for warning threshold - send notification to warn user to release button
+                    if (press_duration >= SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S and 
+                        not self.warning_notification_sent and 
+                        not self.shutdown_initiated):
+                        logger.info(f"Button press reached warning threshold ({SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S}s) - sending warning notification")
+                        self.send_desktop_notification(
+                            "Power Button Warning",
+                            f"Release the power button now to abort shutdown!\nButton held for {press_duration:.1f}s (shutdown in {self.SHUTDOWN_THRESHOLD - press_duration:.1f}s)",
+                            "critical",
+                            FINAL_SHUTDOWN_NOTIFICATION_MS  # No timeout - stays until dismissed
+                        )
+                        self.warning_notification_sent = True
+                    
+                    # Check for shutdown threshold
                     if press_duration >= self.SHUTDOWN_THRESHOLD:
                         if not self.shutdown_initiated:
                             logger.info("Long press threshold reached, initiating shutdown...")
@@ -1220,8 +1250,8 @@ HARDWARE CONFIGURATION:
   - Red LED: Directly connected to power button (not GPIO controlled)
 
 POWER BUTTON BEHAVIOR:
-  - Short press (< threshold): No action
-  - Long press (>= threshold): Initiate shutdown sequence
+  - Short press (< threshold DEFAULT_SHUTDOWN_THRESHOLD_S): No action
+  - Long press (>= threshold DEFAULT_SHUTDOWN_THRESHOLD_S): Initiate shutdown sequence
   - Only new button presses after service startup are detected (prevents shutdown during boot)
 
 LED INDICATORS:
