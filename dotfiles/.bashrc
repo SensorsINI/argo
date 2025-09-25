@@ -27,7 +27,7 @@ argo_quick_timer() {
     # Run check if it's been more than 5 minutes (300 seconds)
     if [ $time_diff -ge 300 ]; then
         # Show condensed status and update timestamp
-        echo "🚢 ARGO: $(python3 ~/argo/launch/argo_lifecycle_manager.py status | grep -E '(Running nodes|Total CPU|System load)' | tr '\n' ' ')"
+        echo "🚢 ARGO: $(python3 ~/argo/launch/argo_lifecycle_manager.py status | grep '📊 SYSTEM:' | sed 's/📊 SYSTEM: //')"
         echo "$current_time" > "$last_check_file"
     fi
 }
