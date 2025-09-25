@@ -176,7 +176,7 @@ class ArgoGUI:
             # Check if ROS2 recording service is available
             try:
                 result = subprocess.run(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 service list'], 
-                                      capture_output=True, text=True, timeout=3)
+                                      capture_output=True, text=True, timeout=10)
                 if '/argo/recording/start' in result.stdout:
                     status['record'] = 'ros2-available'
                 else:
@@ -222,7 +222,7 @@ class ArgoGUI:
                                          capture_output=True, text=True, timeout=5)
             # Recording is now handled via ROS2 service
             record_result = subprocess.run(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 service list'], 
-                                         capture_output=True, text=True, timeout=3)
+                                         capture_output=True, text=True, timeout=10)
             
             launch_status = "active" if launch_result.returncode == 0 else "inactive"
             record_status = "ros2-available" if record_result.returncode == 0 and '/argo/recording/start' in record_result.stdout else "ros2-unavailable"
