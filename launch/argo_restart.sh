@@ -19,6 +19,7 @@ if [ $? -eq 0 ]; then
         
         # Use the lifecycle manager to check node status
         cd "$(dirname "$0")/.."
+        source /opt/ros/humble/setup.bash
         python3 launch/argo_lifecycle_manager.py status
     else
         echo "❌ Argo launch service failed to restart"

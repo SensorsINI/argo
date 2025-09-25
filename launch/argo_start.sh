@@ -22,7 +22,7 @@ else
     # Fallback to direct lifecycle manager
     cd "$(dirname "$0")/.."
     source /opt/ros/humble/setup.bash
-    python3 launch/argo_lifecycle_manager.py start
+    python3 launch/argo_lifecycle_manager.py run
     exit $?
 fi
 
