@@ -1,0 +1,3 @@
+[submodule "simulator"]
+	path = simulator
+	url = https://github.com/SensorsINI/sailboat-playground.git
