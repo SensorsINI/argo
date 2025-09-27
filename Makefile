@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status
 
 help:
 	@echo "Argo Robot Services Management"
@@ -52,6 +52,11 @@ help:
 	@echo "  aliases-force - Force reinstall/update aliases (overwrites existing)"
 	@echo "  aliases-activate - Print command to activate aliases in current shell"
 	@echo "  install-argo-cli - Install Argo CLI (aliases, functions, dotfiles) to ~/.bashrc"
+	@echo ""
+	@echo "Git Submodule Management:"
+	@echo "  submodule-init    - Initialize and checkout sailboat-playground submodule"
+	@echo "  submodule-update  - Update sailboat-playground submodule to latest version"
+	@echo "  submodule-status  - Show submodule status and current commit"
 	@echo ""
 	@echo "Quick Commands (after installing CLI):"
 	@echo "  al  - Launch argo service (with 30s monitoring)"
@@ -210,4 +215,110 @@ status-power-control:
 uninstall-power-control:
 	@echo "Uninstalling power control system..."
 	@$(MAKE) -C power_control uninstall
+
+# ==================== GIT SUBMODULE MANAGEMENT ====================
+
+submodule-init:
+	@echo "Initializing sailboat-playground submodule..."
+	@if [ ! -f .gitmodules ]; then \
+		echo "❌ .gitmodules file not found!"; \
+		echo "   This repository doesn't have submodules configured."; \
+		exit 1; \
+	fi
+	@echo "Checking submodule configuration..."
+	@if ! grep -q "simulator" .gitmodules; then \
+		echo "❌ 'simulator' submodule not found in .gitmodules"; \
+		echo "   Available submodules:"; \
+		grep "path = " .gitmodules | sed 's/.*path = /     - /'; \
+		exit 1; \
+	fi
+	@echo "Initializing and checking out submodule..."
+	git submodule update --init --recursive simulator
+	@echo "✅ sailboat-playground submodule initialized successfully!"
+	@echo ""
+	@echo "Submodule location: simulator/"
+	@echo "Source repository: https://github.com/SensorsINI/sailboat-playground.git"
+	@echo ""
+	@echo "Next steps:"
+	@echo "  1. Review the submodule code in simulator/"
+	@echo "  2. Use 'make submodule-update' to get latest changes"
+	@echo "  3. Use 'make submodule-status' to check current version"
+
+submodule-update:
+	@echo "Updating sailboat-playground submodule..."
+	@if [ ! -d simulator ]; then \
+		echo "❌ Submodule not initialized!"; \
+		echo "   Run 'make submodule-init' first."; \
+		exit 1; \
+	fi
+	@echo "Fetching latest changes from remote..."
+	git submodule update --remote --merge simulator
+	@echo "✅ sailboat-playground submodule updated successfully!"
+	@echo ""
+	@echo "Current submodule status:"
+	@git submodule status simulator
+	@echo ""
+	@echo "Note: The submodule has been updated to the latest version."
+	@echo "      Commit this change to lock the submodule to this version:"
+	@echo "      git add simulator"
+	@echo "      git commit -m 'Update sailboat-playground submodule'"
+
+submodule-status:
+	@echo "Sailboat-Playground Submodule Status"
+	@echo "===================================="
+	@echo ""
+	@if [ ! -f .gitmodules ]; then \
+		echo "❌ .gitmodules file not found!"; \
+		echo "   This repository doesn't have submodules configured."; \
+		exit 1; \
+	fi
+	@echo "🔍 Submodule Configuration:"
+	@if grep -q "simulator" .gitmodules; then \
+		echo "✅ simulator submodule configured"; \
+		url=$$(grep -A1 "simulator" .gitmodules | grep "url" | cut -d'=' -f2 | tr -d ' \t'); \
+		echo "   URL: $$url"; \
+	else \
+		echo "❌ simulator submodule not found in .gitmodules"; \
+		echo "   Available submodules:"; \
+		grep "path = " .gitmodules | sed 's/.*path = /     - /'; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "🔍 Submodule Status:"
+	@if [ -d simulator ]; then \
+		echo "✅ Submodule directory exists: simulator/"; \
+		if [ -f simulator/.git ] || [ -d simulator/.git ]; then \
+			echo "✅ Submodule is initialized"; \
+			echo ""; \
+			echo "Current commit:"; \
+			cd simulator && git log --oneline -1 && cd ..; \
+			echo ""; \
+			echo "Branch information:"; \
+			cd simulator && git branch -v && cd ..; \
+			echo ""; \
+			echo "Remote status:"; \
+			cd simulator && git status -sb && cd ..; \
+		else \
+			echo "❌ Submodule directory exists but not initialized"; \
+			echo "   Run 'make submodule-init' to initialize"; \
+		fi; \
+	else \
+		echo "❌ Submodule directory not found: simulator/"; \
+		echo "   Run 'make submodule-init' to initialize"; \
+	fi
+	@echo ""
+	@echo "🔍 Local Configuration Files:"
+	@if [ -d sailboat-playground ]; then \
+		echo "✅ Local config directory exists: sailboat-playground/"; \
+		echo "   This contains Argo-specific configuration files"; \
+		echo "   (separate from the submodule source code)"; \
+	else \
+		echo "❌ Local config directory not found: sailboat-playground/"; \
+		echo "   This may affect simulator functionality"; \
+	fi
+	@echo ""
+	@echo "💡 Usage:"
+	@echo "  make submodule-init    - Initialize submodule (first time setup)"
+	@echo "  make submodule-update  - Update to latest version"
+	@echo "  make submodule-status  - Show this status information"
 
