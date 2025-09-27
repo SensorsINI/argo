@@ -1,0 +1,8 @@
+{
+    "name": "NACA 0015",
+    "description": "Basic symmetric airfoil for sail and rudder",
+    "max_lift_coefficient": 1.2,
+    "min_drag_coefficient": 0.02,
+    "max_angle": 20,
+    "stall_angle": 15
+}

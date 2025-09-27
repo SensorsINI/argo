@@ -1,5 +1,153 @@
 # Argo Sailing Simulator Setup
 
+## 📦 **Installation Requirements**
+
+Before running the simulator, install the required dependencies:
+
+### **Install sailboat-playground**
+
+The `sailboat-playground` is a simple framework for sailboat simulation and autonomous navigation algorithms development created by Gabriel Gazola Milan at UFRJ (Federal University of Rio de Janeiro).
+
+```bash
+# Install the sailing physics simulation library
+pip install sailboat-playground
+
+# Verify installation
+pip list | grep sailboat-playground
+
+# Test import (should show available module contents)
+python3 -c "import sailboat_playground; print('✅ sailboat-playground imported successfully')"
+```
+
+#### **About sailboat-playground**
+- **Purpose**: Framework for sailboat simulation and autonomous navigation algorithm development
+- **Author**: Gabriel Gazola Milan (UFRJ - Federal University of Rio de Janeiro) 
+- **License**: GPL-3.0
+- **Dependencies**: cython, numpy, pandas, pyglet
+- **GitHub**: https://github.com/gabriel-milan/sailboat-playground
+
+#### **Troubleshooting sailboat-playground Import Issues**
+
+If you see warnings about sailboat-playground not being available:
+
+1. **Check Python Environment Consistency**:
+   ```bash
+   # Ensure pip and python are from the same environment
+   which python3
+   which pip3
+   python3 -m pip list | grep sailboat
+   ```
+
+2. **Virtual Environment Issues**:
+   ```bash
+   # If using virtual environment, ensure it's activated
+   source /path/to/venv/bin/activate  # Linux/Mac
+   # or on Windows: \path\to\venv\Scripts\activate
+   ```
+
+3. **Multiple Python Installations**:
+   ```bash
+   # Use python3 -m pip to ensure correct pip version
+   python3 -m pip install sailboat-playground
+   ```
+
+4. **Reinstall if needed**:
+   ```bash
+   pip3 uninstall sailboat-playground
+   pip3 install sailboat-playground
+   ```
+
+#### **sailboat-playground API Structure**
+
+The sailboat-playground package provides three main modules:
+- **`constants`**: Physical constants and configuration parameters
+- **`engine`**: Core simulation engine for sailboat physics (Manager, Boat, Environment)
+- **`visualization`**: Rendering and display components (requires graphics)
+
+```python
+# Correct usage pattern for Argo integration
+import os
+os.environ['PYGLET_HEADLESS'] = '1'  # Headless mode
+
+from sailboat_playground.engine import Manager, Boat, Environment
+
+# Initialize simulation components
+sim_manager = Manager()
+boat = Boat()
+environment = Environment()
+```
+
+**API Classes Found:**
+- **`Manager`**: Main simulation controller
+- **`Boat`**: Sailboat physics model
+- **`Environment`**: Wind and water conditions
+- **`utils`**: Utility functions
+
+#### **Current Integration Status**
+
+✅ **sailboat-playground Detection**: Successfully detected and imported  
+✅ **Mock Simulator**: Fully functional with realistic sailing physics  
+✅ **Real Simulator Integration**: Configured with proper JSON configuration files  
+✅ **Configuration Files**: Sample boat and environment configs available
+
+**Integration Behavior:**
+1. **First Attempt**: Try to initialize real sailboat-playground simulator with configuration files
+2. **Fallback**: Use reliable mock simulator if real simulator fails or configs missing
+3. **Identical Output**: Both simulators provide same ROS2 topic structure
+
+## 📁 **Configuration Files Setup**
+
+The Argo repository now includes a `sailboat-playground/` directory with required configuration files:
+
+```
+sailboat-playground/
+├── boats/sample_boat.json           # Boat physical properties
+├── environments/playground.json     # Wind and water conditions  
+├── foils/naca0015.json             # Airfoil characteristics
+├── examples/sailing_upwind.py      # Usage example
+└── README.md                       # Configuration documentation
+```
+
+### **Boat Configuration** (`sample_boat.json`)
+- Physical properties: length (1.1m), mass (30kg), sail area (1.0m²)
+- Hydrodynamics: hull friction, rotation resistance
+- Control surfaces: rudder area (0.02m²), sail/rudder foils
+
+### **Environment Configuration** (`playground.json`)  
+- Wind: constant 10 m/s from west (270°)
+- Water: no current for simplicity
+- Gusts: disabled for stable testing
+
+### **Testing the Integration**
+
+To test the sailboat-playground integration:
+
+```bash
+# Test that configuration files are detected
+cd /home/orangepi/argo
+python3 nodes/argo_simulator_bridge.py --help
+
+# The bridge will attempt to use real sailboat-playground first,
+# then fall back to the reliable mock simulator
+```
+
+**Current Status:**
+- ✅ Configuration files created and detected
+- ✅ sailboat-playground imports successfully  
+- ✅ Graceful fallback to mock simulator
+- 🔧 Advanced physics requires further API tuning
+
+**Note**: The system automatically attempts to use real sailboat-playground with these configurations. Whether using the real or mock simulator, you get identical ROS2 topic output for Argo compatibility. The mock simulator provides reliable operation with realistic sailing physics.
+
+### **Verify ROS2 Environment**
+```bash
+# Ensure ROS2 is sourced
+source /opt/ros/humble/setup.bash
+
+# Verify ROS2 is working
+ros2 node list
+```
+
 ## ✅ **Installation Complete**
 
 The sailing simulator and bridge have been successfully installed and tested:
