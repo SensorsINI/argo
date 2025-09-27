@@ -4,7 +4,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
-from std_msgs.msg import String, Float64
+from std_msgs.msg import String, Float64, UInt8
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 import serial
@@ -18,15 +18,39 @@ import pynmea2
 
 class GpsNode(Node):
     """
-    A ROS2 node to interface with a NMEA-compliant GPS device over a serial port.
-    This node reads raw NMEA sentences from the GPS, sends initialization and
-    shutdown commands, and publishes the raw sentences to the /gps_data topic.
-
-    This script is a migration of a ROS1 script. It intentionally keeps the
-    functionality of publishing raw NMEA strings. For a more robust solution
-    that publishes standard sensor_msgs/NavSatFix messages, it is highly
-    recommended to use the standard ROS2 `nmea_navsat_driver` package.
-    This node can be used to feed the raw data to `nmea_navsat_driver`.
+    ROS2 GPS node for Argo autonomous sailboat navigation and 3D visualization.
+    
+    Interfaces with u-blox NEO-M9N GPS module via UART5 (/dev/ttyS5) and publishes
+    comprehensive navigation data for both autonomous control and Foxglove 3D mapping.
+    
+    Published Topics:
+    - /gps_data (std_msgs/String): Raw NMEA sentences from GPS module
+    - /gps_sog (std_msgs/Float64): Speed over ground in knots
+    - /gps_cog (std_msgs/Float64): Course over ground in degrees true (0-360°)
+    - /gps_velocity (geometry_msgs/Vector3): Velocity vector (x=north, y=east, z=speed)
+    - /gps_num_satellites (std_msgs/UInt8): Number of satellites used in GPS fix
+    - /fix (sensor_msgs/NavSatFix): Standard GPS fix for mapping applications
+    
+    Hardware Configuration:
+    - GPS: u-blox NEO-M9N via UART5 (/dev/ttyS5)
+    - Baud Rate: 38400 (u-blox default)
+    - Frame ID: 'argo_gps' (configurable parameter)
+    
+    Key Features:
+    - Automatic GPS communication verification and setup
+    - NMEA sentence parsing (GGA, RMC, VTG) for position and navigation data
+    - Standard NavSatFix messages for 3D mapping in Foxglove
+    - Velocity vector decomposition for course over ground visualization
+    - Robust error handling with communication timeout detection
+    - Configurable debug logging for troubleshooting
+    
+    For 3D Visualization:
+    The /fix topic provides GPS coordinates that can be used directly in Foxglove's
+    3D panel for mapping. Combined with /gps_velocity and /gps_cog topics, this
+    enables comprehensive boat tracking and navigation visualization.
+    
+    Command Line Options:
+    --debug: Enable detailed debug logging of GPS data and communication
     """
     def __init__(self, debug_mode=False):
         super().__init__('gps_node')
@@ -57,6 +81,7 @@ class GpsNode(Node):
         self.pub_sog = self.create_publisher(Float64, 'gps_sog', 10)  # Speed Over Ground (knots)
         self.pub_cog = self.create_publisher(Float64, 'gps_cog', 10)  # Course Over Ground (degrees)
         self.pub_velocity = self.create_publisher(Vector3, 'gps_velocity', 10)  # Combined velocity vector
+        self.pub_satellites = self.create_publisher(UInt8, 'gps_num_satellites', 10)  # Number of satellites used
         
         # Publisher for standard ROS NavSatFix messages (for mapping)
         self.pub_navsat = self.create_publisher(NavSatFix, 'fix', 10)  # Standard GPS fix for mapping
@@ -227,6 +252,7 @@ class GpsNode(Node):
         self.get_logger().info("Publishing SOG (Speed Over Ground) to /gps_sog topic")
         self.get_logger().info("Publishing COG (Course Over Ground) to /gps_cog topic")
         self.get_logger().info("Publishing combined velocity vector to /gps_velocity topic")
+        self.get_logger().info("Publishing satellite count to /gps_num_satellites topic")
         self.get_logger().info("Publishing standard NavSatFix messages to /fix topic (for mapping)")
 
     def enable_nmea_sentences(self):
@@ -318,6 +344,9 @@ class GpsNode(Node):
                 else:
                     self.gps_fix_valid = False
                     self.navsat_status = NavSatStatus.STATUS_NO_FIX
+                    # Clear navigation data when fix is lost
+                    self.current_sog = None
+                    self.current_cog = None
         except (ValueError, IndexError) as e:
             self.get_logger().debug(f"Error parsing RMC sentence: {e}")
         return False
@@ -331,9 +360,11 @@ class GpsNode(Node):
                 course_true = parts[1]  # Course over ground, degrees true
                 speed_knots = parts[5]  # Speed over ground in knots
                 
-                if course_true and speed_knots:
+                # Only process VTG data if we have a valid GPS fix
+                # VTG sentences can contain data even without a fix, so we need to check fix status
+                if course_true and speed_knots and self.gps_fix_valid:
                     # Only update if we don't have valid data from RMC or if this is more recent
-                    if not self.gps_fix_valid or self.current_sog is None:
+                    if self.current_sog is None:
                         self.current_sog = float(speed_knots)
                         self.current_cog = float(course_true)
                         self.get_logger().debug(f"VTG: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
@@ -358,6 +389,10 @@ class GpsNode(Node):
                 altitude_raw = parts[9]  # Altitude above mean sea level
                 alt_unit = parts[10]     # Altitude units (usually M for meters)
                 
+                # Always extract satellite count for GPS health monitoring, even without fix
+                if num_sats:
+                    self.satellites_used = int(num_sats)
+                
                 if fix_quality and int(fix_quality) > 0 and latitude_raw and longitude_raw and num_sats:
                     # Convert DDMM.MMMM to decimal degrees
                     if latitude_raw:
@@ -381,17 +416,19 @@ class GpsNode(Node):
                         if alt_unit != 'M':
                             self.get_logger().debug(f"Unexpected altitude unit: {alt_unit}")
                     
-                    self.satellites_used = int(num_sats)
-                    
-                    # Update NavSat status based on fix quality
+                    # Update NavSat status and GPS fix validity based on fix quality
                     if int(fix_quality) == 1:
                         self.navsat_status = NavSatStatus.STATUS_FIX
+                        self.gps_fix_valid = True
                     elif int(fix_quality) == 2:
                         self.navsat_status = NavSatStatus.STATUS_SBAS_FIX
+                        self.gps_fix_valid = True
                     elif int(fix_quality) >= 4:
                         self.navsat_status = NavSatStatus.STATUS_GBAS_FIX
+                        self.gps_fix_valid = True
                     else:
                         self.navsat_status = NavSatStatus.STATUS_FIX
+                        self.gps_fix_valid = True
                     
                     # Update position covariance based on HDOP if available
                     if hdop:
@@ -406,6 +443,16 @@ class GpsNode(Node):
                     
                     self.get_logger().debug(f"GGA: Position {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt {self.current_altitude}m, {self.satellites_used} sats")
                     return True
+                else:
+                    # No valid fix - clear GPS fix status
+                    self.gps_fix_valid = False
+                    self.navsat_status = NavSatStatus.STATUS_NO_FIX
+                    # Clear navigation data when fix is lost
+                    self.current_sog = None
+                    self.current_cog = None
+                    self.current_latitude = None
+                    self.current_longitude = None
+                    self.current_altitude = None
                     
         except (ValueError, IndexError) as e:
             self.get_logger().debug(f"Error parsing GGA sentence: {e}")
@@ -456,7 +503,8 @@ class GpsNode(Node):
 
     def publish_navigation_data(self):
         """Publish SOG and COG data to ROS topics."""
-        if self.current_sog is not None and self.current_cog is not None:
+        if (self.current_sog is not None and self.current_cog is not None and 
+            self.gps_fix_valid):
             # Publish individual topics
             sog_msg = Float64()
             sog_msg.data = self.current_sog
@@ -476,6 +524,17 @@ class GpsNode(Node):
             self.pub_velocity.publish(velocity_msg)
             
             self.get_logger().debug(f"Published nav data: SOG={self.current_sog:.2f}kt, COG={self.current_cog:.1f}°")
+        else:
+            # Debug: Log why navigation data is not being published
+            self.get_logger().debug(f"NOT publishing nav data: SOG={self.current_sog}, COG={self.current_cog}, fix_valid={self.gps_fix_valid}")
+
+    def publish_satellite_count(self):
+        """Publish satellite count for GPS health monitoring."""
+        # Always publish satellite count, even if zero (valuable for GPS health monitoring)
+        sat_msg = UInt8()
+        sat_msg.data = self.satellites_used
+        self.pub_satellites.publish(sat_msg)
+        self.get_logger().debug(f"Published satellite count: {self.satellites_used}")
 
     def publish_navsat_fix(self):
         """Publish NavSatFix message for mapping applications."""
@@ -545,8 +604,9 @@ class GpsNode(Node):
                         if self.parse_vtg_sentence(data_str):
                             self.publish_navigation_data()
                     elif data_str.startswith('$GNGGA') or data_str.startswith('$GPGGA'):
-                        if self.parse_gga_sentence(data_str):
-                            self.publish_navsat_fix()
+                        self.parse_gga_sentence(data_str)  # Always parse to extract satellite count
+                        self.publish_navsat_fix()  # Only publishes if valid fix
+                        self.publish_satellite_count()  # Always publishes satellite count
                     
                     # Handle periodic status logging for normal operation
                     self.periodic_status_logging()
