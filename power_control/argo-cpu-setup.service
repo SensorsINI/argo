@@ -1,0 +1,10 @@
+[Unit]
+Description=Argo CPU governor setup
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/argo-cpu-setup.sh
+
+[Install]
+WantedBy=multi-user.target

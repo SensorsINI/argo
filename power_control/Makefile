@@ -218,3 +218,38 @@ help:
 	@echo "  make start           # Start the service"
 	@echo "  make status          # Check service status"
 	@echo "  make help            # Show this help"
+
+# Makefile for Argo Power Control system
+
+SERVICE_DIR = /etc/systemd/system
+CPU_SETUP_SERVICE = argo-cpu-setup.service
+CPU_SETUP_SCRIPT = argo-cpu-setup.sh
+
+.PHONY: help install-cpu-tuning uninstall-cpu-tuning
+
+help:
+	@echo "Argo Power Control Management"
+	@echo "============================="
+	@echo ""
+	@echo "CPU Frequency Tuning:"
+	@echo "  install-cpu-tuning   - Install and enable the CPU governor tuning service"
+	@echo "  uninstall-cpu-tuning - Disable and remove the CPU governor tuning service"
+
+install-cpu-tuning:
+	@echo "Installing Argo CPU governor tuning service..."
+	@sudo cp $(CPU_SETUP_SCRIPT) /usr/local/bin/
+	@sudo chmod +x /usr/local/bin/$(CPU_SETUP_SCRIPT)
+	@sudo cp $(CPU_SETUP_SERVICE) $(SERVICE_DIR)/
+	@sudo systemctl daemon-reload
+	@sudo systemctl enable $(CPU_SETUP_SERVICE)
+	@sudo systemctl start $(CPU_SETUP_SERVICE)
+	@echo "✅ Argo CPU governor tuning service installed and enabled."
+
+uninstall-cpu-tuning:
+	@echo "Uninstalling Argo CPU governor tuning service..."
+	@sudo systemctl stop $(CPU_SETUP_SERVICE) || true
+	@sudo systemctl disable $(CPU_SETUP_SERVICE) || true
+	@sudo rm -f $(SERVICE_DIR)/$(CPU_SETUP_SERVICE)
+	@sudo rm -f /usr/local/bin/$(CPU_SETUP_SCRIPT)
+	@sudo systemctl daemon-reload
+	@echo "✅ Argo CPU governor tuning service uninstalled."

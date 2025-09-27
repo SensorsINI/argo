@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning
 
 help:
 	@echo "Argo Robot Services Management"
@@ -32,6 +32,9 @@ help:
 	@echo "  make -C launch restart     - Restart argo-launch service"
 	@echo "  make -C launch clean       - Clean old bag files (>7 days)"
 	@echo "  make -C launch help        - Show detailed service management help"
+	@echo ""
+	@echo "CPU Governor Tuning:"
+	@echo "  install-cpu-tuning   - Install and enable CPU governor tuning service"
 	@echo ""
 	@echo "Power Control System (in power_control/ directory):"
 	@echo "  make -C power_control install  - Install power control system"
@@ -186,13 +189,19 @@ install-hardware:
 	@echo "✅ Hardware installation complete!"
 	@echo "⚠️  Reboot required to apply hardware configuration changes."
 
-install-all: install-python-deps install-hardware
+install-all: install-python-deps install-hardware install-cpu-tuning
 	@echo "✅ Complete Argo hardware installation finished!"
 	@echo "Next steps:"
 	@echo "1. Reboot to apply hardware configuration"
 	@echo "2. Run 'make -C launch install' to install services"
 	@echo "3. Run 'make -C launch enable' to enable automatic startup"
 	@echo "4. Run 'make -C launch start' to launch the system"
+
+# ==================== CPU GOVERNOR TUNING ====================
+
+install-cpu-tuning:
+	@echo "Installing CPU governor tuning service..."
+	@$(MAKE) -C power_control install-cpu-tuning
 
 # ==================== POWER CONTROL CONVENIENCE TARGETS ====================
 
