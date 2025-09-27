@@ -17,8 +17,21 @@ try:
     # Set headless mode for pyglet (no display required)
     import os
     os.environ['PYGLET_HEADLESS'] = '1'
-    from sailboat_playground import SailboatPlayground
-    SIMULATOR_AVAILABLE = True
+    
+    # Import sailboat-playground modules
+    import sailboat_playground
+    available_attrs = [x for x in dir(sailboat_playground) if not x.startswith('_')]
+    print(f"INFO: sailboat_playground module available, contents: {available_attrs}")
+    
+    # Try to import the engine module for simulation
+    try:
+        from sailboat_playground import engine
+        print("INFO: sailboat-playground engine module imported successfully")
+        SIMULATOR_AVAILABLE = True
+    except ImportError as e:
+        print(f"INFO: sailboat-playground engine not available: {e}")
+        SIMULATOR_AVAILABLE = False
+        
 except ImportError:
     print("WARNING: sailboat-playground not available, using mock simulator")
     SIMULATOR_AVAILABLE = False
@@ -100,23 +113,47 @@ class ArgoSimulatorBridge(Node):
         super().__init__('argo_simulator_bridge')
         self.get_logger().info('Argo Simulator Bridge starting...')
         
-        # Initialize simulator - always use mock for now as it's more reliable
-        self.get_logger().info('Using mock simulator (reliable for headless operation)')
-        self.simulator = MockSailboatSimulator()
-        self.use_mock = True
-        
-        # Could try real simulator here if needed:
-        # if SIMULATOR_AVAILABLE:
-        #     try:
-        #         self.get_logger().info('Initializing sailboat-playground simulator...')
-        #         self.simulator = SailboatPlayground()
-        #         self.use_mock = False
-        #         self.get_logger().info('Real simulator initialized successfully')
-        #     except Exception as e:
-        #         self.get_logger().warn(f'Failed to initialize real simulator: {e}')
-        #         self.get_logger().info('Falling back to mock simulator')
-        #         self.simulator = MockSailboatSimulator()
-        #         self.use_mock = True
+        # Initialize simulator
+        if SIMULATOR_AVAILABLE:
+            try:
+                self.get_logger().info('Initializing sailboat-playground simulator...')
+                from sailboat_playground.engine import Manager
+                import numpy as np
+                
+                # Configuration file paths
+                boat_config = "sailboat-playground/boats/sample_boat.json"
+                env_config = "sailboat-playground/environments/playground.json"
+                
+                # Check if configuration files exist
+                import os
+                if not os.path.exists(boat_config):
+                    raise FileNotFoundError(f"Boat configuration file not found: {boat_config}")
+                if not os.path.exists(env_config):
+                    raise FileNotFoundError(f"Environment configuration file not found: {env_config}")
+                
+                # Initialize the sailboat-playground simulation manager with configs
+                self.sim_manager = Manager(
+                    boat_config,
+                    env_config,
+                    boat_heading=0.0,                    # Start facing north
+                    boat_position=np.array([0.0, 0.0]),  # Start at origin
+                    debug=False
+                )
+                
+                self.simulator = self.sim_manager  # Use the manager as our simulator interface
+                self.use_mock = False
+                self.get_logger().info('Real sailboat-playground simulator initialized successfully')
+                self.get_logger().info(f'Using boat config: {boat_config}')
+                self.get_logger().info(f'Using environment config: {env_config}')
+            except Exception as e:
+                self.get_logger().warn(f'Failed to initialize real simulator: {e}')
+                self.get_logger().info('Falling back to mock simulator (reliable for headless operation)')
+                self.simulator = MockSailboatSimulator()
+                self.use_mock = True
+        else:
+            self.get_logger().info('Using mock simulator (reliable for headless operation)')
+            self.simulator = MockSailboatSimulator()
+            self.use_mock = True
         
         # Simulation state
         self.last_control_time = time.time()
@@ -176,9 +213,29 @@ class ArgoSimulatorBridge(Node):
             if self.use_mock:
                 self.boat_state = self.simulator.step()
             else:
-                # Handle real simulator API (would need to check actual API)
+                # Handle real sailboat-playground API
                 try:
-                    self.boat_state = self.simulator.step()
+                    # Get current rudder and sail angles (default to 0 if no control received)
+                    rudder_angle = getattr(self, 'last_rudder_angle', 0.0)
+                    sail_angle = getattr(self, 'last_sail_angle', 0.0)
+                    
+                    # Step the simulation with control inputs
+                    self.sim_manager.step([sail_angle, rudder_angle])
+                    
+                    # Get the current state from sailboat-playground
+                    state = self.sim_manager.agent_state
+                    
+                    # Convert to our internal boat_state format
+                    self.boat_state = {
+                        'x': state['position'][0],
+                        'y': state['position'][1], 
+                        'heading': state['heading'],
+                        'speed': np.linalg.norm(state['velocity']) if 'velocity' in state else 2.0,
+                        'wind_speed': state.get('wind_speed', 8.0),
+                        'wind_direction': state.get('wind_direction', 45.0),
+                        'rudder': rudder_angle,
+                        'sail': sail_angle
+                    }
                 except Exception as e:
                     self.get_logger().warn(f'Simulator step failed: {e}')
                     return
@@ -247,11 +304,10 @@ class ArgoSimulatorBridge(Node):
         if self.use_mock:
             self.simulator.set_control(rudder, sail)
         else:
-            # Handle real simulator control API
-            try:
-                self.simulator.set_control(rudder, sail)
-            except Exception as e:
-                self.get_logger().warn(f'Failed to set control: {e}')
+            # Store control values for real simulator (they're applied in simulation_step)
+            # sailboat-playground expects angles in degrees, Argo sends normalized values
+            self.last_rudder_angle = rudder * 30.0  # Convert to degrees (-30 to +30)
+            self.last_sail_angle = sail * 45.0      # Convert to degrees (-45 to +45)
         
         self.get_logger().debug(f'Applied control: rudder={rudder:.3f}, sail={sail:.3f}')
     

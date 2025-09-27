@@ -1,0 +1,93 @@
+---
+description: "System monitoring and logging setup for Orange Pi Zero 2W hang diagnostics"
+---
+
+# Argo System Monitoring and Logging
+
+## Persistent Logging Setup
+The system has comprehensive persistent logging in `/var/log/persistent/` for hang diagnostics:
+
+### Log Files
+- **`dmesg-YYYYMMDD-HHMMSS.log`**: Kernel messages and hardware events
+- **`thermal-YYYYMMDD.log`**: CPU, GPU, DDR, and VE temperature monitoring
+- **`memory-YYYYMMDD.log`**: Memory usage, swap status, and OOM events
+- **`cursor-processes-YYYYMMDD.log`**: Cursor agent process monitoring
+- **`orangepi-monitor-YYYYMMDD.log`**: System resource monitoring via `orangepimonitor -m`
+
+### Monitoring Services
+All monitoring services run as systemd services:
+
+#### Thermal Monitoring
+- **Service**: `thermal-monitor.service`
+- **Script**: `/usr/local/bin/thermal-monitor.sh`
+- **Frequency**: Every 30 seconds
+- **Alert Threshold**: 80°C
+
+#### Memory Monitoring
+- **Service**: `memory-monitor.service`
+- **Script**: `/usr/local/bin/memory-monitor.sh`
+- **Frequency**: Every 30 seconds
+- **Alert Threshold**: 85% memory usage
+
+#### Cursor Process Monitoring
+- **Service**: `cursor-monitor.service`
+- **Script**: `/usr/local/bin/cursor-monitor.sh`
+- **Frequency**: Every 60 seconds
+- **Alert Threshold**: 1GB memory usage
+
+#### Orange Pi Monitor
+- **Service**: `orangepi-monitor.service`
+- **Command**: `orangepimonitor -m`
+- **Frequency**: Continuous (until shutdown)
+- **Purpose**: System resource monitoring
+
+## Hang Analysis Process
+When investigating system hangs:
+
+1. **Check persistent logs** in `/var/log/persistent/`
+2. **Examine memory usage** before hang
+3. **Review thermal data** for overheating
+4. **Analyze Cursor processes** for memory leaks
+5. **Check system logs** for OOM events
+6. **Review watchdog activity** for false triggers
+
+## Memory Optimization
+Kernel parameters tuned in `/etc/sysctl.d/99-vm-tuning.conf`:
+```
+vm.vfs_cache_pressure = 50
+vm.swappiness = 10
+vm.dirty_ratio = 15
+vm.dirty_background_ratio = 5
+```
+
+## CPU Frequency Scaling
+Conservative CPU governor configured via `cpufreq-tuning.service`:
+- **Governor**: `conservative`
+- **Up Threshold**: 80% (less aggressive scaling)
+- **Down Threshold**: 20%
+- **Sampling Rate**: 100ms
+
+## Commands for Log Analysis
+```bash
+# View recent logs
+sudo tail -f /var/log/persistent/memory-$(date +%Y%m%d).log
+sudo tail -f /var/log/persistent/thermal-$(date +%Y%m%d).log
+sudo tail -f /var/log/persistent/cursor-processes-$(date +%Y%m%d).log
+
+# Check service status
+sudo systemctl status thermal-monitor.service
+sudo systemctl status memory-monitor.service
+sudo systemctl status cursor-monitor.service
+sudo systemctl status orangepi-monitor.service
+
+# View system logs
+sudo journalctl --since "2025-09-25" | grep -i -E "(oom|killed|fatal|panic)"
+sudo dmesg | grep -i -E "(oom|killed|fatal|panic)"
+```
+
+## Common Hang Causes
+1. **Memory exhaustion** from Cursor agent processes
+2. **Watchdog false triggers** from misconfiguration
+3. **Thermal throttling** (though temperatures are typically normal)
+4. **OOM killer** events
+5. **Network interface monitoring failures**
