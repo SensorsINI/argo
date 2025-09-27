@@ -100,3 +100,11 @@ nodes/ain3_decay_20250905_103931.png
 build/
 install/
 log/
+.idea/argo.iml
+.idea/GitLink.xml
+.idea/misc.xml
+.idea/modules.xml
+.idea/other.xml
+.idea/vcs.xml
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/inspectionProfiles/Project_Default.xml
