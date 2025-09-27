@@ -1,0 +1,87 @@
+---
+description: "Watchdog configuration and troubleshooting for Orange Pi Zero 2W on Armbian"
+---
+
+# Orange Pi Zero 2W Watchdog Configuration
+
+## Hardware Watchdog Details
+- **Driver**: `sunxi_wdt` (built into kernel)
+- **Device**: `/dev/watchdog` and `/dev/watchdog0`
+- **Hardware**: Allwinner H618 (compatible with `sun50i-h616-wdt`)
+- **Default Timeout**: 16 seconds (fixed, cannot be changed)
+- **Status**: Enabled in device tree (`status = "okay"`)
+
+## Watchdog Service Issues
+The standard `watchdog` daemon caused multiple reboots due to:
+
+### 1. Network Interface Monitoring Failure
+```bash
+# Problematic configuration in /etc/watchdog.conf:
+interface = wlan0
+```
+- **Issue**: Watchdog expected network activity on `wlan0`
+- **Result**: Triggered reboots when interface was idle
+- **Error**: `device wlan0 did not receive anything since last check`
+
+### 2. Missing PID File
+```bash
+# Problematic configuration in /etc/watchdog.conf:
+pidfile = /var/run/systemd/resolved/pid
+```
+- **Issue**: File didn't exist, causing watchdog to fail
+- **Error**: `cannot open /var/run/systemd/resolved/pid (errno = 2 = 'No such file or directory')`
+
+### 3. Invalid Timeout Configuration
+```bash
+# Problematic configuration in /etc/watchdog.conf:
+watchdog-timeout = 60
+```
+- **Issue**: Hardware only supports 16-second timeout
+- **Error**: `cannot set timeout 60 (errno = 22 = 'Invalid argument')`
+
+### 4. Real-time Scheduler Issues
+```bash
+# Problematic configuration in /etc/watchdog.conf:
+realtime = yes
+priority = 1
+```
+- **Issue**: System lacks permissions for real-time scheduling
+- **Error**: `cannot set scheduler (errno = 1 = 'Operation not permitted')`
+
+## Current Working Configuration
+- **Watchdog daemon**: Disabled and masked
+- **Hardware watchdog**: Active via `wd_keepalive` service
+- **Systemd watchdog**: Available for service-level monitoring
+
+## Commands to Manage Watchdog
+```bash
+# Disable problematic watchdog daemon
+sudo systemctl stop watchdog
+sudo systemctl disable watchdog
+sudo systemctl mask watchdog
+
+# Check current status
+sudo systemctl status watchdog
+sudo systemctl status wd_keepalive
+
+# View watchdog logs
+sudo journalctl -u watchdog.service
+sudo journalctl -u wd_keepalive.service
+```
+
+## Alternative: Systemd Watchdog Integration
+Instead of the `watchdog` daemon, use systemd's built-in watchdog:
+
+```ini
+# /etc/systemd/system.conf
+[Manager]
+RuntimeWatchdogSec=10s
+ShutdownWatchdogSec=30s
+```
+
+## Troubleshooting Watchdog Reboots
+1. Check for network interface monitoring failures
+2. Verify PID files exist for monitored processes
+3. Ensure timeout settings match hardware capabilities
+4. Check for real-time scheduler permission issues
+5. Review watchdog logs for specific error messages
