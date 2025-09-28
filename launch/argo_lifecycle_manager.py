@@ -110,9 +110,14 @@ class ArgoLifecycleManager:
         # Get the nodes directory
         nodes_dir = os.path.join(self.argo_dir, 'nodes')
         
-        # Discover available nodes
-        discovered_nodes = self.node_manager.discover_nodes()
-        node_scripts = [f"{node}.py" for node in discovered_nodes if node != 'foxglove_bridge']
+        # Use expected_nodes if defined (e.g., in simulation mode), otherwise discover all nodes
+        if hasattr(self, 'expected_nodes') and self.expected_nodes:
+            node_scripts = self.expected_nodes
+            print(f"Launching specific nodes: {', '.join(node_scripts)}")
+        else:
+            # Discover available nodes
+            discovered_nodes = self.node_manager.discover_nodes()
+            node_scripts = [f"{node}.py" for node in discovered_nodes if node != 'foxglove_bridge']
         
         # Launch each node in a separate process
         self.node_processes = []
@@ -139,7 +144,18 @@ class ArgoLifecycleManager:
                 print(f"⚠️  Warning: {script} not found at {script_path}")
         
         # Launch special nodes (like foxglove_bridge)
-        for special_node in discovered_nodes:
+        # In simulation mode, launch special nodes defined in self.special_nodes
+        # In normal mode, discover and launch all special nodes
+        special_nodes_to_launch = []
+        if hasattr(self, 'special_nodes') and self.special_nodes:
+            # Simulation mode: use explicitly defined special nodes
+            special_nodes_to_launch = self.special_nodes
+        elif not (hasattr(self, 'expected_nodes') and self.expected_nodes):
+            # Normal mode: discover all special nodes
+            discovered_nodes = self.node_manager.discover_nodes()
+            special_nodes_to_launch = [node for node in discovered_nodes if node == 'foxglove_bridge']
+        
+        for special_node in special_nodes_to_launch:
             if special_node == 'foxglove_bridge':
                 print(f"✅ Launching {special_node}...")
                 # Launch foxglove_bridge as a ROS2 package
@@ -425,6 +441,13 @@ class ArgoLifecycleManager:
                 subprocess.run(['pkill', '-f', f'/{node}'], 
                              capture_output=True, timeout=2)
             
+            # Also kill special nodes (like foxglove_bridge)
+            if hasattr(self, 'special_nodes') and self.special_nodes:
+                for special_node in self.special_nodes:
+                    if special_node == 'foxglove_bridge':
+                        subprocess.run(['pkill', '-f', 'foxglove_bridge'], 
+                                     capture_output=True, timeout=2)
+            
             print("✅ Argo processes terminated")
         except Exception as e:
             print(f"⚠️  Error stopping processes: {e}")
@@ -440,6 +463,179 @@ class ArgoLifecycleManager:
         self.stop()
         time.sleep(1)
         return self.start()
+
+    def simulate(self) -> bool:
+        """
+        Launch Argo in simulation mode.
+        
+        In simulation mode, only essential nodes are launched:
+        - argo_unified_simulator_bridge.py (provides simulated sensor data)
+        - controller.py (autonomous navigation)
+        - battery_water.py (hardware monitoring)
+        - temp_monitor.py (hardware monitoring)
+        - foxglove_bridge (provides visualization via Foxglove Studio)
+        
+        Hardware nodes that conflict with simulator are excluded:
+        - gps.py (conflicts with simulator GPS topics)
+        - imu.py (conflicts with simulator compass topics)
+        - anem.py (conflicts with simulator wind topics)
+        - rudder_sail_radio.py (conflicts with simulator control)
+        """
+        print("🚢 Starting Argo in SIMULATION mode...")
+        print("Simulation mode excludes conflicting hardware nodes:")
+        print("  - gps.py (GPS data provided by simulator)")
+        print("  - imu.py (compass data provided by simulator)")
+        print("  - anem.py (wind data provided by simulator)")
+        print("  - rudder_sail_radio.py (control handled by simulator)")
+        print("Simulation mode includes visualization:")
+        print("  - foxglove_bridge (Foxglove Studio at ws://localhost:9090)")
+        
+        # Check if simulator bridge exists
+        simulator_bridge_path = os.path.join(self.argo_dir, "nodes", "argo_unified_simulator_bridge.py")
+        if not os.path.exists(simulator_bridge_path):
+            print(f"❌ Simulator bridge not found: {simulator_bridge_path}")
+            return False
+        
+        # Define simulation mode node scripts (exclude conflicting hardware nodes)
+        self.expected_nodes = [
+            "argo_unified_simulator_bridge.py",  # Provides simulated sensor data
+            "controller.py",                     # Autonomous navigation
+            "battery_water.py",                  # Hardware monitoring
+            "temp_monitor.py"                    # Hardware monitoring
+        ]
+        
+        # Add foxglove_bridge to special nodes for simulation mode
+        self.special_nodes = ["foxglove_bridge"]
+        
+        # Critical nodes for simulation (simulator bridge is critical)
+        self.critical_nodes = ["argo_unified_simulator_bridge.py", "controller.py"]
+        
+        print(f"Expected simulation nodes: {', '.join(self.expected_nodes)}")
+        print(f"Special simulation nodes: {', '.join(self.special_nodes)}")
+        print(f"Critical simulation nodes: {', '.join(self.critical_nodes)}")
+        
+        # Launch simulation nodes
+        self._launch_nodes_directly()
+        
+        # Wait for nodes to start
+        print("⏳ Waiting for simulation nodes to start...")
+        start_time = time.time()
+        timeout = 30
+        check_interval = 0.3
+        
+        # Calculate total expected nodes (regular + special)
+        total_expected_nodes = len(self.expected_nodes) + len(self.special_nodes)
+        
+        while time.time() - start_time < timeout:
+            node_status = self._get_node_status()
+            running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
+            
+            # Progress reporting (journal-friendly)
+            elapsed = time.time() - start_time
+            if int(elapsed * 10) % 10 == 0:
+                print(f"⏳ Waiting for simulation nodes... {len(running_nodes)}/{total_expected_nodes} running")
+            
+            if len(running_nodes) == total_expected_nodes:
+                break  # All nodes detected, proceed to stabilization
+            
+            time.sleep(check_interval)
+        
+        # Check if all expected nodes are running
+        if len(running_nodes) != total_expected_nodes:
+            print(f"❌ Only {len(running_nodes)}/{total_expected_nodes} simulation nodes started")
+            print(f"Running: {running_nodes}")
+            print(f"Expected: {self.expected_nodes + self.special_nodes}")
+            return False
+        
+        # Monitor during stabilization period
+        print("⏳ Monitoring simulation nodes during stabilization...")
+        stabilization_start = time.time()
+        self.stabilization_wait = 15.0  # 15 seconds stabilization for simulation
+        
+        while time.time() - stabilization_start < self.stabilization_wait:
+            current_status = self._get_node_status()
+            current_stopped = [node for node, status in current_status.items() if "STOPPED" in status]
+            
+            if current_stopped:
+                print(f"\n⚠️  Simulation node failure detected during stabilization: {', '.join(current_stopped)}")
+                # Get and display error messages
+                fatal_messages = self._get_fatal_messages_for_nodes()
+                for failed_node in current_stopped:
+                    if failed_node in fatal_messages:
+                        print(f"   {failed_node}: {fatal_messages[failed_node]}")
+                break
+            
+            time.sleep(1.0)  # Check every second
+        
+        # Final status check
+        final_node_status = self._get_node_status()
+        final_running_nodes = [node for node, status in final_node_status.items() if "RUNNING" in status]
+        
+        # Determine success based on critical nodes and minimum thresholds
+        critical_running = [node for node in self.critical_nodes if node in final_running_nodes]
+        if len(critical_running) == len(self.critical_nodes):
+            print("✅ All critical simulation nodes running")
+            success = True
+        elif len(final_running_nodes) >= 2:  # At least simulator + controller
+            print(f"✅ Sufficient simulation nodes running ({len(final_running_nodes)}/2+)")
+            success = True
+        else:
+            print(f"❌ Insufficient simulation nodes running ({len(final_running_nodes)}/2+)")
+            success = False
+        
+        if success:
+            print("🎉 Argo simulation mode started successfully!")
+            print("Simulated sensor data available on:")
+            print("  - /pose (compass heading)")
+            print("  - /gps_cog, /gps_sog, /gps_velocity (GPS navigation)")
+            print("  - /anem_speed_angle_temp (wind data)")
+            print("  - /rudder_sail_radio (mock human input)")
+            print("Control commands sent to simulator via /rudder_sail_servo")
+            print("Visualization available via Foxglove Studio at ws://localhost:9090")
+            print("\n🔄 Simulation running... Press Ctrl+C to stop and clean up all nodes")
+            
+            # Start continuous monitoring with proper cleanup
+            try:
+                while True:
+                    time.sleep(30)  # Check every 30 seconds
+                    
+                    # Check node status
+                    node_status = self._get_node_status()
+                    running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
+                    stopped_nodes = [node for node, status in node_status.items() if "STOPPED" in status]
+                    
+                    if stopped_nodes:
+                        print(f"⚠️  {len(stopped_nodes)} simulation nodes stopped: {', '.join(stopped_nodes)}")
+                        
+                        # Check if critical nodes are still running
+                        critical_running = [n for n in self.critical_nodes if n in running_nodes]
+                        critical_stopped = [n for n in self.critical_nodes if n in stopped_nodes]
+                        
+                        if critical_stopped:
+                            print(f"❌ CRITICAL SIMULATION NODES STOPPED: {', '.join(critical_stopped)}")
+                            print(f"   Simulation will continue with remaining nodes")
+                        else:
+                            print(f"✅ Critical simulation nodes operational: {', '.join(critical_running)}")
+                        
+                        # Show system status
+                        if len(running_nodes) >= 2:
+                            print(f"✅ Simulation operational with {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes")
+                        else:
+                            print(f"⚠️  Low node count: {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes running")
+                    
+            except KeyboardInterrupt:
+                print("\n🛑 Stopping simulation and cleaning up all nodes...")
+                self.stop()
+                print("✅ All simulation nodes terminated")
+                return True
+            except Exception as e:
+                print(f"❌ Error in simulation mode: {e}")
+                self.stop()
+                return False
+        else:
+            print("❌ Argo simulation mode failed to start")
+        
+        return success
     
     def status(self) -> None:
         """Show current status of Argo nodes"""
@@ -877,7 +1073,7 @@ class ArgoLifecycleManager:
 
 def main():
     parser = argparse.ArgumentParser(description='Argo ROS2 Lifecycle Manager')
-    parser.add_argument('command', choices=['run', 'stop', 'restart', 'status', 'monitor'],
+    parser.add_argument('command', choices=['run', 'stop', 'restart', 'status', 'monitor', 'simulate'],
                        help='Command to execute')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug output')
@@ -901,6 +1097,9 @@ def main():
         manager.status()
     elif args.command == 'monitor':
         manager.monitor()
+    elif args.command == 'simulate':
+        success = manager.simulate()
+        sys.exit(0 if success else 1)
 
 if __name__ == '__main__':
     main()
