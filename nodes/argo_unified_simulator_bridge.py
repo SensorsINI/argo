@@ -14,8 +14,9 @@ Usage:
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float64
+from std_msgs.msg import Bool, Float64, String, UInt8
 from geometry_msgs.msg import Vector3
+from sensor_msgs.msg import NavSatFix, NavSatStatus
 import numpy as np
 import time
 import math
@@ -143,6 +144,10 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.mock_human_input = True
         self.human_input_time = 0.0
         
+        # --- GPS Base Location (for NavSatFix) ---
+        self.base_latitude = 47.3769  # Zurich, Switzerland
+        self.base_longitude = 8.5417
+        
         # Remote mode specific state
         if mode == 'remote':
             self.last_remote_data_time = time.time()
@@ -158,7 +163,10 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.pub_gps_cog = self.create_publisher(Float64, '/gps_cog', 10)
         self.pub_gps_sog = self.create_publisher(Float64, '/gps_sog', 10)
         self.pub_gps_velocity = self.create_publisher(Vector3, '/gps_velocity', 10)
-        
+        self.pub_gps_satellites = self.create_publisher(UInt8, '/gps_num_satellites', 10)
+        self.pub_gps_fix = self.create_publisher(NavSatFix, '/fix', 10)
+        self.pub_gps_data = self.create_publisher(String, '/gps_data', 10)
+
         # Wind data
         self.pub_wind = self.create_publisher(Vector3, '/anem_speed_angle_temp', 10)
         
@@ -321,7 +329,18 @@ class ArgoUnifiedSimulatorBridge(Node):
             z=22.5                               # temperature (mock)
         )
         self.pub_wind.publish(wind_msg)
-    
+
+        # Publish satellite count
+        sat_msg = UInt8()
+        sat_msg.data = 12  # Mock satellite count
+        self.pub_gps_satellites.publish(sat_msg)
+
+        # Publish NavSatFix message for mapping
+        self.publish_navsat_fix()
+
+        # Publish mock NMEA RMC sentence
+        self.publish_mock_nmea()
+
     def publish_mock_human_input(self):
         """Generate mock human radio input for testing."""
         self.human_input_time += 1.0 / self.simulation_rate
@@ -332,7 +351,70 @@ class ArgoUnifiedSimulatorBridge(Node):
         
         radio_msg = Vector3(x=rudder, y=sail, z=0.0)
         self.pub_radio.publish(radio_msg)
-    
+
+    def xy_to_latlon(self, x, y):
+        """Convert XY meters from base lat/lon to new lat/lon."""
+        R = 6378137.0  # Earth radius in meters
+        dLat = y / R
+        dLon = x / (R * math.cos(math.pi * self.base_latitude / 180))
+        lat = self.base_latitude + dLat * 180 / math.pi
+        lon = self.base_longitude + dLon * 180 / math.pi
+        return lat, lon
+
+    def publish_navsat_fix(self):
+        """Publish a NavSatFix message."""
+        if not self.boat_state:
+            return
+
+        lat, lon = self.xy_to_latlon(self.boat_state['x'], self.boat_state['y'])
+
+        fix_msg = NavSatFix()
+        fix_msg.header.stamp = self.get_clock().now().to_msg()
+        fix_msg.header.frame_id = 'gps'
+        fix_msg.status.status = NavSatStatus.STATUS_FIX
+        fix_msg.status.service = NavSatStatus.SERVICE_GPS
+        fix_msg.latitude = lat
+        fix_msg.longitude = lon
+        fix_msg.altitude = 0.0  # Mock altitude
+        fix_msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
+        self.pub_gps_fix.publish(fix_msg)
+
+    def publish_mock_nmea(self):
+        """Publish a mock NMEA RMC sentence."""
+        if not self.boat_state:
+            return
+
+        lat, lon = self.xy_to_latlon(self.boat_state['x'], self.boat_state['y'])
+        
+        # Format latitude for NMEA (DDMM.MMMM)
+        lat_deg = int(abs(lat))
+        lat_min = (abs(lat) - lat_deg) * 60
+        lat_dir = 'N' if lat >= 0 else 'S'
+        lat_str = f"{lat_deg:02d}{lat_min:07.4f}"
+
+        # Format longitude for NMEA (DDDMM.MMMM)
+        lon_deg = int(abs(lon))
+        lon_min = (abs(lon) - lon_deg) * 60
+        lon_dir = 'E' if lon >= 0 else 'W'
+        lon_str = f"{lon_deg:03d}{lon_min:07.4f}"
+        
+        speed_knots = self.boat_state['speed'] * 1.94384
+        course_deg = self.boat_state['heading']
+        
+        timestamp = time.strftime("%H%M%S.00", time.gmtime())
+        datestamp = time.strftime("%d%m%y", time.gmtime())
+
+        nmea_sentence = f"$GPRMC,{timestamp},A,{lat_str},{lat_dir},{lon_str},{lon_dir},{speed_knots:.2f},{course_deg:.2f},{datestamp},,,"
+        
+        # Calculate checksum
+        checksum = 0
+        for char in nmea_sentence[1:]:
+            checksum ^= ord(char)
+        
+        nmea_sentence += f"*{checksum:02X}"
+        
+        self.pub_gps_data.publish(String(data=nmea_sentence))
+
     def control_callback(self, msg):
         """Receive control commands from Argo and apply to simulator."""
         self.last_control_time = time.time()

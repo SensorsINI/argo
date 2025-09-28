@@ -24,4 +24,5 @@ alias ac='if systemctl is-active --quiet argo-launch.service; then ros2 service 
 alias ah='bash /home/orangepi/argo/launch/argo_help.sh' # show argo help
 alias ag='sudo python3 /home/orangepi/argo/launch/argo_gui.py' # start argo gui
 alias alog='journalctl -u argo-launch.service -f --no-pager' # show argo launch logs
-alias asim='python3 launch/argo_lifecycle_manager.py simulate' # start argo simulator bridge
+alias asim='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py simulate_local' # start argo in LOCAL simulation mode
+alias asimr='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py simulate_remote' # start argo in REMOTE simulation mode
