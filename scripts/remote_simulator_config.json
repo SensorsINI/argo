@@ -1,0 +1,20 @@
+{
+  "remote": {
+    "host": "sensors-tobidh87.lan.ini.uzh.ch",
+    "user": "tobi",
+    "argo_dir": "/home/tobi/Dropbox/GitHub/SensorsINI/argo"
+  },
+  "ros2": {
+    "domain_id": 42
+  },
+  "network": {
+    "local_port": 11311,
+    "remote_port": 11311
+  },
+  "ssh": {
+    "timeout": 10,
+    "key_path": "~/.ssh/id_rsa"
+  }
+}
+
+

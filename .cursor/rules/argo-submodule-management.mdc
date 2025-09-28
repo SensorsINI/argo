@@ -1,0 +1,157 @@
+---
+description: "Git submodule management patterns and procedures for Argo sailboat-playground integration"
+---
+
+# Argo Git Submodule Management
+
+## Submodule Configuration
+
+The Argo project uses a git submodule for the sailboat-playground simulator:
+
+### Configuration Files
+- **[.gitmodules](mdc:.gitmodules)** - Submodule configuration pointing to SensorsINI/sailboat-playground
+- **[Makefile](mdc:Makefile)** - Contains submodule management targets
+
+### Directory Structure
+```
+argo/
+├── simulator/                    # Git submodule (source code)
+│   ├── boats/                   # Boat configuration files
+│   ├── environments/            # Environment simulation files
+│   ├── sailboat_playground/     # Python package source
+│   └── ...                     # Full sailboat-playground repository
+├── sailboat-playground/         # Local Argo-specific configs
+│   ├── boats/sample_boat.json   # Argo boat configuration
+│   ├── environments/playground.json # Argo environment setup
+│   └── ...                     # Argo-specific configuration files
+└── .gitmodules                  # Submodule configuration
+```
+
+## Makefile Submodule Targets
+
+### Initialization
+```bash
+make submodule-init    # Initialize and checkout submodule
+```
+- Validates `.gitmodules` configuration
+- Clones submodule to `simulator/` directory
+- Checks out the configured commit
+- Provides next steps guidance
+
+### Updates
+```bash
+make submodule-update  # Update to latest version
+```
+- Fetches latest changes from remote
+- Merges updates into local submodule
+- Shows current commit status
+- Provides commit instructions for locking version
+
+### Status Checking
+```bash
+make submodule-status  # Comprehensive status report
+```
+- Shows submodule configuration and URL
+- Displays current commit and branch information
+- Reports on local configuration directory
+- Provides usage instructions
+
+## Submodule Management Patterns
+
+### Dual Directory Strategy
+The project maintains two separate directories:
+1. **`simulator/`** - Git submodule with source code from upstream
+2. **`sailboat-playground/`** - Local configuration files for Argo
+
+This separation provides:
+- **Version Control**: Submodule tracks upstream changes
+- **Local Customization**: Config files remain independent
+- **No Conflicts**: Different purposes, different directories
+
+### Integration with Simulator Bridge
+The [argo_unified_simulator_bridge.py](mdc:nodes/argo_unified_simulator_bridge.py) uses both directories:
+- **Source Code**: Imports from `simulator/sailboat_playground/` package
+- **Configuration**: Loads boat/env configs from `sailboat-playground/` directory
+
+### Error Handling
+The Makefile targets include comprehensive error checking:
+- Validates `.gitmodules` file existence
+- Checks submodule configuration
+- Verifies directory structure
+- Provides clear error messages and solutions
+
+## Common Workflows
+
+### First Time Setup
+```bash
+# 1. Initialize submodule
+make submodule-init
+
+# 2. Verify setup
+make submodule-status
+
+# 3. Test integration
+python3 nodes/argo_simulator_bridge.py --help
+```
+
+### Updating Submodule
+```bash
+# 1. Update to latest version
+make submodule-update
+
+# 2. Test changes
+make submodule-status
+
+# 3. Commit the update
+git add simulator
+git commit -m "Update sailboat-playground submodule"
+```
+
+### Troubleshooting
+```bash
+# Check submodule status
+make submodule-status
+
+# Re-initialize if needed
+make submodule-init
+
+# Verify local configs
+ls -la sailboat-playground/
+```
+
+## Integration Points
+
+### Simulator Bridge Configuration
+The [argo_unified_simulator_bridge.py](mdc:nodes/argo_unified_simulator_bridge.py) expects:
+- **Boat Config**: `sailboat-playground/boats/sample_boat.json`
+- **Environment Config**: `sailboat-playground/environments/playground.json`
+- **Source Package**: Available via `simulator/sailboat_playground/`
+
+### Fallback Behavior
+If submodule is not available:
+- Simulator bridge falls back to mock simulator
+- Local config files still work for testing
+- System remains functional without submodule
+
+## Best Practices
+
+### Version Management
+- Always commit submodule updates to lock versions
+- Test submodule changes before committing
+- Use `make submodule-status` to verify state
+
+### Configuration Management
+- Keep local configs in `sailboat-playground/` directory
+- Don't modify files in `simulator/` directory
+- Use separate directories for source vs. config
+
+### Error Recovery
+- Use `make submodule-init` to recover from submodule issues
+- Check `make submodule-status` for diagnostic information
+- Verify both directories exist and serve their purposes
+
+## Related Files
+- **[Makefile](mdc:Makefile)** - Submodule management targets
+- **[.gitmodules](mdc:.gitmodules)** - Submodule configuration
+- **[nodes/argo_unified_simulator_bridge.py](mdc:nodes/argo_unified_simulator_bridge.py)** - Simulator integration
+- **[sailboat-playground/README.md](mdc:sailboat-playground/README.md)** - Local config documentation

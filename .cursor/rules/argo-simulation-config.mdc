@@ -1,0 +1,285 @@
+---
+globs: scripts/remote_simulator_config.json,scripts/load_config.py,scripts/*_config*
+description: "Configuration management patterns for simulation system"
+---
+
+# Argo Simulation Configuration Management
+
+## Centralized Configuration Architecture
+
+The simulation system uses a centralized JSON configuration file with a universal loader that provides access from both Python and shell scripts.
+
+### Core Components
+- **[scripts/remote_simulator_config.json](mdc:scripts/remote_simulator_config.json)** - Centralized configuration file
+- **[scripts/load_config.py](mdc:scripts/load_config.py)** - Universal configuration loader
+- **Environment Variable Export** - Shell script integration
+- **Dot Notation Access** - Hierarchical configuration access
+
+## Configuration File Structure
+
+### JSON Configuration Schema
+```json
+{
+  "remote": {
+    "host": "sensors-tobidh87.lan.ini.uzh.ch",
+    "user": "tobi",
+    "argo_dir": "/home/tobi/Dropbox/GitHub/SensorsINI/argo"
+  },
+  "ros2": {
+    "domain_id": 42
+  },
+  "network": {
+    "local_port": 11311,
+    "remote_port": 11311
+  },
+  "ssh": {
+    "timeout": 10,
+    "key_path": "~/.ssh/id_rsa"
+  }
+}
+```
+
+### Configuration Sections
+- **`remote`** - Remote machine connection details
+- **`ros2`** - ROS2 communication settings
+- **`network`** - Network port configuration
+- **`ssh`** - SSH connection parameters
+
+## Universal Loader Patterns
+
+### Python Access Pattern
+```python
+import os
+import sys
+import json
+
+def load_config():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, 'remote_simulator_config.json')
+    with open(config_path, 'r') as f:
+        return json.load(f)
+
+# Usage
+config = load_config()
+REMOTE_HOST = config['remote']['host']
+ROS_DOMAIN_ID = config['ros2']['domain_id']
+```
+
+### Shell Access Pattern
+```bash
+# Load configuration in shell scripts
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+eval "$(python3 "$SCRIPT_DIR/load_config.py" --export-shell)"
+
+# Use exported variables
+echo "Remote host: $REMOTE_HOST"
+echo "ROS domain ID: $ROS2_DOMAIN_ID"
+```
+
+### Dot Notation Access
+```python
+def get_nested_value(data, key_path):
+    keys = key_path.split('.')
+    current = data
+    for key in keys:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return None
+    return current
+
+# Usage
+remote_host = get_nested_value(config, 'remote.host')
+ros_domain_id = get_nested_value(config, 'ros2.domain_id')
+```
+
+## Environment Variable Export Patterns
+
+### Shell Variable Generation
+```python
+def export_shell_variables(config):
+    for section, values in config.items():
+        for key, value in values.items():
+            # Convert to uppercase and prepend section name for clarity in shell
+            env_var_name = f"{section.upper()}_{key.upper()}"
+            # Handle tilde in key_path for SSH_KEY_PATH
+            if env_var_name == "SSH_KEY_PATH" and isinstance(value, str):
+                value = os.path.expanduser(value)
+            print(f"export {env_var_name}='{value}'")
+```
+
+### Variable Naming Convention
+- **Format**: `{SECTION}_{KEY}` (uppercase)
+- **Examples**: 
+  - `remote.host` → `REMOTE_HOST`
+  - `ros2.domain_id` → `ROS2_DOMAIN_ID`
+  - `ssh.key_path` → `SSH_KEY_PATH`
+
+## Command Line Interface Patterns
+
+### Argument Parsing
+```python
+def main():
+    parser = argparse.ArgumentParser(description="Load remote simulator configuration.")
+    parser.add_argument('--export-shell', action='store_true',
+                        help='Export configuration as shell environment variables.')
+    parser.add_argument('--get', type=str,
+                        help='Get a specific configuration value using dot notation (e.g., remote.host).')
+    args = parser.parse_args()
+```
+
+### Usage Examples
+```bash
+# Export all variables for shell use
+eval "$(python3 scripts/load_config.py --export-shell)"
+
+# Get specific value
+REMOTE_HOST=$(python3 scripts/load_config.py --get remote.host)
+
+# Display full configuration
+python3 scripts/load_config.py
+```
+
+## Integration Patterns
+
+### Shell Script Integration
+```bash
+#!/bin/bash
+# Remote Simulator SSH Tunnel Script
+
+# Load centralized configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+eval "$(python3 "$SCRIPT_DIR/load_config.py" --export-shell)"
+
+echo "🚢 Argo Remote Simulator Tunnel"
+echo "==============================="
+echo "Remote host: $REMOTE_HOST"
+echo "Remote user: $REMOTE_USER"
+echo "Remote argo dir: $REMOTE_ARGO_DIR"
+echo "ROS domain ID: $ROS_DOMAIN_ID"
+echo "Local port: $LOCAL_PORT"
+echo "Remote port: $REMOTE_PORT"
+```
+
+### Python Script Integration
+```python
+# Load centralized configuration
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+from load_config import load_config
+
+# Get configuration
+config = load_config()
+REMOTE_HOST = config['remote']['host']
+REMOTE_USER = config['remote']['user']
+REMOTE_ARGO_DIR = config['remote']['argo_dir']
+ROS_DOMAIN_ID = config['ros2']['domain_id']
+```
+
+## Error Handling Patterns
+
+### Configuration File Validation
+```python
+def load_config():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, 'remote_simulator_config.json')
+    
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Configuration file not found: {config_path}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Invalid JSON in configuration file: {e}")
+        sys.exit(1)
+```
+
+### Missing Value Handling
+```python
+def get_nested_value(data, key_path):
+    keys = key_path.split('.')
+    current = data
+    for key in keys:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return None
+    return current
+
+# Usage with error handling
+value = get_nested_value(config, 'remote.host')
+if value is None:
+    print("Error: remote.host not found in configuration")
+    sys.exit(1)
+```
+
+## Configuration Validation Patterns
+
+### Required Fields Validation
+```python
+def validate_config(config):
+    required_fields = [
+        'remote.host',
+        'remote.user', 
+        'remote.argo_dir',
+        'ros2.domain_id',
+        'network.local_port',
+        'network.remote_port'
+    ]
+    
+    for field in required_fields:
+        value = get_nested_value(config, field)
+        if value is None:
+            print(f"Error: Required configuration field missing: {field}")
+            return False
+    
+    return True
+```
+
+### Type Validation
+```python
+def validate_config_types(config):
+    # Validate numeric fields
+    if not isinstance(config['ros2']['domain_id'], int):
+        print("Error: ros2.domain_id must be an integer")
+        return False
+    
+    if not isinstance(config['network']['local_port'], int):
+        print("Error: network.local_port must be an integer")
+        return False
+    
+    return True
+```
+
+## Best Practices
+
+### Configuration Design
+- Use hierarchical structure for logical grouping
+- Provide sensible defaults where possible
+- Use descriptive field names
+- Document all configuration options
+
+### Access Patterns
+- Use centralized loader for all configuration access
+- Provide both Python and shell access methods
+- Use dot notation for hierarchical access
+- Handle missing values gracefully
+
+### Error Handling
+- Validate configuration file existence
+- Check for required fields
+- Validate data types and ranges
+- Provide clear error messages
+
+### Security
+- Don't store sensitive data in configuration files
+- Use environment variables for secrets
+- Validate all configuration values
+- Sanitize user input
+
+### Maintenance
+- Keep configuration schema documented
+- Version control configuration changes
+- Test configuration changes thoroughly
+- Provide migration tools for schema changes

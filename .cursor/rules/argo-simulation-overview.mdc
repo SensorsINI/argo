@@ -1,0 +1,149 @@
+---
+alwaysApply: true
+description: "Argo simulation system overview and architecture patterns"
+---
+
+# Argo Simulation System Overview
+
+## Core Architecture
+
+The Argo simulation system provides both local and remote simulation capabilities through a unified bridge architecture:
+
+### Main Components
+- **[nodes/argo_unified_simulator_bridge.py](mdc:nodes/argo_unified_simulator_bridge.py)** - Unified bridge supporting both local and remote simulation modes
+- **[launch/argo_lifecycle_manager.py](mdc:launch/argo_lifecycle_manager.py)** - Lifecycle manager with `simulate()` method for simulation mode
+- **[scripts/remote_simulator_config.json](mdc:scripts/remote_simulator_config.json)** - Centralized configuration for remote simulation
+- **[scripts/load_config.py](mdc:scripts/load_config.py)** - Universal configuration loader for Python and shell scripts
+
+### Simulation Modes
+
+#### Local Simulation
+- Runs simulator directly on Orange Pi
+- Uses sailboat-playground or mock simulator
+- No network dependencies
+- Good for development and testing
+
+#### Remote Simulation  
+- Offloads CPU-intensive simulation to remote machine
+- Uses SSH tunneling for ROS2 communication
+- Better performance on resource-constrained hardware
+- Scalable and isolated
+
+## Key Design Patterns
+
+### 1. Unified Bridge Pattern
+The `argo_unified_simulator_bridge.py` replaces separate local and remote bridges:
+```python
+# Single node with mode switching
+python3 argo_unified_simulator_bridge.py --mode local    # Local simulation
+python3 argo_unified_simulator_bridge.py --mode remote   # Remote simulation
+```
+
+### 2. Node Exclusion Pattern
+Simulation mode excludes conflicting hardware nodes:
+- **Excluded**: `gps.py`, `imu.py`, `anem.py`, `rudder_sail_radio.py`
+- **Included**: `argo_unified_simulator_bridge.py`, `controller.py`, `battery_water.py`, `temp_monitor.py`
+
+### 3. Centralized Configuration Pattern
+All simulation settings in single JSON file with universal loader:
+```python
+# Python access
+from load_config import load_config
+config = load_config()
+
+# Shell access  
+eval "$(python3 scripts/load_config.py --export-shell)"
+```
+
+### 4. Fallback Pattern
+Graceful degradation from real simulator to mock:
+1. Try sailboat-playground simulator
+2. Fall back to mock simulator if unavailable
+3. Continue operation with reduced functionality
+
+## Topic Architecture
+
+### Published Topics (Simulator → Argo)
+- `/pose` - IMU compass heading (Vector3, z=heading degrees)
+- `/compass` - Raw compass data (Vector3, z=heading degrees)  
+- `/gps_cog` - Course over ground (Float64, degrees)
+- `/gps_sog` - Speed over ground (Float64, knots)
+- `/gps_velocity` - GPS velocity vector (Vector3, x=north, y=east, z=speed knots)
+- `/anem_speed_angle_temp` - Wind data (Vector3, x=speed m/s, y=angle degrees, z=temp °C)
+- `/rudder_sail_radio` - Mock human input (Vector3, x=rudder, y=sail, z=0)
+
+### Subscribed Topics (Argo → Simulator)
+- `/rudder_sail_servo` - Control commands from Argo (Vector3, x=rudder, y=sail)
+- `/human_controlled` - Control mode status (Bool, true=human, false=robot)
+
+## Common Usage Patterns
+
+### Starting Simulation
+```bash
+# Local simulation via lifecycle manager
+python3 launch/argo_lifecycle_manager.py simulate
+
+# Local simulation via launch script
+./scripts/launch_simulator_local.sh
+
+# Remote simulation (requires setup)
+./scripts/remote_simulator_tunnel.sh &      # Terminal 1
+python3 scripts/remote_simulator_launch.py  # Terminal 2
+./scripts/launch_simulator_remote.sh        # Terminal 3
+```
+
+### Configuration Management
+```bash
+# Load configuration in shell scripts
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+eval "$(python3 "$SCRIPT_DIR/load_config.py" --export-shell)"
+
+# Access specific values
+REMOTE_HOST=$(python3 scripts/load_config.py --get remote.host)
+```
+
+### Error Handling Patterns
+- Comprehensive stack traces for simulator initialization failures
+- Graceful fallback to mock simulator
+- Connection monitoring for remote simulation
+- Timeout handling for SSH operations
+
+## Integration Points
+
+### Lifecycle Manager Integration
+The `simulate()` method in `argo_lifecycle_manager.py`:
+- Defines simulation-specific node lists
+- Excludes conflicting hardware nodes
+- Uses unified simulator bridge
+- Provides simulation-specific monitoring
+
+### Submodule Integration
+- **Source Code**: `simulator/` directory (git submodule)
+- **Configuration**: `sailboat-playground/` directory (local configs)
+- **Import Path**: Dynamically added to `sys.path` in simulator bridge
+
+### Remote Machine Integration
+- SSH-based remote execution
+- ROS2 DDS communication via SSH tunnel
+- Centralized configuration for remote settings
+- Automatic setup and dependency installation
+
+## Best Practices
+
+### Development
+- Use local simulation for development and testing
+- Test both real and mock simulator modes
+- Verify topic mappings and data formats
+- Use centralized configuration for all settings
+
+### Deployment
+- Use remote simulation for production testing
+- Monitor connection health and performance
+- Implement proper error handling and recovery
+- Document configuration changes
+
+### Maintenance
+- Keep simulation and hardware node lists synchronized
+- Update configuration when adding new simulation features
+- Test both local and remote modes regularly
+- Maintain fallback compatibility

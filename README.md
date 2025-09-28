@@ -37,6 +37,36 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 - **`launch/`** - Lifecycle management, systemd services, and launch configurations
 - **`power_control/`** - Power management system (separate ROS2 package)
 - **`foxglove/`** - Visualization layouts for Foxglove Studio
+- **`simulator/`** - Sailboat simulation submodule (sailboat-playground)
+
+### Simulation Support
+
+Argo includes comprehensive simulation support for development and testing:
+
+**Local Simulation:**
+- Runs simulator directly on Orange Pi
+- Uses sailboat-playground or mock simulator
+- Excludes conflicting hardware nodes (GPS, IMU, anemometer, radio control)
+- Perfect for algorithm development and testing
+
+**Remote Simulation:**
+- Offloads CPU-intensive simulation to remote machine
+- SSH tunnel for ROS2 communication
+- Centralized configuration management
+- Ideal for resource-constrained environments
+
+**Quick Start:**
+```bash
+# Local simulation
+python3 launch/argo_lifecycle_manager.py simulate
+
+# Remote simulation (requires setup)
+./scripts/remote_simulator_tunnel.sh &
+python3 scripts/remote_simulator_launch.py &
+./scripts/launch_simulator_remote.sh
+```
+
+See [SIMULATION_GUIDE.md](SIMULATION_GUIDE.md) for detailed simulation documentation.
 
 ## Directory Overview
 
