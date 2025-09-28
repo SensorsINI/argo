@@ -39,6 +39,18 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 - **`foxglove/`** - Visualization layouts for Foxglove Studio
 - **`simulator/`** - Sailboat simulation submodule (sailboat-playground)
 
+## Other READMEs
+- [Simulation System Overview](simulator/README.md)  
+- [Power Control System](power_control/README.md)  
+- [Foxglove Visualization](foxglove/README.md)  
+- [Development Workflow](simulator/development-workflow.md)  
+- [Systemd Integration](launch/README.md)  
+- [Project Changelog](CHANGELOG.md)
+- [Contributing Guide](CONTRIBUTING.md)
+- [License](LICENSE.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+
+
 ### Simulation Support
 
 Argo includes comprehensive simulation support for development and testing:
@@ -65,8 +77,6 @@ python3 launch/argo_lifecycle_manager.py simulate
 python3 scripts/remote_simulator_launch.py &
 ./scripts/launch_simulator_remote.sh
 ```
-
-See [SIMULATION_GUIDE.md](SIMULATION_GUIDE.md) for detailed simulation documentation.
 
 ## Directory Overview
 
