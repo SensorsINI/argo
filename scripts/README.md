@@ -35,3 +35,4 @@ A helper script that loads the settings from `remote_simulator_config.json` and 
 
 ### `debug_remote_ros2.sh`
 A utility script for troubleshooting ROS2 issues on the remote machine. It checks the ROS2 installation, verifies Python dependencies, and tests the connection to ensure the remote environment is set up correctly.
+
