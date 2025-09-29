@@ -39,6 +39,18 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 - **`foxglove/`** - Visualization layouts for Foxglove Studio
 - **`simulator/`** - Sailboat simulation submodule (sailboat-playground)
 
+## Other READMEs
+- [Simulation System Overview](simulator/README.md)  
+- [Power Control System](power_control/README.md)  
+- [Foxglove Visualization](foxglove/README.md)  
+- [Development Workflow](simulator/development-workflow.md)  
+- [Systemd Integration](launch/README.md)  
+- [Simulation Documentation](SIMULATION.md)
+- [ROS2 Conversion Summary](ROS2_CONVERSION_SUMMARY.md)
+- [Threading Architecture](THREADING_ARCHITECTURE.md)
+- [CPU Frequency Tuning](README-cpufreq-tuning-service.md)
+
+
 ### Simulation Support
 
 Argo includes comprehensive simulation support for development and testing:
@@ -65,8 +77,6 @@ python3 launch/argo_lifecycle_manager.py simulate
 python3 scripts/remote_simulator_launch.py &
 ./scripts/launch_simulator_remote.sh
 ```
-
-See [SIMULATION_GUIDE.md](SIMULATION_GUIDE.md) for detailed simulation documentation.
 
 ## Directory Overview
 
@@ -112,10 +122,11 @@ Foxglove Studio integration for live system monitoring:
 - **`imu.py`** - 9-DOF IMU sensor fusion (I2C, ICM-20948)
 - **`anem.py`** - Wind sensor array (3x SDP3x pressure sensors)
 - **`battery_water.py`** - Power monitoring and safety systems
-- **`pwm.py`** - Radio control input and servo output interface
+- **`rudder_sail_radio.py`** - Radio control input and servo output interface
 - **`controller.py`** - Autonomous navigation and sail control algorithms
 - **`record.py`** - Data recording management (ROS2 bag files)
 - **`temp_monitor.py`** - System temperature monitoring
+- **`argo_unified_simulator_bridge.py`** - Unified simulator bridge for local and remote simulation
 
 ### Node Lifecycle Management
 
@@ -130,16 +141,16 @@ The Argo system uses a sophisticated lifecycle management approach centered arou
 
 **Lifecycle Management Modes:**
 ```bash
-python3 launch/argo_lifecycle_manager.py start      # Launch all nodes
+python3 launch/argo_lifecycle_manager.py run        # Launch all nodes
 python3 launch/argo_lifecycle_manager.py stop       # Graceful shutdown
 python3 launch/argo_lifecycle_manager.py restart    # Restart all nodes
 python3 launch/argo_lifecycle_manager.py status     # Show system status
 python3 launch/argo_lifecycle_manager.py monitor    # Continuous monitoring
-python3 launch/argo_lifecycle_manager.py continuous # Production mode (systemd)
+python3 launch/argo_lifecycle_manager.py simulate   # Simulation mode
 ```
 
 **Critical Node Management:**
-- **Critical Nodes**: `pwm.py`, `controller.py` (essential for boat operation)
+- **Critical Nodes**: `rudder_sail_radio.py`, `controller.py` (essential for boat operation)
 - **Success Criteria**: All critical nodes + minimum 3 total nodes running
 - **Failure Handling**: Intelligent restart with failure analysis and error reporting
 
@@ -279,18 +290,18 @@ The repository includes a comprehensive Makefile system for easy management:
 ```bash
 cd /home/orangepi/argo
 source /opt/ros/humble/setup.bash
-ros2 launch launch/argo_launch.py
+python3 launch/argo_lifecycle_manager.py run
 ```
 
 ### Individual Node Testing
 ```bash
 # Test individual sensors with debug output
-ros2 run argo gps.py --debug
-ros2 run argo imu.py --debug
-ros2 run argo anem.py --debug
-ros2 run argo battery_water.py --debug
-ros2 run argo pwm.py
-ros2 run argo control.py
+python3 nodes/gps.py --debug
+python3 nodes/imu.py --debug
+python3 nodes/anem.py --debug
+python3 nodes/battery_water.py --debug
+python3 nodes/rudder_sail_radio.py
+python3 nodes/controller.py
 ```
 
 ### System Monitoring
@@ -308,8 +319,9 @@ ros2 topic echo /rudder_sail_radio
 - **`imu.py`**: 9-DOF IMU data, publishes `/accel`, `/gyro`, `/compass`
 - **`anem.py`**: Wind speed/direction from 3 pressure sensors, publishes `/anem_speed_angle_temp`
 - **`battery_water.py`**: Power and safety monitoring, publishes battery/water alerts
-- **`pwm.py`**: Radio control interface and servo output
-- **`control.py`**: Autonomous navigation controller
+- **`rudder_sail_radio.py`**: Radio control interface and servo output
+- **`controller.py`**: Autonomous navigation controller
+- **`argo_unified_simulator_bridge.py`**: Unified simulator bridge for local and remote simulation
 
 ## Configuration Files
 
