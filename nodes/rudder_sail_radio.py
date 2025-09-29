@@ -81,6 +81,9 @@ from pathlib import Path
 import time
 import numpy as np
 import sys
+import tty
+import termios
+import select
 
 # --- Hardware Configuration ---
 SYS_BASE_PATH = Path("/sys/kernel/argo_radio_servo")
@@ -99,6 +102,13 @@ CLAMP_LOG_THROTTLE_S = 60.0
 # Throttle logging for outlier radio PWM messages to once every 10 seconds
 OUTLIER_LOG_THROTTLE_S = 10.0
 
+# Test mode configuration
+TEST_MIN_PW = 900
+TEST_MAX_PW = 2100
+TEST_STEP = 100
+TEST_DELAY_S = 0.5
+TEST_DEFAULT_PW = 1500
+
 def cmd_to_pw_us(cmd: float) -> int:
     """Converts a normalized command (-1 to +1) to a pulse width in microseconds (1000 to 2000)."""
     # Clamp command to [-1, 1]
@@ -114,6 +124,140 @@ def pw_us_to_cmd(pw_us: float) -> float:
     # Linear interpolation
     cmd = (pw_us - 1500.0) / 500.0
     return cmd
+
+# Test mode helper functions
+def get_initial_pw_test(path: Path) -> int:
+    """Reads the initial pulse width from a sysfs file, or returns a default."""
+    try:
+        return int(path.read_text().strip())
+    except (IOError, ValueError, FileNotFoundError):
+        print(f"Warning: Could not read {path}, using default {TEST_DEFAULT_PW} us.", file=sys.stderr)
+        return TEST_DEFAULT_PW
+
+def read_sysfs_pw_test(path: Path) -> str:
+    """Reads a pulse width from a sysfs file for display."""
+    try:
+        return path.read_text().strip()
+    except (IOError, FileNotFoundError):
+        return "N/A"
+
+def write_sysfs_pw_test(path: Path, value: int):
+    """Writes a pulse width to a sysfs file for test mode."""
+    # Apply same clamping as normal mode
+    value = max(SERVO_MIN_PW_US, min(SERVO_MAX_PW_US, value))
+    try:
+        path.write_text(str(value))
+    except IOError as e:
+        print(f"\nError writing to {path}: {e}", file=sys.stderr)
+
+def display_test_status(rudder_pw: int, sail_pw: int, paused: bool):
+    """Clears the screen and displays the current test status."""
+    # ANSI escape code to clear screen and move cursor to top-left
+    print("\033[H\033[J", end="")
+    
+    print("--- Radio Control Input Pulse Widths ---")
+    print(f"Radio Rudder: {read_sysfs_pw_test(RADIO_RUDDER_PATH)} us")
+    print(f"Radio Sail:   {read_sysfs_pw_test(RADIO_SAIL_PATH)} us")
+    print("----------------------------------------")
+    print("--- Servo Motor Output Pulse Widths (Sweeping) ---")
+    print(f"Rudder (PWM2): {rudder_pw} us")
+    print(f"Sail (PWM4):   {sail_pw} us")
+    print("--------------------------------------------------")
+    if paused:
+        print("STATUS: PAUSED (Press Spacebar to RESUME)")
+    else:
+        print("STATUS: RUNNING (Press Spacebar to PAUSE)")
+    sys.stdout.flush()
+
+def get_key_non_blocking() -> str | None:
+    """Reads a single key press without blocking. Returns None if no key is pressed."""
+    if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+        return sys.stdin.read(1)
+    return None
+
+def get_key_blocking() -> str:
+    """Reads a single key press, blocking until one is received."""
+    return sys.stdin.read(1)
+
+def run_test_mode():
+    """Runs the PWM test mode - sweeps servo outputs and displays radio inputs."""
+    # Check if sysfs path exists for better error reporting
+    if not SYS_BASE_PATH.is_dir():
+        print(f"Error: Sysfs path {SYS_BASE_PATH} not found.", file=sys.stderr)
+        print("Is the 'argo_radio_servo_module' kernel module loaded?", file=sys.stderr)
+        sys.exit(1)
+
+    # Initialize state variables
+    current_rudder_pw = get_initial_pw_test(SERVO_RUDDER_PATH)
+    current_sail_pw = get_initial_pw_test(SERVO_SAIL_PATH)
+    direction_rudder = 1  # 1 for increasing, -1 for decreasing
+    direction_sail = 1
+    paused = False
+
+    print("Starting Argo Radio Servo PWM Test Mode...")
+    print("Monitoring input pulse widths and sweeping output servo positions.")
+    print("Press Spacebar to PAUSE/RESUME. Press Ctrl+C to STOP.")
+    time.sleep(1.5)  # Give user time to read the intro message
+
+    # Terminal Setup
+    # Save original terminal settings to restore them on exit
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        # Set terminal to "cbreak" mode to read keys instantly without requiring Enter
+        tty.setcbreak(sys.stdin.fileno())
+
+        # Main Loop
+        while True:
+            display_test_status(current_rudder_pw, current_sail_pw, paused)
+
+            # Handle Input for Pause/Resume
+            key_pressed = get_key_non_blocking()
+
+            if key_pressed == ' ':
+                paused = not paused
+                display_test_status(current_rudder_pw, current_sail_pw, paused)  # Update status immediately
+
+                if paused:
+                    print("\nPAUSED. Press Spacebar to RESUME...")
+                    sys.stdout.flush()
+                    # When paused, enter a blocking loop that waits *only* for a spacebar.
+                    while True:
+                        key_to_resume = get_key_blocking()
+                        if key_to_resume == ' ':
+                            paused = not paused
+                            display_test_status(current_rudder_pw, current_sail_pw, paused)
+                            break  # Exit this inner blocking loop
+
+            if not paused:
+                # Update Rudder (PWM2) Pulse Width
+                current_rudder_pw += direction_rudder * TEST_STEP
+                if current_rudder_pw > TEST_MAX_PW:
+                    current_rudder_pw = TEST_MAX_PW
+                    direction_rudder = -1
+                elif current_rudder_pw < TEST_MIN_PW:
+                    current_rudder_pw = TEST_MIN_PW
+                    direction_rudder = 1
+                write_sysfs_pw_test(SERVO_RUDDER_PATH, current_rudder_pw)
+
+                # Update Sail (PWM4) Pulse Width
+                current_sail_pw += direction_sail * TEST_STEP
+                if current_sail_pw > TEST_MAX_PW:
+                    current_sail_pw = TEST_MAX_PW
+                    direction_sail = -1
+                elif current_sail_pw < TEST_MIN_PW:
+                    current_sail_pw = TEST_MIN_PW
+                    direction_sail = 1
+                write_sysfs_pw_test(SERVO_SAIL_PATH, current_sail_pw)
+
+            time.sleep(TEST_DELAY_S)
+
+    except KeyboardInterrupt:
+        print("\nCtrl+C pressed. Exiting test mode.")
+    finally:
+        # Restore Terminal
+        # This block ensures terminal settings are always restored
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        print("Terminal settings restored.")
 
 class RudderSailRadioNode(Node):
     """
@@ -493,10 +637,43 @@ ROBUSTNESS FEATURES:
 - High-frequency control loop: 20Hz for responsive arbitration
 - Hardware validation: Pulse width clamping and outlier filtering
 - Persistent QoS: Late-joining nodes get immediate access to control status
+
+TEST MODE:
+- Use --test flag to run servo sweep test without ROS2
+- Continuously sweeps servo outputs from 900-2100µs
+- Displays real-time radio input pulse widths
+- Press spacebar to pause/resume, Ctrl+C to exit
         """
     )
     
+    parser.add_argument('--test', action='store_true', 
+                        help='Run in test mode: sweep servo outputs and display radio inputs (no ROS2)')
+    
+    # Parse known args to allow ROS2 arguments to pass through
     parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Check for invalid arguments that aren't ROS2-related
+    # ROS2 arguments typically start with --ros-args, -r, or are node-specific
+    valid_ros2_prefixes = ['--ros-args', '-r', '--node-name', '--namespace', '--remap', '--param']
+    invalid_args = []
+    
+    for arg in unknown_args:
+        # Skip ROS2 arguments
+        is_ros2_arg = any(arg.startswith(prefix) for prefix in valid_ros2_prefixes)
+        # Also skip single character flags that might be ROS2 related
+        if not is_ros2_arg and (arg.startswith('-') or arg.startswith('--')):
+            invalid_args.append(arg)
+    
+    if invalid_args:
+        parser.print_usage()
+        print(f"error: unrecognized arguments: {' '.join(invalid_args)}")
+        print("Use --help for more information.")
+        sys.exit(2)
+    
+    # Check if test mode is requested
+    if parsed_args.test:
+        run_test_mode()
+        return
     
     rclpy.init(args=unknown_args)
     node = None
