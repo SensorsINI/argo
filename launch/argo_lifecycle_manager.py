@@ -537,7 +537,7 @@ class ArgoLifecycleManager:
         
         # Define simulation mode node scripts (exclude conflicting hardware nodes)
         self.expected_nodes = [
-            "argo_unified_simulator_bridge.py",  # Provides simulated sensor data
+            "argo_unified_simulator_bridge.py",  # Provides simulated sensor data + keyboard control
             "controller.py",                     # Autonomous navigation
             "battery_water.py",                  # Hardware monitoring
             "temp_monitor.py"                    # Hardware monitoring
@@ -547,7 +547,7 @@ class ArgoLifecycleManager:
         self.special_nodes = ["foxglove_bridge"]
         
         # Critical nodes for simulation (simulator bridge is critical)
-        self.critical_nodes = ["argo_unified_simulator_bridge.py", "controller.py"]
+        self.critical_nodes = ["argo_unified_simulator_bridge.py"]
         
         print(f"Expected simulation nodes: {', '.join(self.expected_nodes)}")
         print(f"Special simulation nodes: {', '.join(self.special_nodes)}")
@@ -615,7 +615,7 @@ class ArgoLifecycleManager:
         if len(critical_running) == len(self.critical_nodes):
             print("✅ All critical simulation nodes running")
             success = True
-        elif len(final_running_nodes) >= 2:  # At least simulator + controller
+        elif len(final_running_nodes) >= 2:  # At least simulator + one other
             print(f"✅ Sufficient simulation nodes running ({len(final_running_nodes)}/2+)")
             success = True
         else:
@@ -628,8 +628,9 @@ class ArgoLifecycleManager:
             print("  - /pose (compass heading)")
             print("  - /gps_cog, /gps_sog, /gps_velocity (GPS navigation)")
             print("  - /anem_speed_angle_temp (wind data)")
-            print("  - /rudder_sail_radio (mock human input)")
+            print("  - /rudder_sail_radio (integrated keyboard control)")
             print("Control commands sent to simulator via /rudder_sail_servo")
+            print("Keyboard control: Use arrow keys in curses display to control rudder and sail")
             print("Visualization available via Foxglove Studio at ws://localhost:9090")
             print("\n🔄 Simulation running... Press Ctrl+C to stop and clean up all nodes")
             
