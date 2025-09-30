@@ -1,0 +1,126 @@
+---
+alwaysApply: true
+description: "Argo radio and servo control system architecture and safety patterns"
+---
+
+# Argo Radio and Servo Control System
+
+## Core Architecture
+
+The Argo system uses a kernel module and ROS2 node combination for safe radio/servo control:
+
+### Main Components
+- **[nodes/pwm_capture_module/argo_radio_servo_module.c](mdc:nodes/pwm_capture_module/argo_radio_servo_module.c)** - Kernel module with high impedance safety mode
+- **[nodes/rudder_sail_radio.py](mdc:nodes/rudder_sail_radio.py)** - ROS2 node for control arbitration and hardware interface
+- **[nodes/pwm_capture_module/argo_radio_servo_overlay.dts](mdc:nodes/pwm_capture_module/argo_radio_servo_overlay.dts)** - Device tree overlay for GPIO/PWM configuration
+
+### Key Design Patterns
+
+1. **High Impedance Safety Mode**: Servo outputs default to high impedance (PWM disabled) for fail-safe operation
+2. **Radio Control Passthrough**: When PWM is disabled, radio control passes through resistors directly to servos
+3. **Control Arbitration**: Intelligent switching between human and autonomous control with human priority
+4. **Hardware Interface**: Sysfs interface at `/sys/kernel/argo_radio_servo/` for PWM control
+
+## Hardware Pin Configuration
+
+### Orange Pi Zero 2W 40-Pin Header
+```
+Physical Pin  | GPIO Line | GPIO Name | Function              | Module Usage
+-------------|-----------|-----------|----------------------|------------------
+Pin 7        | 267       | PI11      | GPIO Input           | Radio Rudder Input
+Pin 16       | 270       | PI14      | PWM4 Output          | Servo Sail Output  
+Pin 26       | 269       | PI13      | GPIO Input           | Radio Sail Input
+Pin 33       | 268       | PI12      | PWM2 Output          | Servo Rudder Output
+```
+
+### Safety Circuit Design
+- **When PWM is active**: Software controls the servos
+- **When PWM is disabled (high impedance)**: Radio control passes through resistors directly to servos
+- **Default state**: PWM disabled on module load for maximum safety
+
+## Sysfs Interface
+
+### Read-Only (Input Measurements)
+- `radio_rudder_pw_us` - Current radio rudder pulse width (microseconds)
+- `radio_sail_pw_us` - Current radio sail pulse width (microseconds)
+
+### Read-Write (Servo Commands)
+- `servo_rudder_pw_us` - Set/read rudder servo pulse width (0 for high impedance, 900-2100μs for PWM)
+- `servo_sail_pw_us` - Set/read sail servo pulse width (0 for high impedance, 900-2100μs for PWM)
+
+### High Impedance Mode Usage
+```bash
+# Set servo outputs to high impedance mode (radio control active)
+echo 0 | sudo tee /sys/kernel/argo_radio_servo/servo_rudder_pw_us
+echo 0 | sudo tee /sys/kernel/argo_servo/servo_sail_pw_us
+
+# Set servo outputs to PWM mode
+echo 1500 | sudo tee /sys/kernel/argo_radio_servo/servo_rudder_pw_us
+echo 1500 | sudo tee /sys/kernel/argo_radio_servo/servo_sail_pw_us
+```
+
+## ROS2 Topics
+
+### Published Topics
+- `/rudder_sail_radio` - Vector3 with normalized radio inputs (-1 to +1)
+- `/rudder_sail_servo` - Vector3 with actual servo commands sent to hardware
+- `/human_controlled` - Bool indicating current control authority (persistent QoS)
+- `/control_authority` - Vector3 with detailed control status
+
+### Subscribed Topics
+- `/rudder_sail_cmd` - Vector3 with autonomous navigation commands (-1 to +1 range)
+
+## Control Arbitration Logic
+
+### Human Priority System
+- Human gets control when radio input activity is detected
+- Robot gets control after `human_override_timeout` seconds of no activity
+- Deadband threshold prevents noise from triggering human activity
+- Safety limits applied to all commands
+
+### Safety Features
+- **High impedance mode**: Servo outputs start in high impedance mode for safety
+- **Pulse width validation**: All commands clamped to 900-2100μs range
+- **Outlier filtering**: Radio inputs outside 500-2500μs range are rejected
+- **Graceful degradation**: Automatic fallback to high impedance on invalid inputs
+
+## Development Patterns
+
+### Kernel Module Development
+- Always start PWM outputs in high impedance mode for safety
+- Use `pwm_disable()` to set high impedance state
+- Use `pwm_enable()` when switching to PWM mode
+- Log mode changes for debugging: "HIGH IMPEDANCE mode (radio control active)"
+
+### Python Node Development
+- Check sysfs interface availability before operation
+- Handle high impedance mode (0 values) specially in servo control
+- Use persistent QoS for critical control status topics
+- Implement throttled logging to prevent log spam
+
+### Testing Procedures
+- Verify module loads with high impedance mode active
+- Test switching between high impedance and PWM modes
+- Confirm radio input capture is working
+- Validate control arbitration logic
+
+## Error Handling
+
+### Common Issues
+- **Permission denied**: Use sudo for sysfs operations
+- **Module won't load**: Check device tree overlay and GPIO conflicts
+- **No radio input**: Verify GPIO pin assignments and RC receiver connection
+- **Terminal issues**: Test mode may fail in non-interactive environments
+
+### Debugging Commands
+```bash
+# Check module status
+lsmod | grep argo
+dmesg | grep -E "(argo|HIGH IMPEDANCE)"
+
+# Verify GPIO usage
+gpioinfo | grep -E "(267|268|269|270)"
+
+# Test high impedance mode
+echo 0 | sudo tee /sys/kernel/argo_radio_servo/servo_rudder_pw_us
+```

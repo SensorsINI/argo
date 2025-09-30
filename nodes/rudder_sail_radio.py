@@ -12,6 +12,16 @@ Hardware Interface:
 - Supports Orange Pi Zero 2W with custom GPIO/PWM configuration
 - Real-time radio control input capture and normalization
 - Safe servo output with pulse width validation (900-2100µs range)
+- HIGH IMPEDANCE MODE: Writing 0 to servo control files disables PWM output,
+  allowing radio control to pass through directly to servos via resistor network
+
+Safety features:
+- The radio channels are connected directly to the servo outputs by resistors. This way, if
+  radio_sail_servo is not running, the PWM output pins are set to high impedance, so that the radio 
+  directly drives the servo outputs. When radio_sail_servo is running, the radio inputs are passed through when
+  the boat is human controlled. Under argo auto mode, the servos are controlled by controller.py.
+- FAIL-SAFE DESIGN: Servo outputs start in high impedance mode (PWM disabled) for maximum safety
+- HIGH IMPEDANCE MODE: Servos automatically switch to high impedance when not actively controlled
 
 Control Arbitration:
 - Intelligent human/robot control switching with human priority
@@ -24,8 +34,9 @@ Key Features:
 - Combined hardware interface and control logic in single node
 - Persistent QoS for critical control status (immediate access for late-joining nodes)
 - Throttled logging to minimize system load
-- Built-in safety features with neutral position defaults
+- Built-in safety features with high impedance defaults
 - Graceful handling of hardware disconnection
+- HIGH IMPEDANCE MODE: Automatic switching between PWM control and radio passthrough
 
 Topics Published:
 - /rudder_sail_radio: Vector3 with normalized radio inputs (-1 to +1)
@@ -51,21 +62,23 @@ Topics Subscribed:
   * Only applied when human_controlled is False
 
 Hardware Requirements:
-- argo_radio_servo_module kernel module loaded
+- argo_radio_servo_module kernel module loaded (v0.5+ with high impedance support)
 - GPIO pins configured for radio input capture (PI11, PI13)
 - PWM outputs configured for servo control (PI12=PWM2, PI14=PWM4)
 - RC receiver connected and calibrated for 1000-2000µs pulse width range
 
 Safety Features:
+- HIGH IMPEDANCE MODE: Servo outputs default to high impedance (PWM disabled)
 - Pulse width validation and clamping (900-2100µs hardware range)
 - Outlier radio input filtering (500-2500µs acceptance range)
-- Automatic fallback to neutral positions on invalid inputs
+- Automatic fallback to high impedance mode on invalid inputs
 - Throttled error logging to prevent log spam
 - Graceful handling of hardware disconnection
+- FAIL-SAFE: Radio control always works when PWM is disabled
 
-Author: Tobi Delbruck (original pwm.py), Enhanced with control arbitration
+Author: Tobi Delbruck (original pwm.py), Enhanced with control arbitration and high impedance mode
 License: MIT
-Version: 3.0 - Combined hardware interface and control arbitration
+Version: 3.1 - Combined hardware interface and control arbitration with high impedance safety mode
 """
 
 import rclpy
@@ -270,11 +283,12 @@ class RudderSailRadioNode(Node):
     4. Arbitrate between human and robot control with human priority
     5. Write final servo commands to hardware with safety validation
     6. Publish control status and authority information
+    7. HIGH IMPEDANCE MODE: Set servos to high impedance when not actively controlling
     """
     
     def __init__(self):
         super().__init__('rudder_sail_radio_node')
-        self.get_logger().info('Rudder/Sail Radio node starting...')
+        self.get_logger().info('Rudder/Sail Radio node starting with high impedance safety mode...')
         
         # Check for sysfs directory
         if not SYS_BASE_PATH.is_dir():
@@ -365,6 +379,9 @@ class RudderSailRadioNode(Node):
         # Status publishing timer
         self.status_period = 0.1  # 10 Hz status updates
         self.status_timer = self.create_timer(self.status_period, self.publish_status)
+        
+        # Initialize servos to high impedance mode for safety
+        self.set_servo_high_impedance()
     
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""
@@ -414,10 +431,20 @@ class RudderSailRadioNode(Node):
             return 0.0  # Return a safe, invalid value
 
     def write_sysfs_pw(self, path: Path, value: int):
-        """Writes a pulse width to a sysfs file, clamping to valid range."""
+        """Writes a pulse width to a sysfs file, with special handling for high impedance mode."""
         original_value = value
         
-        # Clamp to kernel module's valid range (900-2100µs)
+        # Special case: 0 means high impedance mode (no clamping)
+        if value == 0:
+            try:
+                path.write_text(str(value))
+                self.get_logger().info(f"Set {path.name} to HIGH IMPEDANCE mode (radio control active)")
+                return
+            except IOError as e:
+                self.get_logger().error(f"Error setting high impedance mode for {path}: {e}")
+                return
+        
+        # For non-zero values, apply normal clamping
         value = max(SERVO_MIN_PW_US, min(SERVO_MAX_PW_US, value))
         
         # Log clamping with throttling (once per minute max)
@@ -436,6 +463,14 @@ class RudderSailRadioNode(Node):
             self.get_logger().debug(f"Wrote {value}µs to {path}")
         except IOError as e:
             self.get_logger().error(f"Error writing to {path}: {e}")
+
+    def set_servo_high_impedance(self, rudder: bool = True, sail: bool = True):
+        """Set servo outputs to high impedance mode for safety."""
+        if rudder:
+            self.write_sysfs_pw(SERVO_RUDDER_PATH, 0)
+        if sail:
+            self.write_sysfs_pw(SERVO_SAIL_PATH, 0)
+        self.get_logger().info("Servo outputs set to HIGH IMPEDANCE mode (radio control active)")
 
     def read_radio_inputs(self):
         """Read and process radio inputs from hardware."""
@@ -590,7 +625,7 @@ class RudderSailRadioNode(Node):
 
 def main(args=None):
     parser = argparse.ArgumentParser(
-        description='Rudder/Sail Control Node - Combined hardware interface and control arbitration',
+        description='Rudder/Sail Control Node - Combined hardware interface and control arbitration with high impedance safety mode',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 This ROS2 node provides unified rudder/sail control combining hardware interface
@@ -601,12 +636,19 @@ HARDWARE INTERFACE:
 - Reads radio control inputs and normalizes to -1 to +1 range
 - Writes servo commands to hardware with safety validation
 - Handles pulse width conversion (1000-2000µs ↔ -1 to +1)
+- HIGH IMPEDANCE MODE: Writing 0 to servo control files disables PWM output
 
 CONTROL ARBITRATION:
 - Human gets priority when radio input activity is detected
 - Robot gets control after human_override_timeout seconds of no activity
 - Deadband threshold prevents noise from triggering human activity
 - Safety limits applied to all commands
+
+HIGH IMPEDANCE SAFETY MODE:
+- Servo outputs start in high impedance mode (PWM disabled) for safety
+- Radio control passes through directly to servos when PWM is disabled
+- Automatic switching between PWM control and radio passthrough
+- Fail-safe design ensures radio control always works
 
 TOPICS:
   Publishes:
@@ -625,7 +667,7 @@ PARAMETERS:
   safety_max_sail: Maximum sail command magnitude (default: 1.0)
 
 HARDWARE REQUIREMENTS:
-- argo_radio_servo_module kernel module loaded
+- argo_radio_servo_module kernel module loaded (v0.5+ with high impedance support)
 - Sysfs interface at /sys/kernel/argo_radio_servo/
 - GPIO pins: PI11, PI13 (radio input), PI12, PI14 (servo output)
 - RC receiver calibrated for 1000-2000µs pulse width range
@@ -637,6 +679,7 @@ ROBUSTNESS FEATURES:
 - High-frequency control loop: 20Hz for responsive arbitration
 - Hardware validation: Pulse width clamping and outlier filtering
 - Persistent QoS: Late-joining nodes get immediate access to control status
+- HIGH IMPEDANCE MODE: Automatic fail-safe switching to radio control
 
 TEST MODE:
 - Use --test flag to run servo sweep test without ROS2
