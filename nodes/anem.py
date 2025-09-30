@@ -20,6 +20,8 @@
 # - Optional visual debug mode with ASCII wind vector display
 # - Temperature compensation and averaging
 # - Configurable logging levels
+# - Sample averaging for noise reduction (configurable via constants)
+# - Controlled publishing rate to reduce data transmission
 #
 # Command line options:
 # --debug: Enable debug logging of sensor values
@@ -45,6 +47,20 @@ import argparse
 from rclpy.logging import LoggingSeverity
 import math
 import sys
+from collections import deque
+import threading
+
+# Publishing configuration constants
+PUBLISHING_RATE = 1.0  # Hz - final publishing rate for averaged data
+PUBLISHING_AVERAGE_SAMPLES = 40  # Number of samples to average before publishing
+
+# Sampling configuration constants  
+SENSOR_SAMPLING_RATE = 100.0  # Hz - internal sensor sampling rate (independent of ROS2)
+
+# Visual debugging configuration constants
+VISUAL_FULLSCALE_SPEED_KNOTS = 8.0  # knots - full scale wind speed for visual display
+VISUAL_DISPLAY_WIDTH = 60  # characters - width of visual display
+VISUAL_DISPLAY_HEIGHT = 40  # characters - height of visual display
 
 # from https://stackoverflow.com/questions/49906101/byte-array-to-int-in-python-2-x-using-standard-libraries
 # This function is compatible with Python 3.
@@ -69,38 +85,43 @@ def int_from_bytes(b):
   
 def calculate_angle_deg(dp1, dp2, dp3):
     # parameter for sinus curve, estimated on one measurement at 7.2 m/s
-    b=0.64
-    s1 = dp1+dp2
-    s2 = dp2+dp3
+    b = 0.64
+    s1 = dp1 + dp2
+    s2 = dp2 + dp3
 
-    if s1!=0:
-        g1 = s2/s1
+    # Optimize division operations with early returns
+    if s1 == 0:
+        g1 = 1e12
+        g2 = 0
     else:
-        g1=1e12
-    if g1!=0:
-        g2 = 1/g1
-    else:
-        g2=1e12 # arg large value
+        g1 = s2 / s1
+        g2 = 1 / g1 if g1 != 0 else 1e12
+
+    # Pre-calculate commonly used values
+    threshold = 3 * b / 2  # 1.92
+    sqrt_3 = 1.7320508075688772  # math.sqrt(3) - cache this
+    pi_4 = 0.7853981633974483   # math.pi / 4
+    pi_2 = 1.5707963267948966   # math.pi / 2
+    rad_to_deg = 57.29577951308232  # 180 / math.pi
 
     # |g1|==|g2| for omega = 3b/2
-    if np.abs(g1)<(3*b/2):
+    if abs(g1) < threshold:
         # lookup based on g1
-        magn = 2*np.sqrt(1-g1+g1**2) # Not used in this calculation
-        w = np.pi/4+np.arctan((2*g1-1)/np.sqrt(3))-(np.sign(s1)-1)*np.pi/2
+        w = pi_4 + math.atan((2 * g1 - 1) / sqrt_3) - (math.copysign(1, s1) - 1) * pi_2
     else:
-    # lookup based on g2
-        w = (np.pi/2-np.arctan((2*g2-1)/np.sqrt(3))-(np.sign(s2)-1)*np.pi/2)
-    w=w*(180./np.pi)
-    return w
+        # lookup based on g2
+        w = pi_2 - math.atan((2 * g2 - 1) / sqrt_3) - (math.copysign(1, s2) - 1) * pi_2
+    
+    return w * rad_to_deg
 
-def calculate_speed_mps(dp1,dp2, dp3):
+def calculate_speed_mps(dp1, dp2, dp3):
     rho = 1.2
-    # scale factor sqrt(2) estimated by measurements
-    # A in differential pressure
-    A = np.sqrt(2)*(np.abs(dp1) + np.abs(dp2) + np.abs(dp3))
-    # A in m/s
-    A = np.sqrt(2 * rho * A)
-    return A
+    sqrt_2 = 1.4142135623730951  # math.sqrt(2) - cache this
+    
+    # A in differential pressure - use abs() instead of np.abs() for scalars
+    A = sqrt_2 * (abs(dp1) + abs(dp2) + abs(dp3))
+    # A in m/s - use math.sqrt instead of np.sqrt for scalars
+    return math.sqrt(2 * rho * A)
 
 class AnemNode(Node):
     def __init__(self, debug_visually: bool = False):
@@ -113,6 +134,20 @@ class AnemNode(Node):
 
         # Visual debug mode flag
         self.debug_visually = debug_visually
+
+        # Sample averaging for noise reduction - use deque for O(1) operations
+        self.sample_buffers = {
+            'dp': [deque(), deque(), deque()],  # Differential pressure buffers for 3 sensors
+            'temp': deque(),          # Temperature buffer
+            'speed': deque(),         # Wind speed buffer
+            'angle': deque()          # Wind angle buffer
+        }
+        self.sample_count = 0
+        
+        # Threading for high-rate sensor sampling
+        self.sampling_thread = None
+        self.sampling_active = False
+        self.sample_lock = threading.Lock()  # Protect shared data structures
 
         # I2C setup
         # 21 is CCW, 23 is center, 22 is clockwise (viewed from top)
@@ -135,19 +170,25 @@ class AnemNode(Node):
             else:
                 self.sensors_ready = True
 
-        # Main loop timer
-        self.timer = self.create_timer(0.1, self.timer_callback) # 10 Hz
+        # ROS2 timer runs at publishing rate only (not sampling rate)
+        # Sensor sampling happens in separate thread at SENSOR_SAMPLING_RATE
+        self.timer = self.create_timer(1.0 / PUBLISHING_RATE, self.publish_callback)
         
         # Report actual sensor status
         if self.sensors_ready:
             self.get_logger().info("Initialization of anemometer wind sensor completed successfully.")
+            
+            # Start high-rate sampling thread
+            self.sampling_active = True
+            self.sampling_thread = threading.Thread(target=self._sampling_loop, daemon=True)
+            self.sampling_thread.start()
 
         # Visual mode init
         self._vis_initialized = False
-        self._vis_width = 41
-        self._vis_height = 21
-        # Full-scale visual radius corresponds to 15 knots ≈ 7.72 m/s
-        self._vis_speed_ref = 15 * 0.514444  # ≈ 7.7167 m/s
+        self._vis_width = VISUAL_DISPLAY_WIDTH
+        self._vis_height = VISUAL_DISPLAY_HEIGHT
+        # Full-scale visual radius corresponds to configured knots converted to m/s
+        self._vis_speed_ref = VISUAL_FULLSCALE_SPEED_KNOTS * 0.514444  # knots to m/s conversion
         if self.debug_visually:
             self._init_visual()
 
@@ -272,50 +313,125 @@ class AnemNode(Node):
         return True
 
 
-    def timer_callback(self):
-        dp = []
-        temps = []
-        try:
-            if not self.sensors_ready:
-                self.get_logger().error("CRITICAL: Anemometer sensors not ready. Exiting.")
+    def _sampling_loop(self):
+        """High-rate sensor sampling loop running in separate thread"""
+        sample_period = 1.0 / SENSOR_SAMPLING_RATE  # e.g., 0.01s for 100 Hz
+        
+        while self.sampling_active:
+            start_time = time.time()
+            
+            try:
+                # Pre-allocate lists for better performance
+                dp = [0.0, 0.0, 0.0]
+                temps = [0.0, 0.0, 0.0]
+                
+                # Read raw sensor data - optimize by avoiding list operations
+                for i, a in enumerate(self.i2cAddr):
+                    b = self.bus.read_i2c_block_data(a, 0, 9)
+                    dp[i] = int_from_bytes([b[0], b[1]]) / 240.0  # convert to Pascals diff pressure
+                    temps[i] = int_from_bytes([b[3], b[4]]) / 200.0  # convert to deg celsius
+                
+                # Calculate wind speed and angle from current sample
+                angle_deg = calculate_angle_deg(dp[0], dp[1], dp[2])
+                speed_mps = calculate_speed_mps(dp[0], dp[1], dp[2])
+                temp_celsius = (temps[0] + temps[1] + temps[2]) / 3.0
+                
+                # Thread-safe update of sample buffers
+                with self.sample_lock:
+                    # Add samples to buffers for averaging - use deque for O(1) operations
+                    for i in range(3):
+                        dp_buffer = self.sample_buffers['dp'][i]
+                        dp_buffer.append(dp[i])
+                        if len(dp_buffer) > PUBLISHING_AVERAGE_SAMPLES:
+                            dp_buffer.popleft()
+                    
+                    temp_buffer = self.sample_buffers['temp']
+                    temp_buffer.append(temp_celsius)
+                    if len(temp_buffer) > PUBLISHING_AVERAGE_SAMPLES:
+                        temp_buffer.popleft()
+                        
+                    speed_buffer = self.sample_buffers['speed']
+                    speed_buffer.append(speed_mps)
+                    if len(speed_buffer) > PUBLISHING_AVERAGE_SAMPLES:
+                        speed_buffer.popleft()
+                        
+                    angle_buffer = self.sample_buffers['angle']
+                    angle_buffer.append(angle_deg)
+                    if len(angle_buffer) > PUBLISHING_AVERAGE_SAMPLES:
+                        angle_buffer.popleft()
+                    
+                    self.sample_count += 1
+                
+            except IOError as e:
+                # Critical I2C error - stop sampling and exit
+                self.get_logger().error(f"CRITICAL: I2C read error in sampling thread: {e}. Exiting.")
+                self.sampling_active = False
                 sys.exit(1)
-            for a in self.i2cAddr:
-                b = self.bus.read_i2c_block_data(a, 0, 9)
-                v = int_from_bytes([b[0], b[1]]) / 240.  # convert to Pascals diff pressure
-                temp = int_from_bytes([b[3], b[4]]) / 200.  # convert to deg celsius
-                dp.append(v)
-                temps.append(temp)
+            except IndexError as e:
+                self.get_logger().error(f"Data parsing error in sampling thread: {e}. Continuing.")
             
-            # Publish differential pressure
-            self.pub_diff_pressure.publish(Vector3(x=float(dp[0]), y=float(dp[1]), z=float(dp[2])))
+            # Maintain precise timing
+            elapsed = time.time() - start_time
+            sleep_time = sample_period - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
-            # Calculate and publish wind speed, angle, and temperature
-            angle_deg = calculate_angle_deg(dp[0], dp[1], dp[2])
-            speed_mps = calculate_speed_mps(dp[0], dp[1], dp[2])
-            temp_celsius = (temps[0] + temps[1] + temps[2]) / 3.0
+    def publish_callback(self):
+        """ROS2 timer callback - publishes averaged data at PUBLISHING_RATE"""
+        try:
+            # Thread-safe read of sample buffers
+            with self.sample_lock:
+                if self.sample_count < PUBLISHING_AVERAGE_SAMPLES:
+                    # Not enough samples yet
+                    return
+                
+                # Calculate averages - optimize by caching buffer lengths
+                dp_buffers = self.sample_buffers['dp']
+                temp_buffer = self.sample_buffers['temp']
+                speed_buffer = self.sample_buffers['speed']
+                angle_buffer = self.sample_buffers['angle']
+                
+                if len(temp_buffer) == 0 or len(speed_buffer) == 0 or len(angle_buffer) == 0:
+                    return  # No data available yet
+                
+                avg_dp = [
+                    sum(dp_buffers[0]) / len(dp_buffers[0]),
+                    sum(dp_buffers[1]) / len(dp_buffers[1]),
+                    sum(dp_buffers[2]) / len(dp_buffers[2])
+                ]
+                avg_temp = sum(temp_buffer) / len(temp_buffer)
+                avg_speed = sum(speed_buffer) / len(speed_buffer)
+                avg_angle = sum(angle_buffer) / len(angle_buffer)
             
-            self.pub_wind_temp.publish(Vector3(x=float(speed_mps), y=float(angle_deg), z=float(temp_celsius)))
+            # Publish averaged differential pressure
+            self.pub_diff_pressure.publish(Vector3(x=float(avg_dp[0]), y=float(avg_dp[1]), z=float(avg_dp[2])))
+            
+            # Publish averaged wind speed, angle, and temperature
+            self.pub_wind_temp.publish(Vector3(x=float(avg_speed), y=float(avg_angle), z=float(avg_temp)))
             
             self.get_logger().debug(
-                f"Anemometer: speed(m/s)={speed_mps:.2f} angle(deg)={angle_deg:.1f} "
-                f"temp(C)={temp_celsius:.1f} dp(pascal)=({dp[0]:.4f}, {dp[1]:.4f}, {dp[2]:.4f})"
+                f"Anemometer (avg {len(speed_buffer)} samples @ {SENSOR_SAMPLING_RATE}Hz): speed(m/s)={avg_speed:.2f} angle(deg)={avg_angle:.1f} "
+                f"temp(C)={avg_temp:.1f} dp(pascal)=({avg_dp[0]:.4f}, {avg_dp[1]:.4f}, {avg_dp[2]:.4f})"
             )
-
+            
             if self.debug_visually:
-                self._render_visual(speed_mps, angle_deg, temp_celsius, (dp[0], dp[1], dp[2]))
-
-        except IOError as e:
-            # Critical I2C error - exit immediately
-            self.get_logger().error(f"CRITICAL: I2C read error: {e}. Exiting.")
-            sys.exit(1)
-        except IndexError as e:
-            self.get_logger().error(f"Data parsing error: {e}. Received incomplete data from sensor.")
+                self._render_visual(avg_speed, avg_angle, avg_temp, tuple(avg_dp))
+                
+        except Exception as e:
+            self.get_logger().error(f"Error in publish callback: {e}")
 
 
     def destroy_node(self):
         # This is the recommended way to perform cleanup in ROS2.
         # It gets called automatically when the node is destroyed.
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
+        
+        # Stop sampling thread
+        if self.sampling_active:
+            self.sampling_active = False
+            if self.sampling_thread and self.sampling_thread.is_alive():
+                self.sampling_thread.join(timeout=1.0)  # Wait up to 1 second
+        
         if self.debug_visually:
             self._teardown_visual()
         if self.bus:
@@ -349,6 +465,16 @@ Features:
   - Optional visual debug mode with ASCII wind vector display
   - Temperature compensation and averaging
   - Configurable logging levels
+  - Sample averaging for noise reduction (configurable via constants)
+  - Controlled publishing rate to reduce data transmission
+
+Configuration Constants (modify at top of file):
+  - PUBLISHING_RATE: Final publishing rate in Hz (default: 1.0)
+  - PUBLISHING_AVERAGE_SAMPLES: Number of samples to average (default: 40)
+  - SENSOR_SAMPLING_RATE: Internal sensor sampling rate in Hz (default: 100.0)
+  - VISUAL_FULLSCALE_SPEED_KNOTS: Full-scale wind speed for visual display (default: 8.0)
+  - VISUAL_DISPLAY_WIDTH: Visual display width in characters (default: 60)
+  - VISUAL_DISPLAY_HEIGHT: Visual display height in characters (default: 40)
 
 Topics Published:
   /anem_speed_angle_temp (geometry_msgs/Vector3):
