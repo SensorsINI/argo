@@ -1,9 +1,79 @@
 {
   "configById": {
-    "RosOut!t6nn7i": {
-      "searchTerms": [],
-      "minLogLevel": 1,
-      "nameFilter": {}
+    "map!3x29rgt": {
+      "customTileUrl": "",
+      "disabledTopics": [],
+      "followTopic": "",
+      "layer": "map",
+      "topicColors": {},
+      "zoomLevel": 16,
+      "maxNativeZoom": 18,
+      "topicConfig": {}
+    },
+    "3D!kuxgjl": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": true,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 45,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {
+        "grid": {
+          "visible": true,
+          "drawBehind": false,
+          "frameLocked": true,
+          "label": "Grid",
+          "instanceId": "8ea2528c-5352-4f83-ac3c-b9e0b7647a2a",
+          "layerId": "foxglove.Grid",
+          "size": 10,
+          "divisions": 10,
+          "lineWidth": 1,
+          "color": "#248eff",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {}
     },
     "Plot!wind": {
       "paths": [
@@ -328,55 +398,59 @@
   "layout": {
     "direction": "row",
     "first": {
-      "first": "RosOut!t6nn7i",
-      "second": "Plot!wind",
-      "direction": "row",
-      "splitPercentage": 59.81450610940689
+      "first": "3D!kuxgjl",
+      "second": "map!3x29rgt",
+      "direction": "column"
     },
     "second": {
-      "direction": "column",
-      "first": {
-        "direction": "row",
-        "first": {
-          "first": "Plot!56ofaa",
-          "second": "Plot!gpsVel",
-          "direction": "column"
-        },
-        "second": "Gauge!40ycg9v"
-      },
+      "direction": "row",
+      "first": "Plot!wind",
       "second": {
         "direction": "column",
         "first": {
           "direction": "row",
           "first": {
-            "direction": "column",
-            "first": "Plot!imuAccel",
-            "second": "Plot!imuGyro"
+            "first": "Plot!56ofaa",
+            "second": "Plot!gpsVel",
+            "direction": "column"
           },
-          "second": {
+          "second": "Gauge!40ycg9v"
+        },
+        "second": {
+          "direction": "column",
+          "first": {
+            "direction": "row",
             "first": {
-              "first": "Plot!power",
-              "second": "Plot!env",
-              "direction": "column"
+              "direction": "column",
+              "first": "Plot!imuAccel",
+              "second": "Plot!imuGyro"
             },
             "second": {
-              "first": "Plot!alerts",
+              "first": {
+                "first": "Plot!power",
+                "second": "Plot!env",
+                "direction": "column"
+              },
               "second": {
-                "first": "Indicator!4ansdcz",
-                "second": "Indicator!20wh6qn",
+                "first": "Plot!alerts",
+                "second": {
+                  "first": "Indicator!4ansdcz",
+                  "second": "Indicator!20wh6qn",
+                  "direction": "row"
+                },
                 "direction": "row"
               },
-              "direction": "row"
-            },
-            "direction": "column",
-            "splitPercentage": 70.73170731707316
-          }
+              "direction": "column",
+              "splitPercentage": 70.73170731707316
+            }
+          },
+          "second": "Plot!control",
+          "splitPercentage": 65.13844537202576
         },
-        "second": "Plot!control",
-        "splitPercentage": 65.13844537202576
+        "splitPercentage": 25.920528331458097
       },
-      "splitPercentage": 25.920528331458097
+      "splitPercentage": 46.26775654709863
     },
-    "splitPercentage": 33.608076464565556
+    "splitPercentage": 31.600017118159656
   }
 }
