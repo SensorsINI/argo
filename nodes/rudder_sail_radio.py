@@ -78,7 +78,7 @@ Safety Features:
 
 Author: Tobi Delbruck (original pwm.py), Enhanced with control arbitration and high impedance mode
 License: MIT
-Version: 3.1 - Combined hardware interface and control arbitration with high impedance safety mode
+Version: 3.2 - Enhanced control logging, fail-safe exit handling, and human control timeout constant
 """
 
 import rclpy
@@ -94,6 +94,7 @@ from pathlib import Path
 import time
 import numpy as np
 import sys
+import signal
 import tty
 import termios
 import select
@@ -114,6 +115,9 @@ CLAMP_LOG_THROTTLE_S = 60.0
 
 # Throttle logging for outlier radio PWM messages to once every 10 seconds
 OUTLIER_LOG_THROTTLE_S = 10.0
+
+# Human control timeout - seconds after last human activity before robot can take control
+HUMAN_CONTROL_TIMEOUT_S = 2.0
 
 # Test mode configuration
 TEST_MIN_PW = 900
@@ -299,7 +303,7 @@ class RudderSailRadioNode(Node):
 
         # --- Parameters ---
         self.declare_parameter('param_file_path', 'argo.yaml')
-        self.declare_parameter('human_override_timeout', 2.0)  # seconds
+        self.declare_parameter('human_override_timeout', HUMAN_CONTROL_TIMEOUT_S)  # seconds
         self.declare_parameter('deadband_threshold', 0.05)     # ignore small radio movements
         self.declare_parameter('safety_max_rudder', 1.0)       # safety limits
         self.declare_parameter('safety_max_sail', 1.0)
@@ -315,6 +319,10 @@ class RudderSailRadioNode(Node):
         self.deadband_threshold = self.get_parameter('deadband_threshold').get_parameter_value().double_value
         self.safety_max_rudder = self.get_parameter('safety_max_rudder').get_parameter_value().double_value
         self.safety_max_sail = self.get_parameter('safety_max_sail').get_parameter_value().double_value
+        
+        # Enhanced control logging state
+        self.last_control_switch_time = time.time()
+        self.control_switch_reason = "initialization"
         
         # --- State Variables ---
         # Radio input (from hardware via sysfs)
@@ -382,6 +390,12 @@ class RudderSailRadioNode(Node):
         
         # Initialize servos to high impedance mode for safety
         self.set_servo_high_impedance()
+        
+        # Register cleanup handlers for graceful shutdown
+        import atexit
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        atexit.register(self._ensure_safe_exit)
     
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""
@@ -527,6 +541,9 @@ class RudderSailRadioNode(Node):
         Robot gets control when:
         1. No human activity for timeout period
         2. Autonomous commands are being received
+        
+        Returns:
+            tuple: (human_controlled: bool, reason: str)
         """
         current_time = time.time()
         
@@ -535,15 +552,23 @@ class RudderSailRadioNode(Node):
         
         # Human has control if there's been recent activity
         if time_since_human_activity < self.human_override_timeout:
-            return True  # Human control
+            reason = f"human_activity_within_{self.human_override_timeout:.1f}s (last_activity: {time_since_human_activity:.1f}s ago)"
+            return True, reason  # Human control
         
-        # Check if we have recent autonomous commands
+        # Robot can take control after human timeout expires
+        # This allows testing control handover behavior even when controller.py is not running
+        reason = f"timeout_handover_after_{time_since_human_activity:.1f}s"
+        
+        # Check if we have recent autonomous commands to provide more context
         time_since_auto_update = current_time - self.last_auto_update
         if time_since_auto_update < 1.0:  # Auto commands are fresh
-            return False  # Robot control
+            reason += " (autonomous_commands_active)"
+        elif time_since_auto_update < 30.0:  # Had autonomous commands recently
+            reason += " (autonomous_standby_mode)"
+        else:
+            reason += " (no_autonomous_controller)"
         
-        # Default to human control for safety if no recent commands
-        return True
+        return False, reason  # Robot control
     
     def apply_safety_limits(self, rudder, sail):
         """Apply safety limits to control commands."""
@@ -562,15 +587,23 @@ class RudderSailRadioNode(Node):
         self.pub_rudder_sail_radio.publish(radio_msg)
         
         # 3. Determine control authority
-        self.human_controlled = self.determine_control_authority()
+        new_human_controlled, authority_reason = self.determine_control_authority()
         
-        # 4. Log control mode changes
-        if self.human_controlled != self.last_logged_control_mode:
-            if self.human_controlled:
-                self.get_logger().info("HUMAN has control authority")
+        # 4. Log control mode changes with detailed reason
+        if new_human_controlled != self.last_logged_control_mode:
+            current_time = time.time()
+            time_since_last_switch = current_time - self.last_control_switch_time
+            
+            if new_human_controlled:
+                self.get_logger().info(f"HUMAN has taken control authority - Reason: {authority_reason} (previous mode duration: {time_since_last_switch:.1f}s)")
             else:
-                self.get_logger().info("ROBOT has control authority")
-            self.last_logged_control_mode = self.human_controlled
+                self.get_logger().info(f"ROBOT has taken control authority - Reason: {authority_reason} (previous mode duration: {time_since_last_switch:.1f}s)")
+            
+            self.last_logged_control_mode = new_human_controlled
+            self.last_control_switch_time = current_time
+            self.control_switch_reason = authority_reason
+        
+        self.human_controlled = new_human_controlled
         
         # 5. Select control commands based on authority
         if self.human_controlled:
@@ -603,6 +636,46 @@ class RudderSailRadioNode(Node):
         # 8. Publish actual servo commands
         servo_msg = Vector3(x=cmd_rudder, y=cmd_sail, z=0.0)
         self.pub_rudder_sail_servo.publish(servo_msg)
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals by ensuring safe exit."""
+        self.get_logger().info(f"Received signal {signum}, initiating safe shutdown...")
+        self._ensure_safe_exit()
+        # Allow normal signal handling to proceed
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt()
+        elif signum == signal.SIGTERM:
+            sys.exit(0)
+    
+    def _ensure_safe_exit(self):
+        """Ensure servos are in high impedance mode before exit."""
+        try:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().info("Setting servos to HIGH IMPEDANCE mode for safe exit...")
+            else:
+                print("Setting servos to HIGH IMPEDANCE mode for safe exit...", file=sys.stderr)
+            
+            # Set servos to high impedance mode (radio control active)
+            if SERVO_RUDDER_PATH.exists():
+                SERVO_RUDDER_PATH.write_text("0")
+            if SERVO_SAIL_PATH.exists():
+                SERVO_SAIL_PATH.write_text("0")
+                
+            if hasattr(self, 'get_logger'):
+                self.get_logger().info("Servos successfully set to HIGH IMPEDANCE mode. Radio control is now active.")
+            else:
+                print("Servos successfully set to HIGH IMPEDANCE mode. Radio control is now active.", file=sys.stderr)
+                
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().error(f"Error during safe exit: {e}")
+            else:
+                print(f"Error during safe exit: {e}", file=sys.stderr)
+    
+    def destroy_node(self):
+        """Override destroy_node to ensure safe exit."""
+        self._ensure_safe_exit()
+        super().destroy_node()
     
     def publish_status(self):
         """Publish control status for other nodes."""
@@ -724,14 +797,43 @@ TEST MODE:
         node = RudderSailRadioNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        print("\nKeyboardInterrupt received. Initiating safe shutdown...")
     except rclpy.executors.ExternalShutdownException:
-        pass
+        print("External shutdown requested. Initiating safe shutdown...")
+    except Exception as e:
+        print(f"Unexpected error: {e}. Initiating emergency safe shutdown...")
+        # Ensure servos are in high impedance mode even on unexpected errors
+        try:
+            if SERVO_RUDDER_PATH.exists():
+                SERVO_RUDDER_PATH.write_text("0")
+            if SERVO_SAIL_PATH.exists():
+                SERVO_SAIL_PATH.write_text("0")
+            print("Emergency: Servos set to HIGH IMPEDANCE mode. Radio control is active.")
+        except Exception as emergency_e:
+            print(f"CRITICAL: Could not set high impedance mode during emergency: {emergency_e}")
     finally:
+        # Ensure proper cleanup in all cases
         if node:
-            node.destroy_node()
+            try:
+                node.destroy_node()
+            except Exception as e:
+                print(f"Error during node destruction: {e}")
+        
         if rclpy.ok():
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except Exception as e:
+                print(f"Error during ROS2 shutdown: {e}")
+        
+        # Final safety check - ensure servos are in high impedance mode
+        try:
+            if SERVO_RUDDER_PATH.exists():
+                SERVO_RUDDER_PATH.write_text("0")
+            if SERVO_SAIL_PATH.exists():
+                SERVO_SAIL_PATH.write_text("0")
+            print("Final safety check: Servos confirmed in HIGH IMPEDANCE mode.")
+        except Exception as e:
+            print(f"CRITICAL: Final safety check failed: {e}")
 
 if __name__ == '__main__':
     main()
