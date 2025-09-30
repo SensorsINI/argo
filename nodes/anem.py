@@ -228,11 +228,13 @@ class AnemNode(Node):
 
     def setup_sensors(self):
         # First try to communicate with sensors to see if they exist
+        # SDP3x sensors don't respond to read_byte(), so we use write_i2c_block_data instead
         sensors_detected = []
         for a in self.i2cAddr:
             try:
-                # Try a simple read to test communication
-                self.bus.read_byte(a)
+                # Try to send stop continuous measurement command to test communication
+                # This is a safe operation that should work on all SDP3x sensors
+                self.bus.write_i2c_block_data(a, 0x3F, [0xF9])
                 sensors_detected.append(hex(a))
             except IOError:
                 pass  # Sensor not detected, continue checking others
