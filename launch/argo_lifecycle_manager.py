@@ -679,6 +679,11 @@ class ArgoLifecycleManager:
 
     def status(self) -> None:
         """Show current status of Argo nodes"""
+        # Show checking message and clear it
+        print("🔍 Checking Argo status...", end='', flush=True)
+        time.sleep(0.1)  # Brief pause to show the message
+        print("\r" + " " * 50 + "\r", end='', flush=True)  # Clear the line
+        
         print(f"🚢 ARGO STATUS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)
         
