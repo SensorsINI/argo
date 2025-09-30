@@ -48,14 +48,12 @@ from rclpy.logging import LoggingSeverity
 import math
 import sys
 from collections import deque
-import threading
 
 # Publishing configuration constants
-PUBLISHING_RATE = 1.0  # Hz - final publishing rate for averaged data
-PUBLISHING_AVERAGE_SAMPLES = 40  # Number of samples to average before publishing
+PUBLISHING_RATE = 10.0  # Hz - final publishing rate (no averaging needed)
 
-# Sampling configuration constants  
-SENSOR_SAMPLING_RATE = 100.0  # Hz - internal sensor sampling rate (independent of ROS2)
+# CRC error logging throttling
+CRC_ERROR_LOG_THROTTLE_S = 1.0  # Maximum CRC error logging frequency in seconds
 
 # Visual debugging configuration constants
 VISUAL_FULLSCALE_SPEED_KNOTS = 8.0  # knots - full scale wind speed for visual display
@@ -79,6 +77,42 @@ def int_from_bytes(b):
         return n - offset
     else:
         return n
+
+def calculate_crc8(data_bytes):
+    '''Calculate CRC-8 checksum for SDP3x sensor data
+    
+    Algorithm from SDP3x datasheet:
+    - Polynomial: 0x31 (x^8 + x^5 + x^4 + 1)
+    - Initialization: 0xFF
+    - No reflection of input or output
+    - Final XOR: 0x00
+    '''
+    crc = 0xFF  # Initialization value
+    polynomial = 0x31  # CRC-8 polynomial
+    
+    for byte in data_bytes:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = (crc << 1) ^ polynomial
+            else:
+                crc = crc << 1
+            crc &= 0xFF  # Keep only 8 bits
+    
+    return crc
+
+def verify_crc(data_bytes, received_crc):
+    '''Verify CRC checksum for sensor data
+    
+    Args:
+        data_bytes: List of data bytes to verify
+        received_crc: CRC byte received from sensor
+    
+    Returns:
+        bool: True if CRC is valid, False otherwise
+    '''
+    calculated_crc = calculate_crc8(data_bytes)
+    return calculated_crc == received_crc
     
 
 # following from sensirion https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
@@ -135,19 +169,8 @@ class AnemNode(Node):
         # Visual debug mode flag
         self.debug_visually = debug_visually
 
-        # Sample averaging for noise reduction - use deque for O(1) operations
-        self.sample_buffers = {
-            'dp': [deque(), deque(), deque()],  # Differential pressure buffers for 3 sensors
-            'temp': deque(),          # Temperature buffer
-            'speed': deque(),         # Wind speed buffer
-            'angle': deque()          # Wind angle buffer
-        }
-        self.sample_count = 0
-        
-        # Threading for high-rate sensor sampling
-        self.sampling_thread = None
-        self.sampling_active = False
-        self.sample_lock = threading.Lock()  # Protect shared data structures
+        # CRC error logging throttling
+        self._last_crc_error_log_time = 0.0
 
         # I2C setup
         # 21 is CCW, 23 is center, 22 is clockwise (viewed from top)
@@ -170,18 +193,12 @@ class AnemNode(Node):
             else:
                 self.sensors_ready = True
 
-        # ROS2 timer runs at publishing rate only (not sampling rate)
-        # Sensor sampling happens in separate thread at SENSOR_SAMPLING_RATE
+        # ROS2 timer runs at publishing rate - direct sensor reading
         self.timer = self.create_timer(1.0 / PUBLISHING_RATE, self.publish_callback)
         
         # Report actual sensor status
         if self.sensors_ready:
             self.get_logger().info("Initialization of anemometer wind sensor completed successfully.")
-            
-            # Start high-rate sampling thread
-            self.sampling_active = True
-            self.sampling_thread = threading.Thread(target=self._sampling_loop, daemon=True)
-            self.sampling_thread.start()
 
         # Visual mode init
         self._vis_initialized = False
@@ -295,7 +312,7 @@ class AnemNode(Node):
         
         time.sleep(0.8)
 
-        # Start Continuous Measurement (5.3.1 in Data sheet)
+        # Start Continuous Measurement (Table 6.3.1 in Data sheet)
         self.get_logger().info('Starting 0x3615 continuous measurement with average till read')
         ##Command code (Hex)        Temperature compensation            Averaging
         ##0x3603                    Mass flow                           Average  till read
@@ -313,109 +330,80 @@ class AnemNode(Node):
         return True
 
 
-    def _sampling_loop(self):
-        """High-rate sensor sampling loop running in separate thread"""
-        sample_period = 1.0 / SENSOR_SAMPLING_RATE  # e.g., 0.01s for 100 Hz
-        
-        while self.sampling_active:
-            start_time = time.time()
+    def _read_sensor_data(self):
+        """Read and validate sensor data with CRC checksum verification"""
+        try:
+            # Pre-allocate lists for better performance
+            dp = [0.0, 0.0, 0.0]
+            temps = [0.0, 0.0, 0.0]
             
-            try:
-                # Pre-allocate lists for better performance
-                dp = [0.0, 0.0, 0.0]
-                temps = [0.0, 0.0, 0.0]
+            # Read raw sensor data from all three sensors
+            for i, a in enumerate(self.i2cAddr):
+                b = self.bus.read_i2c_block_data(a, 0, 9)
                 
-                # Read raw sensor data - optimize by avoiding list operations
-                for i, a in enumerate(self.i2cAddr):
-                    b = self.bus.read_i2c_block_data(a, 0, 9)
-                    dp[i] = int_from_bytes([b[0], b[1]]) / 240.0  # convert to Pascals diff pressure
-                    temps[i] = int_from_bytes([b[3], b[4]]) / 200.0  # convert to deg celsius
+                # Verify CRC for differential pressure data (bytes 0,1,2)
+                if not verify_crc([b[0], b[1]], b[2]):
+                    self._log_crc_error(f"sensor {hex(a)} differential pressure")
+                    return None
                 
-                # Calculate wind speed and angle from current sample
-                angle_deg = calculate_angle_deg(dp[0], dp[1], dp[2])
-                speed_mps = calculate_speed_mps(dp[0], dp[1], dp[2])
-                temp_celsius = (temps[0] + temps[1] + temps[2]) / 3.0
+                # Verify CRC for temperature data (bytes 3,4,5)
+                if not verify_crc([b[3], b[4]], b[5]):
+                    self._log_crc_error(f"sensor {hex(a)} temperature")
+                    return None
                 
-                # Thread-safe update of sample buffers
-                with self.sample_lock:
-                    # Add samples to buffers for averaging - use deque for O(1) operations
-                    for i in range(3):
-                        dp_buffer = self.sample_buffers['dp'][i]
-                        dp_buffer.append(dp[i])
-                        if len(dp_buffer) > PUBLISHING_AVERAGE_SAMPLES:
-                            dp_buffer.popleft()
-                    
-                    temp_buffer = self.sample_buffers['temp']
-                    temp_buffer.append(temp_celsius)
-                    if len(temp_buffer) > PUBLISHING_AVERAGE_SAMPLES:
-                        temp_buffer.popleft()
-                        
-                    speed_buffer = self.sample_buffers['speed']
-                    speed_buffer.append(speed_mps)
-                    if len(speed_buffer) > PUBLISHING_AVERAGE_SAMPLES:
-                        speed_buffer.popleft()
-                        
-                    angle_buffer = self.sample_buffers['angle']
-                    angle_buffer.append(angle_deg)
-                    if len(angle_buffer) > PUBLISHING_AVERAGE_SAMPLES:
-                        angle_buffer.popleft()
-                    
-                    self.sample_count += 1
+                # Verify CRC for scale factor data (bytes 6,7,8)
+                if not verify_crc([b[6], b[7]], b[8]):
+                    self._log_crc_error(f"sensor {hex(a)} scale factor")
+                    return None
                 
-            except IOError as e:
-                # Critical I2C error - stop sampling and exit
-                self.get_logger().error(f"CRITICAL: I2C read error in sampling thread: {e}. Exiting.")
-                self.sampling_active = False
-                sys.exit(1)
-            except IndexError as e:
-                self.get_logger().error(f"Data parsing error in sampling thread: {e}. Continuing.")
+                # Convert validated data
+                dp[i] = int_from_bytes([b[0], b[1]]) / 240.0  # convert to Pascals diff pressure
+                temps[i] = int_from_bytes([b[3], b[4]]) / 200.0  # convert to deg celsius
             
-            # Maintain precise timing
-            elapsed = time.time() - start_time
-            sleep_time = sample_period - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            return dp, temps
+            
+        except IOError as e:
+            self.get_logger().error(f"CRITICAL: I2C read error: {e}. Exiting.")
+            sys.exit(1)
+        except IndexError as e:
+            self.get_logger().error(f"Data parsing error: {e}. Continuing.")
+            return None
+    
+    def _log_crc_error(self, sensor_info):
+        """Log CRC error with throttling to prevent log spam"""
+        current_time = time.time()
+        if current_time - self._last_crc_error_log_time >= CRC_ERROR_LOG_THROTTLE_S:
+            self.get_logger().warn(f"CRC checksum error detected on {sensor_info}")
+            self._last_crc_error_log_time = current_time
 
     def publish_callback(self):
-        """ROS2 timer callback - publishes averaged data at PUBLISHING_RATE"""
+        """ROS2 timer callback - reads sensor data and publishes at PUBLISHING_RATE"""
         try:
-            # Thread-safe read of sample buffers
-            with self.sample_lock:
-                if self.sample_count < PUBLISHING_AVERAGE_SAMPLES:
-                    # Not enough samples yet
-                    return
-                
-                # Calculate averages - optimize by caching buffer lengths
-                dp_buffers = self.sample_buffers['dp']
-                temp_buffer = self.sample_buffers['temp']
-                speed_buffer = self.sample_buffers['speed']
-                angle_buffer = self.sample_buffers['angle']
-                
-                if len(temp_buffer) == 0 or len(speed_buffer) == 0 or len(angle_buffer) == 0:
-                    return  # No data available yet
-                
-                avg_dp = [
-                    sum(dp_buffers[0]) / len(dp_buffers[0]),
-                    sum(dp_buffers[1]) / len(dp_buffers[1]),
-                    sum(dp_buffers[2]) / len(dp_buffers[2])
-                ]
-                avg_temp = sum(temp_buffer) / len(temp_buffer)
-                avg_speed = sum(speed_buffer) / len(speed_buffer)
-                avg_angle = sum(angle_buffer) / len(angle_buffer)
+            # Read sensor data with CRC validation
+            sensor_data = self._read_sensor_data()
+            if sensor_data is None:
+                return  # CRC error or other issue, skip this cycle
             
-            # Publish averaged differential pressure
-            self.pub_diff_pressure.publish(Vector3(x=float(avg_dp[0]), y=float(avg_dp[1]), z=float(avg_dp[2])))
+            dp, temps = sensor_data
             
-            # Publish averaged wind speed, angle, and temperature
-            self.pub_wind_temp.publish(Vector3(x=float(avg_speed), y=float(avg_angle), z=float(avg_temp)))
+            # Calculate wind speed and angle from current sample
+            angle_deg = calculate_angle_deg(dp[0], dp[1], dp[2])
+            speed_mps = calculate_speed_mps(dp[0], dp[1], dp[2])
+            temp_celsius = (temps[0] + temps[1] + temps[2]) / 3.0
+            
+            # Publish differential pressure
+            self.pub_diff_pressure.publish(Vector3(x=float(dp[0]), y=float(dp[1]), z=float(dp[2])))
+            
+            # Publish wind speed, angle, and temperature
+            self.pub_wind_temp.publish(Vector3(x=float(speed_mps), y=float(angle_deg), z=float(temp_celsius)))
             
             self.get_logger().debug(
-                f"Anemometer (avg {len(speed_buffer)} samples @ {SENSOR_SAMPLING_RATE}Hz): speed(m/s)={avg_speed:.2f} angle(deg)={avg_angle:.1f} "
-                f"temp(C)={avg_temp:.1f} dp(pascal)=({avg_dp[0]:.4f}, {avg_dp[1]:.4f}, {avg_dp[2]:.4f})"
+                f"Anemometer: speed(m/s)={speed_mps:.2f} angle(deg)={angle_deg:.1f} "
+                f"temp(C)={temp_celsius:.1f} dp(pascal)=({dp[0]:.4f}, {dp[1]:.4f}, {dp[2]:.4f})"
             )
             
             if self.debug_visually:
-                self._render_visual(avg_speed, avg_angle, avg_temp, tuple(avg_dp))
+                self._render_visual(speed_mps, angle_deg, temp_celsius, tuple(dp))
                 
         except Exception as e:
             self.get_logger().error(f"Error in publish callback: {e}")
@@ -425,12 +413,6 @@ class AnemNode(Node):
         # This is the recommended way to perform cleanup in ROS2.
         # It gets called automatically when the node is destroyed.
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
-        
-        # Stop sampling thread
-        if self.sampling_active:
-            self.sampling_active = False
-            if self.sampling_thread and self.sampling_thread.is_alive():
-                self.sampling_thread.join(timeout=1.0)  # Wait up to 1 second
         
         if self.debug_visually:
             self._teardown_visual()
@@ -465,13 +447,13 @@ Features:
   - Optional visual debug mode with ASCII wind vector display
   - Temperature compensation and averaging
   - Configurable logging levels
-  - Sample averaging for noise reduction (configurable via constants)
-  - Controlled publishing rate to reduce data transmission
+  - CRC checksum validation for data integrity
+  - Throttled CRC error logging to prevent log spam
+  - Direct sensor reading without additional averaging (sensor provides averaging)
 
 Configuration Constants (modify at top of file):
-  - PUBLISHING_RATE: Final publishing rate in Hz (default: 1.0)
-  - PUBLISHING_AVERAGE_SAMPLES: Number of samples to average (default: 40)
-  - SENSOR_SAMPLING_RATE: Internal sensor sampling rate in Hz (default: 100.0)
+  - PUBLISHING_RATE: Final publishing rate in Hz (default: 10.0)
+  - CRC_ERROR_LOG_THROTTLE_S: Maximum CRC error logging frequency in seconds (default: 1.0)
   - VISUAL_FULLSCALE_SPEED_KNOTS: Full-scale wind speed for visual display (default: 8.0)
   - VISUAL_DISPLAY_WIDTH: Visual display width in characters (default: 60)
   - VISUAL_DISPLAY_HEIGHT: Visual display height in characters (default: 40)
