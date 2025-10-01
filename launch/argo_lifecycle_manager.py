@@ -707,8 +707,10 @@ class ArgoLifecycleManager:
             node_fatal_messages = self._get_fatal_messages_for_nodes()
         
         # Individual node status
-        print("🤖 ROS NODES:")
         node_status = self._get_node_status()
+        running_count = sum(1 for status in node_status.values() if "RUNNING" in status)
+        total_count = len(node_status)
+        print(f"🤖 ROS NODES: [{running_count}/{total_count}]")
         stopped_nodes = []
         for node, status in node_status.items():
             if "STOPPED" in status and node in node_fatal_messages:
@@ -819,26 +821,35 @@ class ArgoLifecycleManager:
             # add free disk space
             disk = psutil.disk_usage("/")
             free_disk = disk.free / (1024**3)
-            # INSERT_YOUR_CODE
-            # Try to get CPU temperature from sensors (cpu_thermal-virtual-0)
+            # Get CPU temperature from thermal-monitor.service log file (faster than sensors command)
             cpu_temp = None
             try:
-                sensors_output = subprocess.check_output(['sensors'], text=True)
-                lines = sensors_output.splitlines()
-                for i, line in enumerate(lines):
-                    if 'cpu_thermal-virtual-0' in line:
-                        # Look for the next line with 'temp1'
-                        for j in range(i+1, min(i+4, len(lines))):
-                            if 'temp1:' in lines[j]:
-                                parts = lines[j].split()
-                                for part in parts:
-                                    if part.startswith('+') and part.endswith('°C'):
-                                        cpu_temp = part.strip('+°C')
-                                        break
-                                break
-                        break
+                # Try to find the most recent thermal log file
+                import glob
+                thermal_logs = sorted(glob.glob('/var/log.hdd/persistent/thermal-*.log'), reverse=True)
+                for thermal_log in thermal_logs:
+                    if os.path.exists(thermal_log) and os.path.getsize(thermal_log) > 0:
+                        with open(thermal_log, 'r') as f:
+                            # Read last line
+                            lines = f.readlines()
+                            if lines:
+                                last_line = lines[-1].strip()
+                                # Parse: "2025-10-01 06:30:23: GPU:60°C VE:57°C CPU:58°C DDR:58°C"
+                                if 'CPU:' in last_line:
+                                    cpu_part = last_line.split('CPU:')[1].split()[0]
+                                    cpu_temp = cpu_part.replace('°C', '')
+                                    break
             except Exception:
-                cpu_temp = None
+                pass
+            
+            # Fallback to reading thermal zone directly if log method failed
+            if cpu_temp is None:
+                try:
+                    with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
+                        temp_millicelsius = int(f.read().strip())
+                        cpu_temp = str(temp_millicelsius // 1000)
+                except Exception:
+                    cpu_temp = None
             
             # Get battery and alerts in parallel for much faster performance
             battery_summary, critical_alerts = None, None
