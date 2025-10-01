@@ -178,6 +178,7 @@ class WindAwareController(BaseController):
         cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
         
         # Wind-aware sail control
+        # TODO check that this makes sense given simulator, since it might not treat sail winch correctly as setting maximum sail angle
         cmd_sail = state.radio_sail if state.radio_sail is not None else 0.0
         
         if state.wind_angle is not None:
