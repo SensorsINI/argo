@@ -1,0 +1,508 @@
+---
+description: "Documentation for Argo monitoring services (thermal, storage, memory, temperature) - for reference before removal"
+---
+
+# Argo Monitoring Services Documentation
+
+This rule documents the various monitoring services in the Argo system for reference before potential removal.
+
+## Summary Table
+
+| Service | Type | Location | Status | Interval | Safe to Remove? |
+|---------|------|----------|--------|----------|-----------------|
+| thermal-monitor | Shell/Systemd | `/usr/local/bin`<br>`/etc/systemd/system` | enabled & active | 30s | ✅ Yes (update lifecycle mgr) |
+| memory-monitor | Shell/Systemd | `/usr/local/bin`<br>`/etc/systemd/system` | enabled & active | 30s | ✅ Yes (redundant with psutil) |
+| cursor-monitor | Shell/Systemd | `/usr/local/bin`<br>`/etc/systemd/system` | enabled & active | 60s | ✅ Yes (dev/debug tool) |
+| orangepi-monitor | Systemd | `/etc/systemd/system` | enabled & active | 5s | ✅ Yes (potentially redundant) |
+| argo-storage-monitor | Python/User Systemd | `launch/`<br>User service | enabled & active | On-demand | ✅ Yes (if no GUI needed) |
+| memory_monitor.py | Python Tool | `launch/` | Manual only | 10s | ✅ Yes (dev tool) |
+| argo_service_monitor.py | ROS2 Node | `launch/` | Manual only | 2s | ✅ Yes (if not needed) |
+| argo_file_monitor.py | ROS2 Node | `launch/` | Manual only | N/A | ✅ Yes (dev tool) |
+| temp_monitor.py | ROS2 Node | `nodes/` | Auto-launched | 1Hz | ⚠️ **Keep** (core safety) |
+| storage_monitor.py | Python CLI | `launch/` | Manual only | On-demand | ⚠️ **Keep** (useful CLI) |
+
+## 1. Thermal Monitoring Service (System-Level)
+
+### Files
+- **[launch/thermal-monitor.sh](mdc:launch/thermal-monitor.sh)** - Shell script that logs thermal data
+- **[launch/thermal-monitor.service](mdc:launch/thermal-monitor.service)** - Systemd service configuration
+- **[launch/README-thermal-monitor.md](mdc:launch/README-thermal-monitor.md)** - Installation and usage documentation
+
+### Purpose
+Monitors Orange Pi Zero 2W thermal zones and logs temperatures every 30 seconds to persistent storage.
+
+### Implementation Details
+```bash
+# Monitors 4 thermal zones:
+thermal_zone0 - GPU temperature
+thermal_zone1 - VE (Video Engine) temperature  
+thermal_zone2 - CPU temperature
+thermal_zone3 - DDR (Memory) temperature
+
+# Log format (daily rotation):
+/var/log.hdd/persistent/thermal-YYYYMMDD.log
+2025-10-01 06:30:23: GPU:60°C VE:57°C CPU:58°C DDR:58°C
+
+# Alert threshold: >80°C triggers syslog warning
+```
+
+### Integration Points
+- **argo_lifecycle_manager.py** (lines 824-847): Reads thermal logs for fast CPU temperature retrieval in status checks
+- Runs as root systemd service with auto-restart
+- Avoids expensive `sensors` command for performance
+
+### Installation
+```bash
+sudo cp launch/thermal-monitor.sh /usr/local/bin/thermal-monitor.sh
+sudo chmod +x /usr/local/bin/thermal-monitor.sh
+sudo cp launch/thermal-monitor.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable thermal-monitor.service
+sudo systemctl start thermal-monitor.service
+```
+
+## 2. Storage Monitoring Service (GUI Notifications)
+
+### Files
+- **[launch/argo_storage_notifications.py](mdc:launch/argo_storage_notifications.py)** - Python notification script
+- **[launch/argo-storage-monitor.service](mdc:launch/argo-storage-monitor.service)** - Systemd service configuration
+- **[launch/storage_monitor.py](mdc:launch/storage_monitor.py)** - CLI storage monitoring tool
+
+### Purpose
+Monitors disk space and calculates remaining recording hours, sends GUI notifications for storage warnings.
+
+### Implementation Details
+```python
+# Recording rate constants
+RECORDING_RATE_MB_PER_HOUR = 13.5  # MB per hour
+RECORDING_RATE_GB_PER_HOUR = 13.5 / 1024.0
+
+# Notification thresholds
+CRITICAL_HOURS = 10.0   # Critical warning below 10 hours
+WARNING_HOURS = 24.0    # Warning below 24 hours
+
+# Notification urgency levels:
+- Critical: urgency="critical", icon="dialog-error"
+- Warning: urgency="normal", icon="dialog-warning"
+```
+
+### Integration Points
+- Runs as user service (orangepi) in GUI environment
+- Requires DISPLAY=:0 and XDG_RUNTIME_DIR=/run/user/1000
+- Restart on failure with 5-minute RestartSec
+- Depends on graphical.target
+
+### Installation
+```bash
+sudo systemctl --user link /home/orangepi/argo/launch/argo-storage-monitor.service
+sudo systemctl --user daemon-reload
+sudo systemctl --user enable argo-storage-monitor.service
+sudo systemctl --user start argo-storage-monitor.service
+```
+
+## 3. Memory Monitoring (Development Tool)
+
+### Files
+- **[launch/memory_monitor.py](mdc:launch/memory_monitor.py)** - Memory leak detection tool
+
+### Purpose
+Development tool to monitor system memory and per-node memory usage for leak detection.
+
+### Implementation Details
+```python
+# Default monitoring parameters
+Duration: 30 minutes
+Interval: 10 seconds (6 samples per minute)
+
+# Output: CSV file with timestamp
+memory_usage_YYYYMMDD_HHMMSS.csv
+
+# Columns:
+- Timestamp
+- Total system memory (MB)
+- Available memory (MB)
+- Per-node RSS memory (MB)
+```
+
+### Usage Pattern
+```bash
+# Background monitoring
+nohup python3 launch/memory_monitor.py > memory_monitor.log 2>&1 &
+
+# Monitor specific duration
+python3 launch/memory_monitor.py --duration 60 --interval 5
+```
+
+### Integration Points
+- Uses ArgoNodeManager for dynamic node discovery
+- Tracks all discovered ROS2 nodes
+- Saves CSV to repo root for analysis
+- Not a systemd service (manual execution only)
+
+## 4. Temperature ROS2 Node (Real-time Monitoring)
+
+### Files
+- **[nodes/temp_monitor.py](mdc:nodes/temp_monitor.py)** - ROS2 temperature monitoring node
+
+### Purpose
+ROS2 node that publishes CPU temperature and system temperature with alert capabilities.
+
+### Implementation Details
+```python
+# Published Topics
+/cpu_temperature (Float32) - CPU temperature in Celsius
+/system_temperature (Float32) - Overall system temperature
+/temperature_high_alert (Bool) - High temperature warning
+/temperature_critical_alert (Bool) - Critical temperature warning
+
+# Alert Thresholds (configurable)
+HIGH_TEMPERATURE_THRESHOLD_C = 85.0°C
+CRITICAL_TEMPERATURE_THRESHOLD_C = 100.0°C
+TEMPERATURE_HYSTERESIS_C = 2.0°C
+
+# Publishing Optimization (saves rosbag space)
+- First 30s: Publishes all data at 1Hz
+- After 30s: Publishes only on >5% change OR every 60s
+- Alert topics: Always 1Hz for safety
+
+# QoS Configuration
+- Temperature alerts use TRANSIENT_LOCAL durability
+- Late-joining nodes get current alert state
+```
+
+### Debug Mode
+```bash
+# ASCII terminal bars with --debug flag
+python3 nodes/temp_monitor.py --debug
+```
+
+### Integration Points
+- Launched by argo_lifecycle_manager.py
+- Part of core ROS2 node ecosystem
+- Temperature data recorded in rosbags
+- Persistent QoS for critical alerts
+
+## 5. Service Monitoring (ROS2 Recording Status)
+
+### Files
+- **[launch/argo_service_monitor.py](mdc:launch/argo_service_monitor.py)** - ROS2 service status monitor
+
+### Purpose
+Monitors ROS2 recording service status and publishes to topics.
+
+### Implementation Details
+```python
+# Published Topics
+/argo/recording/bagfile_status (Bool) - Recording active status
+/argo/recording/service_status (String) - Service status string
+
+# Check Interval: 2 seconds
+```
+
+### Integration Points
+- Monitors recording service status
+- Provides real-time recording state
+- Used by GUI and other monitoring tools
+
+## 6. File Monitoring (Development Tool)
+
+### Files
+- **[launch/argo_file_monitor.py](mdc:launch/argo_file_monitor.py)** - File change monitoring node
+
+### Purpose
+ROS2 node for monitoring file changes (development/debugging tool).
+
+### Integration Points
+- Development utility for debugging
+- Not part of core launch system
+- Manual execution only
+
+## 7. System Memory Monitoring Service (Shell-based)
+
+### Files
+- **/usr/local/bin/memory-monitor.sh** - Comprehensive memory monitoring script
+- **/etc/systemd/system/memory-monitor.service** - Systemd service (enabled & active)
+
+### Purpose
+System-level memory monitoring that logs memory usage, swap usage, and top memory consumers every 30 seconds.
+
+### Implementation Details
+```bash
+# Monitoring interval: 30 seconds
+
+# Log files (daily rotation):
+/var/log.hdd/persistent/memory-YYYYMMDD.log        # Memory statistics
+/var/log.hdd/persistent/processes-YYYYMMDD.log     # Top memory consumers
+
+# Memory log format:
+2025-10-01 07:15:23: Memory:73% Swap:0% MemTotal=1982916 MemFree=234156 MemAvailable=524892...
+
+# Process log format:
+2025-10-01 07:15:23: Top memory consumers:
+[ps aux output sorted by %mem, top 10 processes]
+
+# Alert thresholds:
+- Memory >85%: Logs HIGH MEMORY USAGE and sends syslog warning
+- Swap >60%: Sends syslog warning
+```
+
+### Installation Status
+```bash
+# Currently installed and running:
+sudo systemctl status memory-monitor.service
+# ● memory-monitor.service - Memory usage monitoring and logging
+#    Loaded: loaded (/etc/systemd/system/memory-monitor.service; enabled)
+#    Active: active (running)
+```
+
+### Integration Points
+- Runs as root systemd service with auto-restart (RestartSec=10)
+- Provides historical memory usage data for diagnostics
+- Complements Python memory_monitor.py (which focuses on ROS2 nodes)
+
+## 8. Cursor Process Monitoring Service
+
+### Files
+- **/usr/local/bin/cursor-monitor.sh** - Cursor IDE process monitoring script
+- **/etc/systemd/system/cursor-monitor.service** - Systemd service (enabled & active)
+
+### Purpose
+Monitors Cursor IDE processes for resource usage, especially helpful for diagnosing performance issues on resource-constrained Orange Pi.
+
+### Implementation Details
+```bash
+# Monitoring interval: 60 seconds (every minute)
+
+# Log file (daily rotation):
+/var/log.hdd/persistent/cursor-processes-YYYYMMDD.log
+
+# Log format:
+2025-10-01 07:15:23: Cursor processes: 5, Total Memory: 450MB
+[Full ps aux output for cursor processes]
+
+# Monitored processes:
+- cursor.*server
+- cursor.*agent  
+- cursor.*extension
+
+# Alert threshold:
+- Memory >1GB: Sends syslog daemon.warning
+```
+
+### Installation Status
+```bash
+# Currently installed and running:
+sudo systemctl status cursor-monitor.service
+# ● cursor-monitor.service - Cursor process monitoring
+#    Loaded: loaded (/etc/systemd/system/cursor-monitor.service; enabled)
+#    Active: active (running)
+```
+
+### Integration Points
+- Runs as root systemd service with auto-restart (RestartSec=10)
+- Helps identify Cursor IDE memory leaks or performance issues
+- Particularly useful on 2GB RAM Orange Pi systems
+
+## 9. Orange Pi System Monitor Service
+
+### Files
+- **/etc/systemd/system/orangepi-monitor.service** - Systemd service (enabled & active)
+- Uses system command: `orangepimonitor -m`
+
+### Purpose
+Orange Pi-specific system monitoring using the built-in orangepimonitor utility for CPU stats, load, and temperature.
+
+### Implementation Details
+```bash
+# Log file (daily rotation):
+/var/log.hdd/persistent/orangepi-monitor-YYYYMMDD.log
+
+# Output format (every 5 seconds):
+Time        CPU    load %cpu %sys %usr %nice %io %irq   CPU  C.St.
+07:17:57:   ---    1.31  11%   2%   9%   0%   0%   0% 56.6°C  0/7
+
+# Metrics:
+- System load average
+- CPU usage percentage (total, system, user, nice, io, irq)
+- CPU temperature
+- C-states (power states)
+```
+
+### Installation Status
+```bash
+# Currently installed and running:
+sudo systemctl status orangepi-monitor.service
+# ● orangepi-monitor.service - Orange Pi Monitor logging service
+#    Loaded: loaded (/etc/systemd/system/orangepi-monitor.service; enabled)
+#    Active: active (running)
+```
+
+### Integration Points
+- Runs as root systemd service
+- No auto-restart (Restart=no)
+- Uses native Orange Pi monitoring tool
+- Provides detailed CPU statistics and C-state information
+
+## Status Check Integration
+
+All monitoring services integrate with the main status check system:
+
+### argo_lifecycle_manager.py Status Display
+```python
+# Status output includes:
+📋 LAUNCH SERVICE: 🟢 RUNNING / 🔴 STOPPED
+🤖 ROS NODES: [X/Y] - Node count
+📊 SYSTEM: CPU X% | Mem. X% | Free Disk XGB | CPU Temp. X°C | Batt. X%
+⚠️  CRITICAL ALERTS: (if any)
+```
+
+### Quick Timer Integration (dotfiles/.bashrc)
+```bash
+# argo_quick_timer shows condensed status
+🚢 ARGO: [7/11] | CPU 8.0% | Mem. 73.0% | Free Disk 13.7GB | CPU Temp. 55°C
+```
+
+## Removal Considerations
+
+### Services Safe to Remove
+
+#### System-Level Monitoring Services (High Priority for Removal)
+1. **thermal-monitor.service** - Can be removed if argo_lifecycle_manager.py is updated to read thermal zones directly
+   - Installed: `/usr/local/bin/thermal-monitor.sh`, `/etc/systemd/system/thermal-monitor.service`
+   - Status: enabled & active
+   
+2. **memory-monitor.service** (Shell-based) - Redundant with psutil-based monitoring
+   - Installed: `/usr/local/bin/memory-monitor.sh`, `/etc/systemd/system/memory-monitor.service`
+   - Status: enabled & active
+   - Note: Different from Python memory_monitor.py development tool
+   
+3. **cursor-monitor.service** - Development/debugging tool, not critical for Argo operations
+   - Installed: `/usr/local/bin/cursor-monitor.sh`, `/etc/systemd/system/cursor-monitor.service`
+   - Status: enabled & active
+   
+4. **orangepi-monitor.service** - Potentially redundant with other monitoring
+   - Installed: `/etc/systemd/system/orangepi-monitor.service`
+   - Status: enabled & active
+   - Uses native `orangepimonitor` command
+
+#### Application-Level Monitoring (Medium Priority for Removal)
+5. **argo-storage-monitor.service** - Can be removed if GUI notifications are not needed
+   - Installed: User service (orangepi)
+   
+6. **memory_monitor.py** (Python) - Development tool for ROS2 node leak detection, safe to remove anytime
+   - Location: `launch/memory_monitor.py`
+   - Not a systemd service (manual execution)
+   
+7. **argo_service_monitor.py** - Can be removed if recording status monitoring is not needed
+   - Location: `launch/argo_service_monitor.py`
+   
+8. **argo_file_monitor.py** - Development tool, safe to remove anytime
+   - Location: `launch/argo_file_monitor.py`
+
+### Services to Keep
+1. **temp_monitor.py (ROS2 node)** - Core temperature monitoring with alerts, should remain
+   - Provides real-time temperature data to ROS2 topics
+   - Essential for autonomous operation safety
+   
+2. **storage_monitor.py** - CLI tool for manual storage checks, useful to keep
+   - Lightweight, on-demand usage only
+
+### Migration Path for Removal
+
+#### Thermal Monitoring Removal
+1. Update argo_lifecycle_manager.py to read thermal zones directly instead of log files
+2. Remove systemd service installation
+3. Delete thermal-monitor.sh and thermal-monitor.service
+
+#### Storage Notification Removal  
+1. Ensure CLI storage_monitor.py is sufficient
+2. Remove argo-storage-monitor.service
+3. Optionally keep argo_storage_notifications.py for manual use
+
+#### Memory Monitor Cleanup
+1. Archive any saved CSV files
+2. Delete memory_monitor.py if no longer needed for development
+
+## Quick Reference Commands
+
+### Service Status Checks
+```bash
+# Check all monitoring services at once
+sudo systemctl status thermal-monitor memory-monitor cursor-monitor orangepi-monitor
+systemctl --user status argo-storage-monitor
+
+# Check individual services
+sudo systemctl status thermal-monitor.service
+sudo systemctl status memory-monitor.service
+sudo systemctl status cursor-monitor.service
+sudo systemctl status orangepi-monitor.service
+
+# View service logs
+tail -f /var/log.hdd/persistent/thermal-$(date +%Y%m%d).log
+tail -f /var/log.hdd/persistent/memory-$(date +%Y%m%d).log
+tail -f /var/log.hdd/persistent/processes-$(date +%Y%m%d).log
+tail -f /var/log.hdd/persistent/cursor-processes-$(date +%Y%m%d).log
+tail -f /var/log.hdd/persistent/orangepi-monitor-$(date +%Y%m%d).log
+```
+
+### Manual Monitoring Tools
+```bash
+# Manual storage check
+python3 launch/storage_monitor.py
+
+# ROS2 node memory leak detection (30 min, 10s interval)
+nohup python3 launch/memory_monitor.py > memory_monitor.log 2>&1 &
+```
+
+### Uninstall Services
+
+#### System-Level Services (in /usr/local/bin and /etc/systemd/system)
+```bash
+# Thermal monitor
+sudo systemctl stop thermal-monitor.service
+sudo systemctl disable thermal-monitor.service
+sudo rm /etc/systemd/system/thermal-monitor.service
+sudo rm /usr/local/bin/thermal-monitor.sh
+sudo systemctl daemon-reload
+
+# Memory monitor (shell-based)
+sudo systemctl stop memory-monitor.service
+sudo systemctl disable memory-monitor.service
+sudo rm /etc/systemd/system/memory-monitor.service
+sudo rm /usr/local/bin/memory-monitor.sh
+sudo systemctl daemon-reload
+
+# Cursor monitor
+sudo systemctl stop cursor-monitor.service
+sudo systemctl disable cursor-monitor.service
+sudo rm /etc/systemd/system/cursor-monitor.service
+sudo rm /usr/local/bin/cursor-monitor.sh
+sudo systemctl daemon-reload
+
+# Orange Pi monitor
+sudo systemctl stop orangepi-monitor.service
+sudo systemctl disable orangepi-monitor.service
+sudo rm /etc/systemd/system/orangepi-monitor.service
+sudo systemctl daemon-reload
+```
+
+#### User-Level Services
+```bash
+# Storage monitor (GUI notifications)
+systemctl --user stop argo-storage-monitor.service
+systemctl --user disable argo-storage-monitor.service
+systemctl --user daemon-reload
+```
+
+### Complete Monitoring Service Cleanup
+```bash
+# One-liner to remove all non-essential monitoring services
+sudo systemctl stop thermal-monitor memory-monitor cursor-monitor orangepi-monitor
+sudo systemctl disable thermal-monitor memory-monitor cursor-monitor orangepi-monitor
+sudo rm /etc/systemd/system/{thermal-monitor,memory-monitor,cursor-monitor,orangepi-monitor}.service
+sudo rm /usr/local/bin/{thermal-monitor,memory-monitor,cursor-monitor}.sh
+systemctl --user stop argo-storage-monitor
+systemctl --user disable argo-storage-monitor
+sudo systemctl daemon-reload
+systemctl --user daemon-reload
+```
