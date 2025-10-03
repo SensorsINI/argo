@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "SparkFun_IMU_Breakout_ICM-20948")(type "KiCad")(uri "$(KIPRJMOD)/SparkFun_IMU_Breakout_ICM-20948.pretty")(options "")(descr ""))
+)
