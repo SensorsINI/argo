@@ -32,6 +32,33 @@
 # --debug: Enable debug logging of sensor values
 # --debug_visually: Show real-time ASCII visualization of wind vector
 #
+# Calibration and Verification:
+# The anemometer system includes calibration tools to verify correct operation:
+#
+# 1. Data Collection Script (scripts/anem_calibration_data_collection.py):
+#    - Systematically collects differential pressure data at known wind angles
+#    - Prompts user to position wind source at angles from -180° to +180° in 30° steps
+#    - Collects data for 7 seconds at each angle with 10Hz sampling rate
+#    - Calculates mean and standard deviation for each sensor
+#    - Saves results to anem-measurement-DATESTAMP.csv
+#    - Usage: python3 scripts/anem_calibration_data_collection.py
+#
+# 2. Data Visualization Script (scripts/plot_anem_calibration_data.py):
+#    - Creates comprehensive plots of sensor response patterns
+#    - Generates polar plot showing differential pressure vs wind angle
+#    - Creates linear plot of pressure response curves
+#    - Calculates and displays wind direction calibration accuracy
+#    - Shows correlation coefficient and RMSE for fitted vs measured angles
+#    - Usage: python3 scripts/plot_anem_calibration_data.py [data_file.csv]
+#
+# 3. Calibration Verification Process:
+#    - Run data collection script with controlled wind source at ~7.4 m/s
+#    - Position wind source at each angle as prompted
+#    - Review generated plots for sinusoidal sensor response patterns
+#    - Check wind direction calibration shows >0.95 correlation
+#    - Verify RMSE is <10° for wind direction accuracy
+#    - Look for consistent phase relationships between all three sensors
+#
 # Topics Published:
 # /anem_speed_angle_temp (geometry_msgs/Vector3):
 #   x: wind speed in m/s
