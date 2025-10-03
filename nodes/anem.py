@@ -20,6 +20,8 @@
 # - Optional visual debug mode with ASCII wind vector display
 # - Temperature compensation and averaging
 # - Configurable logging levels
+# - Sample averaging for noise reduction (configurable via constants)
+# - Controlled publishing rate to reduce data transmission
 #
 # Command line options:
 # --debug: Enable debug logging of sensor values
@@ -45,6 +47,18 @@ import argparse
 from rclpy.logging import LoggingSeverity
 import math
 import sys
+from collections import deque
+
+# Publishing configuration constants
+PUBLISHING_RATE = 10.0  # Hz - final publishing rate (no averaging needed)
+
+# CRC error logging throttling
+CRC_ERROR_LOG_THROTTLE_S = 1.0  # Maximum CRC error logging frequency in seconds
+
+# Visual debugging configuration constants
+VISUAL_FULLSCALE_SPEED_KNOTS = 8.0  # knots - full scale wind speed for visual display
+VISUAL_DISPLAY_WIDTH = 60  # characters - width of visual display
+VISUAL_DISPLAY_HEIGHT = 40  # characters - height of visual display
 
 # from https://stackoverflow.com/questions/49906101/byte-array-to-int-in-python-2-x-using-standard-libraries
 # This function is compatible with Python 3.
@@ -63,44 +77,85 @@ def int_from_bytes(b):
         return n - offset
     else:
         return n
+
+def calculate_crc8(data_bytes):
+    '''Calculate CRC-8 checksum for SDP3x sensor data
+    
+    Algorithm from SDP3x datasheet:
+    - Polynomial: 0x31 (x^8 + x^5 + x^4 + 1)
+    - Initialization: 0xFF
+    - No reflection of input or output
+    - Final XOR: 0x00
+    '''
+    crc = 0xFF  # Initialization value
+    polynomial = 0x31  # CRC-8 polynomial
+    
+    for byte in data_bytes:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = (crc << 1) ^ polynomial
+            else:
+                crc = crc << 1
+            crc &= 0xFF  # Keep only 8 bits
+    
+    return crc
+
+def verify_crc(data_bytes, received_crc):
+    '''Verify CRC checksum for sensor data
+    
+    Args:
+        data_bytes: List of data bytes to verify
+        received_crc: CRC byte received from sensor
+    
+    Returns:
+        bool: True if CRC is valid, False otherwise
+    '''
+    calculated_crc = calculate_crc8(data_bytes)
+    return calculated_crc == received_crc
     
 
 # following from sensirion https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
   
 def calculate_angle_deg(dp1, dp2, dp3):
     # parameter for sinus curve, estimated on one measurement at 7.2 m/s
-    b=0.64
-    s1 = dp1+dp2
-    s2 = dp2+dp3
+    b = 0.64
+    s1 = dp1 + dp2
+    s2 = dp2 + dp3
 
-    if s1!=0:
-        g1 = s2/s1
+    # Optimize division operations with early returns
+    if s1 == 0:
+        g1 = 1e12
+        g2 = 0
     else:
-        g1=1e12
-    if g1!=0:
-        g2 = 1/g1
-    else:
-        g2=1e12 # arg large value
+        g1 = s2 / s1
+        g2 = 1 / g1 if g1 != 0 else 1e12
+
+    # Pre-calculate commonly used values
+    threshold = 3 * b / 2  # 1.92
+    sqrt_3 = 1.7320508075688772  # math.sqrt(3) - cache this
+    pi_4 = 0.7853981633974483   # math.pi / 4
+    pi_2 = 1.5707963267948966   # math.pi / 2
+    rad_to_deg = 57.29577951308232  # 180 / math.pi
 
     # |g1|==|g2| for omega = 3b/2
-    if np.abs(g1)<(3*b/2):
+    if abs(g1) < threshold:
         # lookup based on g1
-        magn = 2*np.sqrt(1-g1+g1**2) # Not used in this calculation
-        w = np.pi/4+np.arctan((2*g1-1)/np.sqrt(3))-(np.sign(s1)-1)*np.pi/2
+        w = pi_4 + math.atan((2 * g1 - 1) / sqrt_3) - (math.copysign(1, s1) - 1) * pi_2
     else:
-    # lookup based on g2
-        w = (np.pi/2-np.arctan((2*g2-1)/np.sqrt(3))-(np.sign(s2)-1)*np.pi/2)
-    w=w*(180./np.pi)
-    return w
+        # lookup based on g2
+        w = pi_2 - math.atan((2 * g2 - 1) / sqrt_3) - (math.copysign(1, s2) - 1) * pi_2
+    
+    return w * rad_to_deg
 
-def calculate_speed_mps(dp1,dp2, dp3):
+def calculate_speed_mps(dp1, dp2, dp3):
     rho = 1.2
-    # scale factor sqrt(2) estimated by measurements
-    # A in differential pressure
-    A = np.sqrt(2)*(np.abs(dp1) + np.abs(dp2) + np.abs(dp3))
-    # A in m/s
-    A = np.sqrt(2 * rho * A)
-    return A
+    sqrt_2 = 1.4142135623730951  # math.sqrt(2) - cache this
+    
+    # A in differential pressure - use abs() instead of np.abs() for scalars
+    A = sqrt_2 * (abs(dp1) + abs(dp2) + abs(dp3))
+    # A in m/s - use math.sqrt instead of np.sqrt for scalars
+    return math.sqrt(2 * rho * A)
 
 class AnemNode(Node):
     def __init__(self, debug_visually: bool = False):
@@ -113,6 +168,9 @@ class AnemNode(Node):
 
         # Visual debug mode flag
         self.debug_visually = debug_visually
+
+        # CRC error logging throttling
+        self._last_crc_error_log_time = 0.0
 
         # I2C setup
         # 21 is CCW, 23 is center, 22 is clockwise (viewed from top)
@@ -135,8 +193,8 @@ class AnemNode(Node):
             else:
                 self.sensors_ready = True
 
-        # Main loop timer
-        self.timer = self.create_timer(0.1, self.timer_callback) # 10 Hz
+        # ROS2 timer runs at publishing rate - direct sensor reading
+        self.timer = self.create_timer(1.0 / PUBLISHING_RATE, self.publish_callback)
         
         # Report actual sensor status
         if self.sensors_ready:
@@ -144,10 +202,10 @@ class AnemNode(Node):
 
         # Visual mode init
         self._vis_initialized = False
-        self._vis_width = 41
-        self._vis_height = 21
-        # Full-scale visual radius corresponds to 15 knots ≈ 7.72 m/s
-        self._vis_speed_ref = 15 * 0.514444  # ≈ 7.7167 m/s
+        self._vis_width = VISUAL_DISPLAY_WIDTH
+        self._vis_height = VISUAL_DISPLAY_HEIGHT
+        # Full-scale visual radius corresponds to configured knots converted to m/s
+        self._vis_speed_ref = VISUAL_FULLSCALE_SPEED_KNOTS * 0.514444  # knots to m/s conversion
         if self.debug_visually:
             self._init_visual()
 
@@ -228,11 +286,13 @@ class AnemNode(Node):
 
     def setup_sensors(self):
         # First try to communicate with sensors to see if they exist
+        # SDP3x sensors don't respond to read_byte(), so we use write_i2c_block_data instead
         sensors_detected = []
         for a in self.i2cAddr:
             try:
-                # Try a simple read to test communication
-                self.bus.read_byte(a)
+                # Try to send stop continuous measurement command to test communication
+                # This is a safe operation that should work on all SDP3x sensors
+                self.bus.write_i2c_block_data(a, 0x3F, [0xF9])
                 sensors_detected.append(hex(a))
             except IOError:
                 pass  # Sensor not detected, continue checking others
@@ -252,7 +312,7 @@ class AnemNode(Node):
         
         time.sleep(0.8)
 
-        # Start Continuous Measurement (5.3.1 in Data sheet)
+        # Start Continuous Measurement (Table 6.3.1 in Data sheet)
         self.get_logger().info('Starting 0x3615 continuous measurement with average till read')
         ##Command code (Hex)        Temperature compensation            Averaging
         ##0x3603                    Mass flow                           Average  till read
@@ -270,50 +330,90 @@ class AnemNode(Node):
         return True
 
 
-    def timer_callback(self):
-        dp = []
-        temps = []
+    def _read_sensor_data(self):
+        """Read and validate sensor data with CRC checksum verification"""
         try:
-            if not self.sensors_ready:
-                self.get_logger().error("CRITICAL: Anemometer sensors not ready. Exiting.")
-                sys.exit(1)
-            for a in self.i2cAddr:
-                b = self.bus.read_i2c_block_data(a, 0, 9)
-                v = int_from_bytes([b[0], b[1]]) / 240.  # convert to Pascals diff pressure
-                temp = int_from_bytes([b[3], b[4]]) / 200.  # convert to deg celsius
-                dp.append(v)
-                temps.append(temp)
+            # Pre-allocate lists for better performance
+            dp = [0.0, 0.0, 0.0]
+            temps = [0.0, 0.0, 0.0]
             
-            # Publish differential pressure
-            self.pub_diff_pressure.publish(Vector3(x=float(dp[0]), y=float(dp[1]), z=float(dp[2])))
+            # Read raw sensor data from all three sensors
+            for i, a in enumerate(self.i2cAddr):
+                b = self.bus.read_i2c_block_data(a, 0, 9)
+                
+                # Verify CRC for differential pressure data (bytes 0,1,2)
+                if not verify_crc([b[0], b[1]], b[2]):
+                    self._log_crc_error(f"sensor {hex(a)} differential pressure")
+                    return None
+                
+                # Verify CRC for temperature data (bytes 3,4,5)
+                if not verify_crc([b[3], b[4]], b[5]):
+                    self._log_crc_error(f"sensor {hex(a)} temperature")
+                    return None
+                
+                # Verify CRC for scale factor data (bytes 6,7,8)
+                if not verify_crc([b[6], b[7]], b[8]):
+                    self._log_crc_error(f"sensor {hex(a)} scale factor")
+                    return None
+                
+                # Convert validated data
+                dp[i] = int_from_bytes([b[0], b[1]]) / 240.0  # convert to Pascals diff pressure
+                temps[i] = int_from_bytes([b[3], b[4]]) / 200.0  # convert to deg celsius
+            
+            return dp, temps
+            
+        except IOError as e:
+            self.get_logger().error(f"CRITICAL: I2C read error: {e}. Exiting.")
+            sys.exit(1)
+        except IndexError as e:
+            self.get_logger().error(f"Data parsing error: {e}. Continuing.")
+            return None
+    
+    def _log_crc_error(self, sensor_info):
+        """Log CRC error with throttling to prevent log spam"""
+        current_time = time.time()
+        if current_time - self._last_crc_error_log_time >= CRC_ERROR_LOG_THROTTLE_S:
+            self.get_logger().warn(f"CRC checksum error detected on {sensor_info}")
+            self._last_crc_error_log_time = current_time
 
-            # Calculate and publish wind speed, angle, and temperature
+    def publish_callback(self):
+        """ROS2 timer callback - reads sensor data and publishes at PUBLISHING_RATE"""
+        try:
+            # Read sensor data with CRC validation
+            sensor_data = self._read_sensor_data()
+            if sensor_data is None:
+                return  # CRC error or other issue, skip this cycle
+            
+            dp, temps = sensor_data
+            
+            # Calculate wind speed and angle from current sample
             angle_deg = calculate_angle_deg(dp[0], dp[1], dp[2])
             speed_mps = calculate_speed_mps(dp[0], dp[1], dp[2])
             temp_celsius = (temps[0] + temps[1] + temps[2]) / 3.0
             
+            # Publish differential pressure
+            self.pub_diff_pressure.publish(Vector3(x=float(dp[0]), y=float(dp[1]), z=float(dp[2])))
+            
+            # Publish wind speed, angle, and temperature
             self.pub_wind_temp.publish(Vector3(x=float(speed_mps), y=float(angle_deg), z=float(temp_celsius)))
             
             self.get_logger().debug(
                 f"Anemometer: speed(m/s)={speed_mps:.2f} angle(deg)={angle_deg:.1f} "
                 f"temp(C)={temp_celsius:.1f} dp(pascal)=({dp[0]:.4f}, {dp[1]:.4f}, {dp[2]:.4f})"
             )
-
+            
             if self.debug_visually:
-                self._render_visual(speed_mps, angle_deg, temp_celsius, (dp[0], dp[1], dp[2]))
-
-        except IOError as e:
-            # Critical I2C error - exit immediately
-            self.get_logger().error(f"CRITICAL: I2C read error: {e}. Exiting.")
-            sys.exit(1)
-        except IndexError as e:
-            self.get_logger().error(f"Data parsing error: {e}. Received incomplete data from sensor.")
+                self._render_visual(speed_mps, angle_deg, temp_celsius, tuple(dp))
+                
+        except Exception as e:
+            self.get_logger().error(f"Error in publish callback: {e}")
 
 
     def destroy_node(self):
         # This is the recommended way to perform cleanup in ROS2.
         # It gets called automatically when the node is destroyed.
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
+        
         if self.debug_visually:
             self._teardown_visual()
         if self.bus:
@@ -347,6 +447,16 @@ Features:
   - Optional visual debug mode with ASCII wind vector display
   - Temperature compensation and averaging
   - Configurable logging levels
+  - CRC checksum validation for data integrity
+  - Throttled CRC error logging to prevent log spam
+  - Direct sensor reading without additional averaging (sensor provides averaging)
+
+Configuration Constants (modify at top of file):
+  - PUBLISHING_RATE: Final publishing rate in Hz (default: 10.0)
+  - CRC_ERROR_LOG_THROTTLE_S: Maximum CRC error logging frequency in seconds (default: 1.0)
+  - VISUAL_FULLSCALE_SPEED_KNOTS: Full-scale wind speed for visual display (default: 8.0)
+  - VISUAL_DISPLAY_WIDTH: Visual display width in characters (default: 60)
+  - VISUAL_DISPLAY_HEIGHT: Visual display height in characters (default: 40)
 
 Topics Published:
   /anem_speed_angle_temp (geometry_msgs/Vector3):

@@ -106,3 +106,6 @@ echo "   cd $REMOTE_ARGO_DIR"
 echo "   pip3 install --user smbus2 pyserial pynmea2 numpy PyYAML matplotlib"
 
 
+
+
+

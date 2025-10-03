@@ -122,7 +122,7 @@ ssh $REMOTE_USER@$REMOTE_HOST "
     cd $ARGO_DIR
     source /opt/ros/humble/setup.bash
     export ROS_DOMAIN_ID=42
-    timeout 5 python3 nodes/argo_simulator_bridge.py --help
+    timeout 5 python3 nodes/argo_unified_simulator_bridge.py --help
 "
 
 if [ $? -eq 0 ]; then

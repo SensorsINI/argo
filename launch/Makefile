@@ -14,14 +14,14 @@ REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 
 # Power control configuration moved to power_control/ directory
 
-.PHONY: help install uninstall enable disable start stop restart clean install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor
+.PHONY: help install uninstall enable disable start stop restart clean install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor install_thermal_monitor enable_thermal_monitor start_thermal_monitor stop_thermal_monitor status_thermal_monitor disable_thermal_monitor uninstall_thermal_monitor
 
 # Default target
 all: install
 
 # ==================== SERVICE MANAGEMENT ====================
 
-install: install_storage_monitor
+install: install_storage_monitor install_thermal_monitor
 	@echo "Installing Argo services..."
 	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
 	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
@@ -36,7 +36,7 @@ install: install_storage_monitor
 	@echo "Services installed successfully!"
 	@echo "Run 'make enable' to enable automatic startup"
 
-uninstall: uninstall_storage_monitor
+uninstall: uninstall_storage_monitor uninstall_thermal_monitor
 	@echo "Uninstalling Argo services..."
 	sudo systemctl stop $(LAUNCH_SERVICE) 2>/dev/null || true
 	sudo systemctl disable $(LAUNCH_SERVICE) 2>/dev/null || true
@@ -44,12 +44,12 @@ uninstall: uninstall_storage_monitor
 	sudo systemctl daemon-reload
 	@echo "Services uninstalled successfully!"
 
-enable: enable_storage_monitor
+enable: enable_storage_monitor enable_thermal_monitor
 	@echo "Enabling Argo services for automatic startup..."
 	sudo systemctl enable $(LAUNCH_SERVICE)
 	@echo "Services enabled!"
 
-disable: disable_storage_monitor
+disable: disable_storage_monitor disable_thermal_monitor
 	@echo "Disabling automatic startup..."
 	sudo systemctl disable $(LAUNCH_SERVICE)
 	@echo "Automatic startup disabled!"
@@ -122,6 +122,60 @@ uninstall_storage_monitor: stop_storage_monitor disable_storage_monitor
 	@sudo systemctl daemon-reload
 	@echo "✅ Storage monitor service uninstalled"
 
+# ==================== THERMAL MONITORING SYSTEM ====================
+
+# Thermal monitoring service configuration
+THERMAL_SERVICE_NAME = thermal-monitor
+THERMAL_SERVICE_FILE = thermal-monitor.service
+THERMAL_SCRIPT = thermal-monitor.sh
+SCRIPT_INSTALL_DIR = /usr/local/bin
+
+# Install thermal monitoring service
+install_thermal_monitor:
+	@echo "📋 Installing thermal monitor service..."
+	@sudo cp $(THERMAL_SCRIPT) $(SCRIPT_INSTALL_DIR)/$(THERMAL_SCRIPT)
+	@sudo chmod +x $(SCRIPT_INSTALL_DIR)/$(THERMAL_SCRIPT)
+	@sudo cp $(THERMAL_SERVICE_FILE) $(SERVICE_DIR)/$(THERMAL_SERVICE_FILE)
+	@sudo systemctl daemon-reload
+	@echo "✅ Thermal monitor service installed"
+
+# Enable thermal monitoring service
+enable_thermal_monitor:
+	@echo "🚀 Enabling thermal monitor service..."
+	@sudo systemctl enable $(THERMAL_SERVICE_NAME)
+	@echo "✅ Thermal monitor service enabled for automatic startup"
+
+# Start thermal monitoring service
+start_thermal_monitor:
+	@echo "▶️  Starting thermal monitor service..."
+	@sudo systemctl start $(THERMAL_SERVICE_NAME)
+	@echo "✅ Thermal monitor service started"
+
+# Stop thermal monitoring service
+stop_thermal_monitor:
+	@echo "⏹️  Stopping thermal monitor service..."
+	@sudo systemctl stop $(THERMAL_SERVICE_NAME)
+	@echo "✅ Thermal monitor service stopped"
+
+# Check thermal monitoring service status
+status_thermal_monitor:
+	@echo "📊 Thermal Monitor Service Status:"
+	@sudo systemctl status $(THERMAL_SERVICE_NAME) --no-pager
+
+# Disable thermal monitoring service
+disable_thermal_monitor:
+	@echo "🚫 Disabling thermal monitor service..."
+	@sudo systemctl disable $(THERMAL_SERVICE_NAME)
+	@echo "✅ Thermal monitor service disabled"
+
+# Uninstall thermal monitoring service
+uninstall_thermal_monitor: stop_thermal_monitor disable_thermal_monitor
+	@echo "🗑️  Uninstalling thermal monitor service..."
+	@sudo rm -f $(SERVICE_DIR)/$(THERMAL_SERVICE_FILE)
+	@sudo rm -f $(SCRIPT_INSTALL_DIR)/$(THERMAL_SCRIPT)
+	@sudo systemctl daemon-reload
+	@echo "✅ Thermal monitor service uninstalled"
+
 # ==================== POWER CONTROL SYSTEM ====================
 # Power control system has been moved to power_control/ directory
 # Use 'make -C ../power_control <target>' to manage power control
@@ -149,6 +203,15 @@ help:
 	@echo "  status_storage_monitor      - Show storage monitor service status"
 	@echo "  disable_storage_monitor     - Disable automatic startup"
 	@echo "  uninstall_storage_monitor   - Complete removal of storage monitor service"
+	@echo ""
+	@echo "Thermal Monitoring System:"
+	@echo "  install_thermal_monitor     - Install thermal monitor systemd service"
+	@echo "  enable_thermal_monitor      - Enable thermal monitor for automatic startup"
+	@echo "  start_thermal_monitor       - Start thermal monitor service"
+	@echo "  stop_thermal_monitor        - Stop thermal monitor service"
+	@echo "  status_thermal_monitor      - Show thermal monitor service status"
+	@echo "  disable_thermal_monitor     - Disable automatic startup"
+	@echo "  uninstall_thermal_monitor   - Complete removal of thermal monitor service"
 	@echo ""
 	@echo "Power Control System:"
 	@echo "  (Power control has been moved to power_control/ directory)"

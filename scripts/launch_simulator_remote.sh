@@ -67,3 +67,6 @@ trap cleanup SIGINT SIGTERM
 # Wait for all background processes
 wait
 
+
+
+

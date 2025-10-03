@@ -12,6 +12,16 @@ Hardware Interface:
 - Supports Orange Pi Zero 2W with custom GPIO/PWM configuration
 - Real-time radio control input capture and normalization
 - Safe servo output with pulse width validation (900-2100µs range)
+- HIGH IMPEDANCE MODE: Writing 0 to servo control files disables PWM output,
+  allowing radio control to pass through directly to servos via resistor network
+
+Safety features:
+- The radio channels are connected directly to the servo outputs by resistors. This way, if
+  radio_sail_servo is not running, the PWM output pins are set to high impedance, so that the radio 
+  directly drives the servo outputs. When radio_sail_servo is running, the radio inputs are passed through when
+  the boat is human controlled. Under argo auto mode, the servos are controlled by controller.py.
+- FAIL-SAFE DESIGN: Servo outputs start in high impedance mode (PWM disabled) for maximum safety
+- HIGH IMPEDANCE MODE: Servos automatically switch to high impedance when not actively controlled
 
 Control Arbitration:
 - Intelligent human/robot control switching with human priority
@@ -24,8 +34,9 @@ Key Features:
 - Combined hardware interface and control logic in single node
 - Persistent QoS for critical control status (immediate access for late-joining nodes)
 - Throttled logging to minimize system load
-- Built-in safety features with neutral position defaults
+- Built-in safety features with high impedance defaults
 - Graceful handling of hardware disconnection
+- HIGH IMPEDANCE MODE: Automatic switching between PWM control and radio passthrough
 
 Topics Published:
 - /rudder_sail_radio: Vector3 with normalized radio inputs (-1 to +1)
@@ -51,21 +62,23 @@ Topics Subscribed:
   * Only applied when human_controlled is False
 
 Hardware Requirements:
-- argo_radio_servo_module kernel module loaded
+- argo_radio_servo_module kernel module loaded (v0.5+ with high impedance support)
 - GPIO pins configured for radio input capture (PI11, PI13)
 - PWM outputs configured for servo control (PI12=PWM2, PI14=PWM4)
 - RC receiver connected and calibrated for 1000-2000µs pulse width range
 
 Safety Features:
+- HIGH IMPEDANCE MODE: Servo outputs default to high impedance (PWM disabled)
 - Pulse width validation and clamping (900-2100µs hardware range)
 - Outlier radio input filtering (500-2500µs acceptance range)
-- Automatic fallback to neutral positions on invalid inputs
+- Automatic fallback to high impedance mode on invalid inputs
 - Throttled error logging to prevent log spam
 - Graceful handling of hardware disconnection
+- FAIL-SAFE: Radio control always works when PWM is disabled
 
-Author: Tobi Delbruck (original pwm.py), Enhanced with control arbitration
+Author: Tobi Delbruck (original pwm.py), Enhanced with control arbitration and high impedance mode
 License: MIT
-Version: 3.0 - Combined hardware interface and control arbitration
+Version: 3.2 - Enhanced control logging, fail-safe exit handling, and human control timeout constant
 """
 
 import rclpy
@@ -81,6 +94,10 @@ from pathlib import Path
 import time
 import numpy as np
 import sys
+import signal
+import tty
+import termios
+import select
 
 # --- Hardware Configuration ---
 SYS_BASE_PATH = Path("/sys/kernel/argo_radio_servo")
@@ -99,6 +116,16 @@ CLAMP_LOG_THROTTLE_S = 60.0
 # Throttle logging for outlier radio PWM messages to once every 10 seconds
 OUTLIER_LOG_THROTTLE_S = 10.0
 
+# Human control timeout - seconds after last human activity before robot can take control
+HUMAN_CONTROL_TIMEOUT_S = 2.0
+
+# Test mode configuration
+TEST_MIN_PW = 900
+TEST_MAX_PW = 2100
+TEST_STEP = 100
+TEST_DELAY_S = 0.5
+TEST_DEFAULT_PW = 1500
+
 def cmd_to_pw_us(cmd: float) -> int:
     """Converts a normalized command (-1 to +1) to a pulse width in microseconds (1000 to 2000)."""
     # Clamp command to [-1, 1]
@@ -115,6 +142,140 @@ def pw_us_to_cmd(pw_us: float) -> float:
     cmd = (pw_us - 1500.0) / 500.0
     return cmd
 
+# Test mode helper functions
+def get_initial_pw_test(path: Path) -> int:
+    """Reads the initial pulse width from a sysfs file, or returns a default."""
+    try:
+        return int(path.read_text().strip())
+    except (IOError, ValueError, FileNotFoundError):
+        print(f"Warning: Could not read {path}, using default {TEST_DEFAULT_PW} us.", file=sys.stderr)
+        return TEST_DEFAULT_PW
+
+def read_sysfs_pw_test(path: Path) -> str:
+    """Reads a pulse width from a sysfs file for display."""
+    try:
+        return path.read_text().strip()
+    except (IOError, FileNotFoundError):
+        return "N/A"
+
+def write_sysfs_pw_test(path: Path, value: int):
+    """Writes a pulse width to a sysfs file for test mode."""
+    # Apply same clamping as normal mode
+    value = max(SERVO_MIN_PW_US, min(SERVO_MAX_PW_US, value))
+    try:
+        path.write_text(str(value))
+    except IOError as e:
+        print(f"\nError writing to {path}: {e}", file=sys.stderr)
+
+def display_test_status(rudder_pw: int, sail_pw: int, paused: bool):
+    """Clears the screen and displays the current test status."""
+    # ANSI escape code to clear screen and move cursor to top-left
+    print("\033[H\033[J", end="")
+    
+    print("--- Radio Control Input Pulse Widths ---")
+    print(f"Radio Rudder: {read_sysfs_pw_test(RADIO_RUDDER_PATH)} us")
+    print(f"Radio Sail:   {read_sysfs_pw_test(RADIO_SAIL_PATH)} us")
+    print("----------------------------------------")
+    print("--- Servo Motor Output Pulse Widths (Sweeping) ---")
+    print(f"Rudder (PWM2): {rudder_pw} us")
+    print(f"Sail (PWM4):   {sail_pw} us")
+    print("--------------------------------------------------")
+    if paused:
+        print("STATUS: PAUSED (Press Spacebar to RESUME)")
+    else:
+        print("STATUS: RUNNING (Press Spacebar to PAUSE)")
+    sys.stdout.flush()
+
+def get_key_non_blocking() -> str | None:
+    """Reads a single key press without blocking. Returns None if no key is pressed."""
+    if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+        return sys.stdin.read(1)
+    return None
+
+def get_key_blocking() -> str:
+    """Reads a single key press, blocking until one is received."""
+    return sys.stdin.read(1)
+
+def run_test_mode():
+    """Runs the PWM test mode - sweeps servo outputs and displays radio inputs."""
+    # Check if sysfs path exists for better error reporting
+    if not SYS_BASE_PATH.is_dir():
+        print(f"Error: Sysfs path {SYS_BASE_PATH} not found.", file=sys.stderr)
+        print("Is the 'argo_radio_servo_module' kernel module loaded?", file=sys.stderr)
+        sys.exit(1)
+
+    # Initialize state variables
+    current_rudder_pw = get_initial_pw_test(SERVO_RUDDER_PATH)
+    current_sail_pw = get_initial_pw_test(SERVO_SAIL_PATH)
+    direction_rudder = 1  # 1 for increasing, -1 for decreasing
+    direction_sail = 1
+    paused = False
+
+    print("Starting Argo Radio Servo PWM Test Mode...")
+    print("Monitoring input pulse widths and sweeping output servo positions.")
+    print("Press Spacebar to PAUSE/RESUME. Press Ctrl+C to STOP.")
+    time.sleep(1.5)  # Give user time to read the intro message
+
+    # Terminal Setup
+    # Save original terminal settings to restore them on exit
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        # Set terminal to "cbreak" mode to read keys instantly without requiring Enter
+        tty.setcbreak(sys.stdin.fileno())
+
+        # Main Loop
+        while True:
+            display_test_status(current_rudder_pw, current_sail_pw, paused)
+
+            # Handle Input for Pause/Resume
+            key_pressed = get_key_non_blocking()
+
+            if key_pressed == ' ':
+                paused = not paused
+                display_test_status(current_rudder_pw, current_sail_pw, paused)  # Update status immediately
+
+                if paused:
+                    print("\nPAUSED. Press Spacebar to RESUME...")
+                    sys.stdout.flush()
+                    # When paused, enter a blocking loop that waits *only* for a spacebar.
+                    while True:
+                        key_to_resume = get_key_blocking()
+                        if key_to_resume == ' ':
+                            paused = not paused
+                            display_test_status(current_rudder_pw, current_sail_pw, paused)
+                            break  # Exit this inner blocking loop
+
+            if not paused:
+                # Update Rudder (PWM2) Pulse Width
+                current_rudder_pw += direction_rudder * TEST_STEP
+                if current_rudder_pw > TEST_MAX_PW:
+                    current_rudder_pw = TEST_MAX_PW
+                    direction_rudder = -1
+                elif current_rudder_pw < TEST_MIN_PW:
+                    current_rudder_pw = TEST_MIN_PW
+                    direction_rudder = 1
+                write_sysfs_pw_test(SERVO_RUDDER_PATH, current_rudder_pw)
+
+                # Update Sail (PWM4) Pulse Width
+                current_sail_pw += direction_sail * TEST_STEP
+                if current_sail_pw > TEST_MAX_PW:
+                    current_sail_pw = TEST_MAX_PW
+                    direction_sail = -1
+                elif current_sail_pw < TEST_MIN_PW:
+                    current_sail_pw = TEST_MIN_PW
+                    direction_sail = 1
+                write_sysfs_pw_test(SERVO_SAIL_PATH, current_sail_pw)
+
+            time.sleep(TEST_DELAY_S)
+
+    except KeyboardInterrupt:
+        print("\nCtrl+C pressed. Exiting test mode.")
+    finally:
+        # Restore Terminal
+        # This block ensures terminal settings are always restored
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        print("Terminal settings restored.")
+
 class RudderSailRadioNode(Node):
     """
     Combined hardware interface and control arbitration node for rudder/sail control.
@@ -126,11 +287,12 @@ class RudderSailRadioNode(Node):
     4. Arbitrate between human and robot control with human priority
     5. Write final servo commands to hardware with safety validation
     6. Publish control status and authority information
+    7. HIGH IMPEDANCE MODE: Set servos to high impedance when not actively controlling
     """
     
     def __init__(self):
         super().__init__('rudder_sail_radio_node')
-        self.get_logger().info('Rudder/Sail Radio node starting...')
+        self.get_logger().info('Rudder/Sail Radio node starting with high impedance safety mode...')
         
         # Check for sysfs directory
         if not SYS_BASE_PATH.is_dir():
@@ -141,7 +303,7 @@ class RudderSailRadioNode(Node):
 
         # --- Parameters ---
         self.declare_parameter('param_file_path', 'argo.yaml')
-        self.declare_parameter('human_override_timeout', 2.0)  # seconds
+        self.declare_parameter('human_override_timeout', HUMAN_CONTROL_TIMEOUT_S)  # seconds
         self.declare_parameter('deadband_threshold', 0.05)     # ignore small radio movements
         self.declare_parameter('safety_max_rudder', 1.0)       # safety limits
         self.declare_parameter('safety_max_sail', 1.0)
@@ -157,6 +319,10 @@ class RudderSailRadioNode(Node):
         self.deadband_threshold = self.get_parameter('deadband_threshold').get_parameter_value().double_value
         self.safety_max_rudder = self.get_parameter('safety_max_rudder').get_parameter_value().double_value
         self.safety_max_sail = self.get_parameter('safety_max_sail').get_parameter_value().double_value
+        
+        # Enhanced control logging state
+        self.last_control_switch_time = time.time()
+        self.control_switch_reason = "initialization"
         
         # --- State Variables ---
         # Radio input (from hardware via sysfs)
@@ -221,6 +387,15 @@ class RudderSailRadioNode(Node):
         # Status publishing timer
         self.status_period = 0.1  # 10 Hz status updates
         self.status_timer = self.create_timer(self.status_period, self.publish_status)
+        
+        # Initialize servos to high impedance mode for safety
+        self.set_servo_high_impedance()
+        
+        # Register cleanup handlers for graceful shutdown
+        import atexit
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        atexit.register(self._ensure_safe_exit)
     
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""
@@ -270,10 +445,20 @@ class RudderSailRadioNode(Node):
             return 0.0  # Return a safe, invalid value
 
     def write_sysfs_pw(self, path: Path, value: int):
-        """Writes a pulse width to a sysfs file, clamping to valid range."""
+        """Writes a pulse width to a sysfs file, with special handling for high impedance mode."""
         original_value = value
         
-        # Clamp to kernel module's valid range (900-2100µs)
+        # Special case: 0 means high impedance mode (no clamping)
+        if value == 0:
+            try:
+                path.write_text(str(value))
+                self.get_logger().info(f"Set {path.name} to HIGH IMPEDANCE mode (radio control active)")
+                return
+            except IOError as e:
+                self.get_logger().error(f"Error setting high impedance mode for {path}: {e}")
+                return
+        
+        # For non-zero values, apply normal clamping
         value = max(SERVO_MIN_PW_US, min(SERVO_MAX_PW_US, value))
         
         # Log clamping with throttling (once per minute max)
@@ -292,6 +477,14 @@ class RudderSailRadioNode(Node):
             self.get_logger().debug(f"Wrote {value}µs to {path}")
         except IOError as e:
             self.get_logger().error(f"Error writing to {path}: {e}")
+
+    def set_servo_high_impedance(self, rudder: bool = True, sail: bool = True):
+        """Set servo outputs to high impedance mode for safety."""
+        if rudder:
+            self.write_sysfs_pw(SERVO_RUDDER_PATH, 0)
+        if sail:
+            self.write_sysfs_pw(SERVO_SAIL_PATH, 0)
+        self.get_logger().info("Servo outputs set to HIGH IMPEDANCE mode (radio control active)")
 
     def read_radio_inputs(self):
         """Read and process radio inputs from hardware."""
@@ -348,6 +541,9 @@ class RudderSailRadioNode(Node):
         Robot gets control when:
         1. No human activity for timeout period
         2. Autonomous commands are being received
+        
+        Returns:
+            tuple: (human_controlled: bool, reason: str)
         """
         current_time = time.time()
         
@@ -356,15 +552,23 @@ class RudderSailRadioNode(Node):
         
         # Human has control if there's been recent activity
         if time_since_human_activity < self.human_override_timeout:
-            return True  # Human control
+            reason = f"human_activity_within_{self.human_override_timeout:.1f}s (last_activity: {time_since_human_activity:.1f}s ago)"
+            return True, reason  # Human control
         
-        # Check if we have recent autonomous commands
+        # Robot can take control after human timeout expires
+        # This allows testing control handover behavior even when controller.py is not running
+        reason = f"timeout_handover_after_{time_since_human_activity:.1f}s"
+        
+        # Check if we have recent autonomous commands to provide more context
         time_since_auto_update = current_time - self.last_auto_update
         if time_since_auto_update < 1.0:  # Auto commands are fresh
-            return False  # Robot control
+            reason += " (autonomous_commands_active)"
+        elif time_since_auto_update < 30.0:  # Had autonomous commands recently
+            reason += " (autonomous_standby_mode)"
+        else:
+            reason += " (no_autonomous_controller)"
         
-        # Default to human control for safety if no recent commands
-        return True
+        return False, reason  # Robot control
     
     def apply_safety_limits(self, rudder, sail):
         """Apply safety limits to control commands."""
@@ -383,15 +587,23 @@ class RudderSailRadioNode(Node):
         self.pub_rudder_sail_radio.publish(radio_msg)
         
         # 3. Determine control authority
-        self.human_controlled = self.determine_control_authority()
+        new_human_controlled, authority_reason = self.determine_control_authority()
         
-        # 4. Log control mode changes
-        if self.human_controlled != self.last_logged_control_mode:
-            if self.human_controlled:
-                self.get_logger().info("HUMAN has control authority")
+        # 4. Log control mode changes with detailed reason
+        if new_human_controlled != self.last_logged_control_mode:
+            current_time = time.time()
+            time_since_last_switch = current_time - self.last_control_switch_time
+            
+            if new_human_controlled:
+                self.get_logger().info(f"HUMAN has taken control authority - Reason: {authority_reason} (previous mode duration: {time_since_last_switch:.1f}s)")
             else:
-                self.get_logger().info("ROBOT has control authority")
-            self.last_logged_control_mode = self.human_controlled
+                self.get_logger().info(f"ROBOT has taken control authority - Reason: {authority_reason} (previous mode duration: {time_since_last_switch:.1f}s)")
+            
+            self.last_logged_control_mode = new_human_controlled
+            self.last_control_switch_time = current_time
+            self.control_switch_reason = authority_reason
+        
+        self.human_controlled = new_human_controlled
         
         # 5. Select control commands based on authority
         if self.human_controlled:
@@ -425,6 +637,46 @@ class RudderSailRadioNode(Node):
         servo_msg = Vector3(x=cmd_rudder, y=cmd_sail, z=0.0)
         self.pub_rudder_sail_servo.publish(servo_msg)
     
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals by ensuring safe exit."""
+        self.get_logger().info(f"Received signal {signum}, initiating safe shutdown...")
+        self._ensure_safe_exit()
+        # Allow normal signal handling to proceed
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt()
+        elif signum == signal.SIGTERM:
+            sys.exit(0)
+    
+    def _ensure_safe_exit(self):
+        """Ensure servos are in high impedance mode before exit."""
+        try:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().info("Setting servos to HIGH IMPEDANCE mode for safe exit...")
+            else:
+                print("Setting servos to HIGH IMPEDANCE mode for safe exit...", file=sys.stderr)
+            
+            # Set servos to high impedance mode (radio control active)
+            if SERVO_RUDDER_PATH.exists():
+                SERVO_RUDDER_PATH.write_text("0")
+            if SERVO_SAIL_PATH.exists():
+                SERVO_SAIL_PATH.write_text("0")
+                
+            if hasattr(self, 'get_logger'):
+                self.get_logger().info("Servos successfully set to HIGH IMPEDANCE mode. Radio control is now active.")
+            else:
+                print("Servos successfully set to HIGH IMPEDANCE mode. Radio control is now active.", file=sys.stderr)
+                
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().error(f"Error during safe exit: {e}")
+            else:
+                print(f"Error during safe exit: {e}", file=sys.stderr)
+    
+    def destroy_node(self):
+        """Override destroy_node to ensure safe exit."""
+        self._ensure_safe_exit()
+        super().destroy_node()
+    
     def publish_status(self):
         """Publish control status for other nodes."""
         # Publish human control status
@@ -446,7 +698,7 @@ class RudderSailRadioNode(Node):
 
 def main(args=None):
     parser = argparse.ArgumentParser(
-        description='Rudder/Sail Control Node - Combined hardware interface and control arbitration',
+        description='Rudder/Sail Control Node - Combined hardware interface and control arbitration with high impedance safety mode',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 This ROS2 node provides unified rudder/sail control combining hardware interface
@@ -457,12 +709,19 @@ HARDWARE INTERFACE:
 - Reads radio control inputs and normalizes to -1 to +1 range
 - Writes servo commands to hardware with safety validation
 - Handles pulse width conversion (1000-2000µs ↔ -1 to +1)
+- HIGH IMPEDANCE MODE: Writing 0 to servo control files disables PWM output
 
 CONTROL ARBITRATION:
 - Human gets priority when radio input activity is detected
 - Robot gets control after human_override_timeout seconds of no activity
 - Deadband threshold prevents noise from triggering human activity
 - Safety limits applied to all commands
+
+HIGH IMPEDANCE SAFETY MODE:
+- Servo outputs start in high impedance mode (PWM disabled) for safety
+- Radio control passes through directly to servos when PWM is disabled
+- Automatic switching between PWM control and radio passthrough
+- Fail-safe design ensures radio control always works
 
 TOPICS:
   Publishes:
@@ -481,7 +740,7 @@ PARAMETERS:
   safety_max_sail: Maximum sail command magnitude (default: 1.0)
 
 HARDWARE REQUIREMENTS:
-- argo_radio_servo_module kernel module loaded
+- argo_radio_servo_module kernel module loaded (v0.5+ with high impedance support)
 - Sysfs interface at /sys/kernel/argo_radio_servo/
 - GPIO pins: PI11, PI13 (radio input), PI12, PI14 (servo output)
 - RC receiver calibrated for 1000-2000µs pulse width range
@@ -493,10 +752,44 @@ ROBUSTNESS FEATURES:
 - High-frequency control loop: 20Hz for responsive arbitration
 - Hardware validation: Pulse width clamping and outlier filtering
 - Persistent QoS: Late-joining nodes get immediate access to control status
+- HIGH IMPEDANCE MODE: Automatic fail-safe switching to radio control
+
+TEST MODE:
+- Use --test flag to run servo sweep test without ROS2
+- Continuously sweeps servo outputs from 900-2100µs
+- Displays real-time radio input pulse widths
+- Press spacebar to pause/resume, Ctrl+C to exit
         """
     )
     
+    parser.add_argument('--test', action='store_true', 
+                        help='Run in test mode: sweep servo outputs and display radio inputs (no ROS2)')
+    
+    # Parse known args to allow ROS2 arguments to pass through
     parsed_args, unknown_args = parser.parse_known_args(args)
+    
+    # Check for invalid arguments that aren't ROS2-related
+    # ROS2 arguments typically start with --ros-args, -r, or are node-specific
+    valid_ros2_prefixes = ['--ros-args', '-r', '--node-name', '--namespace', '--remap', '--param']
+    invalid_args = []
+    
+    for arg in unknown_args:
+        # Skip ROS2 arguments
+        is_ros2_arg = any(arg.startswith(prefix) for prefix in valid_ros2_prefixes)
+        # Also skip single character flags that might be ROS2 related
+        if not is_ros2_arg and (arg.startswith('-') or arg.startswith('--')):
+            invalid_args.append(arg)
+    
+    if invalid_args:
+        parser.print_usage()
+        print(f"error: unrecognized arguments: {' '.join(invalid_args)}")
+        print("Use --help for more information.")
+        sys.exit(2)
+    
+    # Check if test mode is requested
+    if parsed_args.test:
+        run_test_mode()
+        return
     
     rclpy.init(args=unknown_args)
     node = None
@@ -504,14 +797,43 @@ ROBUSTNESS FEATURES:
         node = RudderSailRadioNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        print("\nKeyboardInterrupt received. Initiating safe shutdown...")
     except rclpy.executors.ExternalShutdownException:
-        pass
+        print("External shutdown requested. Initiating safe shutdown...")
+    except Exception as e:
+        print(f"Unexpected error: {e}. Initiating emergency safe shutdown...")
+        # Ensure servos are in high impedance mode even on unexpected errors
+        try:
+            if SERVO_RUDDER_PATH.exists():
+                SERVO_RUDDER_PATH.write_text("0")
+            if SERVO_SAIL_PATH.exists():
+                SERVO_SAIL_PATH.write_text("0")
+            print("Emergency: Servos set to HIGH IMPEDANCE mode. Radio control is active.")
+        except Exception as emergency_e:
+            print(f"CRITICAL: Could not set high impedance mode during emergency: {emergency_e}")
     finally:
+        # Ensure proper cleanup in all cases
         if node:
-            node.destroy_node()
+            try:
+                node.destroy_node()
+            except Exception as e:
+                print(f"Error during node destruction: {e}")
+        
         if rclpy.ok():
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except Exception as e:
+                print(f"Error during ROS2 shutdown: {e}")
+        
+        # Final safety check - ensure servos are in high impedance mode
+        try:
+            if SERVO_RUDDER_PATH.exists():
+                SERVO_RUDDER_PATH.write_text("0")
+            if SERVO_SAIL_PATH.exists():
+                SERVO_SAIL_PATH.write_text("0")
+            print("Final safety check: Servos confirmed in HIGH IMPEDANCE mode.")
+        except Exception as e:
+            print(f"CRITICAL: Final safety check failed: {e}")
 
 if __name__ == '__main__':
     main()

@@ -1,0 +1,122 @@
+---
+description: "Hardware safety patterns and fail-safe design for Argo sailboat control"
+globs: *.c,*.py,*.dts,*.md
+---
+
+# Argo Hardware Safety Patterns
+
+## Fail-Safe Design Principles
+
+### High Impedance Safety Mode
+The Argo system implements a fail-safe design where servo outputs default to high impedance mode:
+
+1. **Default State**: PWM outputs are disabled (high impedance) on module load
+2. **Radio Control Passthrough**: When PWM is disabled, radio control signals pass through resistors directly to servos
+3. **Automatic Fallback**: System automatically switches to high impedance mode on errors or invalid inputs
+
+### Hardware Safety Circuit
+```
+Radio Control → [Resistors] → Servo Inputs
+                     ↑
+              PWM Outputs (High Z when disabled)
+```
+
+## Safety Implementation Patterns
+
+### Kernel Module Safety
+```c
+// Always start in high impedance mode for safety
+pwm_disable(data->servo_rudder_pwm);
+pwm_disable(data->servo_sail_pwm);
+data->current_servo_rudder_pw = 0;  // Mark as high impedance
+
+// Special handling for high impedance mode (0 values)
+if (pulse_width_us == 0) {
+    set_servo_high_impedance(pwm_dev, "servo_name");
+    data->current_servo_pw = 0; // Mark as high impedance
+    return count;
+}
+```
+
+### Python Node Safety
+```python
+def write_sysfs_pw(self, path: Path, value: int):
+    # Special case: 0 means high impedance mode (no clamping)
+    if value == 0:
+        try:
+            path.write_text(str(value))
+            self.get_logger().info(f"Set {path.name} to HIGH IMPEDANCE mode")
+            return
+        except IOError as e:
+            self.get_logger().error(f"Error setting high impedance mode: {e}")
+            return
+```
+
+## Pin Safety Configuration
+
+### GPIO Pin Assignments (Orange Pi Zero 2W)
+- **PI11 (Pin 7)**: Radio Rudder Input - GPIO input with interrupt capability
+- **PI13 (Pin 26)**: Radio Sail Input - GPIO input with interrupt capability  
+- **PI12 (Pin 33)**: Servo Rudder Output - PWM2 channel, high impedance when disabled
+- **PI14 (Pin 16)**: Servo Sail Output - PWM4 channel, high impedance when disabled
+
+### Safety Validation
+- **Pulse Width Range**: 900-2100μs for servo outputs (hardware enforced)
+- **Radio Input Range**: 500-2500μs acceptance range with outlier filtering
+- **Command Clamping**: All control commands clamped to safe ranges
+- **Timeout Handling**: Radio inputs timeout after 1 second of no activity
+
+## Error Handling Patterns
+
+### Graceful Degradation
+1. **Invalid Radio Input**: Reject and log, continue with last valid input
+2. **Hardware Disconnection**: Detect and log, switch to high impedance mode
+3. **Module Failure**: System falls back to radio control via resistor network
+4. **Permission Issues**: Log error and continue operation where possible
+
+### Logging and Monitoring
+```python
+# Throttled error logging to prevent log spam
+if now - self.last_clamp_warning_time > CLAMP_LOG_THROTTLE_S:
+    self.get_logger().warn(f"Clamped servo pulse width from {original}µs to {clamped}µs")
+    self.last_clamp_warning_time = now
+```
+
+## Control Authority Safety
+
+### Human Priority System
+- **Immediate Override**: Any radio activity immediately grants human control
+- **Activity Detection**: Significant radio input changes trigger human control
+- **Timeout Handover**: Smooth transition to robot control after timeout period
+- **Deadband Filtering**: Prevent noise from triggering false human activity
+
+### Safety Limits
+- **Maximum Command Magnitude**: Configurable safety limits for rudder and sail
+- **Rate Limiting**: Prevent sudden large command changes
+- **Neutral Position Default**: Commands default to neutral (1500μs) on errors
+
+## Testing Safety Procedures
+
+### Module Testing
+1. **Verify High Impedance Start**: Confirm servos start in high impedance mode
+2. **Test Mode Switching**: Verify switching between high impedance and PWM modes
+3. **Validate Radio Passthrough**: Confirm radio control works when PWM disabled
+4. **Error Injection**: Test system behavior with invalid inputs
+
+### Integration Testing
+1. **Control Arbitration**: Test human/robot control switching
+2. **Hardware Disconnection**: Test behavior when hardware is disconnected
+3. **Power Cycling**: Verify safe startup after power cycles
+4. **Long-term Operation**: Test stability over extended periods
+
+## Emergency Procedures
+
+### Manual Override
+- **Radio Control**: Always available when PWM is in high impedance mode
+- **Physical Disconnect**: Remove PWM connections to force radio control
+- **Module Unload**: `sudo rmmod argo_radio_servo_module` forces high impedance state
+
+### Recovery Procedures
+1. **Module Reload**: `sudo modprobe argo_radio_servo_module` restores functionality
+2. **Service Restart**: `sudo systemctl restart argo-radio-servo-module.service`
+3. **System Reboot**: Last resort for complete system reset

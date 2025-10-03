@@ -13,7 +13,7 @@ When running simulation, several hardware nodes conflict with the simulator topi
 - `rudder_sail_radio.py` → subscribes to `/rudder_sail_servo` (conflicts with simulator control)
 
 **Nodes that run in simulation:**
-- `argo_unified_simulator_bridge.py` → provides simulated sensor data
+- `argo_unified_simulator_bridge.py` → provides simulated sensor data + integrated keyboard control
 - `controller.py` → autonomous navigation
 - `battery_water.py` → hardware monitoring (no conflicts)
 - `temp_monitor.py` → hardware monitoring (no conflicts)
@@ -33,8 +33,8 @@ Runs the simulator directly on the Orange Pi.
 **Usage:**
 
 ```bash
-# Method 1: Using lifecycle manager
-python3 launch/argo_lifecycle_manager.py simulate
+# Method 1: Using lifecycle manager (includes keyboard control)
+python3 launch/argo_lifecycle_manager.py simulate_local
 
 # Method 2: Using launch script
 ./scripts/launch_simulator_local.sh
@@ -45,6 +45,16 @@ python3 nodes/controller.py --ros-args --params-file nodes/argo.yaml &
 python3 nodes/battery_water.py &
 python3 nodes/temp_monitor.py &
 ```
+
+**Integrated Keyboard Control:**
+The simulator bridge includes integrated keyboard control with curses display:
+- **Arrow Keys**: Left/Right for rudder, Up/Down for sail
+- **8-step granular control** in each direction (full scale)
+- **Real-time curses display** with control visualization and logging
+- **Single keystroke input** (no need to hold keys)
+- **'c' key**: Center controls (rudder=0, sail=0)
+- **'q' key**: Quit the application
+- **Dual-window interface**: Control window on top, log window below
 
 ### 2. Remote Simulation
 
@@ -74,7 +84,7 @@ Connects to a remote simulator running on another machine.
 python3 scripts/remote_simulator_launch.py
 
 # 4. Start local simulation (terminal 3)
-./scripts/launch_simulator_remote.sh
+python3 launch/argo_lifecycle_manager.py simulate_remote
 ```
 
 ## Unified Simulator Bridge
@@ -103,7 +113,7 @@ The simulator bridge provides these topics to the Argo system:
 - `/gps_sog` - Speed over ground (Float64, knots)
 - `/gps_velocity` - GPS velocity vector (Vector3, x=north, y=east, z=speed knots)
 - `/anem_speed_angle_temp` - Wind data (Vector3, x=speed m/s, y=angle degrees, z=temp °C)
-- `/rudder_sail_radio` - Mock human input (Vector3, x=rudder, y=sail, z=0)
+- `/rudder_sail_radio` - Keyboard control input (Vector3, x=rudder, y=sail, z=0)
 
 **Subscribed Topics (Argo → Simulator):**
 - `/rudder_sail_servo` - Control commands from Argo (Vector3, x=rudder, y=sail)

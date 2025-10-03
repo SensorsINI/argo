@@ -24,7 +24,43 @@ See the Argo autonomous sailboat in action at the 2024 CCNW (before current wate
 - **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23)
 - **ADC**: MAX11612 for battery/water sensing via I2C0 (0x34)
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
-- **PWM I/O**: Custom kernel module for radio control and servo interfaces
+- **PWM I/O**: Custom kernel module for radio control and servo interfaces with high impedance safety mode
+
+### Servo Control Hardware
+
+The Argo system uses a shared control circuit design that allows both radio control and autonomous software control of servos through a fail-safe high impedance switching mechanism:
+
+#### Stock DF65 V6 (2018) Servo Configuration
+- **Sail Winch Servo**: Joysway #880545
+  - Type: Standard sail winch servo with high-precision plastic gears
+  - Operating voltage: 4.8V to 6.0V
+  - PWM frequency: 1520μs/50Hz
+  - **Input impedance: 12kΩ** (measured)
+  - **Circuit resistor: 3.3kΩ** (optimized for proper signal level)
+
+- **Rudder Servo**: Joysway #881504  
+  - Type: Digital metal gear servo
+  - Operating voltage: 4.8V to 6.0V
+  - PWM frequency: 1520μs/330Hz
+  - **Input impedance: 400kΩ** (measured)
+  - **Circuit resistor: 10kΩ** (standard value works well)
+
+#### Shared Control Circuit Design
+The hardware implements a fail-safe shared control circuit where:
+
+1. **High Impedance Safety Mode**: When PWM outputs are disabled (high impedance), radio control signals pass through resistors directly to servo inputs
+2. **Software Control Mode**: When PWM outputs are enabled, software generates servo control signals
+3. **Voltage Divider Considerations**: Resistor values are optimized based on servo input impedance:
+   - Sail servo: 3.3V × (12kΩ / (3.3kΩ + 12kΩ)) = 2.6V (adequate signal level)
+   - Rudder servo: 3.3V × (400kΩ / (10kΩ + 400kΩ)) = 3.2V (excellent signal level)
+
+#### GPIO Pin Assignments (Orange Pi Zero 2W)
+- **PI11 (Pin 7)**: Radio Rudder Input - GPIO input with interrupt capability
+- **PI13 (Pin 26)**: Radio Sail Input - GPIO input with interrupt capability  
+- **PI12 (Pin 33)**: Servo Rudder Output - PWM2 channel, high impedance when disabled
+- **PI14 (Pin 16)**: Servo Sail Output - PWM4 channel, high impedance when disabled
+
+This design ensures **radio control always works** when software is not running, providing maximum safety for autonomous sailboat operation.
 
 ## ROS2 Software Architecture
 
@@ -92,7 +128,7 @@ Central control hub for the entire Argo system:
 ### `nodes/` - ROS2 Node Implementations
 Hardware interface and control nodes:
 - **Sensor Nodes**: `gps.py`, `imu.py`, `anem.py`, `battery_water.py`, `temp_monitor.py`
-- **Control Nodes**: `pwm.py`, `controller.py`, `record.py`
+- **Control Nodes**: `rudder_sail_radio.py`, `controller.py`, `record.py`
 - **`pwm_capture_module/`** - Custom kernel module for radio control and servo interfaces
 - **`RTIMULib2/`** - IMU sensor fusion library
 - **Configuration files**: `argo.yaml`, calibration data, and support utilities
@@ -218,7 +254,7 @@ user_overlays=argo_radio_servo_overlay
 
 #### Install PWM Capture Module
 ```bash
-cd /home/orangepi/argo/scripts/pwm_capture_module
+cd /home/orangepi/argo/nodes/pwm_capture_module
 sudo make install
 sudo depmod -a
 sudo modprobe argo_radio_servo_module
@@ -331,7 +367,9 @@ ros2 topic echo /rudder_sail_radio
 
 ## Safety Features
 
-- **Manual Override**: Human can take control via radio at any time
+- **High Impedance Safety Mode**: Servo outputs default to high impedance (PWM disabled), allowing radio control to pass through directly to servos via resistor network
+- **Manual Override**: Human can take control via radio at any time, with immediate priority over autonomous control
+- **Shared Control Circuit**: Fail-safe design where radio control always works when software is not running
 - **Battery Monitoring**: Automatic low battery alerts (7.2V threshold)
 - **Water Intrusion Detection**: Immediate alerts on water sensor activation
 - **Sensor Fault Detection**: Automatic reconnection and error handling
@@ -349,6 +387,9 @@ To plot recorded bag file data, see [argo-plots.py](develop/analysis/argo-plots.
 3. **PWM Module Not Loading**: Check device tree overlay installation
 4. **Sensor Not Found**: Verify I2C connections and addresses
 5. **GPS No Data**: Check UART5 overlay and baud rate settings
+6. **Servo Low Signal Levels**: Check servo input impedance and adjust resistor values accordingly:
+   - High-power servos (e.g., winch servos) may have low input impedance (12kΩ) requiring smaller resistors (3.3kΩ)
+   - Standard digital servos typically have high input impedance (400kΩ) working well with 10kΩ resistors
 
 ### Debug Commands
 ```bash

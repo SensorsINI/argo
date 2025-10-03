@@ -1,4 +1,8 @@
 // generated with help from https://gemini.google.com/app/19c8818984b5f80c
+// MODIFIED: Added high impedance mode support for servo outputs
+// When 0 is written to servo control files, PWM is disabled and pins go high impedance
+// This allows radio control to pass through directly to servos via resistor network
+// Default state on module load: PWM disabled (high impedance) for safety
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -239,19 +243,60 @@ static ssize_t radio_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute
 	return sprintf(buf, "%lld\n", current_high_time);
 }
 
+// HIGH IMPEDANCE MODE FUNCTION
+// This function implements the fail-safe mechanism to put servo output pins in high impedance mode.
+// When PWM is disabled, the output pins go to high impedance state, allowing radio control
+// signals to pass through the resistor network directly to the servo inputs.
+//
+// Parameters:
+//   pwm_dev: Pointer to the PWM device (rudder or sail)
+//   pwm_name: String name for logging ("rudder" or "sail")
+//
+// Safety Features:
+// - Uses spinlock to protect PWM operations from concurrent access
+// - Calls pwm_disable() to put the output pin in high impedance state
+// - Logs the mode change for debugging and verification
+//
+// Hardware Effect:
+// - PI12 (Pin 33) for rudder or PI14 (Pin 16) for sail → High impedance
+// - Radio control signals can now pass through resistors to servo inputs
+// - Servo is under direct radio control (fail-safe mode)
+//
+static void set_servo_high_impedance(struct pwm_device *pwm_dev, const char *pwm_name)
+{
+	unsigned long flags;
+	
+	// Protect PWM operations with spinlock (interrupt-safe)
+	spin_lock_irqsave(&output_control_lock, flags);
+	
+	// CRITICAL SAFETY STEP: Disable PWM output - this puts the pin in high impedance state
+	// When PWM is disabled, the output driver is turned off, creating high impedance
+	// This allows the radio control signal to drive the servo through the resistor network
+	pwm_disable(pwm_dev);
+	
+	spin_unlock_irqrestore(&output_control_lock, flags);
+	
+	// Log the mode change for debugging and system verification
+	pr_info("Set PWM device %s to HIGH IMPEDANCE mode (radio control active)\n", pwm_name);
+}
+
+// MODIFIED: Function to set servo pulse width with automatic PWM enable
 static void set_servo_pulse_width(struct pwm_device *pwm_dev, unsigned long pulse_width_us)
 {
 	unsigned long flags;
 	u64 pulse_width_ns = pulse_width_us * NSEC_PER_USEC;
 	u64 period_ns = SERVO_PERIOD_NS;
 
+	spin_lock_irqsave(&output_control_lock, flags);
+
+	// Re-enable PWM if it was disabled (for high impedance mode)
+	pwm_enable(pwm_dev);
+	
 	// Sanity check pulse_width
 	if (pulse_width_ns < SERVO_MIN_PW_NS)
 		pulse_width_ns = SERVO_MIN_PW_NS;
 	if (pulse_width_ns > SERVO_MAX_PW_NS)
 		pulse_width_ns = SERVO_MAX_PW_NS;
-
-	spin_lock_irqsave(&output_control_lock, flags);
 
 	// Configure the PWM device. This applies period and duty cycle.
 	pwm_config(pwm_dev, pulse_width_ns, period_ns);
@@ -269,6 +314,7 @@ static ssize_t servo_rudder_pw_us_show(struct kobject *kobj, struct kobj_attribu
 	return sprintf(buf, "%lu\n", data->current_servo_rudder_pw);
 }
 
+// MODIFIED: Support for high impedance mode when 0 is written
 static ssize_t servo_rudder_pw_us_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
 {
 	long pulse_width_us;
@@ -279,6 +325,14 @@ static ssize_t servo_rudder_pw_us_store(struct kobject *kobj, struct kobj_attrib
 	if (ret)
 		return ret;
 
+	// Special case: 0 means high impedance mode (radio control active)
+	if (pulse_width_us == 0) {
+		set_servo_high_impedance(data->servo_rudder_pwm, "rudder");
+		data->current_servo_rudder_pw = 0; // Mark as high impedance
+		return count;
+	}
+
+	// Validate range for non-zero values
 	if (pulse_width_us < (long)SERVO_MIN_PW_NS / NSEC_PER_USEC ||
 	    pulse_width_us > (long)SERVO_MAX_PW_NS / NSEC_PER_USEC) {
 		dev_warn(data->dev, "Servo Rudder pulse width %ld out of range (%lu-%lu us).\n",
@@ -297,6 +351,7 @@ static ssize_t servo_sail_pw_us_show(struct kobject *kobj, struct kobj_attribute
 	return sprintf(buf, "%lu\n", data->current_servo_sail_pw);
 }
 
+// MODIFIED: Support for high impedance mode when 0 is written
 static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
 {
 	long pulse_width_us;
@@ -307,6 +362,14 @@ static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribut
 	if (ret)
 		return ret;
 
+	// Special case: 0 means high impedance mode (radio control active)
+	if (pulse_width_us == 0) {
+		set_servo_high_impedance(data->servo_sail_pwm, "sail");
+		data->current_servo_sail_pw = 0; // Mark as high impedance
+		return count;
+	}
+
+	// Validate range for non-zero values
 	if (pulse_width_us < (long)SERVO_MIN_PW_NS / NSEC_PER_USEC ||
 	    pulse_width_us > (long)SERVO_MAX_PW_NS / NSEC_PER_USEC) {
 		dev_warn(data->dev, "Servo Sail pulse width %ld out of range (%lu-%lu us).\n",
@@ -321,6 +384,19 @@ static ssize_t servo_sail_pw_us_store(struct kobject *kobj, struct kobj_attribut
 
 
 // --- Platform Driver Probe Function ---
+// MODIFIED: Start with PWM disabled (high impedance) for safety
+//
+// HIGH IMPEDANCE SAFETY INITIALIZATION:
+// This function implements the fail-safe design where servo outputs start in high impedance mode.
+// This allows radio control to pass through directly to servos via the resistor network,
+// ensuring the boat remains under human control even if the software fails to start properly.
+//
+// Key safety steps:
+// 1. Initialize servo state variables to 0 (high impedance mode)
+// 2. Configure PWM devices but keep them DISABLED initially
+// 3. Explicitly call pwm_disable() to put pins in high impedance state
+// 4. This ensures radio control is active by default for maximum safety
+//
 static int argo_radio_servo_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -334,7 +410,7 @@ static int argo_radio_servo_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, data);
 	data->dev = dev;
 
-	dev_info(dev, "Initializing for Allwinner H618. Built %s.\n", BUILD_DATE);
+	dev_info(dev, "Initializing for Allwinner H618 with HIGH IMPEDANCE safety mode. Built %s.\n", BUILD_DATE);
 
 	// Capture module load timestamp
 	data->module_load_ts = ktime_get();
@@ -342,8 +418,13 @@ static int argo_radio_servo_probe(struct platform_device *pdev)
 	// --- Initialize state variables ---
 	data->radio_rudder_last_pulse_ts = ktime_get();
 	data->radio_sail_last_pulse_ts = ktime_get();
-	data->current_servo_rudder_pw = 1500;
-	data->current_servo_sail_pw = 1500;
+	
+	// SAFETY: Initialize servo outputs to 0 (high impedance mode)
+	// These values track the current state of the servo outputs:
+	// 0 = high impedance mode (PWM disabled, radio control active)
+	// >0 = PWM mode (software control active)
+	data->current_servo_rudder_pw = 0;  // Start in high impedance mode for safety
+	data->current_servo_sail_pw = 0;    // Start in high impedance mode for safety
 
 	// --- 1. Request PWM devices using modern devm_pwm_get ---
 	// This looks for PWMs with the labels "pwm2" and "pwm4" in the device tree,
@@ -364,13 +445,22 @@ static int argo_radio_servo_probe(struct platform_device *pdev)
 	}
 	dev_info(dev, "Successfully got PWM device: %s (pwm4, Servo Sail)\n", data->servo_sail_pwm->label);
 
-	// --- 2. Configure and Enable PWM outputs ---
-	set_servo_pulse_width(data->servo_rudder_pwm, data->current_servo_rudder_pw);
-	set_servo_pulse_width(data->servo_sail_pwm, data->current_servo_sail_pw);
-
-	pwm_enable(data->servo_rudder_pwm);
-	pwm_enable(data->servo_sail_pwm);
-	dev_info(dev, "Enabled PWM2 and PWM4 outputs.\n");
+	// CRITICAL SAFETY SECTION: Configure PWM outputs but keep them DISABLED initially
+	// This implements the fail-safe design where servo outputs start in high impedance mode.
+	// The resistor network allows radio control to pass through when PWM is disabled.
+	
+	// Step 1: Configure PWM devices with neutral pulse width (1500µs = center position)
+	// Note: set_servo_pulse_width() calls pwm_enable(), so PWM will be active after this
+	set_servo_pulse_width(data->servo_rudder_pwm, 1500); // Configure PWM2 (rudder)
+	set_servo_pulse_width(data->servo_sail_pwm, 1500);   // Configure PWM4 (sail)
+	
+	// Step 2: CRITICAL - Disable PWM outputs to put pins in HIGH IMPEDANCE mode
+	// This is the key safety step that allows radio control to pass through
+	pwm_disable(data->servo_rudder_pwm);  // PI12 (Pin 33) → High impedance
+	pwm_disable(data->servo_sail_pwm);    // PI14 (Pin 16) → High impedance
+	
+	// Log the safety initialization for verification
+	dev_info(dev, "PWM2 and PWM4 outputs initialized in HIGH IMPEDANCE mode (radio control active).\n");
 
 	// --- 3. Setup GPIOs for Input Measurement from Device Tree ---
 	data->radio_rudder_gpiod = devm_gpiod_get(dev, "radio_rudder", GPIOD_IN);
@@ -489,5 +579,5 @@ module_platform_driver(argo_radio_servo_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Tobi Delbruck");
-MODULE_DESCRIPTION("Allwinner H618 Argo Radio Servo Module for Pulse Measurement and Control");
-MODULE_VERSION("0.4");
+MODULE_DESCRIPTION("Allwinner H618 Argo Radio Servo Module for Pulse Measurement and Control with High Impedance Safety Mode");
+MODULE_VERSION("0.5");

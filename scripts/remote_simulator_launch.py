@@ -84,7 +84,7 @@ class RemoteSimulatorLauncher:
         cd {self.argo_dir} && \
         source /opt/ros/humble/setup.bash && \
         export ROS_DOMAIN_ID={ROS_DOMAIN_ID} && \
-        python3 nodes/argo_simulator_bridge.py
+        python3 nodes/argo_unified_simulator_bridge.py
         """
         
         # Start remote process

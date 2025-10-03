@@ -31,6 +31,16 @@ from typing import Dict, List, Optional
 from argo_node_utils import ArgoNodeManager
 import psutil
 
+# Add config loading for remote simulation
+try:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.join(SCRIPT_DIR, '..', 'scripts'))
+    from load_config import load_config
+    REMOTE_CONFIG = load_config()
+except ImportError:
+    REMOTE_CONFIG = None
+
+
 class ArgoLifecycleManager:
     def __init__(self):
         self.argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,6 +51,8 @@ class ArgoLifecycleManager:
         # Failures should be preserved for debugging
         self.stabilization_wait = 15.0  # Additional wait time for nodes to stabilize
         self.journal_since = 'today'
+        self.remote_simulator_proc = None
+        self.remote_tunnel_proc = None
         
         # Initialize node manager for discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
@@ -130,7 +142,10 @@ class ArgoLifecycleManager:
                 print(f"✅ Launching {script}...")
                 # Launch each node with proper ROS2 environment
                 # Use None for stdout/stderr so output goes directly to systemd journal
-                cmd = ['bash', '-c', f'source /opt/ros/humble/setup.bash && python3 {script_path}']
+                cmd_str = f'source /opt/ros/humble/setup.bash && python3 {script_path}'
+                if script == 'argo_unified_simulator_bridge.py' and hasattr(self, 'simulation_mode'):
+                    cmd_str += f' --mode {self.simulation_mode}'
+                cmd = ['bash', '-c', cmd_str]
                 proc = subprocess.Popen(
                     cmd,
                     cwd=self.argo_dir,
@@ -454,6 +469,8 @@ class ArgoLifecycleManager:
             success = False
         
         self.process = None
+        # Stop remote processes if they were started
+        self._stop_remote_processes()
         print("✅ All Argo processes stopped")
         return success
     
@@ -464,7 +481,23 @@ class ArgoLifecycleManager:
         time.sleep(1)
         return self.start()
 
-    def simulate(self) -> bool:
+    def simulate_local(self) -> bool:
+        """Launch Argo in local simulation mode."""
+        return self._simulate(mode='local')
+
+    def simulate_remote(self) -> bool:
+        """Launch Argo in remote simulation mode."""
+        print("INFO: Remote simulation requires manual setup on the remote machine")
+        print("      and running 'scripts/remote_simulator_tunnel.sh' on this machine.")
+        # Start remote processes
+        if not self._start_remote_tunnel():
+            return False
+        if not self._start_remote_simulator():
+            self._stop_remote_processes()
+            return False
+        return self._simulate(mode='remote')
+
+    def _simulate(self, mode: str) -> bool:
         """
         Launch Argo in simulation mode.
         
@@ -481,7 +514,13 @@ class ArgoLifecycleManager:
         - anem.py (conflicts with simulator wind topics)
         - rudder_sail_radio.py (conflicts with simulator control)
         """
-        print("🚢 Starting Argo in SIMULATION mode...")
+        self.simulation_mode = mode
+        print(f"🚢 Starting Argo in SIMULATION mode ({mode.upper()})...")
+        if mode == 'local':
+            print("Local simulation runs the simulator on this machine.")
+        else:
+            print("Remote simulation connects to a simulator on another machine.")
+        
         print("Simulation mode excludes conflicting hardware nodes:")
         print("  - gps.py (GPS data provided by simulator)")
         print("  - imu.py (compass data provided by simulator)")
@@ -498,7 +537,7 @@ class ArgoLifecycleManager:
         
         # Define simulation mode node scripts (exclude conflicting hardware nodes)
         self.expected_nodes = [
-            "argo_unified_simulator_bridge.py",  # Provides simulated sensor data
+            "argo_unified_simulator_bridge.py",  # Provides simulated sensor data + keyboard control
             "controller.py",                     # Autonomous navigation
             "battery_water.py",                  # Hardware monitoring
             "temp_monitor.py"                    # Hardware monitoring
@@ -508,7 +547,7 @@ class ArgoLifecycleManager:
         self.special_nodes = ["foxglove_bridge"]
         
         # Critical nodes for simulation (simulator bridge is critical)
-        self.critical_nodes = ["argo_unified_simulator_bridge.py", "controller.py"]
+        self.critical_nodes = ["argo_unified_simulator_bridge.py"]
         
         print(f"Expected simulation nodes: {', '.join(self.expected_nodes)}")
         print(f"Special simulation nodes: {', '.join(self.special_nodes)}")
@@ -576,7 +615,7 @@ class ArgoLifecycleManager:
         if len(critical_running) == len(self.critical_nodes):
             print("✅ All critical simulation nodes running")
             success = True
-        elif len(final_running_nodes) >= 2:  # At least simulator + controller
+        elif len(final_running_nodes) >= 2:  # At least simulator + one other
             print(f"✅ Sufficient simulation nodes running ({len(final_running_nodes)}/2+)")
             success = True
         else:
@@ -589,8 +628,9 @@ class ArgoLifecycleManager:
             print("  - /pose (compass heading)")
             print("  - /gps_cog, /gps_sog, /gps_velocity (GPS navigation)")
             print("  - /anem_speed_angle_temp (wind data)")
-            print("  - /rudder_sail_radio (mock human input)")
+            print("  - /rudder_sail_radio (integrated keyboard control)")
             print("Control commands sent to simulator via /rudder_sail_servo")
+            print("Keyboard control: Use arrow keys in curses display to control rudder and sail")
             print("Visualization available via Foxglove Studio at ws://localhost:9090")
             print("\n🔄 Simulation running... Press Ctrl+C to stop and clean up all nodes")
             
@@ -636,9 +676,14 @@ class ArgoLifecycleManager:
             print("❌ Argo simulation mode failed to start")
         
         return success
-    
+
     def status(self) -> None:
         """Show current status of Argo nodes"""
+        # Show checking message and clear it
+        print("🔍 Checking Argo status...", end='', flush=True)
+        time.sleep(0.1)  # Brief pause to show the message
+        print("\r" + " " * 50 + "\r", end='', flush=True)  # Clear the line
+        
         print(f"🚢 ARGO STATUS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)
         
@@ -662,8 +707,10 @@ class ArgoLifecycleManager:
             node_fatal_messages = self._get_fatal_messages_for_nodes()
         
         # Individual node status
-        print("🤖 ROS NODES:")
         node_status = self._get_node_status()
+        running_count = sum(1 for status in node_status.values() if "RUNNING" in status)
+        total_count = len(node_status)
+        print(f"🤖 ROS NODES: [{running_count}/{total_count}]")
         stopped_nodes = []
         for node, status in node_status.items():
             if "STOPPED" in status and node in node_fatal_messages:
@@ -774,26 +821,35 @@ class ArgoLifecycleManager:
             # add free disk space
             disk = psutil.disk_usage("/")
             free_disk = disk.free / (1024**3)
-            # INSERT_YOUR_CODE
-            # Try to get CPU temperature from sensors (cpu_thermal-virtual-0)
+            # Get CPU temperature from thermal-monitor.service log file (faster than sensors command)
             cpu_temp = None
             try:
-                sensors_output = subprocess.check_output(['sensors'], text=True)
-                lines = sensors_output.splitlines()
-                for i, line in enumerate(lines):
-                    if 'cpu_thermal-virtual-0' in line:
-                        # Look for the next line with 'temp1'
-                        for j in range(i+1, min(i+4, len(lines))):
-                            if 'temp1:' in lines[j]:
-                                parts = lines[j].split()
-                                for part in parts:
-                                    if part.startswith('+') and part.endswith('°C'):
-                                        cpu_temp = part.strip('+°C')
-                                        break
-                                break
-                        break
+                # Try to find the most recent thermal log file
+                import glob
+                thermal_logs = sorted(glob.glob('/var/log.hdd/persistent/thermal-*.log'), reverse=True)
+                for thermal_log in thermal_logs:
+                    if os.path.exists(thermal_log) and os.path.getsize(thermal_log) > 0:
+                        with open(thermal_log, 'r') as f:
+                            # Read last line
+                            lines = f.readlines()
+                            if lines:
+                                last_line = lines[-1].strip()
+                                # Parse: "2025-10-01 06:30:23: GPU:60°C VE:57°C CPU:58°C DDR:58°C"
+                                if 'CPU:' in last_line:
+                                    cpu_part = last_line.split('CPU:')[1].split()[0]
+                                    cpu_temp = cpu_part.replace('°C', '')
+                                    break
             except Exception:
-                cpu_temp = None
+                pass
+            
+            # Fallback to reading thermal zone directly if log method failed
+            if cpu_temp is None:
+                try:
+                    with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
+                        temp_millicelsius = int(f.read().strip())
+                        cpu_temp = str(temp_millicelsius // 1000)
+                except Exception:
+                    cpu_temp = None
             
             # Get battery and alerts in parallel for much faster performance
             battery_summary, critical_alerts = None, None
@@ -826,7 +882,81 @@ class ArgoLifecycleManager:
             pass
         
         print("=" * 60)
-    
+
+    def _start_remote_tunnel(self):
+        """Start SSH tunnel for remote simulation"""
+        if not REMOTE_CONFIG:
+            print("❌ Remote config not found")
+            return False
+
+        host = REMOTE_CONFIG['remote']['host']
+        user = REMOTE_CONFIG['remote']['user']
+        local_port = REMOTE_CONFIG['network']['local_port']
+        remote_port = REMOTE_CONFIG['network']['remote_port']
+
+        print(f"🔗 Creating SSH tunnel to {user}@{host}...")
+        cmd = [
+            'ssh', '-N', '-L', f'{local_port}:localhost:{remote_port}',
+            f'{user}@{host}'
+        ]
+        self.remote_tunnel_proc = subprocess.Popen(cmd)
+        time.sleep(2)  # Wait for tunnel to establish
+        
+        if self.remote_tunnel_proc.poll() is None:
+            print(f"✅ SSH tunnel established (PID: {self.remote_tunnel_proc.pid})")
+            return True
+        else:
+            print("❌ SSH tunnel failed to start")
+            return False
+
+    def _start_remote_simulator(self):
+        """Start the simulator on the remote machine"""
+        if not REMOTE_CONFIG:
+            print("❌ Remote config not found")
+            return False
+
+        host = REMOTE_CONFIG['remote']['host']
+        user = REMOTE_CONFIG['remote']['user']
+        argo_dir = REMOTE_CONFIG['remote']['argo_dir']
+        ros_domain_id = REMOTE_CONFIG['ros2']['domain_id']
+
+        print(f"🚀 Launching remote simulator on {user}@{host}...")
+        remote_cmd = (
+            f"cd {argo_dir} && "
+            f"source /opt/ros/humble/setup.bash && "
+            f"export ROS_DOMAIN_ID={ros_domain_id} && "
+            f"python3 nodes/argo_unified_simulator_bridge.py --mode local"
+        )
+        cmd = ['ssh', f'{user}@{host}', remote_cmd]
+        
+        self.remote_simulator_proc = subprocess.Popen(cmd)
+        if self.remote_simulator_proc.poll() is None:
+            print(f"✅ Remote simulator launched (PID: {self.remote_simulator_proc.pid})")
+            return True
+        else:
+            print("❌ Failed to launch remote simulator")
+            return False
+
+    def _stop_remote_processes(self):
+        """Stop remote simulator and SSH tunnel"""
+        if self.remote_simulator_proc:
+            print("🛑 Stopping remote simulator...")
+            # Need to kill the process on the remote machine
+            if REMOTE_CONFIG:
+                host = REMOTE_CONFIG['remote']['host']
+                user = REMOTE_CONFIG['remote']['user']
+                kill_cmd = "pkill -f 'argo_unified_simulator_bridge.py'"
+                subprocess.run(['ssh', f'{user}@{host}', kill_cmd])
+            self.remote_simulator_proc.terminate()
+            self.remote_simulator_proc.wait(timeout=5)
+            self.remote_simulator_proc = None
+
+        if self.remote_tunnel_proc:
+            print("🛑 Stopping SSH tunnel...")
+            self.remote_tunnel_proc.terminate()
+            self.remote_tunnel_proc.wait(timeout=5)
+            self.remote_tunnel_proc = None
+        
     def monitor(self) -> None:
         """Monitor mode - watch for failures and auto-restart"""
         print("👁️  Starting Argo monitor mode...")
@@ -1073,7 +1203,7 @@ class ArgoLifecycleManager:
 
 def main():
     parser = argparse.ArgumentParser(description='Argo ROS2 Lifecycle Manager')
-    parser.add_argument('command', choices=['run', 'stop', 'restart', 'status', 'monitor', 'simulate'],
+    parser.add_argument('command', choices=['run', 'stop', 'restart', 'status', 'monitor', 'simulate_local', 'simulate_remote'],
                        help='Command to execute')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug output')
@@ -1097,8 +1227,11 @@ def main():
         manager.status()
     elif args.command == 'monitor':
         manager.monitor()
-    elif args.command == 'simulate':
-        success = manager.simulate()
+    elif args.command == 'simulate_local':
+        success = manager.simulate_local()
+        sys.exit(0 if success else 1)
+    elif args.command == 'simulate_remote':
+        success = manager.simulate_remote()
         sys.exit(0 if success else 1)
 
 if __name__ == '__main__':
