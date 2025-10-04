@@ -25,11 +25,21 @@ import subprocess
 import threading
 import argparse
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
+import json
 
 # Import centralized node utilities
 from argo_node_utils import ArgoNodeManager
 import psutil
+
+# ROS2 imports for service client
+try:
+    import rclpy
+    from rclpy.node import Node
+    from std_srvs.srv import Trigger
+    ROS2_AVAILABLE = True
+except ImportError:
+    ROS2_AVAILABLE = False
 
 # Add config loading for remote simulation
 try:
@@ -54,6 +64,20 @@ class ArgoLifecycleManager:
         self.journal_since = 'today'
         self.remote_simulator_proc = None
         self.remote_tunnel_proc = None
+
+        # Initialize ROS2 for service client if available
+        self.ros2_node = None
+        self.battery_service_client = None
+        if ROS2_AVAILABLE:
+            try:
+                if not rclpy.ok():
+                    rclpy.init()
+                self.ros2_node = Node('argo_lifecycle_manager')
+                self.battery_service_client = self.ros2_node.create_client(Trigger, '/battery_status')
+            except Exception as e:
+                print(f"Warning: Could not initialize ROS2 service client: {e}")
+                self.ros2_node = None
+                self.battery_service_client = None
 
         # Initialize node manager for discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
@@ -87,8 +111,23 @@ class ArgoLifecycleManager:
         print(
             f"\n🛑 argo_lifecycle_manager: Received signal {signum}, shutting down...")
         self.monitoring = False
+        self._cleanup_ros2()
         self.stop()
         sys.exit(0)
+
+    def _cleanup_ros2(self):
+        """Clean up ROS2 resources"""
+        if self.ros2_node:
+            try:
+                self.ros2_node.destroy_node()
+            except Exception:
+                pass
+            self.ros2_node = None
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
 
     def _get_ros2_processes(self) -> List[psutil.Process]:
         """Get all ROS2 processes related to Argo using node manager"""
@@ -920,12 +959,15 @@ class ArgoLifecycleManager:
 
         # System info
         try:
+            # CPU percentage (this waits 1 second by design)
             cpu_percent = psutil.cpu_percent(interval=1)
+            
+            # Memory and disk
             memory = psutil.virtual_memory()
-            # add free disk space
             disk = psutil.disk_usage("/")
             free_disk = disk.free / (1024**3)
-            # Get CPU temperature from thermal-monitor.service log file (faster than sensors command)
+            
+            # CPU temperature from thermal logs
             cpu_temp = None
             try:
                 # Try to find the most recent thermal log file
@@ -956,12 +998,14 @@ class ArgoLifecycleManager:
                         cpu_temp = str(temp_millicelsius // 1000)
                 except Exception:
                     cpu_temp = None
-
-            # Get battery and alerts in parallel for much faster performance
-            battery_summary, critical_alerts = None, None
+            
+            # Get node status (needed for battery check)
             node_status = self._get_node_status()
+            
+            # Battery and alerts
+            battery_summary, critical_alerts = None, None
             if "battery_water.py" in node_status and "RUNNING" in node_status["battery_water.py"]:
-                battery_summary, critical_alerts = self._get_battery_and_alerts_parallel()
+                battery_summary, critical_alerts = self._get_battery_water_status_alerts()
 
             # Build system info line with optional battery info
             system_info = f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Mem. {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temp. {cpu_temp}°C"
@@ -972,8 +1016,11 @@ class ArgoLifecycleManager:
             # Display critical alerts if any
             if critical_alerts:
                 print(f"⚠️  CRITICAL ALERTS: {critical_alerts}")
-        except:
-            print("📊 SYSTEM: Unable to get system info")
+                
+        except Exception as e:
+            print(f"📊 SYSTEM: Unable to get system info - {e}")
+            import traceback
+            traceback.print_exc()
 
         # Update timestamp file to prevent quick timer from running on next terminal startup
         # This ensures that manual status checks are treated the same as quick timer checks
@@ -1196,7 +1243,7 @@ class ArgoLifecycleManager:
             # Get battery info if available
             battery_summary, critical_alerts = None, None
             if "battery_water.py" in node_status and "RUNNING" in node_status["battery_water.py"]:
-                battery_summary, critical_alerts = self._get_battery_and_alerts_parallel()
+                battery_summary, critical_alerts = self._get_battery_water_status_alerts()
 
             # Build system info line
             system_info = f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Mem. {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB | CPU Temp. {cpu_temp}°C"
@@ -1327,83 +1374,99 @@ class ArgoLifecycleManager:
 
         return fatal_messages
 
-    def _get_battery_and_alerts_parallel(self) -> tuple[Optional[str], Optional[str]]:
-        """Get battery info and alerts in parallel using persistent QoS"""
+    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str]]:
+        """Get battery info and alerts using the battery Trigger service client"""
         try:
-            import concurrent.futures
+            # Use ROS2 service client if available, otherwise fallback to subprocess
+            if self.battery_service_client and ROS2_AVAILABLE:
+                battery_data = self._call_battery_service_client()
+            else:
+                battery_data = self._call_battery_service_subprocess()
 
-            # Topics to check in parallel
-            topics = {
-                'voltage': '/battery_voltage',
-                'percent': '/battery_remaining_pct',
-                'battery_low': '/battery_low_alert',
-                'saltwater': '/saltwater_alert',
-                'humidity': '/humidity_alert'
-            }
-
-            def get_topic_value(topic_name):
-                try:
-                    result = subprocess.run([
-                        'ros2', 'topic', 'echo', topic_name, '--once'
-                    ], capture_output=True, text=True, timeout=15)
-
-                    if result.returncode == 0 and result.stdout.strip():
-                        lines = result.stdout.strip().split('\n')
-                        for line in lines:
-                            if line.startswith('data:'):
-                                data_str = line.split(':', 1)[1].strip()
-                                # Try to parse as float first, then boolean
-                                try:
-                                    return float(data_str)
-                                except ValueError:
-                                    return data_str.lower() == 'true'
-                except Exception:
-                    pass
-                return None
-
-            # Execute all topic queries in parallel
-            results = {}
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_topic = {executor.submit(get_topic_value, topic): key
-                                   for key, topic in topics.items()}
-
-                for future in concurrent.futures.as_completed(future_to_topic, timeout=20):
-                    topic_key = future_to_topic[future]
-                    try:
-                        results[topic_key] = future.result()
-                    except Exception:
-                        results[topic_key] = None
-
-            # Format battery summary
-            battery_summary = None
-            if results.get('voltage') is not None and results.get('percent') is not None:
-                battery_summary = f"{results['voltage']:.1f}V ({results['percent']:.0f}%)"
-            elif results.get('voltage') is not None:
-                battery_summary = f"{results['voltage']:.1f}V"
-            elif results.get('percent') is not None:
-                battery_summary = f"{results['percent']:.0f}%"
-
-            # Format critical alerts
-            active_alerts = []
-            alert_descriptions = {
-                'battery_low': '🔋 LOW BATTERY',
-                'saltwater': '💧 SALTWATER INTRUSION',
-                'humidity': '💦 HIGH HUMIDITY'
-            }
-
-            for alert_key in ['battery_low', 'saltwater', 'humidity']:
-                if results.get(alert_key) is True:
-                    active_alerts.append(alert_descriptions[alert_key])
-
-            alerts_summary = " | ".join(
-                active_alerts) if active_alerts else None
-
-            return battery_summary, alerts_summary
+            if battery_data:
+                # Extract battery summary and alerts
+                battery_summary = battery_data.get('battery_summary')
+                critical_alerts = battery_data.get('critical_alerts')
+                return battery_summary, critical_alerts
+            else:
+                return None, None
 
         except Exception as e:
-            print(f"Error getting battery and alerts: {e}")
-
+            print(f"    Error getting battery and alerts: {e}")
             return None, None
+
+    def _call_battery_service_client(self) -> Optional[Dict[str, Any]]:
+        """Call battery service using ROS2 service client"""
+        try:
+            if not self.battery_service_client.service_is_ready():
+                return None
+
+            # Create request
+            request = Trigger.Request()
+            
+            # Call service with timeout
+            future = self.battery_service_client.call_async(request)
+            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=3.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    # Parse JSON from response message
+                    return json.loads(response.message)
+                else:
+                    return None
+            else:
+                return None
+                
+        except Exception as e:
+            return None
+
+    def _call_battery_service_subprocess(self) -> Optional[Dict[str, Any]]:
+        """Fallback: Call battery service using subprocess"""
+        try:
+            result = subprocess.run([
+                'ros2', 'service', 'call', '/battery_status', 'std_srvs/srv/Trigger'
+            ], capture_output=True, text=True, timeout=5)
+
+            if result.returncode == 0 and result.stdout.strip():
+                return self._parse_trigger_response_subprocess(result.stdout)
+            else:
+                return None
+        except subprocess.TimeoutExpired:
+            return None
+        except Exception as e:
+            return None
+
+    def _parse_trigger_response_subprocess(self, output: str) -> Optional[Dict[str, Any]]:
+        """Parse ROS2 Trigger service response from subprocess output"""
+        try:
+            # Look for the message field in the Trigger response
+            lines = output.strip().split('\n')
+            message_content = None
+            
+            for line in lines:
+                line = line.strip()
+                if line.startswith('message:'):
+                    # Extract the JSON content from the message field
+                    message_part = line.split(':', 1)[1].strip()
+                    # Remove quotes if present
+                    if message_part.startswith('"') and message_part.endswith('"'):
+                        message_part = message_part[1:-1]
+                    # Unescape newlines and quotes
+                    message_part = message_part.replace('\\n', '\n').replace('\\"', '"')
+                    message_content = message_part
+                    break
+            
+            if message_content:
+                # Parse the JSON content
+                return json.loads(message_content)
+            else:
+                return None
+                
+        except json.JSONDecodeError:
+            return None
+        except Exception:
+            return None
 
     def _print_i2c_health(self, bus: int = 0) -> None:
         """Print a summary of I2C device presence vs expected sensors."""
@@ -1453,25 +1516,29 @@ def main():
     if args.debug:
         print("🔧 DEBUG: Debug mode enabled")
 
-    if args.command == 'run':
-        success = manager.continuous()
-        sys.exit(0 if success else 1)
-    elif args.command == 'stop':
-        success = manager.stop()
-        sys.exit(0 if success else 1)
-    elif args.command == 'restart':
-        success = manager.restart()
-        sys.exit(0 if success else 1)
-    elif args.command == 'status':
-        manager.status()
-    elif args.command == 'monitor':
-        manager.monitor()
-    elif args.command == 'simulate_local':
-        success = manager.simulate_local()
-        sys.exit(0 if success else 1)
-    elif args.command == 'simulate_remote':
-        success = manager.simulate_remote()
-        sys.exit(0 if success else 1)
+    try:
+        if args.command == 'run':
+            success = manager.continuous()
+            sys.exit(0 if success else 1)
+        elif args.command == 'stop':
+            success = manager.stop()
+            sys.exit(0 if success else 1)
+        elif args.command == 'restart':
+            success = manager.restart()
+            sys.exit(0 if success else 1)
+        elif args.command == 'status':
+            manager.status()
+        elif args.command == 'monitor':
+            manager.monitor()
+        elif args.command == 'simulate_local':
+            success = manager.simulate_local()
+            sys.exit(0 if success else 1)
+        elif args.command == 'simulate_remote':
+            success = manager.simulate_remote()
+            sys.exit(0 if success else 1)
+    finally:
+        # Ensure ROS2 cleanup
+        manager._cleanup_ros2()
 
 
 if __name__ == '__main__':
