@@ -29,7 +29,7 @@ class SailingAreaPublisher(Node):
         self.publish_all_markers()
         
         # Create a timer to republish periodically (in case of reconnection)
-        self.timer = self.create_timer(30.0, self.publish_all_markers)
+        self.timer = self.create_timer(60.0, self.publish_all_markers)
         
         self.get_logger().info(f"Sailing area publisher started with {len(self.sailing_areas)} areas")
     

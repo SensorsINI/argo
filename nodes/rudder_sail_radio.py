@@ -117,7 +117,7 @@ SERVO_MAX_PW_US = 2100
 CLAMP_LOG_THROTTLE_S = 60.0
 
 # Throttle logging for outlier radio PWM messages to once every 10 seconds
-OUTLIER_LOG_THROTTLE_S = 10.0
+OUTLIER_LOG_THROTTLE_S = 60.0
 
 # Human control timeout - seconds after last human activity before robot can take control
 HUMAN_CONTROL_TIMEOUT_S = 2.0
