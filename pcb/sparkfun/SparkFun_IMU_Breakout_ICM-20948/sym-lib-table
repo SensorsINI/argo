@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 0)
+  (lib (name "SparkFun_IMU_Breakout_ICM-20948-eagle-import")(type "KiCad")(uri "${KIPRJMOD}/SparkFun_IMU_Breakout_ICM-20948-eagle-import.kicad_sym")(options "")(descr ""))
+)

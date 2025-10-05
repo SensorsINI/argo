@@ -1,0 +1,27 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP NE555DR
+D Single Precision Timer
+K
+F http://www.ti.com/lit/ds/symlink/ne555.pdf
+$ENDCMP
+#
+$CMP MP2672GD-0000
+D Boost Charger with Cell Balance for 2-Cell Series Lithium-Ion Battery,  QFN-18 (2mmx3mm)
+K
+F 
+$ENDCMP
+#
+$CMP 30R500UF
+D PTC 30V POLYFUSE  RADIAL LEADS 5A
+K
+F https://m.littelfuse.com/~/media/electronics/datasheets/resettable_ptcs/littelfuse_ptc_30r_datasheet.pdf.pdf
+$ENDCMP
+#
+$CMP 70553-0003
+D Headers & Wire Housings R/A HDR 4P low profile single
+K
+F 
+$ENDCMP
+#
+#End Doc Library
