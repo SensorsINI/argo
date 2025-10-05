@@ -57,7 +57,6 @@ class ArgoLifecycleManager:
             os.path.dirname(os.path.abspath(__file__)))
         self.process = None
         self.node_processes = []
-        self.monitoring = False
         # Removed restart logic - nodes should not be restarted automatically
         # Failures should be preserved for debugging
         self.stabilization_wait = 15.0  # Additional wait time for nodes to stabilize
@@ -73,9 +72,11 @@ class ArgoLifecycleManager:
                 if not rclpy.ok():
                     rclpy.init()
                 self.ros2_node = Node('argo_lifecycle_manager')
-                self.battery_service_client = self.ros2_node.create_client(Trigger, '/battery_status')
+                self.battery_service_client = self.ros2_node.create_client(
+                    Trigger, '/battery_status')
             except Exception as e:
-                print(f"Warning: Could not initialize ROS2 service client: {e}")
+                print(
+                    f"Warning: Could not initialize ROS2 service client: {e}")
                 self.ros2_node = None
                 self.battery_service_client = None
 
@@ -110,7 +111,6 @@ class ArgoLifecycleManager:
         """Handle shutdown signals gracefully"""
         print(
             f"\n🛑 argo_lifecycle_manager: Received signal {signum}, shutting down...")
-        self.monitoring = False
         self._cleanup_ros2()
         self.stop()
         sys.exit(0)
@@ -171,7 +171,8 @@ class ArgoLifecycleManager:
             print(f"Launching specific nodes: {', '.join(node_scripts)}")
         else:
             # Discover available nodes, excluding simulation-only nodes for normal launches
-            discovered_nodes = self.node_manager.discover_nodes(exclude_simulation_only=True)
+            discovered_nodes = self.node_manager.discover_nodes(
+                exclude_simulation_only=True)
             node_scripts = [
                 f"{node}.py" for node in discovered_nodes if node != 'foxglove_bridge']
 
@@ -961,12 +962,12 @@ class ArgoLifecycleManager:
         try:
             # CPU percentage (this waits 1 second by design)
             cpu_percent = psutil.cpu_percent(interval=1)
-            
+
             # Memory and disk
             memory = psutil.virtual_memory()
             disk = psutil.disk_usage("/")
             free_disk = disk.free / (1024**3)
-            
+
             # CPU temperature from thermal logs
             cpu_temp = None
             try:
@@ -998,10 +999,10 @@ class ArgoLifecycleManager:
                         cpu_temp = str(temp_millicelsius // 1000)
                 except Exception:
                     cpu_temp = None
-            
+
             # Get node status (needed for battery check)
             node_status = self._get_node_status()
-            
+
             # Battery and alerts
             battery_summary, critical_alerts = None, None
             if "battery_water.py" in node_status and "RUNNING" in node_status["battery_water.py"]:
@@ -1016,7 +1017,7 @@ class ArgoLifecycleManager:
             # Display critical alerts if any
             if critical_alerts:
                 print(f"⚠️  CRITICAL ALERTS: {critical_alerts}")
-                
+
         except Exception as e:
             print(f"📊 SYSTEM: Unable to get system info - {e}")
             import traceback
@@ -1111,155 +1112,6 @@ class ArgoLifecycleManager:
             self.remote_tunnel_proc.terminate()
             self.remote_tunnel_proc.wait(timeout=5)
             self.remote_tunnel_proc = None
-
-    def monitor(self) -> None:
-        """Monitor mode - watch for failures and auto-restart"""
-        print("👁️  Starting Argo monitor mode...")
-        print("Press Ctrl+C to stop monitoring")
-
-        self.monitoring = True
-        last_status_check = 0
-        status_interval = 10  # Check status every 10 seconds
-
-        try:
-            while self.monitoring:
-                current_time = time.time()
-
-                # Periodic status check
-                if current_time - last_status_check >= status_interval:
-                    # Clear screen before printing status
-                    os.system('clear')
-                    self._monitor_status()
-                    last_status_check = current_time
-
-                time.sleep(1)
-
-        except KeyboardInterrupt:
-            print("\n🛑 Monitor mode stopped by user")
-        finally:
-            self.monitoring = False
-
-    def _monitor_status(self) -> None:
-        """Enhanced status display for monitor mode with health status reporting"""
-        print(
-            f"🚢 ARGO MONITOR - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 60)
-
-        # Check if argo-launch.service is running
-        service_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo-launch.service'],
-                                    capture_output=True, text=True, timeout=2)
-            service_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            service_running = False
-
-        if service_running:
-            print("📋 LAUNCH SERVICE: 🟢 RUNNING")
-        else:
-            print("📋 LAUNCH SERVICE: 🔴 STOPPED")
-
-        # Get FATAL messages for stopped nodes if service is running
-        node_fatal_messages = {}
-        if service_running:
-            node_fatal_messages = self._get_fatal_messages_for_nodes()
-
-        # Individual node status
-        node_status = self._get_node_status()
-        running_count = sum(
-            1 for status in node_status.values() if "RUNNING" in status)
-        total_count = len(node_status)
-        print(f"🤖 ROS NODES: [{running_count}/{total_count}]")
-
-        # Health status reporting
-        print("🏥 HEALTH STATUS:")
-        health_topics = {
-            'battery_water.py': '/battery_water_health',
-            'anem.py': '/anem_health',
-            'gps.py': '/gps_health',
-            'imu.py': '/imu_health',
-            'rudder_sail_radio.py': '/rudder_sail_radio_health',
-            'temp_monitor.py': '/temp_monitor_health',
-            'controller.py': '/controller_health'
-        }
-
-        health_status = {}
-        for node, topic in health_topics.items():
-            try:
-                result = subprocess.run([
-                    'ros2', 'topic', 'echo', topic, '--once'
-                ], capture_output=True, text=True, timeout=3)
-
-                if result.returncode == 0 and result.stdout.strip():
-                    lines = result.stdout.strip().split('\n')
-                    for line in lines:
-                        if line.startswith('data:'):
-                            data_str = line.split(':', 1)[1].strip()
-                            is_healthy = data_str.lower() == 'true'
-                            health_status[node] = is_healthy
-                            break
-                else:
-                    health_status[node] = None  # No data available
-            except Exception:
-                health_status[node] = None  # Error reading topic
-
-        # Display health status
-        for node, status in node_status.items():
-            if "RUNNING" in status:
-                health = health_status.get(node, None)
-                if health is True:
-                    health_icon = "🟢"
-                    health_text = "HEALTHY"
-                elif health is False:
-                    health_icon = "🔴"
-                    health_text = "FAILED"
-                else:
-                    health_icon = "🟡"
-                    health_text = "UNKNOWN"
-
-                print(f"  {node}: {status} | {health_icon} {health_text}")
-            else:
-                print(f"  {node}: {status}")
-                if node in node_fatal_messages:
-                    print(f"    └─ {node_fatal_messages[node]}")
-
-        # System info
-        try:
-            # Shorter interval for monitor mode
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory()
-            disk = psutil.disk_usage("/")
-            free_disk = disk.free / (1024**3)
-
-            # Get CPU temperature
-            cpu_temp = None
-            try:
-                with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
-                    temp_millicelsius = int(f.read().strip())
-                    cpu_temp = str(temp_millicelsius // 1000)
-            except Exception:
-                cpu_temp = "N/A"
-
-            # Get battery info if available
-            battery_summary, critical_alerts = None, None
-            if "battery_water.py" in node_status and "RUNNING" in node_status["battery_water.py"]:
-                battery_summary, critical_alerts = self._get_battery_water_status_alerts()
-
-            # Build system info line
-            system_info = f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Mem. {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB | CPU Temp. {cpu_temp}°C"
-            if battery_summary:
-                system_info += f" | Batt. {battery_summary}"
-            print(system_info)
-
-            # Display critical alerts if any
-            if critical_alerts:
-                print(f"⚠️  CRITICAL ALERTS: {critical_alerts}")
-
-        except Exception:
-            print("📊 SYSTEM: Unable to get system info")
-
-        print("=" * 60)
-        print("Press Ctrl+C to stop monitoring")
 
     def _get_i2c_addresses(self, bus: int = 0) -> List[int]:
         """Run i2cdetect and parse detected device addresses on the given bus."""
@@ -1403,11 +1255,12 @@ class ArgoLifecycleManager:
 
             # Create request
             request = Trigger.Request()
-            
+
             # Call service with timeout
             future = self.battery_service_client.call_async(request)
-            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=3.0)
-            
+            rclpy.spin_until_future_complete(
+                self.ros2_node, future, timeout_sec=3.0)
+
             if future.done():
                 response = future.result()
                 if response.success:
@@ -1417,7 +1270,7 @@ class ArgoLifecycleManager:
                     return None
             else:
                 return None
-                
+
         except Exception as e:
             return None
 
@@ -1443,7 +1296,7 @@ class ArgoLifecycleManager:
             # Look for the message field in the Trigger response
             lines = output.strip().split('\n')
             message_content = None
-            
+
             for line in lines:
                 line = line.strip()
                 if line.startswith('message:'):
@@ -1453,16 +1306,17 @@ class ArgoLifecycleManager:
                     if message_part.startswith('"') and message_part.endswith('"'):
                         message_part = message_part[1:-1]
                     # Unescape newlines and quotes
-                    message_part = message_part.replace('\\n', '\n').replace('\\"', '"')
+                    message_part = message_part.replace(
+                        '\\n', '\n').replace('\\"', '"')
                     message_content = message_part
                     break
-            
+
             if message_content:
                 # Parse the JSON content
                 return json.loads(message_content)
             else:
                 return None
-                
+
         except json.JSONDecodeError:
             return None
         except Exception:
@@ -1505,7 +1359,7 @@ class ArgoLifecycleManager:
 
 def main():
     parser = argparse.ArgumentParser(description='Argo ROS2 Lifecycle Manager')
-    parser.add_argument('command', choices=['run', 'stop', 'restart', 'status', 'monitor', 'simulate_local', 'simulate_remote'],
+    parser.add_argument('command', choices=['run', 'stop', 'restart', 'status', 'simulate_local', 'simulate_remote'],
                         help='Command to execute')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug output')
@@ -1528,8 +1382,6 @@ def main():
             sys.exit(0 if success else 1)
         elif args.command == 'status':
             manager.status()
-        elif args.command == 'monitor':
-            manager.monitor()
         elif args.command == 'simulate_local':
             success = manager.simulate_local()
             sys.exit(0 if success else 1)
