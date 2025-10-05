@@ -15,15 +15,17 @@ The Argo project uses a git submodule for the sailboat-playground simulator:
 ### Directory Structure
 ```
 argo/
-├── simulator/                    # Git submodule (source code)
-│   ├── boats/                   # Boat configuration files
-│   ├── environments/            # Environment simulation files
-│   ├── sailboat_playground/     # Python package source
-│   └── ...                     # Full sailboat-playground repository
-├── sailboat-playground/         # Local Argo-specific configs
-│   ├── boats/sample_boat.json   # Argo boat configuration
-│   ├── environments/playground.json # Argo environment setup
-│   └── ...                     # Argo-specific configuration files
+├── simulator/
+│   ├── sailboat-playground/      # Git submodule (source code)
+│   │   ├── boats/               # Upstream boat templates
+│   │   ├── environments/        # Upstream environment templates
+│   │   ├── sailboat_playground/ # Python package source
+│   │   └── ...                 # Full sailboat-playground repository
+│   └── customizations/
+│       └── sailboat-playground/ # Local Argo-specific configs
+│           ├── boats/sample_boat.json    # Argo boat configuration
+│           ├── environments/playground.json # Argo environment setup
+│           └── ...             # Argo-specific configuration files
 └── .gitmodules                  # Submodule configuration
 ```
 
@@ -58,20 +60,22 @@ make submodule-status  # Comprehensive status report
 
 ## Submodule Management Patterns
 
-### Dual Directory Strategy
-The project maintains two separate directories:
-1. **`simulator/`** - Git submodule with source code from upstream
-2. **`sailboat-playground/`** - Local configuration files for Argo
+### Nested Directory Strategy
+The project uses a nested directory structure under `simulator/`:
+1. **`simulator/sailboat-playground/`** - Git submodule with source code from upstream
+2. **`simulator/customizations/sailboat-playground/`** - Local configuration files for Argo
 
-This separation provides:
-- **Version Control**: Submodule tracks upstream changes
-- **Local Customization**: Config files remain independent
-- **No Conflicts**: Different purposes, different directories
+This organization provides:
+- **Clear Separation**: Source code and customizations in distinct paths
+- **Version Control**: Submodule tracks upstream changes independently
+- **Local Customization**: Config files remain isolated from submodule
+- **No Conflicts**: Different purposes, different directory trees
+- **Scalability**: Easy to add other simulator components under `simulator/`
 
 ### Integration with Simulator Bridge
 The [argo_unified_simulator_bridge.py](mdc:nodes/argo_unified_simulator_bridge.py) uses both directories:
-- **Source Code**: Imports from `simulator/sailboat_playground/` package
-- **Configuration**: Loads boat/env configs from `sailboat-playground/` directory
+- **Source Code**: Imports from `simulator/sailboat-playground/sailboat_playground/` package
+- **Configuration**: Loads boat/env configs from `simulator/customizations/sailboat-playground/` directory
 
 ### Error Handling
 The Makefile targets include comprehensive error checking:
@@ -123,9 +127,9 @@ ls -la sailboat-playground/
 
 ### Simulator Bridge Configuration
 The [argo_unified_simulator_bridge.py](mdc:nodes/argo_unified_simulator_bridge.py) expects:
-- **Boat Config**: `sailboat-playground/boats/sample_boat.json`
-- **Environment Config**: `sailboat-playground/environments/playground.json`
-- **Source Package**: Available via `simulator/sailboat_playground/`
+- **Boat Config**: `simulator/customizations/sailboat-playground/boats/sample_boat.json`
+- **Environment Config**: `simulator/customizations/sailboat-playground/environments/playground.json`
+- **Source Package**: Available via `simulator/sailboat-playground/sailboat_playground/`
 
 ### Fallback Behavior
 If submodule is not available:
@@ -141,9 +145,9 @@ If submodule is not available:
 - Use `make submodule-status` to verify state
 
 ### Configuration Management
-- Keep local configs in `sailboat-playground/` directory
-- Don't modify files in `simulator/` directory
-- Use separate directories for source vs. config
+- Keep local configs in `simulator/customizations/sailboat-playground/` directory
+- Don't modify files in `simulator/sailboat-playground/` submodule
+- Use separate directory trees for source vs. customizations
 
 ### Error Recovery
 - Use `make submodule-init` to recover from submodule issues
@@ -154,4 +158,4 @@ If submodule is not available:
 - **[Makefile](mdc:Makefile)** - Submodule management targets
 - **[.gitmodules](mdc:.gitmodules)** - Submodule configuration
 - **[nodes/argo_unified_simulator_bridge.py](mdc:nodes/argo_unified_simulator_bridge.py)** - Simulator integration
-- **[sailboat-playground/README.md](mdc:sailboat-playground/README.md)** - Local config documentation
+- **[simulator/customizations/sailboat-playground/README.md](mdc:simulator/customizations/sailboat-playground/README.md)** - Local config documentation

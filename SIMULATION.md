@@ -164,8 +164,9 @@ config = load_config()
 ### Local Simulation Issues
 
 1. **sailboat-playground not available:**
-   - Check if simulator submodule is initialized: `git submodule update --init`
-   - Verify sailboat-playground is in `simulator/` directory
+   - Check if simulator submodule is initialized: `make submodule-status`
+   - Initialize if needed: `make submodule-init`
+   - Verify sailboat-playground is in `simulator/sailboat-playground/` directory
 
 2. **Mock simulator fallback:**
    - This is normal if sailboat-playground fails to load

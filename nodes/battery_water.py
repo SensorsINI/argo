@@ -9,6 +9,8 @@
 # - battery_low_alert (hysteresis 50 mV around battery_low_threshold_v; warning on low, info on recover)
 # - saltwater_alert (voltage >= saltwater_alert_threshold_v)
 # - humidity_alert (RH% >= humidity_alert_threshold_pct)
+# Health (Bool):
+# - battery_water_health (true=healthy, false=failed)
 # Publishing optimization (saves rosbag space):
 # - First 30s: publishes all sensor data at 1Hz, logs sensor states every 5s via ROS info
 # - After 30s: publishes sensor data only when values change >5% OR every 60s (whichever is shorter)
@@ -26,12 +28,14 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Float32, Bool
+from std_srvs.srv import Trigger
 import time
 import sys
 import argparse
 from rclpy.executors import ExternalShutdownException
+
+# Using standard Trigger service - no custom imports needed
 
 # Hardware configuration constants
 I2C_BUS_NUMBER = 0  # Orange Pi Zero 2W default I2C bus
@@ -59,6 +63,7 @@ except Exception:
 # matplotlib for plotting RC-decay capture (only imported when needed)
 _HAS_MPL = False
 
+
 class BatteryWaterNode(Node):
     def __init__(self):
         super().__init__('battery_water_node')
@@ -71,37 +76,60 @@ class BatteryWaterNode(Node):
         self._test_state = 'decay'  # not used in one-shot capture
         self._test_t0 = time.monotonic()
 
-        # QoS profile for persistent sensor data and alerts
-        # This ensures late-joining nodes get the latest values immediately
-        persistent_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            depth=1  # Keep only the latest value
-        )
 
-        # Publishers with persistent QoS for critical battery/water monitoring
-        self.pub_battery_voltage = self.create_publisher(Float32, 'battery_voltage', persistent_qos)
-        self.pub_saltwater_voltage = self.create_publisher(Float32, 'saltwater_voltage', persistent_qos)
-        self.pub_sail_current = self.create_publisher(Float32, 'sail_current', persistent_qos)
-        self.pub_temperature = self.create_publisher(Float32, 'pcb_temperature', persistent_qos)
-        self.pub_humidity = self.create_publisher(Float32, 'relative_humidity', persistent_qos)
-        # Alert publishers with persistent QoS for safety-critical alerts
-        self.pub_battery_low_alert = self.create_publisher(Bool, 'battery_low_alert', persistent_qos)
-        self.pub_saltwater_alert = self.create_publisher(Bool, 'saltwater_alert', persistent_qos)
-        self.pub_humidity_alert = self.create_publisher(Bool, 'humidity_alert', persistent_qos)
-        # Battery remaining percentage publisher with persistent QoS
-        self.pub_battery_remaining_pct = self.create_publisher(Float32, 'battery_remaining_pct', persistent_qos)
+        # Publishers for critical battery/water monitoring
+        self.pub_battery_voltage = self.create_publisher(
+            Float32, 'battery_voltage', 10)
+        self.pub_saltwater_voltage = self.create_publisher(
+            Float32, 'saltwater_voltage', 10)
+        self.pub_sail_current = self.create_publisher(
+            Float32, 'sail_current', 10)
+        self.pub_temperature = self.create_publisher(
+            Float32, 'pcb_temperature', 10)
+        self.pub_humidity = self.create_publisher(
+            Float32, 'relative_humidity', 10)
+        # Alert publishers for safety-critical alerts
+        self.pub_battery_low_alert = self.create_publisher(
+            Bool, 'battery_low_alert', 10)
+        self.pub_saltwater_alert = self.create_publisher(
+            Bool, 'saltwater_alert', 10)
+        self.pub_humidity_alert = self.create_publisher(
+            Bool, 'humidity_alert', 10)
+
+        # Health status publisher
+        self.pub_health = self.create_publisher(
+            Bool, 'battery_water_health', 10)
+        self.health_status = False  # Track current health status
+        # Battery remaining percentage publisher
+        self.pub_battery_remaining_pct = self.create_publisher(
+            Float32, 'battery_remaining_pct', 10)
+        
+        # Service for on-demand battery status using standard Trigger service
+        self.srv_battery_status = self.create_service(
+            Trigger, 'battery_status', self.battery_status_callback)
         # Alert previous-state flags for edge-triggered logging
         self._batt_low_prev = False
         self._salt_alert_prev = False
         self._humid_alert_prev = False
         
+        # Latest sensor values for service response
+        self._latest_battery_voltage = 0.0
+        self._latest_saltwater_voltage = 0.0
+        self._latest_sail_current = 0.0
+        self._latest_temperature = None
+        self._latest_humidity = None
+        self._latest_battery_remaining_pct = None
+        self._latest_battery_low_alert = False
+        self._latest_saltwater_alert = False
+        self._latest_humidity_alert = False
+        self._latest_timestamp = None
+
         # Sensor failure tracking
         self._adc_failure_count = 0
         self._sht_failure_count = 0
         self._max_failures = 3
         self._shutdown_requested = False
-        
+
         # Timing and change detection for optimized publishing
         self._startup_time = time.monotonic()
         self._last_publish_time = 0.0
@@ -130,17 +158,21 @@ class BatteryWaterNode(Node):
 
         # Threshold parameters
         # LiPo 2S ~20% remaining ≈ 3.6 V/cell -> 7.2 V pack (tweak if needed)
-        self.batt_low_threshold_v = float(self.declare_parameter('battery_low_threshold_v', 7.2).value)
+        self.batt_low_threshold_v = float(
+            self.declare_parameter('battery_low_threshold_v', 7.2).value)
         # Battery low hysteresis (Volts)
         self.batt_low_hysteresis_v = 0.05
         # Saltwater alert threshold (Volts)
-        self.saltwater_alert_threshold_v = float(self.declare_parameter('saltwater_alert_threshold_v', 1.0).value)
+        self.saltwater_alert_threshold_v = float(
+            self.declare_parameter('saltwater_alert_threshold_v', 1.0).value)
         # Humidity alert threshold (%)
-        self.humidity_alert_threshold_pct = float(self.declare_parameter('humidity_alert_threshold_pct', 75.0).value)
+        self.humidity_alert_threshold_pct = float(
+            self.declare_parameter('humidity_alert_threshold_pct', 75.0).value)
         # Debug mode - force publishing every cycle for testing
         self.debug_mode = self.declare_parameter('debug_mode', False).value
         # Battery SOC parameters (per-cell formula; defaults from RC LiPo curve)
-        self.batt_series_cells = int(self.declare_parameter('battery_series_cells', 2).value)
+        self.batt_series_cells = int(
+            self.declare_parameter('battery_series_cells', 2).value)
         # Formula: soc% = S - S / (1 + (v / V0)^A)^B
         self.soc_S = float(self.declare_parameter('soc_S', 123.0).value)
         self.soc_V0 = float(self.declare_parameter('soc_V0', 3.7).value)
@@ -154,7 +186,8 @@ class BatteryWaterNode(Node):
 
         # Perform ADC setup (internal ref always on, AIN3 as analog input)
         try:
-            setup_byte = self._build_setup(reg=1, sel=0b101, clk=0, bip_uni=0, rst=1, x=0)
+            setup_byte = self._build_setup(
+                reg=1, sel=0b101, clk=0, bip_uni=0, rst=1, x=0)
             self._i2c_write(self.adc_addr, setup_byte)
             self.get_logger().info('ADC setup complete (internal ref always on).')
         except Exception as e:
@@ -175,18 +208,110 @@ class BatteryWaterNode(Node):
                 pass
             # Perform a single capture: 50 ms REFOUT charge, 3 s decay with 10 ms sampling, then save PNG
             try:
-                png_path = self._adc_rc_capture(duration_s=3.0, sample_dt=0.010)
+                png_path = self._adc_rc_capture(
+                    duration_s=3.0, sample_dt=0.010)
                 if png_path:
-                    self.get_logger().info(f'RC-decay capture saved: {png_path}')
+                    self.get_logger().info(
+                        f'RC-decay capture saved: {png_path}')
                 else:
-                    self.get_logger().warn('RC-decay capture completed but matplotlib could not be imported to save a plot.')
+                    self.get_logger().warn(
+                        'RC-decay capture completed but matplotlib could not be imported to save a plot.')
             except Exception as e:
                 self.get_logger().error(f'RC-decay capture failed: {e}')
             # Keep node idle; no periodic publishing in test mode
-            self.get_logger().info('Battery/Water node is idle after --test-adc capture. Press Ctrl+C to exit.')
+            self.get_logger().info(
+                'Battery/Water node is idle after --test-adc capture. Press Ctrl+C to exit.')
         else:
-            self.timer = self.create_timer(1.0 / SAMPLE_RATE_HZ, self.read_and_publish)
-            self.get_logger().info(f'Battery/Water node initialized and reading at {SAMPLE_RATE_HZ} Hz.')
+            self.timer = self.create_timer(
+                1.0 / SAMPLE_RATE_HZ, self.read_and_publish)
+            self.get_logger().info(
+                f'Battery/Water node initialized and reading at {SAMPLE_RATE_HZ} Hz.')
+
+            # Publish initial health status as healthy
+            self._publish_health_status(True)
+
+    def _publish_health_status(self, is_healthy: bool):
+        """Publish health status and update internal state"""
+        if self.health_status != is_healthy:
+            self.health_status = is_healthy
+            health_msg = Bool()
+            health_msg.data = is_healthy
+            self.pub_health.publish(health_msg)
+
+            if is_healthy:
+                self.get_logger().info("Battery/Water health status: HEALTHY")
+            else:
+                self.get_logger().warn("Battery/Water health status: FAILED")
+
+    def battery_status_callback(self, request, response):
+        """Service callback to provide latest battery and sensor status as JSON string"""
+        try:
+            import json
+            
+            # Get current timestamp
+            now = self.get_clock().now()
+            
+            # Build battery data dictionary
+            battery_data = {
+                'battery_voltage': self._latest_battery_voltage,
+                'saltwater_voltage': self._latest_saltwater_voltage,
+                'sail_current': self._latest_sail_current,
+                'pcb_temperature': self._latest_temperature if self._latest_temperature is not None else 0.0,
+                'relative_humidity': self._latest_humidity if self._latest_humidity is not None else 0.0,
+                'battery_remaining_pct': self._latest_battery_remaining_pct if self._latest_battery_remaining_pct is not None else 0.0,
+                'battery_low_alert': self._latest_battery_low_alert,
+                'saltwater_alert': self._latest_saltwater_alert,
+                'humidity_alert': self._latest_humidity_alert,
+                'battery_water_health': self.health_status,
+                'timestamp_sec': now.seconds_nanoseconds()[0],
+                'timestamp_nanosec': now.seconds_nanoseconds()[1]
+            }
+            
+            # Format battery summary
+            battery_summary = None
+            voltage = battery_data['battery_voltage']
+            percent = battery_data['battery_remaining_pct']
+            
+            if voltage is not None and percent is not None:
+                battery_summary = f"{voltage:.1f}V ({percent:.0f}%)"
+            elif voltage is not None:
+                battery_summary = f"{voltage:.1f}V"
+            elif percent is not None:
+                battery_summary = f"{percent:.0f}%"
+            
+            # Format critical alerts
+            active_alerts = []
+            alert_descriptions = {
+                'battery_low_alert': '🔋 LOW BATTERY',
+                'saltwater_alert': '💧 SALTWATER INTRUSION',
+                'humidity_alert': '💦 HIGH HUMIDITY'
+            }
+            
+            for alert_key, description in alert_descriptions.items():
+                if battery_data.get(alert_key) is True:
+                    active_alerts.append(description)
+            
+            critical_alerts = " | ".join(active_alerts) if active_alerts else None
+            
+            # Create final response data
+            response_data = {
+                'battery_summary': battery_summary,
+                'critical_alerts': critical_alerts,
+                'raw_data': battery_data
+            }
+            
+            # Convert to JSON string and return in Trigger response
+            response.success = True
+            response.message = json.dumps(response_data, indent=2)
+            
+            self.get_logger().debug(f"Battery status service called - returning formatted data")
+            return response
+            
+        except Exception as e:
+            self.get_logger().error(f"Error in battery status service: {e}")
+            response.success = False
+            response.message = f"Error: {str(e)}"
+            return response
 
     # ---------- I2C helpers ----------
     def _i2c_write(self, addr: int, byte_val: int) -> None:
@@ -239,12 +364,14 @@ class BatteryWaterNode(Node):
             return acc // repeats
         except Exception as e:
             self._adc_failure_count += 1
-            self.get_logger().error(f'ADC read ch{ch} failed (attempt {self._adc_failure_count}/{self._max_failures}): {e}')
-            
+            self.get_logger().error(
+                f'ADC read ch{ch} failed (attempt {self._adc_failure_count}/{self._max_failures}): {e}')
+
             if self._adc_failure_count >= self._max_failures:
-                self.get_logger().fatal(f'ADC sensor failed {self._max_failures} times consecutively. Shutting down node.')
+                self.get_logger().fatal(
+                    f'ADC sensor failed {self._max_failures} times consecutively. Shutting down node.')
                 self._request_shutdown()
-            
+
             return 0
 
     # ---------- SHT45 helpers ----------
@@ -271,13 +398,15 @@ class BatteryWaterNode(Node):
             with smbus2.SMBus(I2C_BUS_NUMBER) as b:
                 b.i2c_rdwr(r)
             data = list(r)
-            temp_data = data[0:2]; temp_crc = data[2]
-            humid_data = data[3:5]; humid_crc = data[5]
+            temp_data = data[0:2]
+            temp_crc = data[2]
+            humid_data = data[3:5]
+            humid_crc = data[5]
             if self._sht_crc(temp_data) != temp_crc or self._sht_crc(humid_data) != humid_crc:
                 self.get_logger().warn('SHT45 CRC mismatch')
                 return None, None
             raw_temp = (temp_data[0] << 8) | temp_data[1]
-            raw_hum  = (humid_data[0] << 8) | humid_data[1]
+            raw_hum = (humid_data[0] << 8) | humid_data[1]
             # Convert per datasheet
             temperature = -45.0 + 175.0 * (raw_temp / 65535.0)
             humidity = -6.0 + 125.0 * (raw_hum / 65535.0)
@@ -287,17 +416,20 @@ class BatteryWaterNode(Node):
             return temperature, humidity
         except Exception as e:
             self._sht_failure_count += 1
-            self.get_logger().error(f'SHT45 read failed (attempt {self._sht_failure_count}/{self._max_failures}): {e}')
-            
+            self.get_logger().error(
+                f'SHT45 read failed (attempt {self._sht_failure_count}/{self._max_failures}): {e}')
+
             if self._sht_failure_count >= self._max_failures:
-                self.get_logger().fatal(f'SHT45 sensor failed {self._max_failures} times consecutively. Shutting down node.')
+                self.get_logger().fatal(
+                    f'SHT45 sensor failed {self._max_failures} times consecutively. Shutting down node.')
                 self._request_shutdown()
-            
+
             return None, None
 
     # ---------- Test: RC decay of REFOUT on AIN3 with sampling & PNG ----------
     def _set_ain3_mode(self, sel_bits: int):
-        setup_byte = self._build_setup(reg=1, sel=sel_bits, clk=0, bip_uni=0, rst=1, x=0)
+        setup_byte = self._build_setup(
+            reg=1, sel=sel_bits, clk=0, bip_uni=0, rst=1, x=0)
         self._i2c_write(self.adc_addr, setup_byte)
 
     def _adc_rc_capture(self, duration_s: float = 3.0, sample_dt: float = 0.010):
@@ -316,7 +448,8 @@ class BatteryWaterNode(Node):
                 break
             # One-shot sample on CH3
             try:
-                raw = self._read_adc_channel_avg(3, repeats=1, settle_delay_s=0.0005)
+                raw = self._read_adc_channel_avg(
+                    3, repeats=1, settle_delay_s=0.0005)
             except Exception:
                 raw = 0
             v = raw * self.lsb_value
@@ -332,7 +465,7 @@ class BatteryWaterNode(Node):
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
             from datetime import datetime
-            
+
             plt.figure(figsize=(8, 4))
             plt.plot(times, volts, '-', linewidth=1.5)
             plt.title('AIN3 RC Decay (REFOUT -> Analog Input)')
@@ -360,7 +493,7 @@ class BatteryWaterNode(Node):
             return
         # Nominal ranges
         bat_max = 12.0
-        sw_max  = 4.2
+        sw_max = 4.2
         cur_max = 4.2
         t_min, t_max = -20.0, 60.0
         h_min, h_max = 0.0, 100.0
@@ -374,10 +507,13 @@ class BatteryWaterNode(Node):
             if temp_c is not None:
                 # Map temp to 0..range for bar
                 temp_span = max(1e-6, t_max - t_min)
-                temp_norm = (max(t_min, min(t_max, temp_c)) - t_min) / temp_span * 100.0
-                lines.append(f"PCB   {temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
+                temp_norm = (max(t_min, min(t_max, temp_c)) -
+                             t_min) / temp_span * 100.0
+                lines.append(f"PCB   {temp_c:7.2f} C  " +
+                             self._bar(temp_norm, 100.0))
             if humid_pct is not None:
-                lines.append(f"Humid {humid_pct:7.2f} %  " + self._bar(humid_pct, 100.0))
+                lines.append(f"Humid {humid_pct:7.2f} %  " +
+                             self._bar(humid_pct, 100.0))
             lines.append("Ctrl-C to exit")
             for ln in lines:
                 sys.stdout.write(ln + '\n')
@@ -417,25 +553,28 @@ class BatteryWaterNode(Node):
         if fill > width:
             fill = width
         return '[' + ('#' * fill) + ('-' * (width - fill)) + ']'
-    
+
     def _request_shutdown(self):
         """Request node shutdown due to critical sensor failure"""
         self._shutdown_requested = True
         self.get_logger().fatal("Node shutting down due to critical sensor failure")
+        # Publish health status as failed
+        self._publish_health_status(False)
         # Cancel timer to stop further execution
         if hasattr(self, 'timer'):
             self.timer.cancel()
-    
+
     def _has_significant_change(self, current_value, previous_value, threshold_pct=THRESHOLD_CHANGE_PCT):
         """Check if current value has changed by more than threshold_pct from previous value"""
         if previous_value is None or current_value is None:
             return True  # Always publish if we don't have previous data
-        
+
         if previous_value == 0.0:
             # Avoid division by zero; consider any non-zero change significant
             return current_value != 0.0
-        
-        change_pct = abs((current_value - previous_value) / previous_value) * 100.0
+
+        change_pct = abs((current_value - previous_value) /
+                         previous_value) * 100.0
         return change_pct >= threshold_pct
 
     # ---------- Main read/publish ----------
@@ -449,12 +588,12 @@ class BatteryWaterNode(Node):
             except Exception:
                 pass
             return
-            
+
         current_time = time.monotonic()
         time_since_startup = current_time - self._startup_time
         time_since_last_publish = current_time - self._last_publish_time
         time_since_last_log = current_time - self._last_log_time
-        
+
         # ADC averages
         raw0 = self._read_adc_channel_avg(0)
         raw1 = self._read_adc_channel_avg(1)
@@ -464,14 +603,21 @@ class BatteryWaterNode(Node):
         battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
         saltwater_voltage = raw1 * self.lsb_value
         sail_current = raw2 * self.lsb_value
+        
+        # Store latest values for service
+        self._latest_battery_voltage = battery_voltage
+        self._latest_saltwater_voltage = saltwater_voltage
+        self._latest_sail_current = sail_current
 
         # Calculate battery remaining percentage (per-cell formula)
         battery_remaining_pct = None
         try:
             cells = max(1, int(self.batt_series_cells))
-            v_cell = battery_voltage / float(cells) if cells > 0 else battery_voltage
+            v_cell = battery_voltage / \
+                float(cells) if cells > 0 else battery_voltage
             # soc% = S - S / (1 + (v / V0)^A)^B
-            base = 1.0 + (max(0.0, v_cell) / max(1e-9, self.soc_V0)) ** self.soc_A
+            base = 1.0 + (max(0.0, v_cell) /
+                          max(1e-9, self.soc_V0)) ** self.soc_A
             soc = self.soc_S - (self.soc_S / (base ** self.soc_B))
             # Clamp 0..100
             if soc < 0.0:
@@ -481,13 +627,20 @@ class BatteryWaterNode(Node):
             battery_remaining_pct = float(soc)
         except Exception:
             pass
+        
+        # Store battery remaining percentage for service
+        self._latest_battery_remaining_pct = battery_remaining_pct
 
         # SHT45
         temperature, humidity = self._read_sht45()
         
+        # Store temperature and humidity for service
+        self._latest_temperature = temperature
+        self._latest_humidity = humidity
+
         # Determine if we should publish values
         should_publish = False
-        
+
         # Debug mode: always publish every cycle
         if self.debug_mode:
             should_publish = True
@@ -495,7 +648,7 @@ class BatteryWaterNode(Node):
                 # Build sensor state message
                 battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
                 temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
-                
+
                 self.get_logger().info(
                     f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
                     f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
@@ -509,7 +662,7 @@ class BatteryWaterNode(Node):
                 # Build sensor state message
                 battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
                 temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
-                
+
                 self.get_logger().info(
                     f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
                     f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
@@ -524,25 +677,31 @@ class BatteryWaterNode(Node):
                 self._has_significant_change(sail_current, self._prev_sail_current) or
                 self._has_significant_change(temperature, self._prev_temperature) or
                 self._has_significant_change(humidity, self._prev_humidity) or
-                self._has_significant_change(battery_remaining_pct, self._prev_battery_remaining_pct)
+                self._has_significant_change(
+                    battery_remaining_pct, self._prev_battery_remaining_pct)
             )
-            
+
             if significant_change or time_since_last_publish >= 60.0:
                 should_publish = True
-        
+
         # Publish values if conditions are met and ROS context is valid
         if should_publish and rclpy.ok():
             try:
                 self.pub_battery_voltage.publish(Float32(data=battery_voltage))
-                self.pub_saltwater_voltage.publish(Float32(data=saltwater_voltage))
+                self.pub_saltwater_voltage.publish(
+                    Float32(data=saltwater_voltage))
                 self.pub_sail_current.publish(Float32(data=sail_current))
-                
+
                 if battery_remaining_pct is not None:
-                    self.pub_battery_remaining_pct.publish(Float32(data=battery_remaining_pct))
+                    self.pub_battery_remaining_pct.publish(
+                        Float32(data=battery_remaining_pct))
+
+                # Publish health status as healthy
+                self._publish_health_status(True)
             except Exception as e:
                 # Silently ignore publish errors during shutdown
                 pass
-            
+
             try:
                 if temperature is not None:
                     self.pub_temperature.publish(Float32(data=temperature))
@@ -551,7 +710,7 @@ class BatteryWaterNode(Node):
             except Exception as e:
                 # Silently ignore publish errors during shutdown
                 pass
-            
+
             # Update previous values and timestamp
             self._prev_battery_voltage = battery_voltage
             self._prev_saltwater_voltage = saltwater_voltage
@@ -571,14 +730,18 @@ class BatteryWaterNode(Node):
             else:
                 batt_low = (battery_voltage <= lower)
             salt_alert = saltwater_voltage >= self.saltwater_alert_threshold_v
-            humid_alert = (humidity is not None) and (humidity >= self.humidity_alert_threshold_pct)
-            
+            humid_alert = (humidity is not None) and (
+                humidity >= self.humidity_alert_threshold_pct)
+
             # Always publish alerts if ROS context is valid (not subject to optimization)
             if rclpy.ok():
                 try:
-                    self.pub_battery_low_alert.publish(Bool(data=bool(batt_low)))
-                    self.pub_saltwater_alert.publish(Bool(data=bool(salt_alert)))
-                    self.pub_humidity_alert.publish(Bool(data=bool(humid_alert)))
+                    self.pub_battery_low_alert.publish(
+                        Bool(data=bool(batt_low)))
+                    self.pub_saltwater_alert.publish(
+                        Bool(data=bool(salt_alert)))
+                    self.pub_humidity_alert.publish(
+                        Bool(data=bool(humid_alert)))
                 except Exception as e:
                     # Silently ignore publish errors during shutdown
                     pass
@@ -603,11 +766,17 @@ class BatteryWaterNode(Node):
             self._batt_low_prev = bool(batt_low)
             self._salt_alert_prev = bool(salt_alert)
             self._humid_alert_prev = bool(humid_alert)
+            
+            # Store latest alert status for service
+            self._latest_battery_low_alert = bool(batt_low)
+            self._latest_saltwater_alert = bool(salt_alert)
+            self._latest_humidity_alert = bool(humid_alert)
         except Exception:
             pass
 
         # Update ASCII bars if enabled
-        self._update_bars(battery_voltage, saltwater_voltage, sail_current, temperature, humidity)
+        self._update_bars(battery_voltage, saltwater_voltage,
+                          sail_current, temperature, humidity)
 
 
 def main(args=None):
@@ -651,14 +820,14 @@ Hardware:
   Battery voltage divider: 27k/18k (2.5x scaling)
         """
     )
-    parser.add_argument('--debug', action='store_true', 
-                       help='Enable ASCII terminal visualization of sensor values')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable ASCII terminal visualization of sensor values')
     parser.add_argument('--test-adc', action='store_true',
-                       help='Perform RC decay test on AIN3 and save plot (requires matplotlib)')
-    
+                        help='Perform RC decay test on AIN3 and save plot (requires matplotlib)')
+
     # Parse known args to allow ROS2 arguments to pass through
     parsed_args, unknown_args = parser.parse_known_args(args)
-    
+
     # Initialize ROS2 with remaining arguments
     rclpy.init(args=unknown_args)
     node = None
@@ -679,6 +848,7 @@ Hardware:
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

@@ -1,0 +1,14 @@
+{
+    "name": "Example boat",
+    "length": 1.1,
+    "mass": 30,
+    "com_length": 0.5,
+    "sail_area": 1.0,
+    "sail_foil": "naca0015",
+    "rudder_area": 0.02,
+    "rudder_foil": "naca0015",
+    "hull_area": 0.03,
+    "hull_friction_coefficient": 0.2,
+    "hull_rotation_resistance": 0.4,
+    "moment_of_inertia": 100
+}

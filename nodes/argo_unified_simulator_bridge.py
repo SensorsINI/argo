@@ -34,7 +34,7 @@ try:
     os.environ['PYGLET_HEADLESS'] = '1'
     
     # Add simulator submodule to Python path
-    simulator_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'simulator')
+    simulator_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'simulator', 'sailboat-playground')
     if simulator_path not in sys.path:
         sys.path.insert(0, simulator_path)
     
@@ -774,8 +774,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                 import numpy as np
                 
                 # Configuration file paths
-                boat_config = "sailboat-playground/boats/sample_boat.json"
-                env_config = "sailboat-playground/environments/playground.json"
+                boat_config = "simulator/customizations/sailboat-playground/boats/sample_boat.json"
+                env_config = "simulator/customizations/sailboat-playground/environments/playground.json"
                 
                 # Check if configuration files exist
                 if not os.path.exists(boat_config):

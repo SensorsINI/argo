@@ -1,3 +1,4 @@
-[submodule "simulator"]
-	path = simulator
+[submodule "simulator/sailboat-playground"]
+	path = simulator/sailboat-playground
 	url = https://github.com/SensorsINI/sailboat-playground.git
+

@@ -11,10 +11,17 @@ Hardware:
 - I2C bus 0, address 0x69
 - AK09916 magnetometer (integrated in ICM-20948)
 
+Axes/Coordinate Frame:
+- x: rightwards, starboard
+- y: forwards, towards bow
+- z: up along mast, approx magnetic north
+
 Published Topics:
 - /accel (geometry_msgs/Vector3): Raw accelerometer data in g (gravity units)
 - /gyro (geometry_msgs/Vector3): Raw gyroscope data in deg/s (degrees per second)  
-- /compass (geometry_msgs/Vector3): Raw magnetometer data in uT (microtesla)
+- /magnetometer (geometry_msgs/Vector3): Raw magnetometer data in uT (microtesla)
+- /compass (std_msgs/Float64): Compass heading in degrees (0-360, 0=North, 90=East)
+- /imu_health (std_msgs/Bool): Node health status (true=healthy, false=failed)
 
 Note: This node publishes raw sensor values only. No sensor fusion or pose 
 estimation is performed (unlike RTIMULib-based implementations).
@@ -36,7 +43,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 import os.path
-from  geometry_msgs.msg import Vector3
+from geometry_msgs.msg import Vector3
+from std_msgs.msg import Bool, Float64
 import struct
 import time
 import math
@@ -44,6 +52,7 @@ import argparse
 import sys
 import json
 from datetime import datetime
+
 
 def _to_int16(msb, lsb):
     return struct.unpack('>h', bytes([msb, lsb]))[0]
@@ -98,6 +107,12 @@ class ICM20948:
 
     # Raw reads
     def read_accel(self):
+        """
+        Read accelerometer data from ICM-20948.
+        
+        Returns:
+            tuple: (ax_cnt, ay_cnt, az_cnt) raw accelerometer counts
+        """
         self.select_bank(0x00)
         b = self.read_bytes(0x2D, 6)
         return (
@@ -107,6 +122,12 @@ class ICM20948:
         )
 
     def read_gyro(self):
+        """
+        Read gyroscope data from ICM-20948.
+        
+        Returns:
+            tuple: (gx_cnt, gy_cnt, gz_cnt) raw gyroscope counts
+        """
         self.select_bank(0x00)
         b = self.read_bytes(0x33, 6)
         return (
@@ -114,6 +135,31 @@ class ICM20948:
             _to_int16(b[2], b[3]),
             _to_int16(b[4], b[5]),
         )
+
+    def read_magnetometer(self):
+        """
+        Read magnetometer data from AK09916 via I2C bypass.
+        
+        Returns:
+            tuple: (mx_uT, my_uT, mz_uT) magnetometer readings in microtesla
+        """
+        mx_uT = my_uT = mz_uT = 0.0
+        try:
+            st1 = self.bus.read_byte_data(0x0C, 0x10)
+            if st1 & 0x01:
+                mb = list(self.bus.read_i2c_block_data(0x0C, 0x11, 8))
+                # little-endian raw counts
+                mx_cnt = struct.unpack('<h', bytes(mb[0:2]))[0]
+                my_cnt = struct.unpack('<h', bytes(mb[2:4]))[0]
+                mz_cnt = struct.unpack('<h', bytes(mb[4:6]))[0]
+                # AK09916 sensitivity ~0.15 uT/LSB
+                mx_uT = mx_cnt * 0.15
+                my_uT = my_cnt * 0.15
+                mz_uT = mz_cnt * 0.15
+        except Exception:
+            pass
+        
+        return mx_uT, my_uT, mz_uT
 
 
 class ImuNode(Node):
@@ -126,7 +172,8 @@ class ImuNode(Node):
             self.get_logger().info("Run with --debug to see sensor values being published.")
 
         # I2C setup
-        self.i2c_bus_num = 0  # OrangePi uses bus 0 (confirmed by RTIMULib defaults)
+        # OrangePi uses bus 0 (confirmed by RTIMULib defaults)
+        self.i2c_bus_num = 0
         try:
             try:
                 from smbus2 import SMBus  # type: ignore
@@ -134,7 +181,8 @@ class ImuNode(Node):
                 from smbus import SMBus  # type: ignore
             self.bus = SMBus(self.i2c_bus_num)
         except Exception as e:
-            self.get_logger().error(f"Failed to open I2C bus {self.i2c_bus_num}: {e}")
+            self.get_logger().error(
+                f"Failed to open I2C bus {self.i2c_bus_num}: {e}")
             self.destroy_node()
             rclpy.shutdown()
             return
@@ -165,14 +213,20 @@ class ImuNode(Node):
         try:
             with open('invensense-20948-compass-calibration.json', 'r') as f:
                 self._compass_cal = json.load(f)
-                self.get_logger().info('Loaded compass calibration from invensense-20948-compass-calibration.json')
+                self.get_logger().info(
+                    'Loaded compass calibration from invensense-20948-compass-calibration.json')
         except Exception:
             pass
 
         # Publishers
         self.pub_accel = self.create_publisher(Vector3, 'accel', 10)
         self.pub_gyro = self.create_publisher(Vector3, 'gyro', 10)
-        self.pub_compass = self.create_publisher(Vector3, 'compass', 10)
+        self.pub_magnetometer = self.create_publisher(Vector3, 'magnetometer', 10)
+        self.pub_compass = self.create_publisher(Float64, 'compass', 10)
+
+        # Health status publisher
+        self.pub_health = self.create_publisher(Bool, 'imu_health', 10)
+        self.health_status = False  # Track current health status
 
         # ASCII visual debug
         self._vis_ascii = self.debug
@@ -181,7 +235,23 @@ class ImuNode(Node):
             self._init_ascii_vis()
 
         # Main loop timer
-        self.timer = self.create_timer(0.1, self.timer_callback) # 10 Hz
+        self.timer = self.create_timer(0.1, self.timer_callback)  # 10 Hz
+
+        # Publish initial health status as healthy
+        self._publish_health_status(True)
+
+    def _publish_health_status(self, is_healthy: bool):
+        """Publish health status and update internal state"""
+        if self.health_status != is_healthy:
+            self.health_status = is_healthy
+            health_msg = Bool()
+            health_msg.data = is_healthy
+            self.pub_health.publish(health_msg)
+
+            if is_healthy:
+                self.get_logger().info("IMU health status: HEALTHY")
+            else:
+                self.get_logger().warn("IMU health status: FAILED")
 
     def _init_ascii_vis(self):
         if self._vis_initialized:
@@ -242,40 +312,40 @@ class ImuNode(Node):
             gy_dps = gy_cnt / 131.072
             gz_dps = gz_cnt / 131.072
 
-            # Read AK09916 via bypass (if DRDY) and convert to microtesla
-            mx_uT = my_uT = mz_uT = 0.0
-            try:
-                st1 = self.bus.read_byte_data(0x0C, 0x10)
-                if st1 & 0x01:
-                    mb = list(self.bus.read_i2c_block_data(0x0C, 0x11, 8))
-                    # little-endian raw counts
-                    mx_cnt = struct.unpack('<h', bytes(mb[0:2]))[0]
-                    my_cnt = struct.unpack('<h', bytes(mb[2:4]))[0]
-                    mz_cnt = struct.unpack('<h', bytes(mb[4:6]))[0]
-                    # AK09916 sensitivity ~0.15 uT/LSB
-                    mx_uT = mx_cnt * 0.15
-                    my_uT = my_cnt * 0.15
-                    mz_uT = mz_cnt * 0.15
-            except Exception:
-                pass
+            # Read magnetometer data
+            mx_uT, my_uT, mz_uT = self.icm.read_magnetometer()
 
             if self._vis_ascii:
                 try:
+                    # Compute heading for debug display
+                    heading_rad = math.atan2(-mx_uT, my_uT)
+                    heading_deg = math.degrees(heading_rad)
+                    if heading_deg < 0:
+                        heading_deg += 360.0
+                    
                     sys.stdout.write('\x1b[H')  # home
                     # Nominal limits for bars
                     a_lim = 2.0   # g
-                    g_lim = 500.0 # dps
-                    m_lim = 100.0 # uT
+                    g_lim = 500.0  # dps
+                    m_lim = 100.0  # uT
                     lines = [
                         f"Ax {ax_g:+7.3f} g  " + self._signed_bar(ax_g, a_lim),
                         f"Ay {ay_g:+7.3f} g  " + self._signed_bar(ay_g, a_lim),
                         f"Az {az_g:+7.3f} g  " + self._signed_bar(az_g, a_lim),
-                        f"Gx {gx_dps:+7.1f} dps " + self._signed_bar(gx_dps, g_lim),
-                        f"Gy {gy_dps:+7.1f} dps " + self._signed_bar(gy_dps, g_lim),
-                        f"Gz {gz_dps:+7.1f} dps " + self._signed_bar(gz_dps, g_lim),
-                        f"Mx {mx_uT:+7.1f} uT " + self._signed_bar(mx_uT, m_lim),
-                        f"My {my_uT:+7.1f} uT " + self._signed_bar(my_uT, m_lim),
-                        f"Mz {mz_uT:+7.1f} uT " + self._signed_bar(mz_uT, m_lim),
+                        f"Gx {gx_dps:+7.1f} dps " +
+                        self._signed_bar(gx_dps, g_lim),
+                        f"Gy {gy_dps:+7.1f} dps " +
+                        self._signed_bar(gy_dps, g_lim),
+                        f"Gz {gz_dps:+7.1f} dps " +
+                        self._signed_bar(gz_dps, g_lim),
+                        f"Mx {mx_uT:+7.1f} uT " +
+                        self._signed_bar(mx_uT, m_lim),
+                        f"My {my_uT:+7.1f} uT " +
+                        self._signed_bar(my_uT, m_lim),
+                        f"Mz {mz_uT:+7.1f} uT " +
+                        self._signed_bar(mz_uT, m_lim),
+                        f"Hd {heading_deg:+7.1f}° " +
+                        self._signed_bar(heading_deg - 180, 180),  # Center on 180°
                         "Ctrl-C to exit"
                     ]
                     for ln in lines:
@@ -295,14 +365,27 @@ class ImuNode(Node):
                 except Exception:
                     pass
 
+            # Compute compass heading from magnetometer data
+            # Using atan2 with x and y components, converting to 0-360 degrees
+            # x = starboard (right), y = bow (forward) per coordinate frame
+            heading_rad = math.atan2(-mx_uT, my_uT)  # -x because we want clockwise from North
+            heading_deg = math.degrees(heading_rad)
+            if heading_deg < 0:
+                heading_deg += 360.0
+            
             # Publish in physical units
             self.pub_accel.publish(Vector3(x=ax_g, y=ay_g, z=az_g))
             self.pub_gyro.publish(Vector3(x=gx_dps, y=gy_dps, z=gz_dps))
-            self.pub_compass.publish(Vector3(x=mx_uT, y=my_uT, z=mz_uT))
+            self.pub_magnetometer.publish(Vector3(x=mx_uT, y=my_uT, z=mz_uT))
+            self.pub_compass.publish(Float64(data=heading_deg))
         except Exception as e:
             self.get_logger().error(f'IMU read failed: {e}')
+            self._publish_health_status(False)
 
     def _quiet_shutdown(self) -> None:
+        # Publish health status as failed on shutdown
+        self._publish_health_status(False)
+
         # Teardown ASCII view
         self._teardown_ascii_vis()
         # Attempt to close I2C bus if supported
@@ -312,12 +395,15 @@ class ImuNode(Node):
         except Exception:
             pass
 
+
 def main(args=None):
     rclpy.init(args=args)
 
     parser = argparse.ArgumentParser(description='IMU Sensor Node')
-    parser.add_argument('--debug', action='store_true', help='Enable debug logging for sensor values')
-    parser.add_argument('--calib_compass', action='store_true', help='Collect magnetometer samples and save calibration')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug logging for sensor values')
+    parser.add_argument('--calib_compass', action='store_true',
+                        help='Collect magnetometer samples and save calibration')
     parsed_args = parser.parse_args(args=args)
 
     # If only calibration is requested, run a standalone collector
@@ -336,7 +422,8 @@ def main(args=None):
             bus.write_byte_data(AK_ADDR, 0x31, 0x08)
             time.sleep(0.01)
 
-            print("Rotate the device slowly through all orientations (figure-8). Press Ctrl-C to finish and save.")
+            print(
+                "Rotate the device slowly through all orientations (figure-8). Press Ctrl-C to finish and save.")
             samples = []
             # Tracking minima and maxima
             minx = miny = minz = float('inf')
@@ -362,7 +449,8 @@ def main(args=None):
                     frac = max(0.0, min(1.0, span / fs))
                     fill = int(round(frac * bar_width))
                     bar = '#' * fill + '-' * (bar_width - fill)
-                    lines.append(f"Mag {name} [{mn:+6.1f} .. {mx:+6.1f}] |{bar}| span={span:5.1f} uT")
+                    lines.append(
+                        f"Mag {name} [{mn:+6.1f} .. {mx:+6.1f}] |{bar}| span={span:5.1f} uT")
                 try:
                     sys.stdout.write('\x1b[H')  # home
                     for ln in [f"Samples: {len(samples)}", *lines, "Ctrl-C to finish..."]:
@@ -384,12 +472,18 @@ def main(args=None):
                             my_uT = my_cnt * 0.15
                             mz_uT = mz_cnt * 0.15
                             samples.append((mx_uT, my_uT, mz_uT))
-                            if mx_uT < minx: minx = mx_uT
-                            if my_uT < miny: miny = my_uT
-                            if mz_uT < minz: minz = mz_uT
-                            if mx_uT > maxx: maxx = mx_uT
-                            if my_uT > maxy: maxy = my_uT
-                            if mz_uT > maxz: maxz = mz_uT
+                            if mx_uT < minx:
+                                minx = mx_uT
+                            if my_uT < miny:
+                                miny = my_uT
+                            if mz_uT < minz:
+                                minz = mz_uT
+                            if mx_uT > maxx:
+                                maxx = mx_uT
+                            if my_uT > maxy:
+                                maxy = my_uT
+                            if mz_uT > maxz:
+                                maxz = mz_uT
                             if visual_ok:
                                 render_bars()
                     except Exception:
@@ -409,7 +503,8 @@ def main(args=None):
                         pass
 
             if len(samples) < 100:
-                print(f"Warning: only {len(samples)} samples collected; calibration may be poor.")
+                print(
+                    f"Warning: only {len(samples)} samples collected; calibration may be poor.")
 
             # Min-max calibration (diagonal soft-iron approximation)
             xs = [s[0] for s in samples]
@@ -441,7 +536,8 @@ def main(args=None):
             print("\nProposed compass calibration (min-max diag fit):")
             print(f"  bias_uT     = [{bx:+.2f}, {by:+.2f}, {bz:+.2f}]")
             print(f"  scale_diag  = [{sx:.4f}, {sy:.4f}, {sz:.4f}]")
-            print(f"  ranges_uT   = X[{minx:+.1f}..{maxx:+.1f}] Y[{miny:+.1f}..{maxy:+.1f}] Z[{minz:+.1f}..{maxz:+.1f}] (n={len(samples)})")
+            print(
+                f"  ranges_uT   = X[{minx:+.1f}..{maxx:+.1f}] Y[{miny:+.1f}..{maxy:+.1f}] Z[{minz:+.1f}..{maxz:+.1f}] (n={len(samples)})")
 
             def _prompt_yes_no(message: str, default_yes: bool = True) -> bool:
                 opts = "Y/n" if default_yes else "y/N"
@@ -460,7 +556,8 @@ def main(args=None):
             if _prompt_yes_no("Save calibration to invensense-20948-compass-calibration.json?", default_yes=True):
                 with open('invensense-20948-compass-calibration.json', 'w') as f:
                     json.dump(calib, f, indent=2)
-                print("Saved compass calibration to invensense-20948-compass-calibration.json")
+                print(
+                    "Saved compass calibration to invensense-20948-compass-calibration.json")
             else:
                 print("Calibration discarded; file not saved.")
         except Exception as e:
@@ -501,6 +598,7 @@ def main(args=None):
             except Exception:
                 pass
             sys.exit(0)
+
 
 if __name__ == '__main__':
     main()

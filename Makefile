@@ -235,41 +235,42 @@ submodule-init:
 		exit 1; \
 	fi
 	@echo "Checking submodule configuration..."
-	@if ! grep -q "simulator" .gitmodules; then \
-		echo "❌ 'simulator' submodule not found in .gitmodules"; \
+	@if ! grep -q "simulator/sailboat-playground" .gitmodules; then \
+		echo "❌ 'simulator/sailboat-playground' submodule not found in .gitmodules"; \
 		echo "   Available submodules:"; \
 		grep "path = " .gitmodules | sed 's/.*path = /     - /'; \
 		exit 1; \
 	fi
 	@echo "Initializing and checking out submodule..."
-	git submodule update --init --recursive simulator
+	git submodule update --init --recursive simulator/sailboat-playground
 	@echo "✅ sailboat-playground submodule initialized successfully!"
 	@echo ""
-	@echo "Submodule location: simulator/"
+	@echo "Submodule location: simulator/sailboat-playground/"
+	@echo "Customizations location: simulator/customizations/sailboat-playground/"
 	@echo "Source repository: https://github.com/SensorsINI/sailboat-playground.git"
 	@echo ""
 	@echo "Next steps:"
-	@echo "  1. Review the submodule code in simulator/"
+	@echo "  1. Review the submodule code in simulator/sailboat-playground/"
 	@echo "  2. Use 'make submodule-update' to get latest changes"
 	@echo "  3. Use 'make submodule-status' to check current version"
 
 submodule-update:
 	@echo "Updating sailboat-playground submodule..."
-	@if [ ! -d simulator ]; then \
+	@if [ ! -d simulator/sailboat-playground ]; then \
 		echo "❌ Submodule not initialized!"; \
 		echo "   Run 'make submodule-init' first."; \
 		exit 1; \
 	fi
 	@echo "Fetching latest changes from remote..."
-	git submodule update --remote --merge simulator
+	git submodule update --remote --merge simulator/sailboat-playground
 	@echo "✅ sailboat-playground submodule updated successfully!"
 	@echo ""
 	@echo "Current submodule status:"
-	@git submodule status simulator
+	@git submodule status simulator/sailboat-playground
 	@echo ""
 	@echo "Note: The submodule has been updated to the latest version."
 	@echo "      Commit this change to lock the submodule to this version:"
-	@echo "      git add simulator"
+	@echo "      git add simulator/sailboat-playground"
 	@echo "      git commit -m 'Update sailboat-playground submodule'"
 
 submodule-status:
@@ -282,47 +283,48 @@ submodule-status:
 		exit 1; \
 	fi
 	@echo "🔍 Submodule Configuration:"
-	@if grep -q "simulator" .gitmodules; then \
-		echo "✅ simulator submodule configured"; \
-		url=$$(grep -A1 "simulator" .gitmodules | grep "url" | cut -d'=' -f2 | tr -d ' \t'); \
+	@if grep -q "simulator/sailboat-playground" .gitmodules; then \
+		echo "✅ simulator/sailboat-playground submodule configured"; \
+		url=$$(grep -A1 "simulator/sailboat-playground" .gitmodules | grep "url" | cut -d'=' -f2 | tr -d ' \t'); \
 		echo "   URL: $$url"; \
 	else \
-		echo "❌ simulator submodule not found in .gitmodules"; \
+		echo "❌ simulator/sailboat-playground submodule not found in .gitmodules"; \
 		echo "   Available submodules:"; \
 		grep "path = " .gitmodules | sed 's/.*path = /     - /'; \
 		exit 1; \
 	fi
 	@echo ""
 	@echo "🔍 Submodule Status:"
-	@if [ -d simulator ]; then \
-		echo "✅ Submodule directory exists: simulator/"; \
-		if [ -f simulator/.git ] || [ -d simulator/.git ]; then \
+	@if [ -d simulator/sailboat-playground ]; then \
+		echo "✅ Submodule directory exists: simulator/sailboat-playground/"; \
+		if [ -f simulator/sailboat-playground/.git ] || [ -d simulator/sailboat-playground/.git ]; then \
 			echo "✅ Submodule is initialized"; \
 			echo ""; \
 			echo "Current commit:"; \
-			cd simulator && git log --oneline -1 && cd ..; \
+			cd simulator/sailboat-playground && git log --oneline -1 && cd ../..; \
 			echo ""; \
 			echo "Branch information:"; \
-			cd simulator && git branch -v && cd ..; \
+			cd simulator/sailboat-playground && git branch -v && cd ../..; \
 			echo ""; \
 			echo "Remote status:"; \
-			cd simulator && git status -sb && cd ..; \
+			cd simulator/sailboat-playground && git status -sb && cd ../..; \
 		else \
 			echo "❌ Submodule directory exists but not initialized"; \
 			echo "   Run 'make submodule-init' to initialize"; \
 		fi; \
 	else \
-		echo "❌ Submodule directory not found: simulator/"; \
+		echo "❌ Submodule directory not found: simulator/sailboat-playground/"; \
 		echo "   Run 'make submodule-init' to initialize"; \
 	fi
 	@echo ""
-	@echo "🔍 Local Configuration Files:"
-	@if [ -d sailboat-playground ]; then \
-		echo "✅ Local config directory exists: sailboat-playground/"; \
+	@echo "🔍 Local Customization Files:"
+	@if [ -d simulator/customizations/sailboat-playground ]; then \
+		echo "✅ Customizations directory exists: simulator/customizations/sailboat-playground/"; \
 		echo "   This contains Argo-specific configuration files"; \
 		echo "   (separate from the submodule source code)"; \
+		ls -1 simulator/customizations/sailboat-playground/ | sed 's/^/     - /'; \
 	else \
-		echo "❌ Local config directory not found: sailboat-playground/"; \
+		echo "❌ Customizations directory not found: simulator/customizations/sailboat-playground/"; \
 		echo "   This may affect simulator functionality"; \
 	fi
 	@echo ""
