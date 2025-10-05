@@ -1,0 +1,23 @@
+[Unit]
+Description=ROS2 Test Service Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=tobi
+Group=tobi
+WorkingDirectory=/home/tobi/Dropbox/GitHub/SensorsINI/argo/tests
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/tobi/Dropbox/GitHub/SensorsINI/argo/tests/test_service_server.py'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=test-service-server
+
+# Environment variables
+Environment=ROS_DOMAIN_ID=0
+Environment=PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:/home/tobi/Dropbox/GitHub/SensorsINI/argo
+
+[Install]
+WantedBy=multi-user.target
