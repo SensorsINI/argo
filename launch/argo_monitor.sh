@@ -3,6 +3,7 @@
 # Argo Monitor Script
 # Continuously displays Argo status with proper buffering
 #
+PAUSE_TIME=3
 
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,12 +32,9 @@ while true; do
     
     # Clear screen and display the buffered output
     clear
-    echo -e "${GREEN}🚢 ARGO MONITOR - $(date '+%Y-%m-%d %H:%M:%S')${NC}"
-    echo "============================================================"
     echo "$status_output"
-    echo "============================================================"
-    echo -e "${YELLOW}Press Ctrl+C to stop monitoring${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to stop monitoring${NC}. Next update in $PAUSE_TIME seconds."
     
     # Wait 10 seconds before next update
-    sleep 10
+    sleep $PAUSE_TIME
 done

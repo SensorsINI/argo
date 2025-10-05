@@ -225,6 +225,11 @@ uninstall-power-control:
 	@echo "Uninstalling power control system..."
 	@$(MAKE) -C power_control uninstall
 
+# ==================== BATTERY MONITORING ====================
+# Battery monitoring is now integrated into battery_water.py node
+# CSV files are automatically created in /var/log.hdd/persistent/
+# No separate service installation needed
+
 # ==================== GIT SUBMODULE MANAGEMENT ====================
 
 submodule-init:

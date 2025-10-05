@@ -50,15 +50,19 @@ class ArgoNodeManager:
         self.nodes_dir = os.path.join(self.argo_root, 'nodes')
         self._discovered_nodes = None
         self._special_nodes = ['foxglove_bridge']  # Nodes not in nodes/ folder
+        self._simulation_only_nodes = ['argo_unified_simulator_bridge']  # Nodes only for simulation mode
     
-    def discover_nodes(self) -> List[str]:
+    def discover_nodes(self, exclude_simulation_only: bool = False) -> List[str]:
         """
         Discover all available nodes from the nodes/ folder
+        
+        Args:
+            exclude_simulation_only: If True, exclude nodes that are only for simulation mode
         
         Returns:
             List of node names (without .py extension)
         """
-        if self._discovered_nodes is not None:
+        if self._discovered_nodes is not None and not exclude_simulation_only:
             return self._discovered_nodes
             
         nodes = []
@@ -72,6 +76,11 @@ class ArgoNodeManager:
                     if self._is_ros_node(os.path.join(self.nodes_dir, file_path)):
                         # Remove .py extension
                         node_name = file_path[:-3]
+                        
+                        # Skip simulation-only nodes if requested
+                        if exclude_simulation_only and node_name in self._simulation_only_nodes:
+                            continue
+                            
                         nodes.append(node_name)
         
         # Add special nodes that aren't in the nodes/ folder
@@ -80,7 +89,9 @@ class ArgoNodeManager:
         # Sort for consistent ordering
         nodes.sort()
         
-        self._discovered_nodes = nodes
+        # Only cache if not excluding simulation nodes
+        if not exclude_simulation_only:
+            self._discovered_nodes = nodes
         return nodes
     
     def _is_ros_node(self, file_path: str) -> bool:
@@ -307,10 +318,10 @@ class ArgoNodeManager:
 
 
 # Convenience functions for backward compatibility
-def get_argo_nodes(argo_root: Optional[str] = None) -> List[str]:
+def get_argo_nodes(argo_root: Optional[str] = None, exclude_simulation_only: bool = False) -> List[str]:
     """Get list of all Argo nodes"""
     manager = ArgoNodeManager(argo_root)
-    return manager.discover_nodes()
+    return manager.discover_nodes(exclude_simulation_only=exclude_simulation_only)
 
 
 def get_argo_node_status(argo_root: Optional[str] = None) -> Dict[str, Dict]:

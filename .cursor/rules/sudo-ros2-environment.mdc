@@ -1,0 +1,109 @@
+---
+alwaysApply: true
+description: "Sudo ROS2 command patterns and environment sourcing requirements"
+---
+
+# Sudo ROS2 Command Environment Sourcing
+
+## Critical Pattern: Always Source ROS2 Environment for Sudo Commands
+
+When running ROS2 commands with `sudo`, the ROS2 environment is NOT automatically inherited. This causes `ModuleNotFoundError: No module named 'rclpy'` and other ROS2-related failures.
+
+## Correct Patterns
+
+### ✅ DO: Use bash -c with environment sourcing
+```bash
+# For single ROS2 commands
+sudo bash -c 'source /opt/ros/humble/setup.bash && ros2 service call /argo/recording/start std_srvs/srv/Trigger'
+
+# For Python scripts that use ROS2
+sudo bash -c 'source /opt/ros/humble/setup.bash && python3 /path/to/ros2_script.py'
+
+# For complex command chains
+sudo bash -c 'source /opt/ros/humble/setup.bash && ros2 node list && ros2 topic list'
+```
+
+### ❌ DON'T: Run ROS2 commands directly with sudo
+```bash
+# This will fail with ModuleNotFoundError
+sudo ros2 service call /argo/recording/start std_srvs/srv/Trigger
+sudo python3 /path/to/ros2_script.py
+```
+
+## Common Use Cases
+
+### Power Control Service
+The [power_control/argo_power_control.py](mdc:power_control/argo_power_control.py) service runs as root and requires proper environment sourcing:
+
+```bash
+# Starting the service
+sudo bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/power_control/argo_power_control.py'
+
+# Testing the service
+sudo bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/power_control/argo_power_control.py --simulate-triple-tap'
+```
+
+### Subprocess Calls in Python
+When making subprocess calls to ROS2 commands from Python scripts running as root:
+
+```python
+# Correct pattern in Python
+result = subprocess.run([
+    'bash', '-c', 
+    'source /opt/ros/humble/setup.bash && ros2 service call /argo/recording/start std_srvs/srv/Trigger'
+], capture_output=True, text=True, timeout=10)
+```
+
+### Service Management
+For systemd services that need ROS2 environment:
+
+```bash
+# In service files, use ExecStart with proper environment
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /path/to/ros2_service.py'
+```
+
+## Environment Variables
+
+The ROS2 environment typically includes:
+- `ROS_DISTRO=humble`
+- `PYTHONPATH` with ROS2 Python packages
+- `LD_LIBRARY_PATH` with ROS2 libraries
+- `PATH` with ROS2 executables
+
+## Testing Commands
+
+Always test sudo ROS2 commands to ensure they work:
+
+```bash
+# Test basic ROS2 functionality
+sudo bash -c 'source /opt/ros/humble/setup.bash && ros2 node list'
+
+# Test service calls
+sudo bash -c 'source /opt/ros/humble/setup.bash && ros2 service list'
+
+# Test Python ROS2 imports
+sudo bash -c 'source /opt/ros/humble/setup.bash && python3 -c "import rclpy; print(\"ROS2 environment OK\")"'
+```
+
+## Error Patterns to Watch For
+
+- `ModuleNotFoundError: No module named 'rclpy'`
+- `ModuleNotFoundError: No module named 'std_msgs'`
+- `ros2: command not found`
+- `[Errno 2] No such file or directory: 'ros2'`
+
+All of these indicate missing ROS2 environment sourcing in sudo commands.
+
+## Integration with Existing Scripts
+
+Update existing scripts that use sudo with ROS2 commands:
+
+```bash
+# Before (broken)
+sudo python3 script.py
+
+# After (working)
+sudo bash -c 'source /opt/ros/humble/setup.bash && python3 script.py'
+```
+
+This pattern ensures consistent ROS2 functionality across all sudo operations in the Argo project.

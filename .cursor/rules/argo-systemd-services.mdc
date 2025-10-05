@@ -89,7 +89,7 @@ WantedBy=multi-user.target
 
 ## Service Log Locations
 - **System logs**: `sudo journalctl -u <service>`
-- **Persistent logs**: `/var/log/persistent/`
+- **Persistent logs**: `/var/log.hdd/persistent/`
 - **Service-specific logs**: Check service configuration for custom log paths
 
 ## Common Service Issues

@@ -1,0 +1,128 @@
+---
+alwaysApply: true
+description: "Argo dotfiles setup and installation patterns"
+---
+
+# Argo Dotfiles Setup and Installation
+
+## Custom Dotfiles Structure
+
+The Argo project uses a custom dotfiles system managed through the top-level Makefile:
+
+### Dotfiles Location
+- **Aliases**: [dotfiles/.bash_aliases](mdc:dotfiles/.bash_aliases) - Custom bash aliases for Argo robot control
+- **Bashrc**: [dotfiles/.bashrc](mdc:dotfiles/.bashrc) - Custom bash configuration with Argo-specific functions
+- **Installation**: Managed by [Makefile](mdc:Makefile) `install-argo-cli` target
+
+### Key Aliases (from dotfiles/.bash_aliases)
+```bash
+# Argo Robot Control Aliases - ROS2 Native Approach
+alias al='/home/orangepi/argo/launch/argo_start.sh'           # Start Argo nodes
+alias aq='/home/orangepi/argo/launch/argo_stop.sh'            # Stop Argo nodes  
+alias ars='/home/orangepi/argo/launch/argo_restart.sh'        # Restart Argo nodes
+alias as='/home/orangepi/argo/launch/argo_status.sh'          # Show Argo status
+alias am='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py monitor'  # Monitor mode
+alias ar='ros2 service call /argo/recording/start std_srvs/srv/Trigger'  # Start recording
+alias ac='ros2 service call /argo/recording/stop std_srvs/srv/Trigger'   # Stop recording
+alias ah='bash /home/orangepi/argo/launch/argo_help.sh'       # Show argo help
+alias ag='sudo python3 /home/orangepi/argo/launch/argo_gui.py' # Start argo gui
+alias alog='journalctl -u argo-launch.service -f --no-pager'  # Show argo launch logs
+alias asim='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py simulate_local'  # Local simulation
+alias asimr='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py simulate_remote' # Remote simulation
+```
+
+### Custom Functions (from dotfiles/.bashrc)
+```bash
+# Manual status check (always shows full details)
+argo_status() {
+    python3 ~/argo/launch/argo_lifecycle_manager.py status
+}
+
+# Quick timer for automatic status checks (5+ minutes since last check)
+argo_quick_timer() {
+    # Implements throttled status checking with force option
+    # Updates ~/.argo_last_check timestamp file
+}
+```
+
+## Installation Process
+
+### Makefile Integration
+The [Makefile](mdc:Makefile) provides several targets for dotfiles management:
+
+```makefile
+# Install Argo CLI (aliases, functions, and dotfiles)
+install-argo-cli:
+    # Adds "source ~/argo/dotfiles/.bashrc" to ~/.bashrc
+    # Installs .tmux.conf if available
+    # Provides activation instructions
+
+# Alias management targets
+aliases-install    # Install/update aliases and activate immediately
+aliases-force      # Force reinstall/update aliases (overwrites existing)
+aliases-activate   # Print command to activate aliases in current shell
+```
+
+### Installation Steps
+1. **Run**: `make install-argo-cli` from project root
+2. **Activates**: Adds dotfiles sourcing to `~/.bashrc`
+3. **Immediate use**: Run `source ~/.bashrc` in current terminal
+4. **Auto-load**: New terminals automatically load Argo CLI
+
+### Path Configuration
+The dotfiles automatically add Argo directories to PATH:
+```bash
+PATH="$HOME/argo/launch:$HOME/argo/nodes:$HOME/argo/scripts:$PATH"
+```
+
+## Service Integration
+
+### ROS2 Service Calls
+The aliases use proper ROS2 service calls:
+- **Recording**: Uses `std_srvs/srv/Trigger` (not `Empty`)
+- **Service checks**: Validates `argo-launch.service` is running before calls
+- **Error handling**: Shows clear error messages if service unavailable
+
+### Systemd Integration
+- **Service status**: `systemctl is-active --quiet argo-launch.service`
+- **Log monitoring**: `journalctl -u argo-launch.service -f --no-pager`
+- **Auto-startup**: Managed through launch/ directory Makefile
+
+## Development Patterns
+
+### When Adding New Aliases
+1. **Add to**: [dotfiles/.bash_aliases](mdc:dotfiles/.bash_aliases)
+2. **Test**: Run `make aliases-install` to update
+3. **Activate**: Run `source ~/.bashrc` or open new terminal
+4. **Document**: Update this rule if adding significant functionality
+
+### When Adding New Functions
+1. **Add to**: [dotfiles/.bashrc](mdc:dotfiles/.bashrc)
+2. **Follow pattern**: Use `argo_` prefix for Argo-specific functions
+3. **Error handling**: Include proper error messages and usage info
+4. **Throttling**: Consider using timer patterns for expensive operations
+
+### Service Call Patterns
+- **Always check service status** before making ROS2 calls
+- **Use proper service types** (Trigger, not Empty)
+- **Include timeouts** for service calls to prevent hanging
+- **Provide clear error messages** when services unavailable
+
+## Quick Reference
+
+### Essential Commands
+```bash
+make install-argo-cli    # Install dotfiles system
+source ~/.bashrc         # Activate in current terminal
+al                      # Start Argo system
+aq                      # Stop Argo system
+ar                      # Start recording
+ac                      # Stop recording
+as                      # Show status
+argo_status             # Detailed status check
+```
+
+### Troubleshooting
+- **Aliases not working**: Run `source ~/.bashrc` or check `~/.bashrc` has dotfiles sourcing
+- **Service calls hanging**: Check service type (use Trigger, not Empty) and add timeouts
+- **Path issues**: Verify PATH includes Argo directories after sourcing dotfiles

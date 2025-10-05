@@ -1,0 +1,87 @@
+---
+alwaysApply: true
+description: "Python testing environment rules and pycache cleanup"
+---
+
+# Python Testing Environment Rules
+
+## No Automatic Compilation During Testing
+
+When working with Python code in this project, **DO NOT** automatically compile Python files using `python3 -m py_compile` or similar compilation commands during testing phases. The project is in active development and testing mode, so:
+
+- **Skip compilation checks** unless explicitly requested by the user
+- **Focus on functionality testing** rather than syntax validation
+- **Assume code is syntactically correct** unless errors are reported
+- **Only compile when user specifically asks** for syntax validation
+
+## Pycache Cleanup for Testing
+
+Always clean up Python cache files to ensure testing uses the latest code:
+
+### Automatic Pycache Removal
+When making changes to Python files, automatically remove `__pycache__` directories and `.pyc` files to prevent stale bytecode from affecting tests:
+
+```bash
+# Remove all Python cache files
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+find . -name "*.pyc" -delete 2>/dev/null || true
+```
+
+### When to Clean Pycache
+- **Before testing** any Python code changes
+- **After modifying** Python files in the project
+- **When switching** between different Python versions or environments
+- **When experiencing** unexpected behavior that might be due to cached bytecode
+
+### Files to Clean
+- `__pycache__/` directories
+- `*.pyc` files
+- `*.pyo` files (optimized bytecode)
+- `*.pyd` files (Windows Python extensions)
+
+## Testing Best Practices
+
+### Focus on Functionality
+- Test the actual behavior of Python scripts
+- Verify ROS2 service calls work correctly
+- Check that GPIO operations function as expected
+- Validate that systemd services start/stop properly
+
+### Avoid Premature Compilation
+- Don't compile files just to check syntax
+- Don't run `python3 -m py_compile` unless specifically requested
+- Don't assume compilation errors indicate real problems
+- Focus on runtime behavior and integration testing
+
+### Clean Testing Environment
+- Always start with a clean pycache state
+- Remove stale bytecode before testing
+- Ensure tests run against the latest source code
+- Clear any cached imports that might affect behavior
+
+## Common Pycache Locations in This Project
+
+Based on the project structure, watch for pycache in:
+- `power_control/__pycache__/`
+- `nodes/__pycache__/`
+- `launch/__pycache__/`
+- `scripts/__pycache__/`
+- `simulator/__pycache__/` (if present)
+
+## Integration with Existing Tools
+
+This rule works alongside:
+- **Argo lifecycle management** - ensures clean testing of ROS2 nodes
+- **Power control testing** - prevents stale bytecode in GPIO operations
+- **Recording service testing** - ensures latest code is used for service calls
+- **Systemd service testing** - clean environment for service validation
+
+## Quick Cleanup Command
+
+For immediate pycache cleanup, use:
+```bash
+# One-liner to clean all Python cache
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && find . -name "*.pyc" -delete 2>/dev/null || true
+```
+
+This ensures that all Python testing in the Argo project uses the latest source code without interference from cached bytecode.

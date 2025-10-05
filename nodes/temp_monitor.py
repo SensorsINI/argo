@@ -8,6 +8,8 @@
 # Alerts (Bool):
 # - temperature_high_alert - When temperature exceeds high threshold
 # - temperature_critical_alert - When temperature exceeds critical threshold
+# Health (Bool):
+# - temp_monitor_health (true=healthy, false=failed)
 # Publishing optimization (saves rosbag space):
 # - First 30s: publishes all temperature data at 1Hz, logs temperature states every 5s via ROS info
 # - After 30s: publishes temperature data only when values change >5% OR every 60s (whichever is shorter)
@@ -20,7 +22,6 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Float32, Bool
 import time
 import sys
@@ -34,6 +35,7 @@ HIGH_TEMPERATURE_THRESHOLD_C = 85.0
 CRITICAL_TEMPERATURE_THRESHOLD_C = 100.0
 TEMPERATURE_HYSTERESIS_C = 2.0
 
+
 class TempMonitorNode(Node):
     def __init__(self):
         super().__init__('temp_monitor_node')
@@ -42,25 +44,27 @@ class TempMonitorNode(Node):
         # Debug flag
         self.debug = ('--debug' in sys.argv)
 
-        # QoS profile for persistent temperature alerts
-        # Critical temperature alerts should persist for safety
-        persistent_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            depth=1  # Keep only the latest value
-        )
 
         # Publishers
-        self.pub_cpu_temperature = self.create_publisher(Float32, 'cpu_temperature', 10)
-        self.pub_system_temperature = self.create_publisher(Float32, 'system_temperature', 10)
-        # Alert publishers with persistent QoS for safety-critical temperature alerts
-        self.pub_temperature_high_alert = self.create_publisher(Bool, 'temperature_high_alert', persistent_qos)
-        self.pub_temperature_critical_alert = self.create_publisher(Bool, 'temperature_critical_alert', persistent_qos)
-        
+        self.pub_cpu_temperature = self.create_publisher(
+            Float32, 'cpu_temperature', 10)
+        self.pub_system_temperature = self.create_publisher(
+            Float32, 'system_temperature', 10)
+        # Alert publishers for safety-critical temperature alerts
+        self.pub_temperature_high_alert = self.create_publisher(
+            Bool, 'temperature_high_alert', 10)
+        self.pub_temperature_critical_alert = self.create_publisher(
+            Bool, 'temperature_critical_alert', 10)
+
+        # Health status publisher
+        self.pub_health = self.create_publisher(
+            Bool, 'temp_monitor_health', 10)
+        self.health_status = False  # Track current health status
+
         # Alert previous-state flags for edge-triggered logging
         self._temp_high_prev = False
         self._temp_critical_prev = False
-        
+
         # Timing and change detection for optimized publishing
         self._startup_time = time.monotonic()
         self._last_publish_time = 0.0
@@ -70,16 +74,20 @@ class TempMonitorNode(Node):
         self._prev_system_temperature = None
 
         # Temperature thresholds
-        self.temp_high_threshold_c = float(self.declare_parameter('temperature_high_threshold_c', HIGH_TEMPERATURE_THRESHOLD_C).value)
-        self.temp_critical_threshold_c = float(self.declare_parameter('temperature_critical_threshold_c', CRITICAL_TEMPERATURE_THRESHOLD_C).value)
-        self.temp_hysteresis_c = float(self.declare_parameter('temperature_hysteresis_c', TEMPERATURE_HYSTERESIS_C).value)
+        self.temp_high_threshold_c = float(self.declare_parameter(
+            'temperature_high_threshold_c', HIGH_TEMPERATURE_THRESHOLD_C).value)
+        self.temp_critical_threshold_c = float(self.declare_parameter(
+            'temperature_critical_threshold_c', CRITICAL_TEMPERATURE_THRESHOLD_C).value)
+        self.temp_hysteresis_c = float(self.declare_parameter(
+            'temperature_hysteresis_c', TEMPERATURE_HYSTERESIS_C).value)
 
         # Find thermal zones
         self.thermal_zones = self._find_thermal_zones()
         if not self.thermal_zones:
             self.get_logger().error('No thermal zones found! Temperature monitoring will not work.')
         else:
-            self.get_logger().info(f'Found thermal zones: {self.thermal_zones}')
+            self.get_logger().info(
+                f'Found thermal zones: {self.thermal_zones}')
 
         # ASCII visual debug when --debug is passed
         self._vis_ascii = self.debug
@@ -90,6 +98,22 @@ class TempMonitorNode(Node):
         # Timer: 1 Hz
         self.timer = self.create_timer(1.0, self.read_and_publish)
         self.get_logger().info('Temperature Monitor node initialized and reading at 1 Hz.')
+
+        # Publish initial health status as healthy
+        self._publish_health_status(True)
+
+    def _publish_health_status(self, is_healthy: bool):
+        """Publish health status and update internal state"""
+        if self.health_status != is_healthy:
+            self.health_status = is_healthy
+            health_msg = Bool()
+            health_msg.data = is_healthy
+            self.pub_health.publish(health_msg)
+
+            if is_healthy:
+                self.get_logger().info("Temperature Monitor health status: HEALTHY")
+            else:
+                self.get_logger().warn("Temperature Monitor health status: FAILED")
 
     def _find_thermal_zones(self):
         """Find available thermal zones for temperature monitoring"""
@@ -109,12 +133,14 @@ class TempMonitorNode(Node):
                                 # Look for CPU-related thermal zones
                                 if 'cpu' in zone_type.lower() or 'soc' in zone_type.lower():
                                     thermal_zones.append(zone_dir)
-                                    self.get_logger().info(f'Found thermal zone: {zone_type} at {zone_dir}')
+                                    self.get_logger().info(
+                                        f'Found thermal zone: {zone_type} at {zone_dir}')
                             except Exception as e:
-                                self.get_logger().debug(f'Could not read type from {type_file}: {e}')
+                                self.get_logger().debug(
+                                    f'Could not read type from {type_file}: {e}')
         except Exception as e:
             self.get_logger().error(f'Error finding thermal zones: {e}')
-        
+
         return thermal_zones
 
     def _read_thermal_zone_temp(self, zone_path):
@@ -126,20 +152,21 @@ class TempMonitorNode(Node):
                     temp_millicelsius = int(f.read().strip())
                 return temp_millicelsius / 1000.0  # Convert to Celsius
         except Exception as e:
-            self.get_logger().debug(f'Error reading temperature from {zone_path}: {e}')
+            self.get_logger().debug(
+                f'Error reading temperature from {zone_path}: {e}')
         return None
 
     def _read_cpu_temperature(self):
         """Read CPU temperature from thermal zones"""
         if not self.thermal_zones:
             return None
-        
+
         temperatures = []
         for zone in self.thermal_zones:
             temp = self._read_thermal_zone_temp(zone)
             if temp is not None:
                 temperatures.append(temp)
-        
+
         if temperatures:
             # Return the maximum temperature found (hottest CPU core)
             return max(temperatures)
@@ -160,25 +187,29 @@ class TempMonitorNode(Node):
         """Update ASCII visualization bars"""
         if not self._vis_ascii:
             return
-        
+
         # Temperature ranges for visualization
         temp_min, temp_max = 20.0, 100.0
-        
+
         try:
             sys.stdout.write('\x1b[H')  # home
             lines = []
-            
+
             if cpu_temp_c is not None:
                 # Map temp to 0..range for bar
                 temp_span = max(1e-6, temp_max - temp_min)
-                temp_norm = (max(temp_min, min(temp_max, cpu_temp_c)) - temp_min) / temp_span * 100.0
-                lines.append(f"CPU    {cpu_temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
-            
+                temp_norm = (max(temp_min, min(temp_max, cpu_temp_c)
+                                 ) - temp_min) / temp_span * 100.0
+                lines.append(
+                    f"CPU    {cpu_temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
+
             if sys_temp_c is not None:
                 temp_span = max(1e-6, temp_max - temp_min)
-                temp_norm = (max(temp_min, min(temp_max, sys_temp_c)) - temp_min) / temp_span * 100.0
-                lines.append(f"System {sys_temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
-            
+                temp_norm = (max(temp_min, min(temp_max, sys_temp_c)
+                                 ) - temp_min) / temp_span * 100.0
+                lines.append(
+                    f"System {sys_temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
+
             lines.append("Ctrl-C to exit")
             for ln in lines:
                 sys.stdout.write(ln + '\n')
@@ -221,17 +252,18 @@ class TempMonitorNode(Node):
         if fill > width:
             fill = width
         return '[' + ('#' * fill) + ('-' * (width - fill)) + ']'
-    
+
     def _has_significant_change(self, current_value, previous_value, threshold_pct=5.0):
         """Check if current value has changed by more than threshold_pct from previous value"""
         if previous_value is None or current_value is None:
             return True  # Always publish if we don't have previous data
-        
+
         if previous_value == 0.0:
             # Avoid division by zero; consider any non-zero change significant
             return current_value != 0.0
-        
-        change_pct = abs((current_value - previous_value) / previous_value) * 100.0
+
+        change_pct = abs((current_value - previous_value) /
+                         previous_value) * 100.0
         return change_pct >= threshold_pct
 
     def read_and_publish(self):
@@ -240,14 +272,14 @@ class TempMonitorNode(Node):
         time_since_startup = current_time - self._startup_time
         time_since_last_publish = current_time - self._last_publish_time
         time_since_last_log = current_time - self._last_log_time
-        
+
         # Read temperatures
         cpu_temperature = self._read_cpu_temperature()
         system_temperature = self._read_system_temperature()
-        
+
         # Determine if we should publish values
         should_publish = False
-        
+
         # First 30 seconds: publish every cycle (1Hz) and log every 5s
         if time_since_startup <= 30.0:
             should_publish = True
@@ -255,26 +287,32 @@ class TempMonitorNode(Node):
                 # Build temperature state message
                 cpu_str = f"CPU={cpu_temperature:.2f}C" if cpu_temperature is not None else "CPU=N/A"
                 sys_str = f"System={system_temperature:.2f}C" if system_temperature is not None else "System=N/A"
-                
-                self.get_logger().info(f"Temperature states: {cpu_str}, {sys_str}")
+
+                self.get_logger().info(
+                    f"Temperature states: {cpu_str}, {sys_str}")
                 self._last_log_time = current_time
         else:
             # After 30s: publish only if significant change (>5%) or 60s elapsed
             significant_change = (
                 self._has_significant_change(cpu_temperature, self._prev_cpu_temperature) or
-                self._has_significant_change(system_temperature, self._prev_system_temperature)
+                self._has_significant_change(
+                    system_temperature, self._prev_system_temperature)
             )
-            
+
             if significant_change or time_since_last_publish >= 60.0:
                 should_publish = True
-        
+
         # Publish values if conditions are met
         if should_publish:
             if cpu_temperature is not None:
                 self.pub_cpu_temperature.publish(Float32(data=cpu_temperature))
             if system_temperature is not None:
-                self.pub_system_temperature.publish(Float32(data=system_temperature))
-            
+                self.pub_system_temperature.publish(
+                    Float32(data=system_temperature))
+
+            # Publish health status as healthy
+            self._publish_health_status(True)
+
             # Update previous values and timestamp
             self._prev_cpu_temperature = cpu_temperature
             self._prev_system_temperature = system_temperature
@@ -291,7 +329,7 @@ class TempMonitorNode(Node):
                     temp_high = not (cpu_temperature <= high_upper)
                 else:
                     temp_high = (cpu_temperature >= high_lower)
-                
+
                 # Critical temperature alert with hysteresis
                 critical_lower = self.temp_critical_threshold_c
                 critical_upper = critical_lower + self.temp_hysteresis_c
@@ -302,10 +340,11 @@ class TempMonitorNode(Node):
             else:
                 temp_high = False
                 temp_critical = False
-            
+
             self.pub_temperature_high_alert.publish(Bool(data=bool(temp_high)))
-            self.pub_temperature_critical_alert.publish(Bool(data=bool(temp_critical)))
-            
+            self.pub_temperature_critical_alert.publish(
+                Bool(data=bool(temp_critical)))
+
             # Edge-triggered warnings
             if temp_high and not self._temp_high_prev:
                 self.get_logger().warning(
@@ -323,12 +362,13 @@ class TempMonitorNode(Node):
                 self.get_logger().info(
                     f"Temperature below critical: {cpu_temperature:.2f} C <= release {critical_upper:.2f} C"
                 )
-            
+
             # Update previous states
             self._temp_high_prev = bool(temp_high)
             self._temp_critical_prev = bool(temp_critical)
-        except Exception:
-            pass
+        except Exception as e:
+            self.get_logger().error(f"Error in read_and_publish: {e}")
+            self._publish_health_status(False)
 
         # Update ASCII bars if enabled
         self._update_bars(cpu_temperature, system_temperature)
@@ -365,12 +405,12 @@ Hardware:
   Reads from /sys/class/thermal/thermal_zone* for CPU temperature
         """
     )
-    parser.add_argument('--debug', action='store_true', 
-                       help='Enable ASCII terminal visualization of temperature values')
-    
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable ASCII terminal visualization of temperature values')
+
     # Parse known args to allow ROS2 arguments to pass through
     parsed_args, unknown_args = parser.parse_known_args(args)
-    
+
     # Initialize ROS2 with remaining arguments
     rclpy.init(args=unknown_args)
     node = TempMonitorNode()
@@ -403,7 +443,7 @@ Hardware:
             except Exception:
                 pass
             try:
-                    rclpy.shutdown()
+                rclpy.shutdown()
             except Exception:
                 pass
         else:
@@ -415,6 +455,7 @@ Hardware:
                 pass
             node.destroy_node()
             rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

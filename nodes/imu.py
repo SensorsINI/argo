@@ -7,14 +7,21 @@ This ROS2 node interfaces with the ICM-20948 9-axis IMU sensor (accelerometer,
 gyroscope, magnetometer) via I2C and publishes raw sensor data to ROS2 topics.
 
 Hardware:
-- ICM-20948 9-axis IMU sensor
+- SparkfunICM-20948 9-axis IMU sensor https://invensense.tdk.com/products/motion-tracking/9-axis/icm-20948/#documentation https://www.sparkfun.com/sparkfun-9dof-imu-breakout-icm-20948-qwiic.html
 - I2C bus 0, address 0x69
 - AK09916 magnetometer (integrated in ICM-20948)
 
-Axes/Coordinate Frame:
-- x: rightwards, starboard
+Axes/Coordinate Frame: (see https://cdn.sparkfun.com/assets/learn_tutorials/8/9/3/DS-000189-ICM-20948-v1.3.pdf section 15, figs 12-13)
+For the ICM-20948, the coordinate frame is defined as follows for the accelerometer:
+- +x: rightwards, starboard
 - y: forwards, towards bow
-- z: up along mast, approx magnetic north
+- +z: up along mast, approx magnetic north
+
+For the magnetometer, the coordinate frame is defined as follows:
+- +x: rightwards, starboard
+- +y: backwards, towards stern
+- z: down into water
+For the gyroscope, the coordinate frame is defined as follows:
 
 Published Topics:
 - /accel (geometry_msgs/Vector3): Raw accelerometer data in g (gravity units)
@@ -317,9 +324,10 @@ class ImuNode(Node):
 
             if self._vis_ascii:
                 try:
-                    # Compute heading for debug display
-                    heading_rad = math.atan2(-mx_uT, my_uT)
-                    heading_deg = math.degrees(heading_rad)
+                    # Compute heading for debug display (same as main calculation)
+                    # Magnetometer coordinate frame: x=starboard, y=stern, z=down
+                    heading_rad = math.atan2(-my_uT, mx_uT)  # -y points to bow, x points to starboard
+                    heading_deg = math.degrees(heading_rad) - 90.0  # Adjust so 0° = North
                     if heading_deg < 0:
                         heading_deg += 360.0
                     
@@ -329,22 +337,22 @@ class ImuNode(Node):
                     g_lim = 500.0  # dps
                     m_lim = 100.0  # uT
                     lines = [
-                        f"Ax {ax_g:+7.3f} g  " + self._signed_bar(ax_g, a_lim),
-                        f"Ay {ay_g:+7.3f} g  " + self._signed_bar(ay_g, a_lim),
-                        f"Az {az_g:+7.3f} g  " + self._signed_bar(az_g, a_lim),
+                        f"Ax {ax_g:+7.3f} g   " + self._signed_bar(ax_g, a_lim),
+                        f"Ay {ay_g:+7.3f} g   " + self._signed_bar(ay_g, a_lim),
+                        f"Az {az_g:+7.3f} g   " + self._signed_bar(az_g, a_lim),
                         f"Gx {gx_dps:+7.1f} dps " +
                         self._signed_bar(gx_dps, g_lim),
                         f"Gy {gy_dps:+7.1f} dps " +
                         self._signed_bar(gy_dps, g_lim),
                         f"Gz {gz_dps:+7.1f} dps " +
                         self._signed_bar(gz_dps, g_lim),
-                        f"Mx {mx_uT:+7.1f} uT " +
+                        f"Mx {mx_uT:+7.1f} uT  " +
                         self._signed_bar(mx_uT, m_lim),
-                        f"My {my_uT:+7.1f} uT " +
+                        f"My {my_uT:+7.1f} uT  " +
                         self._signed_bar(my_uT, m_lim),
-                        f"Mz {mz_uT:+7.1f} uT " +
+                        f"Mz {mz_uT:+7.1f} uT  " +
                         self._signed_bar(mz_uT, m_lim),
-                        f"Hd {heading_deg:+7.1f}° " +
+                        f"Hd {heading_deg:+7.1f}°    " +
                         self._signed_bar(heading_deg - 180, 180),  # Center on 180°
                         "Ctrl-C to exit"
                     ]
@@ -366,10 +374,12 @@ class ImuNode(Node):
                     pass
 
             # Compute compass heading from magnetometer data
-            # Using atan2 with x and y components, converting to 0-360 degrees
-            # x = starboard (right), y = bow (forward) per coordinate frame
-            heading_rad = math.atan2(-mx_uT, my_uT)  # -x because we want clockwise from North
-            heading_deg = math.degrees(heading_rad)
+            # Magnetometer coordinate frame: x=starboard, y=stern (backward), z=down
+            # To get heading: use x and -y (since y points to stern, -y points to bow)
+            # atan2(-y, x) gives us the angle from the x-axis (starboard) to the bow direction
+            # We want angle from North (0°), so we need to adjust by 90° (North is -90° from starboard)
+            heading_rad = math.atan2(-my_uT, mx_uT)  # -y points to bow, x points to starboard
+            heading_deg = math.degrees(heading_rad) - 90.0  # Adjust so 0° = North
             if heading_deg < 0:
                 heading_deg += 360.0
             

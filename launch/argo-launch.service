@@ -9,6 +9,7 @@ User=orangepi
 Group=orangepi
 WorkingDirectory=/home/orangepi/argo
 EnvironmentFile=/home/orangepi/argo/launch/argo.env
+Environment=ROS_DOMAIN_ID=0
 ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 launch/argo_lifecycle_manager.py run'
 ExecStop=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 launch/argo_lifecycle_manager.py stop'
 Restart=no

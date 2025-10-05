@@ -3,6 +3,19 @@
 echo "🚢 Argo Robot Control Commands"
 echo "=================================="
 
+echo "Direct Commands:"
+echo "  python3 launch/argo_lifecycle_manager.py run      # Start and keep running"
+echo "  python3 launch/argo_lifecycle_manager.py stop     # Stop all nodes"
+echo "  python3 launch/argo_lifecycle_manager.py restart  # Restart all nodes"
+echo "  python3 launch/argo_lifecycle_manager.py status   # Show status"
+echo "  python3 launch/argo_lifecycle_manager.py monitor  # Monitor mode"
+echo "  python3 launch/argo_lifecycle_manager.py simulate_local   # Start local simulation"
+echo "  python3 launch/argo_lifecycle_manager.py simulate_remote  # Start remote simulation"
+
+echo "Help:"
+echo "  argo_help - Show this help"
+echo "  make help - Show full Makefile commands"
+
 echo "Service Control:"
 echo "  al   - Launch argo service (start all nodes)"
 echo "  aq   - Quit argo service (stop all nodes)"
@@ -19,19 +32,6 @@ echo "  ac   - Stop data recording"
 
 echo "GUI Control:"
 echo "  ag   - Launch Argo CLI GUI (interactive control)"
-
-echo "Direct Commands:"
-echo "  python3 launch/argo_lifecycle_manager.py run      # Start and keep running"
-echo "  python3 launch/argo_lifecycle_manager.py stop     # Stop all nodes"
-echo "  python3 launch/argo_lifecycle_manager.py restart  # Restart all nodes"
-echo "  python3 launch/argo_lifecycle_manager.py status   # Show status"
-echo "  python3 launch/argo_lifecycle_manager.py monitor  # Monitor mode"
-echo "  python3 launch/argo_lifecycle_manager.py simulate_local   # Start local simulation"
-echo "  python3 launch/argo_lifecycle_manager.py simulate_remote  # Start remote simulation"
-
-echo "Help:"
-echo "  argo_help - Show this help"
-echo "  make help - Show full Makefile commands"
 
 echo "Examples:"
 echo "  al && as    # Start service and check status"

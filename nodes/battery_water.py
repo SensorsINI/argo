@@ -33,6 +33,9 @@ from std_srvs.srv import Trigger
 import time
 import sys
 import argparse
+import os
+import csv
+from datetime import datetime
 from rclpy.executors import ExternalShutdownException
 
 # Using standard Trigger service - no custom imports needed
@@ -76,7 +79,6 @@ class BatteryWaterNode(Node):
         self._test_state = 'decay'  # not used in one-shot capture
         self._test_t0 = time.monotonic()
 
-
         # Publishers for critical battery/water monitoring
         self.pub_battery_voltage = self.create_publisher(
             Float32, 'battery_voltage', 10)
@@ -103,7 +105,7 @@ class BatteryWaterNode(Node):
         # Battery remaining percentage publisher
         self.pub_battery_remaining_pct = self.create_publisher(
             Float32, 'battery_remaining_pct', 10)
-        
+
         # Service for on-demand battery status using standard Trigger service
         self.srv_battery_status = self.create_service(
             Trigger, 'battery_status', self.battery_status_callback)
@@ -111,7 +113,7 @@ class BatteryWaterNode(Node):
         self._batt_low_prev = False
         self._salt_alert_prev = False
         self._humid_alert_prev = False
-        
+
         # Latest sensor values for service response
         self._latest_battery_voltage = 0.0
         self._latest_saltwater_voltage = 0.0
@@ -123,6 +125,13 @@ class BatteryWaterNode(Node):
         self._latest_saltwater_alert = False
         self._latest_humidity_alert = False
         self._latest_timestamp = None
+
+        # CSV logging setup
+        self.csv_log_dir = "/var/log.hdd/persistent"
+        self.csv_log_interval = 30.0  # Log to CSV every 30 seconds
+        self._last_csv_log_time = 0.0
+        self._csv_file_initialized = False
+        self._init_csv_logging()
 
         # Sensor failure tracking
         self._adc_failure_count = 0
@@ -243,14 +252,78 @@ class BatteryWaterNode(Node):
             else:
                 self.get_logger().warn("Battery/Water health status: FAILED")
 
+    def _init_csv_logging(self):
+        """Initialize CSV logging directory and file"""
+        try:
+            # Create log directory if it doesn't exist
+            os.makedirs(self.csv_log_dir, exist_ok=True)
+
+            # Create CSV filename with current date
+            date_str = datetime.now().strftime('%Y%m%d')
+            csv_filename = f"battery-monitor-{date_str}.csv"
+            self.csv_file_path = os.path.join(self.csv_log_dir, csv_filename)
+
+            # Initialize CSV file with headers if it doesn't exist
+            if not os.path.exists(self.csv_file_path):
+                with open(self.csv_file_path, 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow([
+                        'timestamp', 'battery_voltage', 'battery_remaining_pct',
+                        'saltwater_voltage', 'sail_current', 'pcb_temperature',
+                        'relative_humidity', 'battery_low_alert', 'saltwater_alert',
+                        'humidity_alert', 'battery_water_health'
+                    ])
+                self.get_logger().info(
+                    f"CSV logging initialized: {self.csv_file_path}")
+
+            self._csv_file_initialized = True
+        except Exception as e:
+            self.get_logger().error(f"Failed to initialize CSV logging: {e}")
+            self._csv_file_initialized = False
+
+    def _log_to_csv(self, battery_voltage, battery_remaining_pct, saltwater_voltage,
+                    sail_current, temperature, humidity, battery_low_alert,
+                    saltwater_alert, humidity_alert, health_status):
+        """Log current sensor data to CSV file"""
+        if not self._csv_file_initialized:
+            return
+
+        try:
+            current_time = datetime.now()
+            timestamp = current_time.strftime('%Y-%m-%d %H:%M:%S')
+
+            # Convert boolean values to 0/1 for CSV
+            battery_low_csv = 1 if battery_low_alert else 0
+            saltwater_alert_csv = 1 if saltwater_alert else 0
+            humidity_alert_csv = 1 if humidity_alert else 0
+            health_csv = 1 if health_status else 0
+
+            # Handle None values
+            battery_remaining_pct = battery_remaining_pct if battery_remaining_pct is not None else ""
+            temperature = temperature if temperature is not None else ""
+            humidity = humidity if humidity is not None else ""
+
+            # Write CSV row
+            with open(self.csv_file_path, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow([
+                    timestamp, battery_voltage, battery_remaining_pct,
+                    saltwater_voltage, sail_current, temperature,
+                    humidity, battery_low_csv, saltwater_alert_csv,
+                    humidity_alert_csv, health_csv
+                ])
+
+        except Exception as e:
+            self.get_logger().error(f"Failed to write to CSV: {e}")
+
     def battery_status_callback(self, request, response):
         """Service callback to provide latest battery and sensor status as JSON string"""
         try:
             import json
-            
+
             # Get current timestamp
             now = self.get_clock().now()
-            
+
             # Build battery data dictionary
             battery_data = {
                 'battery_voltage': self._latest_battery_voltage,
@@ -266,19 +339,19 @@ class BatteryWaterNode(Node):
                 'timestamp_sec': now.seconds_nanoseconds()[0],
                 'timestamp_nanosec': now.seconds_nanoseconds()[1]
             }
-            
+
             # Format battery summary
             battery_summary = None
             voltage = battery_data['battery_voltage']
             percent = battery_data['battery_remaining_pct']
-            
+
             if voltage is not None and percent is not None:
                 battery_summary = f"{voltage:.1f}V ({percent:.0f}%)"
             elif voltage is not None:
                 battery_summary = f"{voltage:.1f}V"
             elif percent is not None:
                 battery_summary = f"{percent:.0f}%"
-            
+
             # Format critical alerts
             active_alerts = []
             alert_descriptions = {
@@ -286,27 +359,28 @@ class BatteryWaterNode(Node):
                 'saltwater_alert': '💧 SALTWATER INTRUSION',
                 'humidity_alert': '💦 HIGH HUMIDITY'
             }
-            
+
             for alert_key, description in alert_descriptions.items():
                 if battery_data.get(alert_key) is True:
                     active_alerts.append(description)
-            
-            critical_alerts = " | ".join(active_alerts) if active_alerts else None
-            
+
+            critical_alerts = " | ".join(
+                active_alerts) if active_alerts else None
+
             # Create final response data
             response_data = {
                 'battery_summary': battery_summary,
                 'critical_alerts': critical_alerts,
                 'raw_data': battery_data
             }
-            
+
             # Convert to JSON string and return in Trigger response
             response.success = True
             response.message = json.dumps(response_data, indent=2)
-            
+
             self.get_logger().debug(f"Battery status service called - returning formatted data")
             return response
-            
+
         except Exception as e:
             self.get_logger().error(f"Error in battery status service: {e}")
             response.success = False
@@ -603,7 +677,7 @@ class BatteryWaterNode(Node):
         battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
         saltwater_voltage = raw1 * self.lsb_value
         sail_current = raw2 * self.lsb_value
-        
+
         # Store latest values for service
         self._latest_battery_voltage = battery_voltage
         self._latest_saltwater_voltage = saltwater_voltage
@@ -627,13 +701,13 @@ class BatteryWaterNode(Node):
             battery_remaining_pct = float(soc)
         except Exception:
             pass
-        
+
         # Store battery remaining percentage for service
         self._latest_battery_remaining_pct = battery_remaining_pct
 
         # SHT45
         temperature, humidity = self._read_sht45()
-        
+
         # Store temperature and humidity for service
         self._latest_temperature = temperature
         self._latest_humidity = humidity
@@ -766,7 +840,7 @@ class BatteryWaterNode(Node):
             self._batt_low_prev = bool(batt_low)
             self._salt_alert_prev = bool(salt_alert)
             self._humid_alert_prev = bool(humid_alert)
-            
+
             # Store latest alert status for service
             self._latest_battery_low_alert = bool(batt_low)
             self._latest_saltwater_alert = bool(salt_alert)
@@ -777,6 +851,16 @@ class BatteryWaterNode(Node):
         # Update ASCII bars if enabled
         self._update_bars(battery_voltage, saltwater_voltage,
                           sail_current, temperature, humidity)
+
+        # Log to CSV every csv_log_interval seconds
+        if current_time - self._last_csv_log_time >= self.csv_log_interval:
+            self._log_to_csv(
+                battery_voltage, battery_remaining_pct, saltwater_voltage,
+                sail_current, temperature, humidity,
+                self._latest_battery_low_alert, self._latest_saltwater_alert,
+                self._latest_humidity_alert, self.health_status
+            )
+            self._last_csv_log_time = current_time
 
 
 def main(args=None):

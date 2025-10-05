@@ -25,19 +25,19 @@ sudo journalctl --list-boots
 ### 2. Examine Persistent Logs
 ```bash
 # Check all persistent logs
-ls -la /var/log/persistent/
+ls -la /var/log.hdd/persistent/
 
 # Memory usage before hang
-sudo cat /var/log/persistent/memory-$(date +%Y%m%d).log | tail -20
+sudo cat /var/log.hdd/persistent/memory-$(date +%Y%m%d).log | tail -20
 
 # Thermal data
-sudo cat /var/log/persistent/thermal-$(date +%Y%m%d).log | tail -20
+sudo cat /var/log.hdd/persistent/thermal-$(date +%Y%m%d).log | tail -20
 
 # Cursor processes
-sudo cat /var/log/persistent/cursor-processes-$(date +%Y%m%d).log | tail -20
+sudo cat /var/log.hdd/persistent/cursor-processes-$(date +%Y%m%d).log | tail -20
 
 # System monitoring
-sudo cat /var/log/persistent/orangepi-monitor-$(date +%Y%m%d).log | tail -20
+sudo cat /var/log.hdd/persistent/orangepi-monitor-$(date +%Y%m%d).log | tail -20
 ```
 
 ### 3. Check System Logs for Errors
@@ -61,7 +61,7 @@ sudo journalctl --since "2025-09-25" | grep -i -E "(oom|out of memory)" | tail -
 sudo journalctl --since "2025-09-25" | grep -i -E "(killed|terminated)" | tail -10
 
 # High memory usage
-sudo cat /var/log/persistent/memory-$(date +%Y%m%d).log | grep -E "(WARNING|High memory)" | tail -10
+sudo cat /var/log.hdd/persistent/memory-$(date +%Y%m%d).log | grep -E "(WARNING|High memory)" | tail -10
 ```
 
 ### 5. Check Watchdog Activity
@@ -126,7 +126,7 @@ ping -c 3 8.8.8.8
 # Plot memory usage over time
 python3 -c "
 import re
-with open('/var/log/persistent/memory-$(date +%Y%m%d).log', 'r') as f:
+with open('/var/log.hdd/persistent/memory-$(date +%Y%m%d).log', 'r') as f:
     lines = f.readlines()
     for line in lines[-20:]:
         if 'Memory:' in line:
@@ -134,7 +134,7 @@ with open('/var/log/persistent/memory-$(date +%Y%m%d).log', 'r') as f:
 "
 
 # Check for patterns
-grep -E "(WARNING|ERROR|FATAL)" /var/log/persistent/*.log | tail -20
+grep -E "(WARNING|ERROR|FATAL)" /var/log.hdd/persistent/*.log | tail -20
 ```
 
 ## Prevention Measures

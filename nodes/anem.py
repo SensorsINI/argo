@@ -68,10 +68,13 @@
 #   x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
 #   y: differential pressure from I2C_CW (0x22, 120°) in Pascals
 #   z: differential pressure from I2C_CCW (0x23, 240°) in Pascals
+# /anem_health (std_msgs/Bool):
+#   data: true if node is healthy and sensors are working, false if failed
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
+from std_msgs.msg import Bool
 import smbus
 import time
 import numpy as np
@@ -302,6 +305,10 @@ class AnemNode(Node):
         self.pub_wind_temp = self.create_publisher(
             Vector3, 'anem_speed_angle_temp', 10)
 
+        # Health status publisher
+        self.pub_health = self.create_publisher(Bool, 'anem_health', 10)
+        self.health_status = False  # Track current health status
+
         # Visual debug mode flag
         self.debug_visually = debug_visually
 
@@ -320,11 +327,13 @@ class AnemNode(Node):
             self.get_logger().info('Opened i2c SMBus')
         except FileNotFoundError:
             self.get_logger().error("CRITICAL: I2C bus not found. Is I2C enabled? Exiting.")
+            self._publish_health_status(False)
             sys.exit(1)
 
         if self.bus is not None:
             if not self.setup_sensors():
                 self.get_logger().fatal("FATAL: Failed to setup anemometer sensors. Exiting.")
+                self._publish_health_status(False)
                 sys.exit(1)
             else:
                 self.sensors_ready = True
@@ -336,6 +345,7 @@ class AnemNode(Node):
         # Report actual sensor status
         if self.sensors_ready:
             self.get_logger().info("Initialization of anemometer wind sensor completed successfully.")
+            self._publish_health_status(True)
 
         # Visual mode init
         self._vis_initialized = False
@@ -346,6 +356,19 @@ class AnemNode(Node):
             0.514444  # knots to m/s conversion
         if self.debug_visually:
             self._init_visual()
+
+    def _publish_health_status(self, is_healthy: bool):
+        """Publish health status and update internal state"""
+        if self.health_status != is_healthy:
+            self.health_status = is_healthy
+            health_msg = Bool()
+            health_msg.data = is_healthy
+            self.pub_health.publish(health_msg)
+
+            if is_healthy:
+                self.get_logger().info("Anemometer health status: HEALTHY")
+            else:
+                self.get_logger().warn("Anemometer health status: FAILED")
 
     def _init_visual(self):
         # Setup terminal for in-place drawing (no scrolling)
@@ -557,6 +580,7 @@ class AnemNode(Node):
 
         except IOError as e:
             self.get_logger().error(f"CRITICAL: I2C read error: {e}. Exiting.")
+            self._publish_health_status(False)
             sys.exit(1)
         except IndexError as e:
             self.get_logger().error(f"Data parsing error: {e}. Continuing.")
@@ -589,6 +613,7 @@ class AnemNode(Node):
             # Check if we got any valid samples
             if not dp_samples:
                 self.get_logger().warn("No valid sensor samples in this cycle, skipping publish")
+                self._publish_health_status(False)
                 return
 
             # Average differential pressures across all valid samples
@@ -622,6 +647,9 @@ class AnemNode(Node):
             self.pub_wind_temp.publish(
                 Vector3(x=float(speed_mps), y=float(angle_deg), z=float(temp_celsius)))
 
+            # Publish health status as healthy
+            self._publish_health_status(True)
+
             self.get_logger().debug(
                 f"Anemometer: speed(m/s)={speed_mps:.2f} angle(deg)={angle_deg:.1f} "
                 f"temp(C)={temp_celsius:.1f} dp(pascal)=({dp_avg[0]:.4f}, {dp_avg[1]:.4f}, {dp_avg[2]:.4f}) "
@@ -634,11 +662,15 @@ class AnemNode(Node):
 
         except Exception as e:
             self.get_logger().error(f"Error in publish callback: {e}")
+            self._publish_health_status(False)
 
     def destroy_node(self):
         # This is the recommended way to perform cleanup in ROS2.
         # It gets called automatically when the node is destroyed.
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
+
+        # Publish health status as failed on shutdown
+        self._publish_health_status(False)
 
         if self.debug_visually:
             self._teardown_visual()
