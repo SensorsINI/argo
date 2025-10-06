@@ -1,0 +1,133 @@
+---
+globs: *.py
+---
+
+# Documentation Standards for Sailboat Playground
+
+## Module Header Documentation
+
+All Python modules should include comprehensive header documentation following this structure:
+
+### Required Header Sections
+1. **Module Purpose**: Brief description of the module's role
+2. **Architecture Overview**: How the module fits into the larger system
+3. **Key Components**: Main classes/functions and their responsibilities
+4. **State Variables**: Document all important state variables with types and units
+5. **Configuration**: How the module uses configuration files
+6. **Coordinate System**: Any coordinate system conventions used
+7. **Critical Requirements**: Important implementation details or constraints
+
+### Example Header Structure
+```python
+"""
+Module Name - Brief Description
+
+This module implements [detailed description] for the sailing simulation.
+
+## Architecture Overview
+[How it fits into the system]
+
+## Key Components
+[Main classes/functions]
+
+## State Variables
+[Document all important state]
+
+## Configuration
+[How config files are used]
+
+## Coordinate System
+[Any coordinate conventions]
+
+## Critical Requirements
+[Important implementation details]
+"""
+```
+
+## Function Documentation
+
+### Docstring Requirements
+All functions must have comprehensive docstrings including:
+- **Purpose**: What the function does
+- **Args**: Parameter types and descriptions
+- **Returns**: Return type and description
+- **Raises**: Any exceptions that may be raised
+- **Notes**: Important implementation details
+- **Examples**: Usage examples where helpful
+
+### Example Function Docstring
+```python
+def compute_angle(vec: np.ndarray):
+    """
+    Compute the angle of a 2D vector in radians.
+    
+    Calculates the angle of a 2D vector using atan2 and normalizes the result
+    to the range [0, 2π) to handle the 2π cut problem.
+    
+    Args:
+        vec (np.ndarray): 2D vector [x, y] to compute angle for
+        
+    Returns:
+        float: Angle in radians, normalized to [0, 2π)
+        
+    Raises:
+        AssertionError: If input vector is not 2D
+        
+    Note:
+        Uses standard trigonometric convention where:
+        - 0 radians = positive X-axis (East)
+        - π/2 radians = positive Y-axis (North)
+    """
+```
+
+## Physics Documentation Standards
+
+### Force Calculations
+Document all force calculations with:
+- **Physical meaning**: What the force represents
+- **Formula reference**: Mathematical basis
+- **Coordinate system**: How forces are oriented
+- **Units**: Force units and scaling factors
+
+### State Variables
+Document all state variables with:
+- **Physical meaning**: What the variable represents
+- **Units**: Measurement units
+- **Range**: Valid value ranges
+- **Coordinate system**: How values are oriented
+
+### Angle Handling
+Always document angle normalization and the 2π cut problem:
+- **Input format**: Degrees vs radians
+- **Normalization**: How angles are wrapped
+- **Coordinate convention**: 0° = East, 90° = North, etc.
+
+## Code Comments
+
+### Inline Comments
+- Explain complex physics calculations
+- Document angle normalization steps
+- Clarify coordinate transformations
+- Note any scaling factors or approximations
+
+### Section Comments
+- Use clear section headers for major code blocks
+- Group related calculations together
+- Mark force calculation phases clearly
+
+## README Documentation
+
+### Module READMEs
+Each major module should have a README.md explaining:
+- **Purpose**: What the module does
+- **Architecture**: How components interact
+- **Configuration**: Required config files and parameters
+- **Usage**: How to use the module
+- **Examples**: Code examples and integration patterns
+
+### Integration Examples
+Always provide complete, runnable examples showing:
+- Proper initialization
+- Correct usage patterns
+- Error handling
+- State management

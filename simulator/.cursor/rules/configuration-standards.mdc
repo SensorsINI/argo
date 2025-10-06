@@ -1,0 +1,139 @@
+---
+globs: *.json,*.csv
+---
+
+# Configuration Standards for Sailboat Playground
+
+## JSON Configuration Files
+
+### Boat Configuration Schema
+All boat configuration files must follow this structure:
+
+```json
+{
+  "mass": 1000,                           // Boat mass in kg
+  "sail_area": 25,                        // Sail area in m²
+  "hull_area": 5,                         // Hull wetted area in m²
+  "rudder_area": 2,                       // Rudder area in m²
+  "sail_foil": "naca0015",                // Sail foil filename (without .csv)
+  "rudder_foil": "naca0015",              // Rudder foil filename (without .csv)
+  "hull_friction_coefficient": 0.02,      // Hull drag coefficient
+  "hull_rotation_resistance": 0.01,       // Hull rotational drag coefficient
+  "length": 10,                           // Boat length in m
+  "com_length": 3,                        // Center of mass distance from bow in m
+  "moment_of_inertia": 5000               // Moment of inertia in kg⋅m²
+}
+```
+
+### Environment Configuration Schema
+All environment configuration files must follow this structure:
+
+```json
+{
+  "wind_direction": 45,                   // Wind direction in degrees (0° = East)
+  "wind_min_speed": 5,                    // Minimum wind speed in m/s
+  "wind_max_speed": 15,                   // Maximum wind speed in m/s
+  "wind_max_delta_percent": 10,           // Max wind speed change per step (%)
+  "wind_gust_probability": 0.1,           // Probability of gust occurrence (0-1)
+  "wind_gust_min_duration": 5,            // Minimum gust duration in seconds
+  "wind_gust_max_duration": 15,           // Maximum gust duration in seconds
+  "wind_gust_min_speed": 20,              // Minimum gust speed in m/s
+  "wind_gust_max_speed": 30,              // Maximum gust speed in m/s
+  "wind_gust_max_delta_percent": 15,      // Max gust speed change per step (%)
+  "current_direction": 0,                 // Current direction in degrees (0° = East)
+  "current_speed": 1                      // Current speed in m/s
+}
+```
+
+## CSV Foil Data Files
+
+### Required Format
+All foil data files must follow this exact format:
+
+```csv
+alpha,cl,cd
+-180,0.0,0.1
+-179,0.1,0.1
+...
+179,0.1,0.1
+180,0.0,0.1
+```
+
+### Required Specifications
+- **File Extension**: Must be `.csv`
+- **Header Row**: Must contain exactly `alpha,cl,cd`
+- **Angle Range**: Must cover -180° to +180° in 1° increments (361 rows total)
+- **Angle Column**: Integer degrees from -180 to +180
+- **Lift Column**: Lift coefficient (cl) as decimal numbers
+- **Drag Column**: Drag coefficient (cd) as decimal numbers
+- **No Missing Values**: All rows must have complete data
+- **Consistent Formatting**: Use decimal points, not commas for decimals
+
+### Foil Data Validation
+When creating or modifying foil data:
+1. **Angle Completeness**: Verify all angles from -180° to +180° are present
+2. **Physical Realism**: Ensure lift/drag coefficients are physically reasonable
+3. **Symmetry**: Check for expected symmetry in foil characteristics
+4. **Smoothness**: Verify coefficients change smoothly across angle range
+
+## File Naming Conventions
+
+### Boat Configurations
+- **Pattern**: `{boat_name}_boat.json`
+- **Examples**: `sample_boat.json`, `argo_boat.json`, `racing_boat.json`
+- **Location**: `boats/` directory
+
+### Environment Configurations
+- **Pattern**: `{environment_name}.json`
+- **Examples**: `playground.json`, `race_course.json`, `storm_conditions.json`
+- **Location**: `environments/` directory
+
+### Foil Data
+- **Pattern**: `{foil_name}.csv`
+- **Examples**: `naca0015.csv`, `naca0012.csv`, `custom_foil.csv`
+- **Location**: `foils/` directory
+
+## Configuration Validation
+
+### Required Field Validation
+All configuration files must be validated for:
+- **Presence**: All required fields must be present
+- **Type**: Fields must have correct data types (numbers, strings, booleans)
+- **Range**: Numeric values must be within reasonable physical ranges
+- **Format**: String values must match expected patterns
+
+### Physical Constraints
+Validate that configuration values are physically reasonable:
+- **Masses**: Positive values, typical range 100-10000 kg
+- **Areas**: Positive values, typical range 1-100 m²
+- **Speeds**: Non-negative values, typical range 0-50 m/s
+- **Angles**: Degrees in range 0-360 or -180 to +180 as appropriate
+- **Probabilities**: Values between 0 and 1
+
+### Cross-Reference Validation
+Ensure configuration files reference valid dependencies:
+- **Foil References**: Referenced foil files must exist in `foils/` directory
+- **File Paths**: All file paths must be relative to project root
+- **Consistency**: Related parameters must be consistent (e.g., gust speeds > base speeds)
+
+## Documentation Requirements
+
+### Configuration File Headers
+Each configuration file should include a comment header:
+```json
+{
+  "_comment": "Sample boat configuration for basic sailing simulation",
+  "_version": "1.0",
+  "_description": "Standard boat with NACA0015 foils for general purpose sailing",
+  "mass": 1000,
+  // ... rest of configuration
+}
+```
+
+### README Documentation
+Each configuration directory should have a README explaining:
+- **Purpose**: What the configuration is for
+- **Parameters**: Description of each parameter
+- **Usage**: How to use the configuration
+- **Dependencies**: Required foil files or other dependencies
+- **Examples**: Usage examples and integration patterns

@@ -22,6 +22,7 @@
 
 import rclpy
 from rclpy.node import Node
+# Removed QoS imports - using default QoS only
 from std_msgs.msg import Float32, Bool
 import time
 import sys
@@ -44,23 +45,14 @@ class TempMonitorNode(Node):
         # Debug flag
         self.debug = ('--debug' in sys.argv)
 
+        # Using default QoS for all publishers
 
         # Publishers
-        self.pub_cpu_temperature = self.create_publisher(
-            Float32, 'cpu_temperature', 10)
-        self.pub_system_temperature = self.create_publisher(
-            Float32, 'system_temperature', 10)
-        # Alert publishers for safety-critical temperature alerts
-        self.pub_temperature_high_alert = self.create_publisher(
-            Bool, 'temperature_high_alert', 10)
-        self.pub_temperature_critical_alert = self.create_publisher(
-            Bool, 'temperature_critical_alert', 10)
-
-        # Health status publisher
-        self.pub_health = self.create_publisher(
-            Bool, 'temp_monitor_health', 10)
-        self.health_status = False  # Track current health status
-
+        self.pub_cpu_temperature = self.create_publisher(Float32, 'cpu_temperature', 10)
+        self.pub_system_temperature = self.create_publisher(Float32, 'system_temperature', 10)
+        # Alert publishers with default QoS
+        self.pub_temperature_high_alert = self.create_publisher(Bool, 'temperature_high_alert', 10)
+        self.pub_temperature_critical_alert = self.create_publisher(Bool, 'temperature_critical_alert', 10)
         # Alert previous-state flags for edge-triggered logging
         self._temp_high_prev = False
         self._temp_critical_prev = False
@@ -99,21 +91,6 @@ class TempMonitorNode(Node):
         self.timer = self.create_timer(1.0, self.read_and_publish)
         self.get_logger().info('Temperature Monitor node initialized and reading at 1 Hz.')
 
-        # Publish initial health status as healthy
-        self._publish_health_status(True)
-
-    def _publish_health_status(self, is_healthy: bool):
-        """Publish health status and update internal state"""
-        if self.health_status != is_healthy:
-            self.health_status = is_healthy
-            health_msg = Bool()
-            health_msg.data = is_healthy
-            self.pub_health.publish(health_msg)
-
-            if is_healthy:
-                self.get_logger().info("Temperature Monitor health status: HEALTHY")
-            else:
-                self.get_logger().warn("Temperature Monitor health status: FAILED")
 
     def _find_thermal_zones(self):
         """Find available thermal zones for temperature monitoring"""
@@ -310,8 +287,6 @@ class TempMonitorNode(Node):
                 self.pub_system_temperature.publish(
                     Float32(data=system_temperature))
 
-            # Publish health status as healthy
-            self._publish_health_status(True)
 
             # Update previous values and timestamp
             self._prev_cpu_temperature = cpu_temperature
@@ -368,7 +343,6 @@ class TempMonitorNode(Node):
             self._temp_critical_prev = bool(temp_critical)
         except Exception as e:
             self.get_logger().error(f"Error in read_and_publish: {e}")
-            self._publish_health_status(False)
 
         # Update ASCII bars if enabled
         self._update_bars(cpu_temperature, system_temperature)

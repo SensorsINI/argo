@@ -106,9 +106,12 @@ Argo includes comprehensive simulation support for development and testing:
 **Quick Start:**
 ```bash
 # Local simulation
-python3 launch/argo_lifecycle_manager.py simulate
+python3 launch/argo_lifecycle_manager.py simulate_local
 
 # Remote simulation (requires setup)
+python3 launch/argo_lifecycle_manager.py simulate_remote
+
+# Or use helper scripts (equivalent flow):
 ./scripts/remote_simulator_tunnel.sh &
 python3 scripts/remote_simulator_launch.py &
 ./scripts/launch_simulator_remote.sh
@@ -177,12 +180,13 @@ The Argo system uses a sophisticated lifecycle management approach centered arou
 
 **Lifecycle Management Modes:**
 ```bash
-python3 launch/argo_lifecycle_manager.py run        # Launch all nodes
-python3 launch/argo_lifecycle_manager.py stop       # Graceful shutdown
-python3 launch/argo_lifecycle_manager.py restart    # Restart all nodes
-python3 launch/argo_lifecycle_manager.py status     # Show system status
-python3 launch/argo_lifecycle_manager.py monitor    # Continuous monitoring
-python3 launch/argo_lifecycle_manager.py simulate   # Simulation mode
+python3 launch/argo_lifecycle_manager.py run             # Launch all nodes
+python3 launch/argo_lifecycle_manager.py stop            # Graceful shutdown
+python3 launch/argo_lifecycle_manager.py restart         # Restart all nodes
+python3 launch/argo_lifecycle_manager.py status          # Show system status
+python3 launch/argo_lifecycle_manager.py monitor         # Continuous monitoring
+python3 launch/argo_lifecycle_manager.py simulate_local  # Local simulation mode
+python3 launch/argo_lifecycle_manager.py simulate_remote # Remote simulation mode
 ```
 
 **Critical Node Management:**
@@ -231,8 +235,8 @@ cd argo
 
 ### 4. Install Python Dependencies
 ```bash
-# Install system dependencies
-pip3 install smbus2 pyserial numpy tqdm matplotlib
+# Install Python runtime dependencies
+make install-python-deps  # installs from requirements-runtime.txt
 
 # Install ROS2 dependencies (if not already installed)
 sudo apt install python3-rclpy python3-std-msgs python3-geometry-msgs
@@ -255,8 +259,8 @@ user_overlays=argo_radio_servo_overlay
 #### Install PWM Capture Module
 ```bash
 cd /home/orangepi/argo/nodes/pwm_capture_module
-sudo make install
-sudo depmod -a
+make all
+# Reboot or load the module manually after install
 sudo modprobe argo_radio_servo_module
 ```
 
@@ -377,7 +381,7 @@ ros2 topic echo /rudder_sail_radio
 
 ## Data Analysis
 
-To plot recorded bag file data, see [argo-plots.py](develop/analysis/argo-plots.py)
+To plot recorded bag file data, see [argo-plots-2025.py](develop/analysis/argo-plots-2025.py) (or [argo-plots-2023.py](develop/analysis/argo-plots-2023.py)).
 
 ## Troubleshooting
 

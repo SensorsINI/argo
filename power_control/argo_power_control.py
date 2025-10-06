@@ -89,7 +89,14 @@ import select
 import tty
 import termios
 
-# No ROS2 imports needed - using subprocess calls only
+# ROS2 imports
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Empty
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+# Removed QoS imports - using default QoS only
 
 # =============================================================================
 # CONSTANTS
@@ -413,6 +420,50 @@ class PowerController:
             logger.info("GPIO pins configured successfully")
             self.gpio_available = True
 
+<<<<<<< HEAD
+=======
+    def setup_ros2(self):
+        """Setup ROS2 publishers, subscribers, and service clients"""
+        try:
+            self.get_logger().info("Setting up ROS2 components...")
+            
+            # Using default QoS for all publishers
+            
+            # Publishers
+            self.led_status_pub = self.create_publisher(
+                String, 
+                '/argo/power_control/led_status', 
+                10
+            )
+            
+            self.node_health_pub = self.create_publisher(
+                DiagnosticArray,
+                '/argo/power_control/node_health',
+                10
+            )
+            
+            # Subscriber for recording status (use default QoS)
+            self.recording_status_sub = self.create_subscription(
+                Bool,
+                '/argo/recording/status',
+                self.recording_status_callback,
+                10
+            )
+            
+            # Service clients for recording control
+            self.start_recording_client = self.create_client(Empty, '/argo/recording/start')
+            self.stop_recording_client = self.create_client(Empty, '/argo/recording/stop')
+            
+            # Recording state tracking
+            self.recording_active = False
+            
+            # ROS2 timers for periodic tasks
+            self.status_timer = self.create_timer(1.0, self.publish_status)  # 1Hz status updates
+            self.health_timer = self.create_timer(5.0, self.publish_health)  # 5s health checks
+            
+            self.get_logger().info("ROS2 components initialized successfully")
+            
+>>>>>>> 24f43f4447496ce71f974ce426d71370a8b8ddc3
         except Exception as e:
             if self.test_mode:
                 logger.warning(f"GPIO not available in test mode: {e}")

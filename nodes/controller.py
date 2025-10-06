@@ -4,6 +4,7 @@
 
 import rclpy
 from rclpy.node import Node
+# Removed QoS imports - using default QoS only
 from std_msgs.msg import Bool, Float64, Float32
 from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
@@ -307,8 +308,8 @@ class ControllerNode(Node):
 
         # Load initial parameters
         self.check_and_reload_params(is_initial=True)
-
-
+        
+        # --- Using default QoS for all publishers/subscribers ---
         # --- State and Control ---
         self.boat_state = BoatState()
         self.controller = None
@@ -331,67 +332,43 @@ class ControllerNode(Node):
         self._initialize_controller()
 
         # --- Publishers ---
-        # Real-time control commands
-        self.pub_rudder_sail_cmd = self.create_publisher(
-            Vector3, '/rudder_sail_cmd', 10)
-
-        # Health status publisher
-        self.pub_health = self.create_publisher(Bool, '/controller_health', 10)
-        self.health_status = False  # Track current health status
-
+        # Real-time control commands (use default QoS)
+        self.pub_rudder_sail_cmd = self.create_publisher(Vector3, '/rudder_sail_cmd', 10)
+        
         # --- Subscribers ---
-        # Control status from rudder_sail_radio.py
-        self.create_subscription(
-            Bool, '/human_controlled', self.human_control_callback, 10)
-        self.create_subscription(
-            Vector3, '/control_authority', self.control_authority_callback, 10)
-
+        # Control status from rudder_sail_radio.py (use default QoS)
+        self.create_subscription(Bool, '/human_controlled', self.human_control_callback, 10)
+        self.create_subscription(Vector3, '/control_authority', self.control_authority_callback, 10)
+        
         # Radio input for reference (real-time data)
-        self.create_subscription(
-            Vector3, '/rudder_sail_radio', self.radio_reference_callback, 10)
-
+        self.create_subscription(Vector3, '/rudder_sail_radio', self.radio_reference_callback, 10)
+        
         # Navigation sensors (real-time data)
-        self.create_subscription(
-            Vector3, '/pose', self.pose_callback, 10)
-        self.create_subscription(
-            Float64, '/gps_cog', self.gps_cog_callback, 10)
-        self.create_subscription(
-            Float64, '/gps_sog', self.gps_sog_callback, 10)
-        self.create_subscription(
-            Vector3, '/gps_velocity', self.gps_velocity_callback, 10)
-
+        self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
+        self.create_subscription(Float64, '/gps_cog', self.gps_cog_callback, 10)
+        self.create_subscription(Float64, '/gps_sog', self.gps_sog_callback, 10)
+        self.create_subscription(Vector3, '/gps_velocity', self.gps_velocity_callback, 10)
+        
         # IMU sensors (real-time data)
-        self.create_subscription(
-            Vector3, '/accel', self.accel_callback, 10)
-        self.create_subscription(
-            Vector3, '/gyro', self.gyro_callback, 10)
-        self.create_subscription(
-            Vector3, '/compass', self.compass_callback, 10)
-
+        self.create_subscription(Vector3, '/accel', self.accel_callback, 10)
+        self.create_subscription(Vector3, '/gyro', self.gyro_callback, 10)
+        self.create_subscription(Vector3, '/compass', self.compass_callback, 10)
+        
         # Wind sensor (real-time data)
-        self.create_subscription(
-            Vector3, '/anem_speed_angle_temp', self.wind_callback, 10)
-
-        # Battery/Water monitoring
-        self.create_subscription(
-            Float32, '/battery_voltage', self.battery_voltage_callback, 10)
-        self.create_subscription(Float32, '/battery_remaining_pct',
-                                 self.battery_remaining_callback, 10)
-        self.create_subscription(
-            Bool, '/battery_low_alert', self.battery_low_alert_callback, 10)
-        self.create_subscription(
-            Bool, '/saltwater_alert', self.saltwater_alert_callback, 10)
-        self.create_subscription(
-            Bool, '/humidity_alert', self.humidity_alert_callback, 10)
-
+        self.create_subscription(Vector3, '/anem_speed_angle_temp', self.wind_callback, 10)
+        
+        # Battery/Water monitoring (use default QoS)
+        self.create_subscription(Float32, '/battery_voltage', self.battery_voltage_callback, 10)
+        self.create_subscription(Float32, '/battery_remaining_pct', self.battery_remaining_callback, 10)
+        self.create_subscription(Bool, '/battery_low_alert', self.battery_low_alert_callback, 10)
+        self.create_subscription(Bool, '/saltwater_alert', self.saltwater_alert_callback, 10)
+        self.create_subscription(Bool, '/humidity_alert', self.humidity_alert_callback, 10)
         # --- Timers ---
         # 5 Hz (reduced from 10 Hz for lower CPU usage)
         self.control_loop_period = 0.2
         self.timer = self.create_timer(
             self.control_loop_period, self.timer_callback)
 
-        # Publish initial health status as healthy
-        self._publish_health_status(True)
 
         # Only create parameter reload timer if enabled (CPU optimization)
         if self.get_parameter('enable_param_reload').get_parameter_value().bool_value:
@@ -402,19 +379,6 @@ class ControllerNode(Node):
         else:
             self.param_timer = None
 
-    def _publish_health_status(self, is_healthy: bool):
-        """Publish health status and update internal state"""
-        if self.health_status != is_healthy:
-            self.health_status = is_healthy
-            health_msg = Bool()
-            health_msg.data = is_healthy
-            self.pub_health.publish(health_msg)
-
-            if is_healthy:
-                self.get_logger().info("Controller health status: HEALTHY")
-            else:
-                self.get_logger().warn("Controller health status: FAILED")
-            self.get_logger().info("Parameter file monitoring disabled for performance")
 
     def _initialize_controller(self):
         """Initialize the controller based on parameters."""
@@ -609,8 +573,6 @@ class ControllerNode(Node):
                     self.pub_rudder_sail_cmd.publish(
                         control_command.to_vector3())
 
-                    # Publish health status as healthy
-                    self._publish_health_status(True)
 
                     # Only format debug string if debug logging is enabled (CPU optimization)
                     if self.get_logger().get_effective_level() <= 10:  # DEBUG level
@@ -620,7 +582,6 @@ class ControllerNode(Node):
                         )
         except Exception as e:
             self.get_logger().error(f"Error in timer_callback: {e}")
-            self._publish_health_status(False)
 
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""
@@ -729,8 +690,6 @@ CONTROL FLOW:
             pass  # Ignore errors during shutdown
         try:
             if controller_node:
-                # Publish health status as failed on shutdown
-                controller_node._publish_health_status(False)
                 controller_node.destroy_node()
         except Exception:
             pass  # Ignore errors during shutdown

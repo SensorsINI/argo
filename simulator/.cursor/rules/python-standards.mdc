@@ -1,0 +1,61 @@
+---
+globs: *.py
+---
+
+# Python Coding Standards for Sailboat Playground
+
+## Code Style and Conventions
+
+- Follow PEP 8 style guidelines
+- Use meaningful variable names that reflect sailing terminology
+- Prefer explicit imports over wildcard imports
+- Use type hints where appropriate for better code clarity
+
+## Critical Type Requirements
+
+**IMPORTANT**: The Manager.step() method requires integer arguments:
+```python
+# CORRECT - Convert floats to integers
+m.step([int(sail_angle), int(rudder_angle)])
+
+# INCORRECT - Will cause TypeError
+m.step([sail_angle, rudder_angle])  # if sail_angle or rudder_angle are floats
+```
+
+## Coordinate System
+
+- Use trigonometric circle convention: 0° = East, 90° = North, 180° = West, 270° = South
+- All angles should be in degrees (0-360)
+- Position coordinates are in meters (x, y)
+
+## Simulation Loop Pattern
+
+Follow this standard pattern for simulation loops:
+
+```python
+state_list = []
+m = Manager("boats/config.json", "environments/config.json")
+
+for step in range(max_steps):
+    state_list.append(m.state)
+    state = m.agent_state
+    
+    # Algorithm logic here
+    sail_angle = calculate_sail_angle(state)
+    rudder_angle = calculate_rudder_angle(state)
+    
+    m.step([int(sail_angle), int(rudder_angle)])
+```
+
+## Error Handling
+
+- Handle display connection errors gracefully (common in headless environments)
+- Validate configuration file paths before creating Manager instances
+- Use try-catch blocks around visualization code for environments without display
+
+## Performance Considerations
+
+- The project uses Cython for performance-critical components
+- Avoid unnecessary calculations in simulation loops
+- Use numpy arrays for mathematical operations
+- Consider caching expensive calculations when possible

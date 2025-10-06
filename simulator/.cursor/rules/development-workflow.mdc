@@ -1,0 +1,159 @@
+---
+description: Development workflow and environment setup guidelines
+---
+
+# Development Workflow and Environment Setup
+
+## Virtual Environment Setup
+
+### Creating and Activating Environment
+```bash
+# Create virtual environment
+python3 -m venv .venv
+
+# Activate environment
+source .venv/bin/activate
+
+# Install project in development mode
+python3 -m pip install -e .
+```
+
+### Dependencies Management
+- Core dependencies: numpy, pyglet==1.5.17, pandas, cython
+- Development dependencies: pytest (for testing)
+- Always use the exact pyglet version (1.5.17) to avoid compatibility issues
+
+## Development Commands
+
+### Running Examples
+```bash
+# Activate virtual environment first
+source .venv/bin/activate
+
+# Run upwind sailing example
+python3 examples/upwind/sailing_upwind.py
+
+# Run downwind sailing example
+python3 examples/downwind/sailing_downwind.py
+```
+
+### Building Cython Extensions
+```bash
+# Rebuild Cython extensions after code changes
+python3 setup.py build_ext --inplace
+```
+
+### Testing
+```bash
+# Run tests (if available)
+python3 -m pytest ci/
+
+# Run specific test file
+python3 -m pytest ci/test_Boat.py
+```
+
+## Common Development Issues
+
+### Display Connection Errors
+When running in headless environments or without X11:
+```python
+# Add this to handle display errors
+import os
+os.environ['PYGLET_HEADLESS'] = '1'
+```
+
+### Type Conversion Errors
+Always convert angles to integers:
+```python
+# Fix for Manager.step() type errors
+m.step([int(sail_angle), int(rudder_angle)])
+```
+
+### Import Errors
+Ensure the package is properly installed:
+```bash
+# Reinstall in development mode
+python3 -m pip install -e .
+```
+
+## Code Organization
+
+### Adding New Algorithms
+1. Create new example in `examples/` directory
+2. Follow naming convention: `sailing_[strategy].py`
+3. Include comprehensive comments and documentation
+4. Test with various wind conditions
+
+### Adding New Configurations
+1. Create boat configs in `boats/` directory
+2. Create environment configs in `environments/` directory
+3. Add foil data in `foils/` directory if needed
+4. Document configuration parameters
+
+### Modifying Core Components
+1. Make changes to Python source files
+2. Rebuild Cython extensions if needed
+3. Test thoroughly with existing examples
+4. Update documentation as needed
+
+## Git Workflow
+
+### Branch Naming
+- `feature/algorithm-name` for new sailing algorithms
+- `fix/issue-description` for bug fixes
+- `config/new-config-name` for configuration additions
+
+### Commit Messages
+- Use descriptive commit messages
+- Include algorithm or configuration name
+- Reference issues when applicable
+
+## Performance Optimization
+
+### Profiling
+```python
+import cProfile
+import pstats
+
+# Profile simulation performance
+cProfile.run('run_simulation()', 'profile_output')
+stats = pstats.Stats('profile_output')
+stats.sort_stats('cumulative').print_stats(10)
+```
+
+### Memory Management
+- Monitor memory usage during long simulations
+- Consider data sampling for very long runs
+- Use appropriate data structures for state storage
+
+## Documentation Standards
+
+### Code Comments
+- Document algorithm logic and sailing principles
+- Explain coordinate system usage
+- Include parameter ranges and units
+- Add examples for complex calculations
+
+### Configuration Documentation
+- Document all configuration parameters
+- Include typical value ranges
+- Explain parameter effects on simulation
+- Provide tuning guidelines
+
+## Troubleshooting
+
+### Common Error Messages
+- `TypeError: Argument has incorrect type`: Convert angles to integers
+- `NoSuchDisplayException`: Handle headless environment
+- `FileNotFoundError`: Check configuration file paths
+- `ImportError`: Verify package installation
+
+### Debug Mode
+```python
+# Enable debug mode for detailed output
+m = Manager(
+    "boats/sample_boat.json",
+    "environments/playground.json",
+    debug=True
+)
+```

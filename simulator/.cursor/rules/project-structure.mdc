@@ -1,0 +1,47 @@
+---
+alwaysApply: true
+---
+
+# Sailboat Playground Project Structure
+
+This is a Python framework for developing autonomous sailing algorithms with 2D simulations and visualizations.
+
+## Core Architecture
+
+The project is organized into two main modules:
+
+### Engine Module (`sailboat_playground/engine/`)
+- **Manager.py**: Main simulation controller - coordinates boat, environment, and simulation steps
+- **Boat.py**: Boat physics and dynamics implementation
+- **Environment.py**: Wind, current, and environmental conditions
+- **utils.py**: Mathematical utilities for sailing calculations
+
+### Visualization Module (`sailboat_playground/visualization/`)
+- **Viewer.py**: Main visualization interface using Pyglet
+- **Sailboat.py**: Visual representation of the sailboat
+- **resources/**: Image assets (sailboat.png, foil.png, etc.)
+- **utils.py**: Visualization utilities
+
+## Key Files
+
+- [setup.py](mdc:setup.py): Package configuration with Cython extensions
+- [requirements.txt](mdc:requirements.txt): Core dependencies (numpy, pyglet==1.5.17, pandas, cython)
+- [README.md](mdc:README.md): Comprehensive documentation
+
+## Configuration System
+
+- **Boats**: [boats/sample_boat.json](mdc:boats/sample_boat.json) - Boat physics parameters
+- **Environments**: [environments/playground.json](mdc:environments/playground.json) - Wind and current conditions
+- **Foils**: [foils/naca0015.csv](mdc:foils/naca0015.csv) - Aerodynamic coefficients
+
+## Examples
+
+- [examples/upwind/sailing_upwind.py](mdc:examples/upwind/sailing_upwind.py) - Upwind sailing algorithm
+- [examples/downwind/sailing_downwind.py](mdc:examples/downwind/sailing_downwind.py) - Downwind sailing algorithm
+
+## Development Notes
+
+- Uses Cython for performance-critical components
+- Coordinate system follows trigonometric circle convention (0° = East, 90° = North)
+- Simulation timestep is 0.1 seconds
+- All angles must be integers when passed to Manager.step()

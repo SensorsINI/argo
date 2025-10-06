@@ -1,0 +1,83 @@
+---
+description: PowerShell terminal prompt recognition and command completion patterns
+---
+
+# PowerShell Terminal Prompt Recognition
+
+## Command Completion Patterns
+
+When working with terminal output, recognize these PowerShell prompt patterns as indicators of command completion:
+
+### Standard PowerShell Prompts
+- `PS C:\path\to\directory>` - Standard PowerShell prompt
+- `PS F:\path\to\directory>` - PowerShell prompt on different drive
+- `PS .*>` - General pattern for PowerShell prompts (regex)
+
+### Command Completion Indicators
+
+**Completed Commands**: When you see output ending with a PowerShell prompt after a significant delay (>2 seconds), this indicates:
+1. The previous command has finished executing
+2. The shell is ready for new input
+3. Any partial output shown represents the complete command result
+
+**Interrupted Commands**: When you see patterns like:
+```
+PS F:\path> command
+PS F:\path> q^C
+```
+This indicates:
+- The command was interrupted with Ctrl+C
+- The `^C` represents the interrupt signal
+- The command did not complete successfully
+
+### Terminal Behavior Guidelines
+
+1. **Wait for Prompts**: Always wait for the PowerShell prompt to appear before assuming a command is complete
+2. **Recognize Delays**: Significant delays before prompt appearance usually indicate command processing time
+3. **Handle Interruptions**: Commands ending with `^C` should be considered incomplete/failed
+4. **Path Interpretation**: The path in the prompt shows the current working directory
+
+### Common PowerShell Command Patterns
+
+- **Git Commands**: Often show progress indicators before returning to prompt
+- **Package Installation**: May show download progress and installation steps
+- **File Operations**: Large file operations may have delays before prompt return
+- **Network Operations**: Commands involving network requests often have variable delays
+
+### Pager Handling
+
+Many commands use pagers by default which can cause incomplete output or hanging commands. Always use non-interactive options:
+
+**Git Commands with Pager Prevention**:
+- `git log --oneline --no-pager` or `git --no-pager log --oneline`
+- `git diff --no-pager` or `git --no-pager diff`
+- `git show --no-pager` or `git --no-pager show`
+- `git status --no-pager` (though status rarely needs it)
+
+**Alternative Approach**: Pipe to `cat` to prevent pager activation:
+- `git log | cat`
+- `git diff | cat`
+- `command-with-pager | cat`
+
+**Configure Git Globally** (recommended):
+```bash
+git config --global pager.diff false
+git config --global pager.show false
+git config --global pager.log false
+```
+
+**Signs of Pager Issues**:
+- Command appears to hang without returning to prompt
+- Partial output that seems cut off
+- Commands that would normally show long output but show nothing
+
+### Error Recognition
+
+PowerShell errors typically appear before the prompt returns:
+```
+PS F:\path> some-command
+Error: Command failed
+PS F:\path>
+```
+
+The presence of the prompt after error messages indicates the command has completed (albeit with errors).

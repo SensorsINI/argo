@@ -32,6 +32,7 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
+# Removed QoS imports - using default QoS only
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
@@ -55,8 +56,8 @@ class ArgoRecordingNode(Node):
 
         # Ensure bagfiles directory exists
         os.makedirs(self.bagfiles_dir, exist_ok=True)
-
-
+        
+        # Using default QoS for all publishers
         # ROS2 Services
         self.start_service = self.create_service(
             Trigger,

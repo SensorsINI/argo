@@ -1,0 +1,150 @@
+---
+description: Guidelines for developing sailing algorithms and simulation logic
+---
+
+# Sailing Algorithm Development Guidelines
+
+## Agent State Structure
+
+The `agent_state` provides sensor-like data for algorithm development:
+
+```python
+{
+    "heading": float,        # Boat orientation (0-360°, trigonometric circle)
+    "wind_speed": float,     # Wind speed in m/s
+    "wind_direction": float, # Wind direction (0-360°, trigonometric circle)
+    "position": [x, y],      # Boat position in meters
+}
+```
+
+## Algorithm Development Best Practices
+
+### 1. Sail Angle Calculation
+- Consider wind direction relative to boat heading
+- Implement tacking logic for upwind sailing
+- Account for apparent wind vs. true wind
+- Typical sail angles: -20° to +20° relative to wind
+
+### 2. Rudder Angle Calculation
+- Use proportional control for heading adjustments
+- Implement smooth steering to avoid oscillations
+- Consider boat momentum and turning radius
+- Typical rudder angles: -30° to +30°
+
+### 3. Navigation Strategies
+
+**Upwind Sailing:**
+- Implement tacking when wind angle is too close
+- Use zigzag pattern to make progress against wind
+- Monitor wind shifts and adjust strategy
+
+**Downwind Sailing:**
+- Minimize sail angle for maximum speed
+- Watch for accidental jibes
+- Consider wind shadow effects
+
+### 4. Common Algorithm Patterns
+
+```python
+def calculate_sail_angle(wind_direction, boat_heading, is_tacking=False):
+    """Calculate optimal sail angle based on wind conditions"""
+    relative_wind = wind_direction - boat_heading
+    
+    if is_tacking:
+        return 20 if relative_wind > 0 else -20
+    else:
+        # Normal sailing logic
+        return optimize_sail_angle(relative_wind)
+
+def calculate_rudder_angle(current_heading, target_heading):
+    """Calculate rudder angle for heading control"""
+    heading_error = current_heading - target_heading
+    # Normalize to -180 to 180 range
+    heading_error = (heading_error + 180) % 360 - 180
+    return heading_error * 0.25  # Proportional gain
+```
+
+## Simulation Loop Structure
+
+### Standard Simulation Pattern
+```python
+# Initialize simulation
+state_list = []
+m = Manager("boats/config.json", "environments/config.json", 
+           boat_heading=INITIAL_HEADING_ANGLE, 
+           boat_position=INITIAL_POSITION)
+
+# Main simulation loop
+for step in range(MAX_STEPS):
+    state = m.agent_state
+    
+    # Algorithm logic here
+    sail_angle = calculate_sail_angle(state)
+    rudder_angle = calculate_rudder_angle(state)
+    
+    # CRITICAL: Convert to integers before stepping
+    m.step([int(sail_angle), int(rudder_angle)])
+    
+    # Store state for visualization
+    state_list.append(m.state)
+```
+
+### State Management
+- Always store `m.state` (complete state) for visualization
+- Use `m.agent_state` for algorithm decisions
+- Track previous state for debugging and change detection
+
+## Debugging and Monitoring
+
+### State Change Detection
+```python
+def check_state_changes(current_state, previous_state, step, threshold_percent):
+    """Monitor for sudden changes in boat state"""
+    if previous_state is None:
+        return
+    
+    # Check position changes
+    pos_change = np.linalg.norm(
+        current_state["boat_position"] - previous_state["boat_position"]
+    )
+    
+    # Check heading changes (handle 360° wraparound)
+    heading_change = abs(current_state["boat_heading"] - previous_state["boat_heading"])
+    if heading_change > 180:
+        heading_change = 360 - heading_change
+    
+    # Check speed changes
+    current_speed = np.linalg.norm(current_state["boat_speed"])
+    previous_speed = np.linalg.norm(previous_state["boat_speed"])
+    
+    # Alert on significant changes
+    if any_change_exceeds_threshold:
+        print(f"🚨 STEP {step}: SUDDEN CHANGES DETECTED!")
+```
+
+### Debugging Parameters
+- Set `DEBUG_THRESHOLD_PERCENT` for change detection sensitivity
+- Use `debug=True` in Manager initialization for verbose logging
+- Implement progress bars with `tqdm` for long simulations
+
+## Simulation Parameters
+
+- **Timestep**: 0.1 seconds per simulation step
+- **Max Steps**: Typically 3000-6000 steps (5-10 minutes of simulation)
+- **Coordinate System**: Meters, centered at origin
+- **Wind**: Variable speed and direction with gusts
+- **Current**: Optional water current effects
+
+## Performance Optimization
+
+- Cache expensive calculations (wind triangle, etc.)
+- Use numpy for vector operations
+- Minimize function calls in simulation loops
+- Consider pre-computing lookup tables for common calculations
+
+## Testing and Validation
+
+- Test algorithms in various wind conditions
+- Validate against known sailing principles
+- Use visualization to debug algorithm behavior
+- Implement logging for algorithm decision tracking
