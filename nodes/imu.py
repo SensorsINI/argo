@@ -235,6 +235,14 @@ class ImuNode(Node):
         self.pub_health = self.create_publisher(Bool, 'imu_health', 10)
         self.health_status = False  # Track current health status
 
+        # Node health tracking for transient I2C failures
+        self.node_healthy = True
+        self._last_io_error_log_time = 0.0
+        self._consecutive_io_errors = 0
+        self._last_successful_read_time = time.time()
+        self._last_recovery_attempt_time = 0.0
+        self._recovery_attempt_count = 0
+
         # ASCII visual debug
         self._vis_ascii = self.debug
         self._vis_initialized = False
@@ -259,6 +267,94 @@ class ImuNode(Node):
                 self.get_logger().info("IMU health status: HEALTHY")
             else:
                 self.get_logger().warn("IMU health status: FAILED")
+
+    def _handle_io_error(self, error):
+        """Handle I2C IOError with health tracking and throttled logging"""
+        current_time = time.time()
+        self._consecutive_io_errors += 1
+
+        # Log error with throttling (max once per 5 seconds)
+        if current_time - self._last_io_error_log_time >= 5.0:
+            self.get_logger().warn(
+                f"Transient I2C read error (attempt {self._consecutive_io_errors}): {error}")
+            self._last_io_error_log_time = current_time
+
+        # Mark node as unhealthy after first IO error
+        if self.node_healthy:
+            self.node_healthy = False
+            self._publish_health_status(False)
+            self.get_logger().warn(
+                "Node health set to UNHEALTHY due to I2C errors. Switching to 1Hz retry mode.")
+            # Switch to low-frequency retry mode
+            self._switch_to_retry_mode()
+
+    def _switch_to_retry_mode(self):
+        """Switch timer to low-frequency retry mode (1Hz)"""
+        if hasattr(self, 'timer'):
+            self.timer.destroy()
+        self.timer = self.create_timer(1.0, self.timer_callback)
+        self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
+        
+        # Reset consecutive error counter for recovery tracking
+        self._consecutive_io_errors = 0
+
+    def _switch_to_normal_mode(self):
+        """Switch timer back to normal frequency (10Hz)"""
+        if hasattr(self, 'timer'):
+            self.timer.destroy()
+        self.timer = self.create_timer(0.1, self.timer_callback)  # 10 Hz
+        self.get_logger().info("Switched back to normal 10Hz mode - I2C communication recovered")
+
+    def _reinitialize_sensors(self):
+        """Re-initialize IMU sensors after I2C recovery"""
+        self.get_logger().info("Re-initializing IMU sensors...")
+        
+        try:
+            # Re-initialize the ICM-20948
+            self.icm.initialize()
+            
+            # Re-setup AK09916 magnetometer via bypass
+            AK_ADDR = 0x0C
+            # soft reset
+            self.bus.write_byte_data(AK_ADDR, 0x32, 0x01)
+            time.sleep(0.05)
+            # continuous measurement 100Hz
+            self.bus.write_byte_data(AK_ADDR, 0x31, 0x08)
+            time.sleep(0.01)
+            
+            self.get_logger().info("IMU sensor re-initialization successful")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"IMU sensor re-initialization failed: {e}")
+            return False
+
+    def _check_io_recovery(self):
+        """Check if I2C communication has recovered and switch back to normal mode"""
+        current_time = time.time()
+        time_since_last_success = current_time - self._last_successful_read_time
+        time_since_last_recovery_attempt = current_time - self._last_recovery_attempt_time
+
+        # Try recovery if we've been in retry mode for a while
+        # This allows recovery even with ongoing errors, since sensors need re-initialization
+        if (time_since_last_success > 5.0 and  # Been in retry mode for at least 5 seconds
+                time_since_last_recovery_attempt > 3.0):  # Wait at least 3 seconds between attempts
+
+            self._recovery_attempt_count += 1
+            self._last_recovery_attempt_time = current_time
+            
+            # Re-initialize sensors after I2C recovery
+            self.get_logger().info(f"Attempting IMU sensor re-initialization (attempt {self._recovery_attempt_count})...")
+            if self._reinitialize_sensors():
+                self.node_healthy = True
+                self._publish_health_status(True)
+                self._switch_to_normal_mode()
+                self._recovery_attempt_count = 0  # Reset counter on success
+                self.get_logger().info(
+                    f"IMU sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
+            else:
+                self.get_logger().error(f"IMU sensor re-initialization failed (attempt {self._recovery_attempt_count}), staying in retry mode")
+                # Stay in retry mode and try again later
 
     def _init_ascii_vis(self):
         if self._vis_initialized:
@@ -321,6 +417,14 @@ class ImuNode(Node):
 
             # Read magnetometer data
             mx_uT, my_uT, mz_uT = self.icm.read_magnetometer()
+
+            # Update successful read time for recovery detection
+            self._last_successful_read_time = time.time()
+            self._consecutive_io_errors = 0  # Reset error counter on success
+
+            # Check for recovery from I2C errors (do this even if no valid samples)
+            if not self.node_healthy:
+                self._check_io_recovery()
 
             if self._vis_ascii:
                 try:
@@ -388,9 +492,12 @@ class ImuNode(Node):
             self.pub_gyro.publish(Vector3(x=gx_dps, y=gy_dps, z=gz_dps))
             self.pub_magnetometer.publish(Vector3(x=mx_uT, y=my_uT, z=mz_uT))
             self.pub_compass.publish(Float64(data=heading_deg))
+            
+            # Publish health status as healthy
+            self._publish_health_status(True)
+            
         except Exception as e:
-            self.get_logger().error(f'IMU read failed: {e}')
-            self._publish_health_status(False)
+            self._handle_io_error(e)
 
     def _quiet_shutdown(self) -> None:
         # Publish health status as failed on shutdown
