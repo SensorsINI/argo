@@ -1,0 +1,104 @@
+---
+globs: *.json,*.csv
+---
+
+# Configuration Files Guidelines
+
+## Boat Configuration (`boats/*.json`)
+
+Reference: [boats/sample_boat.json](mdc:boats/sample_boat.json)
+
+### Required Parameters
+```json
+{
+    "name": "string",                    // Boat identifier
+    "length": float,                     // Hull length in meters
+    "mass": float,                       // Total mass in kg
+    "com_length": float,                 // Distance from bow to center of mass (m)
+    "sail_area": float,                  // Sail area in m²
+    "sail_foil": "string",               // Foil model name (e.g., "naca0015")
+    "rudder_area": float,                // Rudder area in m²
+    "rudder_foil": "string",             // Rudder foil model
+    "hull_area": float,                  // Frontal hull area in m²
+    "hull_friction_coefficient": float,  // Hull friction (0.1-0.5 typical)
+    "hull_rotation_resistance": float,   // Rotation resistance (0.2-0.8 typical)
+    "moment_of_inertia": float           // Boat moment of inertia
+}
+```
+
+### Tuning Guidelines
+- **Friction coefficients**: Start with 0.2, adjust based on simulation behavior
+- **Moment of inertia**: Larger values = slower turning, more stable
+- **Foil models**: Must match available CSV files in `foils/` directory
+
+## Environment Configuration (`environments/*.json`)
+
+Reference: [environments/playground.json](mdc:environments/playground.json)
+
+### Wind Parameters
+```json
+{
+    "wind_min_speed": float,             // Minimum wind speed (m/s)
+    "wind_max_speed": float,             // Maximum wind speed (m/s)
+    "wind_max_delta_percent": float,     // Max wind variation per timestep (%)
+    "wind_direction": float,             // Wind direction (0-360°, trig circle)
+    "wind_gust_probability": float,      // Gust probability (0-1)
+    "wind_gust_min_duration": float,     // Min gust duration (seconds)
+    "wind_gust_max_duration": float,     // Max gust duration (seconds)
+    "wind_gust_min_speed": float,        // Min gust speed (m/s)
+    "wind_gust_max_speed": float,        // Max gust speed (m/s)
+    "wind_gust_max_delta_percent": float // Max gust variation (%)
+}
+```
+
+### Current Parameters
+```json
+{
+    "current_speed": float,              // Water current speed (m/s)
+    "current_direction": float           // Current direction (0-360°, trig circle)
+}
+```
+
+### Environment Setup Tips
+- **Steady wind**: Set min/max speeds equal, delta_percent to 0
+- **Variable wind**: Use different min/max speeds with delta_percent 5-10%
+- **Gusty conditions**: Increase gust probability and duration ranges
+- **No current**: Set current_speed to 0
+
+## Foil Configuration (`foils/*.csv`)
+
+Reference: [foils/naca0015.csv](mdc:foils/naca0015.csv)
+
+### Required Format
+```csv
+alpha,cl,cd
+-180,0.0,0.00605
+-179,-0.123,0.00667
+...
+180,0.0,0.00605
+```
+
+### Column Definitions
+- **alpha**: Angle of attack in degrees (-180 to 180)
+- **cl**: Lift coefficient
+- **cd**: Drag coefficient
+
+### Creating Custom Foils
+- Use JavaFoil or similar software to generate coefficients
+- Ensure 1-degree resolution (-180 to 180 degrees)
+- Include both positive and negative angles
+- Validate coefficients are physically reasonable
+
+## Configuration Validation
+
+### Common Issues
+- **Missing foil files**: Ensure CSV files exist for referenced foil models
+- **Invalid ranges**: Check that speeds and angles are within reasonable bounds
+- **File paths**: Use relative paths from project root
+- **JSON syntax**: Validate JSON format before running simulations
+
+### Testing Configurations
+- Start with provided sample configurations
+- Test in simple environments before complex scenarios
+- Use visualization to verify boat behavior matches expectations
+- Log configuration parameters for debugging

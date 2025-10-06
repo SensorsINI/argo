@@ -1,0 +1,150 @@
+---
+globs: sailboat_playground/engine/*.py
+---
+
+# Physics Modeling Standards for Engine Module
+
+## Force Integration Patterns
+
+### Manager.step() Force Calculation Structure
+Follow this exact pattern for force calculations in Manager.step():
+
+1. **Wind Forces on Sail**
+   - Compute apparent wind: `Va = wind_speed - boat_speed`
+   - Calculate sail angle of attack with proper normalization
+   - Look up aerodynamic coefficients from foil data
+   - Compute lift and drag forces
+   - Project driving force onto boat heading
+
+2. **Water Forces on Hull**
+   - Compute apparent water current: `Wa = water_speed - boat_speed`
+   - Calculate hull resistance using friction coefficients
+   - Apply drag forces opposing motion
+
+3. **Water Forces on Rudder**
+   - Calculate rudder angle of attack with normalization
+   - Look up rudder aerodynamic coefficients
+   - Compute torque for steering control
+   - Apply angular acceleration to boat
+
+### Force Calculation Documentation
+Always document force calculations with:
+```python
+# 1 - Wind forces on sail
+# 1.1 - Compute apparent wind
+# 1.2 - Compute total force (in order to check driving force direction)
+# 1.3 - Compute driving force (project total force into unit vector on boat heading)
+```
+
+## Angle Normalization Standards
+
+### Required Angle Normalization
+All angle calculations must handle the 2π cut problem:
+
+```python
+# Normalize angles to [0, 360) range
+while angle >= 360:
+    angle -= 360
+while angle < 0:
+    angle += 360
+
+# Normalize angles to [-180, 180] range for relative calculations
+while angle < -180:
+    angle += 360
+while angle > 180:
+    angle -= 360
+```
+
+### Angle Conversion Patterns
+- **Input angles**: Always in degrees for user interface
+- **Internal calculations**: Convert to radians for trigonometric functions
+- **Foil lookups**: Must use integer degrees for CSV lookup tables
+- **Output angles**: Convert back to degrees for state reporting
+
+## State Management Patterns
+
+### Boat State Variables
+Document all boat state variables with physical meaning:
+```python
+# Position and Orientation
+self._position = np.array([0, 0])      # 2D position [x, y] in meters
+self._heading = 270                    # Boat orientation in degrees (0° = East)
+self._alpha = 0                        # Sail angle of attack in degrees
+
+# Kinematics  
+self._speed = np.array([0, 0])         # 2D velocity [vx, vy] in m/s
+self._angular_speed = 0                # Rotational velocity in degrees/second
+self._currentTime = 0                  # Current simulation time in seconds
+
+# Control Surfaces
+self._rudder_angle = 0                 # Rudder deflection angle in degrees
+```
+
+### Environment State Variables
+Document environmental state with units and ranges:
+```python
+self._currentWindSpeed = 0             # Current wind speed in m/s
+self._isWindGust = False               # Boolean gust state flag
+self._currentWindGustStart = 0         # Gust start time in seconds
+self._currentWindGustDuration = 0      # Gust duration in seconds
+self._currentTime = 0                  # Environment time in seconds
+```
+
+## Coordinate System Consistency
+
+### Vector Representations
+All vectors must use consistent coordinate system:
+- **Position**: `[x, y]` where x=East, y=North
+- **Velocity**: `[vx, vy]` in m/s
+- **Forces**: `[fx, fy]` in Newtons
+- **Wind/Current**: `[wx, wy]` in m/s
+
+### Angle Conventions
+- **Boat heading**: 0° = East, 90° = North, 180° = West, 270° = South
+- **Wind direction**: Direction wind is coming FROM
+- **Current direction**: Direction current is flowing TO
+- **Sail angle**: Relative to boat heading (positive = starboard)
+- **Rudder angle**: Relative to boat heading (positive = starboard)
+
+## Force Scaling and Units
+
+### Physical Constants
+Use consistent physical constants from [constants.py](mdc:sailboat_playground/constants.py):
+- `sea_water_rho = 1029` kg/m³
+- `wind_rho = 1.225` kg/m³  
+- `time_delta = 0.1` seconds
+
+### Force Scaling
+Document any force scaling factors:
+```python
+# Scale factor to make forces appropriate for simulation
+# Original formula gives correct physics but too small for numerical stability
+force_scale = 10  # Scale up forces by 10x for simulation stability
+```
+
+## Error Handling in Physics
+
+### Input Validation
+Always validate physics inputs:
+```python
+if type(ans) != list or len(ans) != 2:
+    raise Exception('Argument "ans" for Manager.step() must be a list with two values: [alpha, rudder_angle]')
+```
+
+### Angle Range Validation
+Validate angle ranges for foil lookups:
+```python
+# Convert to integers for foil lookup (foil data has integer angle resolution)
+self._boat.set_alpha(int(alpha))
+self._boat.set_rudder_angle(int(rudder_angle))
+```
+
+### Numerical Stability
+Handle edge cases in physics calculations:
+```python
+# Prevent unrealistic angular speeds
+if self._angular_speed > 360 / constants.time_delta:
+    self._angular_speed = 360 / constants.time_delta
+if self._angular_speed < -360 / constants.time_delta:
+    self._angular_speed = -360 / constants.time_delta
+```

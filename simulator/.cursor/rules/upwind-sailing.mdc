@@ -1,0 +1,210 @@
+---
+description: Specific patterns and strategies for upwind sailing algorithms
+---
+
+# Upwind Sailing Algorithm Patterns
+
+## Core Upwind Strategy
+
+Upwind sailing requires a zigzag (tacking) pattern to make progress against the wind. The boat cannot sail directly into the wind and must sail at angles to the wind direction.
+
+### Key Concepts
+- **Tacking**: Changing from one side of the wind to the other
+- **Tack Angles**: Typically 40° and 140° relative to wind direction
+- **No-Go Zone**: Area where boat cannot sail effectively (typically 30-45° on each side of wind)
+- **Target Approach**: When close to target, abandon tacking and sail directly
+
+## Tacking State Management
+
+### State Variables
+```python
+target_heading = 140          # Current target heading angle
+prev_target_heading = 140     # Previous target heading for comparison
+is_tacking = False           # Whether currently executing a tack
+target_position = [x, y]      # Final destination
+```
+
+### Tacking Logic Pattern
+```python
+def determine_tacking_state(target_angle, prev_target_heading, target_distance):
+    """Determine if boat should tack based on target angle and distance"""
+    
+    # Close to target - abandon tacking, sail directly
+    if target_distance < 20:
+        return False, target_angle
+    
+    # Check if target angle crosses tack threshold
+    if (target_angle >= 140 and prev_target_heading == 40) or \
+       (target_angle <= 40 and prev_target_heading == 140):
+        return True, None  # Trigger tack
+    
+    return False, None  # Continue current tack
+```
+
+## Sail Angle Strategy
+
+### Wind-Relative Sail Angles
+```python
+def get_sail_angle(wind_direction, is_tacking):
+    """Calculate sail angle based on wind direction and tacking state"""
+    
+    if wind_direction > 170 and wind_direction < 190:
+        # Wind directly behind - use proportional control
+        return 2 * (wind_direction - 180)
+    elif wind_direction >= 190:
+        # Wind from starboard - fixed angle
+        return 20
+    else:
+        # Wind from port - fixed angle
+        return -20
+```
+
+### Sail Angle Guidelines
+- **Upwind**: -20° to +20° relative to wind
+- **Tacking**: Use fixed angles (±20°) for stability
+- **Close-hauled**: Minimize sail angle for maximum upwind progress
+- **Wind shifts**: Adjust strategy when wind direction changes significantly
+
+## Rudder Control Strategy
+
+### Proportional Heading Control
+```python
+def get_rudder_angle(current_heading, target_heading):
+    """Calculate rudder angle using proportional control"""
+    diff = current_heading - target_heading
+    return diff * 0.25  # Proportional gain factor
+```
+
+### Rudder Control Guidelines
+- **Proportional gain**: 0.25 provides smooth, stable control
+- **Heading error**: Calculate difference between current and target
+- **Smooth transitions**: Avoid sudden rudder movements
+- **Momentum consideration**: Account for boat's turning momentum
+
+## Target Navigation
+
+### Target Angle Calculation
+```python
+def get_target_angle(boat_position, target_position):
+    """Calculate angle from boat to target position"""
+    return compute_angle(target_position - boat_position) * 180 / np.pi
+```
+
+### Navigation Strategy
+1. **Far from target**: Use tacking pattern (40°/140°)
+2. **Close to target**: Sail directly toward target
+3. **Target distance threshold**: Typically 20 meters
+4. **Angle monitoring**: Track when to switch tacks
+
+## Complete Upwind Algorithm Structure
+
+```python
+def upwind_sailing_algorithm(state, target_position, prev_target_heading):
+    """Complete upwind sailing algorithm"""
+    
+    # Calculate target angle
+    target_angle = get_target_angle(state["position"], target_position)
+    target_distance = np.linalg.norm(state["position"] - target_position)
+    
+    # Determine tacking state
+    is_tacking, new_target = determine_tacking_state(
+        target_angle, prev_target_heading, target_distance
+    )
+    
+    # Set target heading
+    if new_target is not None:
+        target_heading = new_target
+    elif is_tacking:
+        # Switch to opposite tack
+        target_heading = 140 if prev_target_heading == 40 else 40
+    else:
+        target_heading = target_angle
+    
+    # Calculate control angles
+    sail_angle = get_sail_angle(state["wind_direction"], is_tacking)
+    rudder_angle = get_rudder_angle(state["heading"], target_heading)
+    
+    return int(sail_angle), int(rudder_angle), target_heading, is_tacking
+```
+
+## Simulation Loop Integration
+
+### Complete Upwind Simulation Pattern
+```python
+# Initialize upwind sailing
+target_position = np.array([0, 90])
+target_heading = 140
+prev_target_heading = 140
+previous_state = None
+
+for step in range(MAX_STEPS):
+    state = m.agent_state
+    
+    # Check stop conditions
+    if state["position"][1] <= -100:  # Bottom boundary
+        break
+    if state["position"][1] > 100:   # Top boundary
+        break
+    
+    # Calculate control angles
+    sail_angle, rudder_angle, target_heading, is_tacking = \
+        upwind_sailing_algorithm(state, target_position, prev_target_heading)
+    
+    # Update state tracking
+    if not is_tacking:
+        prev_target_heading = target_heading
+    
+    # Step simulation
+    m.step([sail_angle, rudder_angle])
+    
+    # Store state and monitor changes
+    current_state = m.state
+    state_list.append(current_state)
+    check_state_changes(current_state, previous_state, step, DEBUG_THRESHOLD)
+    previous_state = current_state
+```
+
+## Debugging and Monitoring
+
+### State Change Detection
+Monitor for sudden changes in:
+- **Position**: Large jumps may indicate simulation issues
+- **Heading**: Sudden heading changes during tacking
+- **Speed**: Unexpected speed changes
+- **Wind**: Wind direction/speed variations
+
+### Debugging Parameters
+```python
+DEBUG_THRESHOLD_PERCENT = 10.0  # Alert threshold for state changes
+ARENA_SIZE_METERS = 200         # Simulation arena size
+INITIAL_POSITION = [50, -90]    # Starting position
+INITIAL_HEADING_ANGLE = 110     # Starting heading
+```
+
+## Performance Considerations
+
+### Optimization Strategies
+- **Angle wrapping**: Use `wrap()` function for angle normalization
+- **Vector operations**: Use numpy for position calculations
+- **State caching**: Store previous state for change detection
+- **Progress tracking**: Use `tqdm` for long simulations
+
+### Common Pitfalls
+- **Integer conversion**: Always convert angles to int before `m.step()`
+- **Angle normalization**: Handle 360° wraparound correctly
+- **State management**: Track both `agent_state` and `state`
+- **Tacking logic**: Ensure smooth transitions between tacks
+
+## Testing and Validation
+
+### Test Scenarios
+- **Various wind directions**: Test 0°, 45°, 90°, 135°, 180°
+- **Different target positions**: Test various distances and angles
+- **Wind shifts**: Test algorithm response to changing wind
+- **Boundary conditions**: Test near arena edges
+
+### Success Metrics
+- **Progress toward target**: Measure upwind progress made
+- **Tacking efficiency**: Minimize unnecessary tacks
+- **Stability**: Avoid oscillations and erratic behavior
+- **Completion time**: Reach target in reasonable time

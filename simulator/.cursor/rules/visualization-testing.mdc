@@ -1,0 +1,149 @@
+---
+description: Guidelines for visualization, testing, and debugging simulations
+---
+
+# Visualization and Testing Guidelines
+
+## Visualization Setup
+
+### Basic Visualization Pattern
+```python
+import pickle
+from sailboat_playground.visualization import Viewer
+
+# Load simulation data
+with open("output.sbpickle", "rb") as f:
+    state_list = pickle.load(f)
+
+# Create viewer with optional parameters
+v = Viewer(
+    map_size=1000,           # Map size in meters (default: 800)
+    buoy_list=[(0, 0), (-40, -40)]  # Optional buoy positions
+)
+
+# Run visualization
+v.run(
+    state_list=state_list,
+    simulation_speed=100     # Timesteps per second (default: 100)
+)
+```
+
+### Visualization Parameters
+
+**Viewer Options:**
+- `map_size`: Square map size in meters (centered at origin)
+- `buoy_list`: List of (x, y) tuples for buoy positions
+- `simulation_speed`: Controls playback speed (higher = faster)
+
+**Display Elements:**
+- Blue arrow: Real wind direction and speed
+- Speedometer: Current boat speed
+- Position display: Current coordinates
+- Red foils: Sail (large) and rudder (small)
+- Buoys: Marked positions for racing scenarios
+
+## Common Display Issues
+
+### Headless Environment Errors
+```python
+# Handle display connection errors
+try:
+    v.run(state_list=state_list)
+except Exception as e:
+    if "Cannot connect" in str(e) or "NoSuchDisplayException" in str(e):
+        print("Display not available - running in headless mode")
+        # Continue with data analysis instead
+    else:
+        raise
+```
+
+### Performance Optimization
+- Reduce `simulation_speed` if visualization is choppy
+- Limit `map_size` for better performance
+- Use smaller state lists for testing
+
+## Testing Strategies
+
+### 1. Algorithm Validation
+```python
+# Test algorithm in different conditions
+test_scenarios = [
+    {"wind_speed": 5, "wind_direction": 270},   # Light wind
+    {"wind_speed": 15, "wind_direction": 180},  # Strong wind
+    {"wind_speed": 10, "wind_direction": 0},    # Headwind
+]
+
+for scenario in test_scenarios:
+    # Run simulation with scenario parameters
+    # Analyze results
+    # Validate algorithm behavior
+```
+
+### 2. Data Analysis
+```python
+# Analyze simulation data without visualization
+import numpy as np
+
+# Extract key metrics
+positions = [state["position"] for state in state_list]
+headings = [state["heading"] for state in state_list]
+speeds = [np.linalg.norm(state["velocity"]) for state in state_list]
+
+# Calculate performance metrics
+total_distance = calculate_total_distance(positions)
+average_speed = np.mean(speeds)
+efficiency = calculate_sailing_efficiency(positions, headings)
+```
+
+### 3. Debugging Techniques
+
+**Logging Algorithm Decisions:**
+```python
+def debug_algorithm(state, sail_angle, rudder_angle):
+    print(f"Step {step}: Heading={state['heading']:.1f}°, "
+          f"Wind={state['wind_direction']:.1f}°, "
+          f"Sail={sail_angle}°, Rudder={rudder_angle}°")
+```
+
+**State Inspection:**
+```python
+# Check agent state structure
+state = m.agent_state
+print("Available state keys:", state.keys())
+print("Position:", state["position"])
+print("Wind conditions:", state["wind_speed"], state["wind_direction"])
+```
+
+## File Management
+
+### Simulation Data Files
+- Use `.sbpickle` extension for simulation data
+- Include timestamp in filename for multiple runs
+- Compress large datasets for storage
+
+### Example File Naming
+```
+simulation_20240101_upwind_10ms.sbpickle
+simulation_20240101_downwind_15ms.sbpickle
+test_algorithm_v1_light_wind.sbpickle
+```
+
+## Performance Monitoring
+
+### Simulation Metrics
+- Track simulation time vs. real time
+- Monitor memory usage for long simulations
+- Log algorithm performance statistics
+
+### Visualization Performance
+- Measure frame rate during visualization
+- Optimize rendering for large datasets
+- Consider data sampling for very long simulations
+
+## Best Practices
+
+1. **Start Simple**: Begin with basic scenarios before complex conditions
+2. **Validate Physics**: Ensure boat behavior matches expected sailing physics
+3. **Test Edge Cases**: Include boundary conditions and extreme scenarios
+4. **Document Results**: Keep logs of algorithm performance and behavior
+5. **Iterate Quickly**: Use fast feedback loops for algorithm development

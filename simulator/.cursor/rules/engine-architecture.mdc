@@ -1,0 +1,168 @@
+---
+globs: sailboat_playground/engine/*.py
+---
+
+# Engine Module Architecture Standards
+
+## Module Organization
+
+The engine module follows a clear architectural pattern with these responsibilities:
+
+### Manager.py - Central Coordinator
+- **Role**: Main simulation controller and physics integrator
+- **Responsibilities**:
+  - Coordinate between Boat and Environment
+  - Compute and apply all physical forces
+  - Provide agent interface for sailing algorithms
+  - Manage simulation state and debug logging
+- **Key Methods**: `step()`, `state`, `agent_state`
+
+### Boat.py - Physics Model
+- **Role**: Physical boat representation and dynamics
+- **Responsibilities**:
+  - Manage boat physical state (position, velocity, heading)
+  - Handle control surfaces (sail, rudder)
+  - Implement force/acceleration integration
+  - Provide aerodynamic foil lookup tables
+- **Key Methods**: `apply_force()`, `apply_angular_acceleration()`, `execute()`
+
+### Environment.py - Environmental Dynamics
+- **Role**: Wind and current modeling
+- **Responsibilities**:
+  - Simulate wind speed variations and gusts
+  - Provide water current vectors
+  - Manage environmental time evolution
+- **Key Methods**: `execute()`, `wind_speed`, `water_speed`
+
+### utils.py - Mathematical Utilities
+- **Role**: Vector mathematics and angle handling
+- **Responsibilities**:
+  - Vector-to-angle conversions
+  - Angle-to-vector conversions
+  - 2π cut problem handling
+- **Key Functions**: `compute_angle()`, `norm_to_vector()`
+
+## Integration Patterns
+
+### Manager-Boat Integration
+```python
+# Manager applies forces to boat
+self._boat.apply_force(total_force)
+self._boat.apply_angular_acceleration(angular_acceleration)
+
+# Manager reads boat state
+boat_heading = self._boat.heading
+boat_speed = self._boat.speed
+boat_position = self._boat.position
+```
+
+### Manager-Environment Integration
+```python
+# Manager reads environment state
+wind_speed = self._env.wind_speed
+water_speed = self._env.water_speed
+
+# Manager advances environment time
+self._env.execute()
+```
+
+### State Flow Pattern
+1. **Agent Input**: `[sail_angle, rudder_angle]` → Manager
+2. **Force Calculation**: Manager computes all forces
+3. **Force Application**: Manager applies forces to Boat
+4. **State Integration**: Boat and Environment execute physics
+5. **State Output**: Manager provides updated state to agent
+
+## Configuration Dependencies
+
+### Boat Configuration
+- **File**: JSON format in `boats/` directory
+- **Required Fields**: mass, sail_area, hull_area, rudder_area, foil specifications
+- **Foil Dependencies**: References CSV files in `foils/` directory
+
+### Environment Configuration  
+- **File**: JSON format in `environments/` directory
+- **Required Fields**: wind parameters, current parameters, gust settings
+- **Units**: Wind speeds in m/s, directions in degrees
+
+### Foil Data
+- **File**: CSV format in `foils/` directory
+- **Required Columns**: `alpha`, `cl`, `cd`
+- **Angle Range**: -180° to +180° in 1° increments
+- **Usage**: Lookup tables for aerodynamic coefficients
+
+## Error Handling Architecture
+
+### Configuration Loading
+```python
+try:
+    with open(config_file, "r") as f:
+        self._config = json.loads(f.read())
+except Exception as e:
+    raise Exception(f"Failed to load configuration file: {e}")
+```
+
+### Input Validation
+```python
+if type(ans) != list or len(ans) != 2:
+    raise Exception('Argument "ans" for Manager.step() must be a list with two values: [alpha, rudder_angle]')
+```
+
+### Physics Validation
+```python
+try:
+    assert vec.shape == (2,)
+except AssertionError:
+    raise AssertionError(f"Failed to compute angle on vector with shape different from (2,): Shape is {vec.shape}")
+```
+
+## Performance Considerations
+
+### Cython Integration
+- Performance-critical components are compiled with Cython
+- Maintain Python interface for ease of use
+- Use numpy arrays for mathematical operations
+
+### Force Calculation Optimization
+- Pre-compute foil coefficient lookups
+- Use vectorized operations where possible
+- Minimize trigonometric calculations in simulation loops
+
+### Memory Management
+- Reuse numpy arrays where possible
+- Avoid creating new arrays in tight loops
+- Use in-place operations for state updates
+
+## Debug and Logging
+
+### Debug Mode
+```python
+def log(self, *args, **kwargs):
+    if self._debug:
+        print(*args, **kwargs)
+```
+
+### State Monitoring
+- Use `print_current_state()` for detailed physics debugging
+- Log force calculations with clear section headers
+- Track angle normalizations and coordinate transformations
+
+## Extension Points
+
+### Adding New Force Types
+1. Add force calculation in `Manager.step()`
+2. Document force physics and units
+3. Add to `total_force` accumulation
+4. Update state reporting if needed
+
+### Adding New Boat Components
+1. Add state variables to `Boat` class
+2. Add configuration parameters
+3. Update force calculations in `Manager`
+4. Add to state reporting
+
+### Adding New Environmental Effects
+1. Add parameters to `Environment` class
+2. Update `execute()` method for time evolution
+3. Add to `Manager` force calculations
+4. Update configuration schema
