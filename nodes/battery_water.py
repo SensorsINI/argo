@@ -2,9 +2,13 @@
 # Battery/Water ROS2 node
 # - Reads MAX11612 ADC: AIN0=battery via 27k/18k divider, AIN1=saltwater probe, AIN2=sail winch shunt
 # - Reads SHT45 temperature/humidity sensor
+# - Monitors MP2672GD charger status via GPIO: PC12 (!CHARGING) and PH9 (!ACOK)
 # Publishes (Float32):
 # - battery_voltage (V), saltwater_voltage (V), sail_current (A), pcb_temperature (C), relative_humidity (%)
 # - battery_remaining_pct (%) using per‑cell LiPo formula: soc% = S − S/(1 + (v/V0)^A)^B
+# Publishes (Bool):
+# - charging_status (true=charging, false=not charging) - inverted from !CHARGING GPIO
+# - ac_power_present (true=AC/USB power present, false=not present) - inverted from !ACOK GPIO
 # Alerts (Bool):
 # - battery_low_alert (hysteresis 50 mV around battery_low_threshold_v; warning on low, info on recover)
 # - saltwater_alert (voltage >= saltwater_alert_threshold_v)
@@ -25,6 +29,7 @@
 # - I2C Bus: Exclusively uses I2C bus 0 (Orange Pi Zero 2W default I2C interface)
 # - I2C Pins: SDA=PI6 (twi0-sda), SCL=PI5 (twi0-sck) - configured via pi-i2c0 overlay
 # - MAX11612 ADC at I2C address 0x34, SHT45 sensor at I2C address 0x44
+# - GPIO Pins: PC12 (pin 36, line 76) !CHARGING, PH9 (pin 26, line 233) !ACOK from MP2672GD
 
 import rclpy
 from rclpy.node import Node
@@ -43,6 +48,10 @@ from rclpy.executors import ExternalShutdownException
 # Hardware configuration constants
 I2C_BUS_NUMBER = 0  # Orange Pi Zero 2W default I2C bus
 
+# GPIO configuration for MP2672GD charger status
+CHARGING_GPIO_LINE = 76   # PC12 (pin 36) - !CHARGING from MP2672GD
+ACOK_GPIO_LINE = 233      # PH9 (pin 26) - !ACOK from MP2672GD
+
 # Sample rate configuration
 SAMPLE_RATE_HZ = 1/3.0  # 1/3 Hz = 3 second intervals
 
@@ -55,6 +64,14 @@ try:
 except Exception:
     smbus2 = None
     i2c_msg = None
+
+# GPIO for MP2672GD charger status monitoring
+try:
+    import gpiod
+    _HAS_GPIO = True
+except Exception:
+    _HAS_GPIO = False
+    gpiod = None
 
 # tqdm for terminal bars in debug mode
 try:
@@ -105,6 +122,12 @@ class BatteryWaterNode(Node):
         # Battery remaining percentage publisher
         self.pub_battery_remaining_pct = self.create_publisher(
             Float32, 'battery_remaining_pct', 10)
+        
+        # GPIO status publishers for MP2672GD charger monitoring
+        self.pub_charging_status = self.create_publisher(
+            Bool, 'charging_status', 10)
+        self.pub_ac_power_present = self.create_publisher(
+            Bool, 'ac_power_present', 10)
 
         # Service for on-demand battery status using standard Trigger service
         self.srv_battery_status = self.create_service(
@@ -124,6 +147,8 @@ class BatteryWaterNode(Node):
         self._latest_battery_low_alert = False
         self._latest_saltwater_alert = False
         self._latest_humidity_alert = False
+        self._latest_charging_status = None
+        self._latest_ac_power_present = None
         self._latest_timestamp = None
 
         # CSV logging setup
@@ -150,6 +175,8 @@ class BatteryWaterNode(Node):
         self._prev_temperature = None
         self._prev_humidity = None
         self._prev_battery_remaining_pct = None
+        self._prev_charging_status = None
+        self._prev_ac_power_present = None
 
         # I2C preferences
         self.use_smbus2 = (smbus2 is not None)
@@ -192,6 +219,28 @@ class BatteryWaterNode(Node):
         self.sht_addr = 0x44
         self.SHT45_HIGH_PRECISION_CMD = 0xFD
         self.SHT45_MEASUREMENT_DELAY = 0.01
+
+        # GPIO setup for MP2672GD charger status monitoring
+        self.gpio_available = False
+        self.charging_gpio_line = None
+        self.acok_gpio_line = None
+        if _HAS_GPIO:
+            try:
+                # Initialize GPIO chip
+                self.gpio_chip = gpiod.Chip("/dev/gpiochip0")
+                # Request charging status GPIO line (PC12, line 76)
+                self.charging_gpio_line = self.gpio_chip.get_line(CHARGING_GPIO_LINE)
+                self.charging_gpio_line.request(consumer="battery_water_node", type=gpiod.LINE_REQ_DIR_IN)
+                # Request AC power status GPIO line (PH9, line 233)
+                self.acok_gpio_line = self.gpio_chip.get_line(ACOK_GPIO_LINE)
+                self.acok_gpio_line.request(consumer="battery_water_node", type=gpiod.LINE_REQ_DIR_IN)
+                self.gpio_available = True
+                self.get_logger().info('GPIO setup complete for MP2672GD charger monitoring')
+            except Exception as e:
+                self.get_logger().error(f'GPIO setup failed: {e}')
+                self.gpio_available = False
+        else:
+            self.get_logger().warning('GPIO not available - MP2672GD charger status monitoring disabled')
 
         # Perform ADC setup (internal ref always on, AIN3 as analog input)
         try:
@@ -271,7 +320,7 @@ class BatteryWaterNode(Node):
                         'timestamp', 'battery_voltage', 'battery_remaining_pct',
                         'saltwater_voltage', 'sail_current', 'pcb_temperature',
                         'relative_humidity', 'battery_low_alert', 'saltwater_alert',
-                        'humidity_alert', 'battery_water_health'
+                        'humidity_alert', 'battery_water_health', 'charging_status', 'ac_power_present'
                     ])
                 self.get_logger().info(
                     f"CSV logging initialized: {self.csv_file_path}")
@@ -283,7 +332,8 @@ class BatteryWaterNode(Node):
 
     def _log_to_csv(self, battery_voltage, battery_remaining_pct, saltwater_voltage,
                     sail_current, temperature, humidity, battery_low_alert,
-                    saltwater_alert, humidity_alert, health_status):
+                    saltwater_alert, humidity_alert, health_status, charging_status,
+                    ac_power_present):
         """Log current sensor data to CSV file"""
         if not self._csv_file_initialized:
             return
@@ -297,6 +347,8 @@ class BatteryWaterNode(Node):
             saltwater_alert_csv = 1 if saltwater_alert else 0
             humidity_alert_csv = 1 if humidity_alert else 0
             health_csv = 1 if health_status else 0
+            charging_csv = 1 if charging_status else 0
+            ac_power_csv = 1 if ac_power_present else 0
 
             # Handle None values
             battery_remaining_pct = battery_remaining_pct if battery_remaining_pct is not None else ""
@@ -310,7 +362,7 @@ class BatteryWaterNode(Node):
                     timestamp, battery_voltage, battery_remaining_pct,
                     saltwater_voltage, sail_current, temperature,
                     humidity, battery_low_csv, saltwater_alert_csv,
-                    humidity_alert_csv, health_csv
+                    humidity_alert_csv, health_csv, charging_csv, ac_power_csv
                 ])
 
         except Exception as e:
@@ -335,6 +387,8 @@ class BatteryWaterNode(Node):
                 'battery_low_alert': self._latest_battery_low_alert,
                 'saltwater_alert': self._latest_saltwater_alert,
                 'humidity_alert': self._latest_humidity_alert,
+                'charging_status': self._latest_charging_status if self._latest_charging_status is not None else False,
+                'ac_power_present': self._latest_ac_power_present if self._latest_ac_power_present is not None else False,
                 'battery_water_health': self.health_status,
                 'timestamp_sec': now.seconds_nanoseconds()[0],
                 'timestamp_nanosec': now.seconds_nanoseconds()[1]
@@ -499,6 +553,31 @@ class BatteryWaterNode(Node):
                 self._request_shutdown()
 
             return None, None
+
+    # ---------- GPIO reading helpers ----------
+    def _read_gpio_status(self):
+        """Read GPIO status from MP2672GD charger"""
+        charging_status = None
+        ac_power_present = None
+        
+        if not self.gpio_available:
+            return charging_status, ac_power_present
+            
+        try:
+            # Read !CHARGING GPIO (PC12, line 76) - invert logic for charging status
+            if self.charging_gpio_line is not None:
+                charging_gpio_value = self.charging_gpio_line.get_value()
+                charging_status = not charging_gpio_value  # Invert: !CHARGING=0 means charging=True
+                
+            # Read !ACOK GPIO (PH9, line 233) - invert logic for AC power present
+            if self.acok_gpio_line is not None:
+                acok_gpio_value = self.acok_gpio_line.get_value()
+                ac_power_present = not acok_gpio_value  # Invert: !ACOK=0 means AC power present=True
+                
+        except Exception as e:
+            self.get_logger().error(f'GPIO read failed: {e}')
+            
+        return charging_status, ac_power_present
 
     # ---------- Test: RC decay of REFOUT on AIN3 with sampling & PNG ----------
     def _set_ain3_mode(self, sel_bits: int):
@@ -712,6 +791,13 @@ class BatteryWaterNode(Node):
         self._latest_temperature = temperature
         self._latest_humidity = humidity
 
+        # Read GPIO status from MP2672GD charger
+        charging_status, ac_power_present = self._read_gpio_status()
+
+        # Store GPIO status for service
+        self._latest_charging_status = charging_status
+        self._latest_ac_power_present = ac_power_present
+
         # Determine if we should publish values
         should_publish = False
 
@@ -722,11 +808,24 @@ class BatteryWaterNode(Node):
                 # Build sensor state message
                 battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
                 temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
+                
+                # Build charging status message
+                charging_str = ""
+                if charging_status is not None and ac_power_present is not None:
+                    charging_icon = "🔌" if charging_status else "🔋"
+                    ac_icon = "⚡" if ac_power_present else "🔌"
+                    charging_str = f", Charging={charging_icon}{charging_status}, AC={ac_icon}{ac_power_present}"
+                elif charging_status is not None:
+                    charging_icon = "🔌" if charging_status else "🔋"
+                    charging_str = f", Charging={charging_icon}{charging_status}"
+                elif ac_power_present is not None:
+                    ac_icon = "⚡" if ac_power_present else "🔌"
+                    charging_str = f", AC={ac_icon}{ac_power_present}"
 
                 self.get_logger().info(
                     f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
                     f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
-                    f"{temp_humid_str}"
+                    f"{temp_humid_str}{charging_str}"
                 )
                 self._last_log_time = current_time
         # First 30 seconds: publish every cycle (1Hz) and log every 5s
@@ -736,11 +835,24 @@ class BatteryWaterNode(Node):
                 # Build sensor state message
                 battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
                 temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
+                
+                # Build charging status message
+                charging_str = ""
+                if charging_status is not None and ac_power_present is not None:
+                    charging_icon = "🔌" if charging_status else "🔋"
+                    ac_icon = "⚡" if ac_power_present else "🔌"
+                    charging_str = f", Charging={charging_icon}{charging_status}, AC={ac_icon}{ac_power_present}"
+                elif charging_status is not None:
+                    charging_icon = "🔌" if charging_status else "🔋"
+                    charging_str = f", Charging={charging_icon}{charging_status}"
+                elif ac_power_present is not None:
+                    ac_icon = "⚡" if ac_power_present else "🔌"
+                    charging_str = f", AC={ac_icon}{ac_power_present}"
 
                 self.get_logger().info(
                     f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
                     f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
-                    f"{temp_humid_str}"
+                    f"{temp_humid_str}{charging_str}"
                 )
                 self._last_log_time = current_time
         else:
@@ -785,6 +897,23 @@ class BatteryWaterNode(Node):
                 # Silently ignore publish errors during shutdown
                 pass
 
+            # Publish GPIO status (always publish on change or startup)
+            try:
+                # Publish charging status if changed or first time
+                if charging_status is not None and charging_status != self._prev_charging_status:
+                    self.pub_charging_status.publish(Bool(data=charging_status))
+                    if self._prev_charging_status is not None:  # Don't log on first startup
+                        self.get_logger().info(f"Charging status changed: {charging_status}")
+                
+                # Publish AC power status if changed or first time
+                if ac_power_present is not None and ac_power_present != self._prev_ac_power_present:
+                    self.pub_ac_power_present.publish(Bool(data=ac_power_present))
+                    if self._prev_ac_power_present is not None:  # Don't log on first startup
+                        self.get_logger().info(f"AC power status changed: {ac_power_present}")
+            except Exception as e:
+                # Silently ignore publish errors during shutdown
+                pass
+
             # Update previous values and timestamp
             self._prev_battery_voltage = battery_voltage
             self._prev_saltwater_voltage = saltwater_voltage
@@ -792,6 +921,8 @@ class BatteryWaterNode(Node):
             self._prev_temperature = temperature
             self._prev_humidity = humidity
             self._prev_battery_remaining_pct = battery_remaining_pct
+            self._prev_charging_status = charging_status
+            self._prev_ac_power_present = ac_power_present
             self._last_publish_time = current_time
 
         # Alerts (always published regardless of sensor data publishing logic)
@@ -858,7 +989,8 @@ class BatteryWaterNode(Node):
                 battery_voltage, battery_remaining_pct, saltwater_voltage,
                 sail_current, temperature, humidity,
                 self._latest_battery_low_alert, self._latest_saltwater_alert,
-                self._latest_humidity_alert, self.health_status
+                self._latest_humidity_alert, self.health_status,
+                charging_status, ac_power_present
             )
             self._last_csv_log_time = current_time
 

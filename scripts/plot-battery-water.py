@@ -76,7 +76,7 @@ def load_battery_data(csv_file_path):
                 'timestamp', 'battery_voltage', 'battery_remaining_pct',
                 'saltwater_voltage', 'sail_current', 'pcb_temperature',
                 'relative_humidity', 'battery_low_alert', 'saltwater_alert',
-                'humidity_alert', 'battery_water_health'
+                'humidity_alert', 'battery_water_health', 'charging_status', 'ac_power_present'
             ]
             df = pd.read_csv(csv_file_path, header=None, names=column_names)
             print(
@@ -323,10 +323,10 @@ def plot_sensor_trends(df, output_dir):
 
 def plot_alerts(df, output_dir):
     """Plot alert patterns over time"""
-    plt.figure(figsize=(14, 6))
+    plt.figure(figsize=(14, 8))
 
     # Create alert timeline
-    plt.subplot(2, 1, 1)
+    plt.subplot(3, 1, 1)
     plt.plot(df['timestamp'], df['battery_low_alert'],
              'r-', linewidth=2, label='Battery Low Alert')
     plt.plot(df['timestamp'], df['saltwater_alert'],
@@ -339,8 +339,20 @@ def plot_alerts(df, output_dir):
     plt.grid(True, alpha=0.3)
     plt.ylim(-0.1, 1.1)
 
+    # Charging status
+    plt.subplot(3, 1, 2)
+    plt.plot(df['timestamp'], df['charging_status'],
+             'orange', linewidth=2, label='Charging Status')
+    plt.plot(df['timestamp'], df['ac_power_present'],
+             'purple', linewidth=2, label='AC Power Present')
+    plt.title('MP2672GD Charger Status', fontsize=14, fontweight='bold')
+    plt.ylabel('Status (0/1)', fontsize=12)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim(-0.1, 1.1)
+
     # Health status
-    plt.subplot(2, 1, 2)
+    plt.subplot(3, 1, 3)
     plt.plot(df['timestamp'], df['battery_water_health'],
              'k-', linewidth=2, label='System Health')
     plt.title('Battery Water System Health', fontsize=14, fontweight='bold')
@@ -420,6 +432,16 @@ def print_data_summary(df):
     print(f"  Saltwater: {saltwater_alerts} occurrences")
     print(f"  High Humidity: {humidity_alerts} occurrences")
     print(f"  Health Failures: {health_failures} occurrences")
+
+    # Charging status summary (if available)
+    if 'charging_status' in df.columns and 'ac_power_present' in df.columns:
+        charging_active = df['charging_status'].sum()
+        ac_power_active = df['ac_power_present'].sum()
+        print(f"\nCharging Status:")
+        print(f"  Charging Active: {charging_active} samples")
+        print(f"  AC Power Present: {ac_power_active} samples")
+        print(f"  Charging Percentage: {(charging_active / len(df) * 100):.1f}%")
+        print(f"  AC Power Percentage: {(ac_power_active / len(df) * 100):.1f}%")
 
     print("="*60)
 

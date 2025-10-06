@@ -8,6 +8,28 @@ This package provides a ROS2 node for the Argo power control system, which manag
 - PH4 (pin 18) green LED (line 228)
 - PI1 (pin 12) blue LED (line 257)
 - PI3 (pin 40) shutdown pulse to external cutoff (line 259)
+- PC12 (pin 36) !CHARGING from MP2672GD that indicates when CHARGING=0 that the MP2672GD is currently charging the battery (line 76)
+- PH9 (pin 26) !ACOK from MP2672GD that indicates with ACOK=0 that the MP2672GD gets input power from USB (line 233)
+
+## Power circuits
+The board power relay (PRL3-5V-DC-1A)	is latched on by power button. The other coil in relay latches it off from the shutdown pulse on PI3. The latching is magnetic inside the relay.
+
+The main PCB battery power (a 2S LiPo with fully-charged voltage about 8.V) is routed through a 7A fuse to the relay. The relay output is called MAIN. 
+
+MAIN powers a 5V Traco switching regulator that supplies power called 5V. 
+
+5V powers the OrangePi Zero 2W and peripheral circuits (MAX11612 ADC, Sparkfun_IMU_ICM-20948 IMU, Sparkfun_NEO-N9M-SMA GPS, 3x SDP32 custom anemometer). 
+
+MAIN power also powers the servos and radio, via the servo cables. 
+
+The OrangePi board 3.3V regulator called 3.3 supplies power to the humidity sensor (SHT5-ADB1B) and long range radio (RA-01 SX1278 LORA from ai-thinker).
+
+## Critical low battery halting
+In normal shutdown, the relay is turned off to completely disconnect MAIN and reduce battery consumption to a trickle of about 40uA consumed by the battery charger chip (MP2672GD). This relay disconnection is done by a special shutdown hook that runs as the very last operation before halt; see [`argo_poweroff.shutdown`](argo_poweroff.shutdown).
+
+During normal battery-powered operation, if the battery voltage ever gets critically low (below about 6.5V), the OrangePi should be halted to conserve power, but the relay should *not* disconnect, because this would prevent sailing argo. If the OrangePi is halted, the PWM output pins are placed in high impedance mode and then the radio input pulses drive the servo output pins through resistors. That will allow sailing argo by hand.
+
+Therefore, there needs to be a special shutdown mode that prevents the normal shutdown hook from running in the case of critical low battery halting. 
 
 ## Components
 - `argo_power_control.py`: ROS2 node for button monitoring, LEDs, relay control, graceful shutdown, and recording control integration
@@ -72,7 +94,7 @@ sudo /home/orangepi/argo/launch/argo_power_control.py --threshold 2.0
 ```
 
 ## GPIO quick refs (H616)
-- PI3: 259, PI9: 265, PH4: 228, PI1: 257
+- PI3: 259, PI9: 265, PH4: 228, PI1: 257, PC12: 76, PH9: 233
 
 ## Uninstall
 ```bash
