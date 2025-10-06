@@ -4,7 +4,7 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+# Removed QoS imports - using default QoS only
 from std_msgs.msg import Bool, Float64, Float32
 from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
@@ -291,17 +291,7 @@ class ControllerNode(Node):
         # Load initial parameters
         self.check_and_reload_params(is_initial=True)
         
-        # --- QoS Profiles ---
-        # Standard QoS for real-time data (reduced depth for lower memory usage)
-        self.standard_qos = 5  # Reduced from 10 to 5 for lower memory/CPU overhead
-        
-        # Persistent QoS for critical status and configuration data
-        # Late-joining nodes get immediate access to current state
-        self.persistent_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            depth=1  # Keep only the latest value
-        )
+        # --- Using default QoS for all publishers/subscribers ---
         
         # --- State and Control ---
         self.boat_state = BoatState()
@@ -324,37 +314,37 @@ class ControllerNode(Node):
         self._initialize_controller()
         
         # --- Publishers ---
-        # Real-time control commands (use standard QoS for low latency)
-        self.pub_rudder_sail_cmd = self.create_publisher(Vector3, '/rudder_sail_cmd', self.standard_qos)
+        # Real-time control commands (use default QoS)
+        self.pub_rudder_sail_cmd = self.create_publisher(Vector3, '/rudder_sail_cmd', 10)
         
         # --- Subscribers ---
-        # Control status from rudder_sail_radio.py (use persistent QoS to get current state immediately)
-        self.create_subscription(Bool, '/human_controlled', self.human_control_callback, self.persistent_qos)
-        self.create_subscription(Vector3, '/control_authority', self.control_authority_callback, self.standard_qos)
+        # Control status from rudder_sail_radio.py (use default QoS)
+        self.create_subscription(Bool, '/human_controlled', self.human_control_callback, 10)
+        self.create_subscription(Vector3, '/control_authority', self.control_authority_callback, 10)
         
         # Radio input for reference (real-time data)
-        self.create_subscription(Vector3, '/rudder_sail_radio', self.radio_reference_callback, self.standard_qos)
+        self.create_subscription(Vector3, '/rudder_sail_radio', self.radio_reference_callback, 10)
         
         # Navigation sensors (real-time data)
-        self.create_subscription(Vector3, '/pose', self.pose_callback, self.standard_qos)
-        self.create_subscription(Float64, '/gps_cog', self.gps_cog_callback, self.standard_qos)
-        self.create_subscription(Float64, '/gps_sog', self.gps_sog_callback, self.standard_qos)
-        self.create_subscription(Vector3, '/gps_velocity', self.gps_velocity_callback, self.standard_qos)
+        self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
+        self.create_subscription(Float64, '/gps_cog', self.gps_cog_callback, 10)
+        self.create_subscription(Float64, '/gps_sog', self.gps_sog_callback, 10)
+        self.create_subscription(Vector3, '/gps_velocity', self.gps_velocity_callback, 10)
         
         # IMU sensors (real-time data)
-        self.create_subscription(Vector3, '/accel', self.accel_callback, self.standard_qos)
-        self.create_subscription(Vector3, '/gyro', self.gyro_callback, self.standard_qos)
-        self.create_subscription(Vector3, '/compass', self.compass_callback, self.standard_qos)
+        self.create_subscription(Vector3, '/accel', self.accel_callback, 10)
+        self.create_subscription(Vector3, '/gyro', self.gyro_callback, 10)
+        self.create_subscription(Vector3, '/compass', self.compass_callback, 10)
         
         # Wind sensor (real-time data)
-        self.create_subscription(Vector3, '/anem_speed_angle_temp', self.wind_callback, self.standard_qos)
+        self.create_subscription(Vector3, '/anem_speed_angle_temp', self.wind_callback, 10)
         
-        # Battery/Water monitoring (use persistent QoS to get latest values immediately)
-        self.create_subscription(Float32, '/battery_voltage', self.battery_voltage_callback, self.persistent_qos)
-        self.create_subscription(Float32, '/battery_remaining_pct', self.battery_remaining_callback, self.persistent_qos)
-        self.create_subscription(Bool, '/battery_low_alert', self.battery_low_alert_callback, self.persistent_qos)
-        self.create_subscription(Bool, '/saltwater_alert', self.saltwater_alert_callback, self.persistent_qos)
-        self.create_subscription(Bool, '/humidity_alert', self.humidity_alert_callback, self.persistent_qos)
+        # Battery/Water monitoring (use default QoS)
+        self.create_subscription(Float32, '/battery_voltage', self.battery_voltage_callback, 10)
+        self.create_subscription(Float32, '/battery_remaining_pct', self.battery_remaining_callback, 10)
+        self.create_subscription(Bool, '/battery_low_alert', self.battery_low_alert_callback, 10)
+        self.create_subscription(Bool, '/saltwater_alert', self.saltwater_alert_callback, 10)
+        self.create_subscription(Bool, '/humidity_alert', self.humidity_alert_callback, 10)
         
         # --- Timers ---
         self.control_loop_period = 0.2  # 5 Hz (reduced from 10 Hz for lower CPU usage)

@@ -20,7 +20,7 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+# Removed QoS imports - using default QoS only
 from std_msgs.msg import Float32, Bool
 import time
 import sys
@@ -42,20 +42,14 @@ class TempMonitorNode(Node):
         # Debug flag
         self.debug = ('--debug' in sys.argv)
 
-        # QoS profile for persistent temperature alerts
-        # Critical temperature alerts should persist for safety
-        persistent_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            depth=1  # Keep only the latest value
-        )
+        # Using default QoS for all publishers
 
         # Publishers
         self.pub_cpu_temperature = self.create_publisher(Float32, 'cpu_temperature', 10)
         self.pub_system_temperature = self.create_publisher(Float32, 'system_temperature', 10)
-        # Alert publishers with persistent QoS for safety-critical temperature alerts
-        self.pub_temperature_high_alert = self.create_publisher(Bool, 'temperature_high_alert', persistent_qos)
-        self.pub_temperature_critical_alert = self.create_publisher(Bool, 'temperature_critical_alert', persistent_qos)
+        # Alert publishers with default QoS
+        self.pub_temperature_high_alert = self.create_publisher(Bool, 'temperature_high_alert', 10)
+        self.pub_temperature_critical_alert = self.create_publisher(Bool, 'temperature_critical_alert', 10)
         
         # Alert previous-state flags for edge-triggered logging
         self._temp_high_prev = False

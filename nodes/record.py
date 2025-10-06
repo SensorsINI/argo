@@ -31,7 +31,7 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+# Removed QoS imports - using default QoS only
 from std_srvs.srv import Empty
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
@@ -52,12 +52,7 @@ class ArgoRecordingNode(Node):
         # Ensure bagfiles directory exists
         os.makedirs(self.bagfiles_dir, exist_ok=True)
         
-        # QoS profile for reliable communication
-        qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            depth=10
-        )
+        # Using default QoS for all publishers
         
         # ROS2 Services
         self.start_service = self.create_service(
@@ -76,13 +71,13 @@ class ArgoRecordingNode(Node):
         self.status_publisher = self.create_publisher(
             Bool,
             '/argo/recording/status',
-            qos_profile
+            10
         )
         
         self.info_publisher = self.create_publisher(
             String,
             '/argo/recording/info',
-            qos_profile
+            10
         )
         
         # ROS2 Subscribers

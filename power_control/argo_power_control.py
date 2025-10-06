@@ -95,7 +95,7 @@ from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+# Removed QoS imports - using default QoS only
 
 # =============================================================================
 # CONSTANTS
@@ -291,37 +291,27 @@ class PowerController(Node):
         try:
             self.get_logger().info("Setting up ROS2 components...")
             
-            # QoS profile for reliable communication
-            qos_profile = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                depth=10
-            )
+            # Using default QoS for all publishers
             
             # Publishers
             self.led_status_pub = self.create_publisher(
                 String, 
                 '/argo/power_control/led_status', 
-                qos_profile
+                10
             )
             
             self.node_health_pub = self.create_publisher(
                 DiagnosticArray,
                 '/argo/power_control/node_health',
-                qos_profile
+                10
             )
             
-            # Subscriber for recording status (match publisher's TRANSIENT_LOCAL QoS)
-            recording_qos = QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                depth=10
-            )
+            # Subscriber for recording status (use default QoS)
             self.recording_status_sub = self.create_subscription(
                 Bool,
                 '/argo/recording/status',
                 self.recording_status_callback,
-                recording_qos
+                10
             )
             
             # Service clients for recording control
