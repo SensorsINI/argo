@@ -19,14 +19,15 @@
 # https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
 #
 # Features:
-# - Automatic sensor reconnection on I2C errors
+# - Automatic sensor reconnection on I2C errors with health-based frequency adaptation
 # - Optional visual debug mode with ASCII wind vector display and differential pressure bar charts
 # - Temperature compensation and averaging
 # - Configurable logging levels
-# - Multi-sample averaging for noise reduction (5 samples per publish cycle)
+# - Multi-sample averaging for noise reduction (15 samples per publish cycle)
 # - Effective time constant ~100ms (sensor IIR ~10ms + application averaging)
-# - Low CPU overhead - single 10Hz timer with multiple sensor reads per cycle
+# - Low CPU overhead - single timer with multiple sensor reads per cycle
 # - Controlled publishing rate to reduce data transmission
+# - Transient I2C failure recovery: switches to 1Hz retry mode, recovers to 3Hz normal operation
 #
 # Command line options:
 # --debug: Enable debug logging of sensor values
@@ -68,10 +69,14 @@
 #   x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
 #   y: differential pressure from I2C_CW (0x22, 120°) in Pascals
 #   z: differential pressure from I2C_CCW (0x23, 240°) in Pascals
+# /anem_health (std_msgs/Bool):
+#   data: true when node is healthy, false when unhealthy or shutting down
+#   Published only on state changes, startup, and shutdown
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
+from std_msgs.msg import Bool
 import smbus
 import time
 import numpy as np
@@ -301,12 +306,20 @@ class AnemNode(Node):
             Vector3, 'anem_diffpressure', 10)
         self.pub_wind_temp = self.create_publisher(
             Vector3, 'anem_speed_angle_temp', 10)
+        self.pub_health = self.create_publisher(
+            Bool, 'anem_health', 10)
 
         # Visual debug mode flag
         self.debug_visually = debug_visually
 
         # CRC error logging throttling
         self._last_crc_error_log_time = 0.0
+
+        # Node health tracking for transient I2C failures
+        self.node_healthy = True
+        self._last_io_error_log_time = 0.0
+        self._consecutive_io_errors = 0
+        self._last_successful_read_time = time.time()
 
         # I2C setup
         # CTR is center (0° - front/back), CW is 120° from front, CCW is 240° from front (looking down on mast)
@@ -336,6 +349,8 @@ class AnemNode(Node):
         # Report actual sensor status
         if self.sensors_ready:
             self.get_logger().info("Initialization of anemometer wind sensor completed successfully.")
+            # Publish initial health status
+            self._publish_health_status(True)
 
         # Visual mode init
         self._vis_initialized = False
@@ -556,8 +571,8 @@ class AnemNode(Node):
             return dp, temps
 
         except IOError as e:
-            self.get_logger().error(f"CRITICAL: I2C read error: {e}. Exiting.")
-            sys.exit(1)
+            self._handle_io_error(e)
+            return None
         except IndexError as e:
             self.get_logger().error(f"Data parsing error: {e}. Continuing.")
             return None
@@ -569,6 +584,60 @@ class AnemNode(Node):
             self.get_logger().warn(
                 f"CRC checksum error detected on {sensor_info}")
             self._last_crc_error_log_time = current_time
+
+    def _handle_io_error(self, error):
+        """Handle I2C IOError with health tracking and throttled logging"""
+        current_time = time.time()
+        self._consecutive_io_errors += 1
+        
+        # Log error with throttling (max once per 5 seconds)
+        if current_time - self._last_io_error_log_time >= 5.0:
+            self.get_logger().warn(
+                f"Transient I2C read error (attempt {self._consecutive_io_errors}): {error}")
+            self._last_io_error_log_time = current_time
+        
+        # Mark node as unhealthy after first IO error
+        if self.node_healthy:
+            self.node_healthy = False
+            self._publish_health_status(False)
+            self.get_logger().warn("Node health set to UNHEALTHY due to I2C errors. Switching to 1Hz retry mode.")
+            # Switch to low-frequency retry mode
+            self._switch_to_retry_mode()
+    
+    def _switch_to_retry_mode(self):
+        """Switch timer to low-frequency retry mode (1Hz)"""
+        if hasattr(self, 'timer'):
+            self.timer.destroy()
+        self.timer = self.create_timer(1.0, self.publish_callback)
+        self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
+    
+    def _switch_to_normal_mode(self):
+        """Switch timer back to normal frequency (3Hz)"""
+        if hasattr(self, 'timer'):
+            self.timer.destroy()
+        self.timer = self.create_timer(1.0 / PUBLISHING_RATE, self.publish_callback)
+        self.get_logger().info("Switched back to normal 3Hz mode - I2C communication recovered")
+    
+    def _check_io_recovery(self):
+        """Check if I2C communication has recovered and switch back to normal mode"""
+        current_time = time.time()
+        time_since_last_success = current_time - self._last_successful_read_time
+        
+        # Consider recovered if we've had successful reads for at least 10 seconds
+        # and no IO errors in recent samples
+        if (time_since_last_success < 1.0 and  # Recent successful read
+            self._consecutive_io_errors == 0):  # No recent IO errors
+            
+            self.node_healthy = True
+            self._publish_health_status(True)
+            self._switch_to_normal_mode()
+            self.get_logger().info(f"I2C communication recovered after {self._consecutive_io_errors} errors")
+    
+    def _publish_health_status(self, healthy: bool):
+        """Publish node health status (only when state changes)"""
+        self.pub_health.publish(Bool(data=healthy))
+        status = "HEALTHY" if healthy else "UNHEALTHY"
+        self.get_logger().info(f"Node health status: {status}")
 
     def publish_callback(self):
         """ROS2 timer callback - reads multiple sensor samples and publishes averaged data at PUBLISHING_RATE"""
@@ -585,11 +654,18 @@ class AnemNode(Node):
                 dp, temps = sensor_data
                 dp_samples.append(dp)
                 temp_samples.append(temps)
+                # Update successful read time for recovery detection
+                self._last_successful_read_time = time.time()
+                self._consecutive_io_errors = 0  # Reset error counter on success
 
             # Check if we got any valid samples
             if not dp_samples:
                 self.get_logger().warn("No valid sensor samples in this cycle, skipping publish")
                 return
+
+            # Check for recovery from I2C errors
+            if not self.node_healthy:
+                self._check_io_recovery()
 
             # Average differential pressures across all valid samples
             dp_avg = [
@@ -639,6 +715,12 @@ class AnemNode(Node):
         # This is the recommended way to perform cleanup in ROS2.
         # It gets called automatically when the node is destroyed.
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
+        
+        # Publish health=false on shutdown
+        try:
+            self._publish_health_status(False)
+        except Exception:
+            pass  # Ignore errors during shutdown publishing
 
         if self.debug_visually:
             self._teardown_visual()
@@ -675,7 +757,7 @@ Algorithm based on Sensirion's directional wind meter application:
   https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
 
 Features:
-  - Automatic sensor reconnection on I2C errors
+  - Automatic sensor reconnection on I2C errors with health-based frequency adaptation
   - Optional visual debug mode with ASCII wind vector display and differential pressure bar charts
   - Temperature compensation and averaging
   - Configurable logging levels
@@ -683,6 +765,7 @@ Features:
   - Throttled CRC error logging to prevent log spam
   - Multi-sample averaging for noise reduction with configurable time constant
   - Sensor internal averaging (~10ms) + application averaging (~100ms)
+  - Transient I2C failure recovery: switches to 1Hz retry mode, recovers to 3Hz normal operation
 
 Configuration Constants (modify at top of file):
   - I2C_CTR: I2C address for center sensor (default: 0x21)
@@ -705,6 +788,9 @@ Topics Published:
     x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
     y: differential pressure from I2C_CW (0x22, 120°) in Pascals  
     z: differential pressure from I2C_CCW (0x23, 240°) in Pascals
+  /anem_health (std_msgs/Bool):
+    data: true when node is healthy, false when unhealthy or shutting down
+    Published only on state changes, startup, and shutdown
         """
     )
     parser.add_argument('--debug', action='store_true',
