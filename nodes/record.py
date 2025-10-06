@@ -56,7 +56,7 @@ class ArgoRecordingNode(Node):
 
         # Ensure bagfiles directory exists
         os.makedirs(self.bagfiles_dir, exist_ok=True)
-        
+
         # Using default QoS for all publishers
         # ROS2 Services
         self.start_service = self.create_service(
@@ -102,12 +102,15 @@ class ArgoRecordingNode(Node):
         self._log_info("🚀 Argo Recording Node started")
         self._log_info(f"📁 Bagfiles directory: {self.bagfiles_dir}")
         self._log_info("🎮 Services available:")
-        self._log_info("   /argo/recording/start - Start recording (Trigger service)")
-        self._log_info("   /argo/recording/stop - Stop recording (Trigger service)")
+        self._log_info(
+            "   /argo/recording/start - Start recording (Trigger service)")
+        self._log_info(
+            "   /argo/recording/stop - Stop recording (Trigger service)")
         self._log_info("📡 Topics available:")
         self._log_info("   /argo/recording/status - Recording status (Bool)")
         self._log_info("   /argo/recording/info - Recording info (String)")
-        self._log_info("   /argo/recording/control - Recording control (Twist)")
+        self._log_info(
+            "   /argo/recording/control - Recording control (Twist)")
 
         # Publish initial status
         self.publish_status()
@@ -118,27 +121,27 @@ class ArgoRecordingNode(Node):
             # Create a separate logger for file logging since ROS2 logger doesn't support addHandler
             self.file_logger = logging.getLogger('record_file')
             self.file_logger.setLevel(logging.DEBUG)
-            
+
             # Create a file handler for detailed logging
             file_handler = logging.FileHandler('/tmp/record.log', mode='a')
             file_handler.setLevel(logging.DEBUG)
-            
+
             # Create a formatter
             formatter = logging.Formatter(
                 '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
             )
             file_handler.setFormatter(formatter)
-            
+
             # Add the file handler to the file logger
             self.file_logger.addHandler(file_handler)
-            
+
             # Prevent propagation to avoid duplicate logs
             self.file_logger.propagate = False
-            
+
             # Log that file logging is set up
             self.file_logger.info("📝 File logging enabled: /tmp/record.log")
             self._log_info("📝 File logging enabled: /tmp/record.log")
-            
+
         except Exception as e:
             # If file logging fails, continue without it
             self._log_warn(f"⚠️  Could not setup file logging: {e}")
@@ -190,13 +193,14 @@ class ArgoRecordingNode(Node):
             response.success = False
             response.message = "Recording is already in progress"
             self._log_warn("⚠️  Recording is already in progress")
-            self._log_debug(f"Service response: success={response.success}, message='{response.message}'")
+            self._log_debug(
+                f"Service response: success={response.success}, message='{response.message}'")
             return response
 
         self._log_debug("Calling start_recording() method...")
         success = self.start_recording()
         self._log_debug(f"start_recording() returned: {success}")
-        
+
         if success:
             response.success = True
             response.message = f"Recording started successfully - {self.current_bag_name}"
@@ -206,7 +210,8 @@ class ArgoRecordingNode(Node):
             response.message = "Failed to start recording"
             self._log_error("❌ Failed to start recording")
 
-        self._log_debug(f"Service response: success={response.success}, message='{response.message}'")
+        self._log_debug(
+            f"Service response: success={response.success}, message='{response.message}'")
         return response
 
     def stop_recording_callback(self, request, response):
@@ -221,7 +226,7 @@ class ArgoRecordingNode(Node):
 
         # Store bag name before stopping for response message
         success = self.stop_recording()
-        
+
         if success:
             response.success = True
             response.message = f"Recording stopped successfully - {self.stopped_bag_name}"
@@ -247,15 +252,17 @@ class ArgoRecordingNode(Node):
         """Start rosbag recording"""
         try:
             self._log_debug("start_recording() method called")
-            
+
             if self.is_recording:
                 self._log_warn("⚠️  Recording already in progress")
-                self._log_debug("start_recording() returning False - already recording")
+                self._log_debug(
+                    "start_recording() returning False - already recording")
                 return False
 
             # Generate new bag name
             self.current_bag_name = self.generate_bag_name()
-            self.bag_path = os.path.join(self.bagfiles_dir, self.current_bag_name)
+            self.bag_path = os.path.join(
+                self.bagfiles_dir, self.current_bag_name)
             self._log_debug(f"Generated bag name: {self.current_bag_name}")
             self._log_debug(f"Bag path: {self.bag_path}")
 
@@ -275,7 +282,8 @@ class ArgoRecordingNode(Node):
                 universal_newlines=True,
                 bufsize=1
             )
-            self._log_debug(f"Subprocess created with PID: {self.recording_process.pid}")
+            self._log_debug(
+                f"Subprocess created with PID: {self.recording_process.pid}")
 
             self.is_recording = True
             self._log_debug("Setting is_recording = True")

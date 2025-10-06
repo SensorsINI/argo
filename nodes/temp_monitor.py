@@ -48,11 +48,15 @@ class TempMonitorNode(Node):
         # Using default QoS for all publishers
 
         # Publishers
-        self.pub_cpu_temperature = self.create_publisher(Float32, 'cpu_temperature', 10)
-        self.pub_system_temperature = self.create_publisher(Float32, 'system_temperature', 10)
+        self.pub_cpu_temperature = self.create_publisher(
+            Float32, 'cpu_temperature', 10)
+        self.pub_system_temperature = self.create_publisher(
+            Float32, 'system_temperature', 10)
         # Alert publishers with default QoS
-        self.pub_temperature_high_alert = self.create_publisher(Bool, 'temperature_high_alert', 10)
-        self.pub_temperature_critical_alert = self.create_publisher(Bool, 'temperature_critical_alert', 10)
+        self.pub_temperature_high_alert = self.create_publisher(
+            Bool, 'temperature_high_alert', 10)
+        self.pub_temperature_critical_alert = self.create_publisher(
+            Bool, 'temperature_critical_alert', 10)
         # Alert previous-state flags for edge-triggered logging
         self._temp_high_prev = False
         self._temp_critical_prev = False
@@ -90,7 +94,6 @@ class TempMonitorNode(Node):
         # Timer: 1 Hz
         self.timer = self.create_timer(1.0, self.read_and_publish)
         self.get_logger().info('Temperature Monitor node initialized and reading at 1 Hz.')
-
 
     def _find_thermal_zones(self):
         """Find available thermal zones for temperature monitoring"""
@@ -286,7 +289,6 @@ class TempMonitorNode(Node):
             if system_temperature is not None:
                 self.pub_system_temperature.publish(
                     Float32(data=system_temperature))
-
 
             # Update previous values and timestamp
             self._prev_cpu_temperature = cpu_temperature

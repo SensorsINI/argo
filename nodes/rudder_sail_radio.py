@@ -32,7 +32,7 @@ Control Arbitration:
 
 Key Features:
 - Combined hardware interface and control logic in single node
-- Persistent QoS for critical control status (immediate access for late-joining nodes)
+- Default QoS for all topics (compatible with systemd and normal processes)
 - Throttled logging to minimize system load
 - Built-in safety features with high impedance defaults
 - Graceful handling of hardware disconnection
@@ -47,7 +47,7 @@ Topics Published:
 - /rudder_sail_servo: Vector3 with actual servo commands being sent to hardware
   * Same format as radio topic but reflects actual servo positions
   
-- /human_controlled: Bool indicating current control state (persistent QoS)
+- /human_controlled: Bool indicating current control state (default QoS)
   * True: Human has control (radio inputs active)
   * False: Computer has control (autonomous navigation active)
   
@@ -543,13 +543,14 @@ class RudderSailRadioNode(Node):
                 failure_reason = f"Radio sail channel off/disconnected (0.0us), rudder={radio_rudder_pw_us:.1f}us"
             else:
                 failure_reason = f"Outlier radio PWM: rudder={radio_rudder_pw_us:.1f}us, sail={radio_sail_pw_us:.1f}us"
-            
+
             # Throttle warning logs to once every 10 seconds
             now = time.time()
             if now - self.last_outlier_warning_time > OUTLIER_LOG_THROTTLE_S:
-                self.get_logger().warn(f"Radio input validation failed: {failure_reason}")
+                self.get_logger().warn(
+                    f"Radio input validation failed: {failure_reason}")
                 self.last_outlier_warning_time = now
-            
+
             self._publish_health_status(False, failure_reason)
             return False
 
@@ -645,7 +646,8 @@ class RudderSailRadioNode(Node):
                 self.get_logger().info("Rudder/Sail Radio health status: HEALTHY")
             else:
                 if reason:
-                    self.get_logger().warn(f"Rudder/Sail Radio health status: FAILED - {reason}")
+                    self.get_logger().warn(
+                        f"Rudder/Sail Radio health status: FAILED - {reason}")
                 else:
                     self.get_logger().warn("Rudder/Sail Radio health status: FAILED")
 
@@ -812,7 +814,7 @@ TOPICS:
   Publishes:
     /rudder_sail_radio: Vector3 - Normalized radio inputs from hardware
     /rudder_sail_servo: Vector3 - Final commands sent to hardware
-    /human_controlled: Bool - Current control authority status (persistent QoS)
+    /human_controlled: Bool - Current control authority status (default QoS)
     /control_authority: Vector3 - Detailed control status (authority, time_since_human, time_since_auto)
 
   Subscribes:
@@ -836,7 +838,7 @@ ROBUSTNESS FEATURES:
 - Safety limits: All commands clamped to safe ranges
 - High-frequency control loop: 20Hz for responsive arbitration
 - Hardware validation: Pulse width clamping and outlier filtering
-- Persistent QoS: Late-joining nodes get immediate access to control status
+- Default QoS: Compatible communication between systemd and normal processes
 - HIGH IMPEDANCE MODE: Automatic fail-safe switching to radio control
 
 TEST MODE:

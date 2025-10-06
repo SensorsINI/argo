@@ -605,50 +605,52 @@ class AnemNode(Node):
         """Handle I2C IOError with health tracking and throttled logging"""
         current_time = time.time()
         self._consecutive_io_errors += 1
-        
+
         # Log error with throttling (max once per 5 seconds)
         if current_time - self._last_io_error_log_time >= 5.0:
             self.get_logger().warn(
                 f"Transient I2C read error (attempt {self._consecutive_io_errors}): {error}")
             self._last_io_error_log_time = current_time
-        
+
         # Mark node as unhealthy after first IO error
         if self.node_healthy:
             self.node_healthy = False
             self._publish_health_status(False)
-            self.get_logger().warn("Node health set to UNHEALTHY due to I2C errors. Switching to 1Hz retry mode.")
+            self.get_logger().warn(
+                "Node health set to UNHEALTHY due to I2C errors. Switching to 1Hz retry mode.")
             # Switch to low-frequency retry mode
             self._switch_to_retry_mode()
-    
+
     def _switch_to_retry_mode(self):
         """Switch timer to low-frequency retry mode (1Hz)"""
         if hasattr(self, 'timer'):
             self.timer.destroy()
         self.timer = self.create_timer(1.0, self.publish_callback)
         self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
-    
+
     def _switch_to_normal_mode(self):
         """Switch timer back to normal frequency (3Hz)"""
         if hasattr(self, 'timer'):
             self.timer.destroy()
-        self.timer = self.create_timer(1.0 / PUBLISHING_RATE, self.publish_callback)
+        self.timer = self.create_timer(
+            1.0 / PUBLISHING_RATE, self.publish_callback)
         self.get_logger().info("Switched back to normal 3Hz mode - I2C communication recovered")
-    
+
     def _check_io_recovery(self):
         """Check if I2C communication has recovered and switch back to normal mode"""
         current_time = time.time()
         time_since_last_success = current_time - self._last_successful_read_time
-        
+
         # Consider recovered if we've had successful reads for at least 10 seconds
         # and no IO errors in recent samples
         if (time_since_last_success < 1.0 and  # Recent successful read
-            self._consecutive_io_errors == 0):  # No recent IO errors
-            
+                self._consecutive_io_errors == 0):  # No recent IO errors
+
             self.node_healthy = True
             self._publish_health_status(True)
             self._switch_to_normal_mode()
-            self.get_logger().info(f"I2C communication recovered after {self._consecutive_io_errors} errors")
-    
+            self.get_logger().info(
+                f"I2C communication recovered after {self._consecutive_io_errors} errors")
 
     def publish_callback(self):
         """ROS2 timer callback - reads multiple sensor samples and publishes averaged data at PUBLISHING_RATE"""
@@ -731,7 +733,7 @@ class AnemNode(Node):
         # This is the recommended way to perform cleanup in ROS2.
         # It gets called automatically when the node is destroyed.
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
-        
+
         # Publish health=false on shutdown
         try:
             self._publish_health_status(False)
