@@ -10,7 +10,6 @@ alias cdsensorsini='cd ~/Dropbox/GitHub/SensorsINI'
 alias df1="df | egrep '^/'"
 alias df2='df -x tmpfs -x efivarfs '
 alias mount1="mount | grep -E '^/'|grep -v snapd"
-alias sd="sudo shutdown now"
 
 
 # Argo Robot Control Aliases - Improved ROS2 Native Approach
