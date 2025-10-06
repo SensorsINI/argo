@@ -116,7 +116,7 @@ class ICM20948:
     def read_accel(self):
         """
         Read accelerometer data from ICM-20948.
-        
+
         Returns:
             tuple: (ax_cnt, ay_cnt, az_cnt) raw accelerometer counts
         """
@@ -131,7 +131,7 @@ class ICM20948:
     def read_gyro(self):
         """
         Read gyroscope data from ICM-20948.
-        
+
         Returns:
             tuple: (gx_cnt, gy_cnt, gz_cnt) raw gyroscope counts
         """
@@ -146,7 +146,7 @@ class ICM20948:
     def read_magnetometer(self):
         """
         Read magnetometer data from AK09916 via I2C bypass.
-        
+
         Returns:
             tuple: (mx_uT, my_uT, mz_uT) magnetometer readings in microtesla
         """
@@ -165,7 +165,7 @@ class ICM20948:
                 mz_uT = mz_cnt * 0.15
         except Exception:
             pass
-        
+
         return mx_uT, my_uT, mz_uT
 
 
@@ -217,7 +217,8 @@ class ImuNode(Node):
         # Publishers
         self.pub_accel = self.create_publisher(Vector3, 'accel', 10)
         self.pub_gyro = self.create_publisher(Vector3, 'gyro', 10)
-        self.pub_magnetometer = self.create_publisher(Vector3, 'magnetometer', 10)
+        self.pub_magnetometer = self.create_publisher(
+            Vector3, 'magnetometer', 10)
         self.pub_compass = self.create_publisher(Float64, 'compass', 10)
 
         # Health status publisher
@@ -283,7 +284,7 @@ class ImuNode(Node):
             self.timer.destroy()
         self.timer = self.create_timer(1.0, self.timer_callback)
         self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
-        
+
         # Reset consecutive error counter for recovery tracking
         self._consecutive_io_errors = 0
 
@@ -299,7 +300,7 @@ class ImuNode(Node):
         try:
             # Initialize the ICM-20948
             self.icm.initialize()
-            
+
             # Setup AK09916 magnetometer via bypass
             AK_ADDR = 0x0C
             # soft reset
@@ -308,10 +309,10 @@ class ImuNode(Node):
             # continuous measurement 100Hz
             self.bus.write_byte_data(AK_ADDR, 0x31, 0x08)
             time.sleep(0.01)
-            
+
             self.get_logger().info("ICM-20948 init complete (raw mode)")
             return True
-            
+
         except Exception as e:
             self.get_logger().error(f"IMU sensor initialization failed: {e}")
             return False
@@ -319,7 +320,7 @@ class ImuNode(Node):
     def _reinitialize_sensors(self):
         """Re-initialize IMU sensors after I2C recovery"""
         self.get_logger().info("Re-initializing IMU sensors...")
-        
+
         if self._initialize_sensors():
             self.get_logger().info("IMU sensor re-initialization successful")
             return True
@@ -333,6 +334,7 @@ class ImuNode(Node):
         time_since_last_success = current_time - self._last_successful_read_time
         time_since_last_recovery_attempt = current_time - self._last_recovery_attempt_time
 
+
         # Try recovery if we've been in retry mode for a while
         # This allows recovery even with ongoing errors, since sensors need re-initialization
         if (time_since_last_success > 5.0 and  # Been in retry mode for at least 5 seconds
@@ -340,9 +342,10 @@ class ImuNode(Node):
 
             self._recovery_attempt_count += 1
             self._last_recovery_attempt_time = current_time
-            
+
             # Re-initialize sensors after I2C recovery
-            self.get_logger().info(f"Attempting IMU sensor re-initialization (attempt {self._recovery_attempt_count})...")
+            self.get_logger().info(
+                f"Attempting IMU sensor re-initialization (attempt {self._recovery_attempt_count})...")
             if self._reinitialize_sensors():
                 self.node_healthy = True
                 self._publish_health_status(True)
@@ -351,7 +354,8 @@ class ImuNode(Node):
                 self.get_logger().info(
                     f"IMU sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
             else:
-                self.get_logger().error(f"IMU sensor re-initialization failed (attempt {self._recovery_attempt_count}), staying in retry mode")
+                self.get_logger().error(
+                    f"IMU sensor re-initialization failed (attempt {self._recovery_attempt_count}), staying in retry mode")
                 # Stay in retry mode and try again later
 
     def _init_ascii_vis(self):
@@ -400,6 +404,10 @@ class ImuNode(Node):
         return '[' + ''.join(left) + '|' + ''.join(right) + ']'
 
     def timer_callback(self):
+        # Check for recovery from I2C errors (do this even if no valid samples)
+        if not self.node_healthy:
+            self._check_io_recovery()
+
         try:
             ax_cnt, ay_cnt, az_cnt = self.icm.read_accel()
             gx_cnt, gy_cnt, gz_cnt = self.icm.read_gyro()
@@ -420,28 +428,29 @@ class ImuNode(Node):
             self._last_successful_read_time = time.time()
             self._consecutive_io_errors = 0  # Reset error counter on success
 
-            # Check for recovery from I2C errors (do this even if no valid samples)
-            if not self.node_healthy:
-                self._check_io_recovery()
-
             if self._vis_ascii:
                 try:
                     # Compute heading for debug display (same as main calculation)
                     # Magnetometer coordinate frame: x=starboard, y=stern, z=down
-                    heading_rad = math.atan2(-my_uT, mx_uT)  # -y points to bow, x points to starboard
-                    heading_deg = math.degrees(heading_rad) - 90.0  # Adjust so 0° = North
+                    # -y points to bow, x points to starboard
+                    heading_rad = math.atan2(-my_uT, mx_uT)
+                    heading_deg = math.degrees(
+                        heading_rad) - 90.0  # Adjust so 0° = North
                     if heading_deg < 0:
                         heading_deg += 360.0
-                    
+
                     sys.stdout.write('\x1b[H')  # home
                     # Nominal limits for bars
                     a_lim = 2.0   # g
                     g_lim = 500.0  # dps
                     m_lim = 100.0  # uT
                     lines = [
-                        f"Ax {ax_g:+7.3f} g   " + self._signed_bar(ax_g, a_lim),
-                        f"Ay {ay_g:+7.3f} g   " + self._signed_bar(ay_g, a_lim),
-                        f"Az {az_g:+7.3f} g   " + self._signed_bar(az_g, a_lim),
+                        f"Ax {ax_g:+7.3f} g   " +
+                        self._signed_bar(ax_g, a_lim),
+                        f"Ay {ay_g:+7.3f} g   " +
+                        self._signed_bar(ay_g, a_lim),
+                        f"Az {az_g:+7.3f} g   " +
+                        self._signed_bar(az_g, a_lim),
                         f"Gx {gx_dps:+7.1f} dps " +
                         self._signed_bar(gx_dps, g_lim),
                         f"Gy {gy_dps:+7.1f} dps " +
@@ -455,7 +464,8 @@ class ImuNode(Node):
                         f"Mz {mz_uT:+7.1f} uT  " +
                         self._signed_bar(mz_uT, m_lim),
                         f"Hd {heading_deg:+7.1f}°    " +
-                        self._signed_bar(heading_deg - 180, 180),  # Center on 180°
+                        # Center on 180°
+                        self._signed_bar(heading_deg - 180, 180),
                         "Ctrl-C to exit"
                     ]
                     for ln in lines:
@@ -480,20 +490,22 @@ class ImuNode(Node):
             # To get heading: use x and -y (since y points to stern, -y points to bow)
             # atan2(-y, x) gives us the angle from the x-axis (starboard) to the bow direction
             # We want angle from North (0°), so we need to adjust by 90° (North is -90° from starboard)
-            heading_rad = math.atan2(-my_uT, mx_uT)  # -y points to bow, x points to starboard
-            heading_deg = math.degrees(heading_rad) - 90.0  # Adjust so 0° = North
+            # -y points to bow, x points to starboard
+            heading_rad = math.atan2(-my_uT, mx_uT)
+            heading_deg = math.degrees(
+                heading_rad) - 90.0  # Adjust so 0° = North
             if heading_deg < 0:
                 heading_deg += 360.0
-            
+
             # Publish in physical units
             self.pub_accel.publish(Vector3(x=ax_g, y=ay_g, z=az_g))
             self.pub_gyro.publish(Vector3(x=gx_dps, y=gy_dps, z=gz_dps))
             self.pub_magnetometer.publish(Vector3(x=mx_uT, y=my_uT, z=mz_uT))
             self.pub_compass.publish(Float64(data=heading_deg))
-            
+
             # Publish health status as healthy
             self._publish_health_status(True)
-            
+
         except Exception as e:
             self._handle_io_error(e)
 
