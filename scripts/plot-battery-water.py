@@ -5,6 +5,12 @@ Battery Water Data Plotting Script
 This script reads CSV data from battery_water.py and creates visualizations
 for battery voltage decay, sensor trends, and alert patterns.
 
+Features:
+- Standard battery voltage decay plot
+- Critical battery analysis with enhanced decay visualization
+- Comprehensive sensor trends overview
+- Alert pattern analysis
+
 Usage:
     python3 plot-battery-water.py [csv_file_path]
     
@@ -132,6 +138,124 @@ def plot_battery_voltage_decay(df, output_dir):
     output_path = os.path.join(output_dir, output_filename)
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Battery voltage decay plot saved: {output_path}")
+    plt.close()
+
+
+def plot_critical_battery_analysis(df, output_dir):
+    """Plot detailed battery voltage analysis for critical monitoring"""
+    plt.figure(figsize=(16, 12))
+
+    # Main voltage plot with enhanced features
+    plt.subplot(3, 1, 1)
+    
+    # Plot voltage with gradient coloring to show decay
+    voltage = df['battery_voltage'].values
+    timestamps = df['timestamp'].values
+    
+    # Create gradient line plot
+    for i in range(len(voltage) - 1):
+        # Color gradient from blue (high) to red (low)
+        color_intensity = (voltage[i] - voltage.min()) / (voltage.max() - voltage.min())
+        color = plt.cm.RdYlBu_r(color_intensity)  # Red-Yellow-Blue reversed
+        plt.plot([timestamps[i], timestamps[i+1]], 
+                [voltage[i], voltage[i+1]], 
+                color=color, linewidth=2.5, alpha=0.8)
+    
+    # Add reference lines for critical voltages
+    min_voltage = voltage.min()
+    max_voltage = voltage.max()
+    avg_voltage = voltage.mean()
+    
+    plt.axhline(y=avg_voltage, color='green', linestyle='--', alpha=0.7, 
+                label=f'Average: {avg_voltage:.2f}V')
+    plt.axhline(y=min_voltage, color='red', linestyle='--', alpha=0.7, 
+                label=f'Minimum: {min_voltage:.2f}V')
+    plt.axhline(y=max_voltage, color='blue', linestyle='--', alpha=0.7, 
+                label=f'Maximum: {max_voltage:.2f}V')
+    
+    # Add critical voltage thresholds (typical for Li-ion)
+    plt.axhline(y=3.2, color='orange', linestyle=':', alpha=0.8, 
+                label='Critical Low (3.2V)', linewidth=2)
+    plt.axhline(y=3.7, color='yellow', linestyle=':', alpha=0.8, 
+                label='Low Battery (3.7V)', linewidth=2)
+    
+    plt.title('Critical Battery Voltage Analysis - Enhanced Decay Visualization', 
+              fontsize=16, fontweight='bold')
+    plt.ylabel('Voltage (V)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Format x-axis
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    plt.xticks(rotation=45)
+
+    # Voltage decay rate analysis
+    plt.subplot(3, 1, 2)
+    
+    # Calculate voltage decay rate (V/hour)
+    time_diff_hours = (df['timestamp'].diff().dt.total_seconds() / 3600)
+    voltage_diff = df['battery_voltage'].diff()
+    decay_rate = voltage_diff / time_diff_hours
+    
+    # Plot decay rate
+    plt.plot(df['timestamp'][1:], decay_rate[1:], 
+             'purple', linewidth=2, label='Voltage Decay Rate')
+    plt.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    plt.axhline(y=-0.1, color='red', linestyle='--', alpha=0.7, 
+                label='Fast Decay Threshold (-0.1V/h)')
+    
+    plt.title('Battery Voltage Decay Rate Over Time', fontsize=14, fontweight='bold')
+    plt.ylabel('Decay Rate (V/hour)', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    # Format x-axis
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    plt.xticks(rotation=45)
+
+    # Battery percentage with voltage overlay
+    plt.subplot(3, 1, 3)
+    
+    # Create dual y-axis plot
+    ax1 = plt.gca()
+    color1 = 'tab:green'
+    ax1.set_xlabel('Time', fontsize=12)
+    ax1.set_ylabel('Battery Percentage (%)', color=color1, fontsize=12)
+    line1 = ax1.plot(df['timestamp'], df['battery_remaining_pct'], 
+                     color=color1, linewidth=2, label='Battery %')
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.grid(True, alpha=0.3)
+    
+    # Second y-axis for voltage
+    ax2 = ax1.twinx()
+    color2 = 'tab:blue'
+    ax2.set_ylabel('Battery Voltage (V)', color=color2, fontsize=12)
+    line2 = ax2.plot(df['timestamp'], df['battery_voltage'], 
+                     color=color2, linewidth=2, alpha=0.7, label='Battery Voltage')
+    ax2.tick_params(axis='y', labelcolor=color2)
+    
+    # Add legend
+    lines = line1 + line2
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc='upper right')
+    
+    plt.title('Battery State of Charge vs Voltage Correlation', 
+              fontsize=14, fontweight='bold')
+    
+    # Format x-axis
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax1.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    plt.xticks(rotation=45)
+
+    plt.tight_layout()
+
+    # Save plot
+    output_filename = f"critical_battery_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    output_path = os.path.join(output_dir, output_filename)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Critical battery analysis plot saved: {output_path}")
     plt.close()
 
 
@@ -346,6 +470,7 @@ Examples:
         # Generate plots
         print(f"\nGenerating plots in {args.output_dir}...")
         plot_battery_voltage_decay(df, args.output_dir)
+        plot_critical_battery_analysis(df, args.output_dir)
         plot_sensor_trends(df, args.output_dir)
         plot_alerts(df, args.output_dir)
         print("All plots generated successfully!")
