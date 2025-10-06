@@ -198,19 +198,8 @@ class ImuNode(Node):
         self.icm_addr = 0x69
         self.icm = ICM20948(self.bus, self.icm_addr)
 
-        try:
-            self.icm.initialize()
-            # AK09916 setup via bypass
-            AK_ADDR = 0x0C
-            # soft reset
-            self.bus.write_byte_data(AK_ADDR, 0x32, 0x01)
-            time.sleep(0.05)
-            # continuous measurement 100Hz
-            self.bus.write_byte_data(AK_ADDR, 0x31, 0x08)
-            time.sleep(0.01)
-            self.get_logger().info("ICM-20948 init complete (raw mode)")
-        except Exception as e:
-            self.get_logger().fatal(f"FATAL: IMU init failed: {e}")
+        if not self._initialize_sensors():
+            self.get_logger().fatal("FATAL: IMU init failed")
             self.destroy_node()
             rclpy.shutdown()
             return
@@ -305,15 +294,13 @@ class ImuNode(Node):
         self.timer = self.create_timer(0.1, self.timer_callback)  # 10 Hz
         self.get_logger().info("Switched back to normal 10Hz mode - I2C communication recovered")
 
-    def _reinitialize_sensors(self):
-        """Re-initialize IMU sensors after I2C recovery"""
-        self.get_logger().info("Re-initializing IMU sensors...")
-        
+    def _initialize_sensors(self):
+        """Initialize IMU sensors (ICM-20948 and AK09916 magnetometer)"""
         try:
-            # Re-initialize the ICM-20948
+            # Initialize the ICM-20948
             self.icm.initialize()
             
-            # Re-setup AK09916 magnetometer via bypass
+            # Setup AK09916 magnetometer via bypass
             AK_ADDR = 0x0C
             # soft reset
             self.bus.write_byte_data(AK_ADDR, 0x32, 0x01)
@@ -322,11 +309,22 @@ class ImuNode(Node):
             self.bus.write_byte_data(AK_ADDR, 0x31, 0x08)
             time.sleep(0.01)
             
-            self.get_logger().info("IMU sensor re-initialization successful")
+            self.get_logger().info("ICM-20948 init complete (raw mode)")
             return True
             
         except Exception as e:
-            self.get_logger().error(f"IMU sensor re-initialization failed: {e}")
+            self.get_logger().error(f"IMU sensor initialization failed: {e}")
+            return False
+
+    def _reinitialize_sensors(self):
+        """Re-initialize IMU sensors after I2C recovery"""
+        self.get_logger().info("Re-initializing IMU sensors...")
+        
+        if self._initialize_sensors():
+            self.get_logger().info("IMU sensor re-initialization successful")
+            return True
+        else:
+            self.get_logger().error("IMU sensor re-initialization failed")
             return False
 
     def _check_io_recovery(self):
