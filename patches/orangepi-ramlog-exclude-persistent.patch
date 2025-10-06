@@ -1,0 +1,12 @@
+--- a/usr/lib/orangepi/orangepi-ramlog
++++ b/usr/lib/orangepi/orangepi-ramlog
+@@ -45,7 +45,7 @@ syncToDisk () {
+ 	if [ "$USE_RSYNC" = true ]; then
+ 		${NoCache} rsync -aXWv \
+ 			--exclude "lost+found" --exclude orangepi-ramlog.log \
+-			--delete \
++			--delete --exclude "persistent" \
+ 			--links \
+ 			${XTRA_RSYNC_TO[@]+"${XTRA_RSYNC_TO[@]}"} \
+ 			$RAM_LOG $HDD_LOG 2>&1 | $LOG_OUTPUT
+

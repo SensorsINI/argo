@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog
 
 help:
 	@echo "Argo Robot Services Management"
@@ -35,6 +35,9 @@ help:
 	@echo ""
 	@echo "CPU Governor Tuning:"
 	@echo "  install-cpu-tuning   - Install and enable CPU governor tuning service"
+	@echo ""
+	@echo "System Fixes:"
+	@echo "  fix-orangepi-ramlog  - Fix orangepi-ramlog to preserve persistent logs"
 	@echo ""
 	@echo "Power Control System (in power_control/ directory):"
 	@echo "  make -C power_control install  - Install power control system"
@@ -189,7 +192,7 @@ install-hardware:
 	@echo "✅ Hardware installation complete!"
 	@echo "⚠️  Reboot required to apply hardware configuration changes."
 
-install-all: install-python-deps install-hardware install-cpu-tuning
+install-all: install-python-deps install-hardware install-cpu-tuning fix-orangepi-ramlog
 	@echo "✅ Complete Argo hardware installation finished!"
 	@echo "Next steps:"
 	@echo "1. Reboot to apply hardware configuration"
@@ -202,6 +205,18 @@ install-all: install-python-deps install-hardware install-cpu-tuning
 install-cpu-tuning:
 	@echo "Installing CPU governor tuning service..."
 	@$(MAKE) -C power_control install-cpu-tuning
+
+# ==================== SYSTEM FIXES ====================
+
+fix-orangepi-ramlog:
+	@echo "Fixing orangepi-ramlog service to preserve persistent logs..."
+	@if [ -f scripts/fix-orangepi-ramlog.sh ]; then \
+		./scripts/fix-orangepi-ramlog.sh; \
+	else \
+		echo "❌ Error: scripts/fix-orangepi-ramlog.sh not found!"; \
+		echo "   Make sure you're running this from the Argo project root directory."; \
+		exit 1; \
+	fi
 
 # ==================== POWER CONTROL CONVENIENCE TARGETS ====================
 
