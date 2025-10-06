@@ -321,6 +321,8 @@ class AnemNode(Node):
         self._last_io_error_log_time = 0.0
         self._consecutive_io_errors = 0
         self._last_successful_read_time = time.time()
+        self._last_recovery_attempt_time = 0.0
+        self._recovery_attempt_count = 0
 
         # I2C setup
         # CTR is center (0° - front/back), CW is 120° from front, CCW is 240° from front (looking down on mast)
@@ -549,6 +551,36 @@ class AnemNode(Node):
 
         return True
 
+    def _recover_sensors_with_reset(self):
+        """Attempt sensor recovery with soft reset for severe I2C issues"""
+        self.get_logger().info("Attempting sensor recovery with soft reset...")
+
+        try:
+            # First, try to stop any existing measurements
+            for a in self.i2cAddr:
+                try:
+                    self.bus.write_i2c_block_data(a, 0x3F, [0xF9])
+                except IOError:
+                    pass  # Ignore errors during cleanup
+
+            time.sleep(0.2)
+
+            # Perform soft reset on all sensors
+            for a in self.i2cAddr:
+                try:
+                    self.bus.write_i2c_block_data(a, 0x00, [0x06])
+                except IOError:
+                    pass  # Ignore errors during reset
+
+            time.sleep(0.2)
+
+            # Now try normal setup
+            return self.setup_sensors()
+
+        except Exception as e:
+            self.get_logger().error(f"Sensor recovery with reset failed: {e}")
+            return False
+
     def _read_sensor_data(self):
         """Read and validate sensor data with CRC checksum verification"""
         try:
@@ -628,6 +660,9 @@ class AnemNode(Node):
         self.timer = self.create_timer(1.0, self.publish_callback)
         self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
 
+        # Reset consecutive error counter for recovery tracking
+        self._consecutive_io_errors = 0
+
     def _switch_to_normal_mode(self):
         """Switch timer back to normal frequency (3Hz)"""
         if hasattr(self, 'timer'):
@@ -640,17 +675,41 @@ class AnemNode(Node):
         """Check if I2C communication has recovered and switch back to normal mode"""
         current_time = time.time()
         time_since_last_success = current_time - self._last_successful_read_time
+        time_since_last_recovery_attempt = current_time - self._last_recovery_attempt_time
 
-        # Consider recovered if we've had successful reads for at least 10 seconds
-        # and no IO errors in recent samples
-        if (time_since_last_success < 1.0 and  # Recent successful read
-                self._consecutive_io_errors == 0):  # No recent IO errors
+        # Try recovery if we've been in retry mode for a while
+        # This allows recovery even with ongoing errors, since sensors need re-initialization
+        if (time_since_last_success > 5.0 and  # Been in retry mode for at least 5 seconds
+                time_since_last_recovery_attempt > 3.0):  # Wait at least 3 seconds between attempts
 
-            self.node_healthy = True
-            self._publish_health_status(True)
-            self._switch_to_normal_mode()
+            self._recovery_attempt_count += 1
+            self._last_recovery_attempt_time = current_time
+
+            # Re-initialize sensors after I2C recovery
             self.get_logger().info(
-                f"I2C communication recovered after {self._consecutive_io_errors} errors")
+                f"Attempting sensor re-initialization (attempt {self._recovery_attempt_count})...")
+            if self.setup_sensors():
+                self.node_healthy = True
+                self._publish_health_status(True)
+                self._switch_to_normal_mode()
+                self._recovery_attempt_count = 0  # Reset counter on success
+                self.get_logger().info(
+                    f"Sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
+            else:
+                # Try more aggressive recovery with soft reset
+                self.get_logger().warn(
+                    f"Normal sensor re-initialization failed (attempt {self._recovery_attempt_count}), trying soft reset recovery...")
+                if self._recover_sensors_with_reset():
+                    self.node_healthy = True
+                    self._publish_health_status(True)
+                    self._switch_to_normal_mode()
+                    self._recovery_attempt_count = 0  # Reset counter on success
+                    self.get_logger().info(
+                        f"Sensor recovery with soft reset successful after {self._consecutive_io_errors} I2C errors")
+                else:
+                    self.get_logger().error(
+                        f"All sensor recovery attempts failed (attempt {self._recovery_attempt_count}), staying in retry mode")
+                    # Stay in retry mode and try again later
 
     def publish_callback(self):
         """ROS2 timer callback - reads multiple sensor samples and publishes averaged data at PUBLISHING_RATE"""
@@ -671,15 +730,15 @@ class AnemNode(Node):
                 self._last_successful_read_time = time.time()
                 self._consecutive_io_errors = 0  # Reset error counter on success
 
+            # Check for recovery from I2C errors (do this even if no valid samples)
+            if not self.node_healthy:
+                self._check_io_recovery()
+
             # Check if we got any valid samples
             if not dp_samples:
                 self.get_logger().warn("No valid sensor samples in this cycle, skipping publish")
                 self._publish_health_status(False)
                 return
-
-            # Check for recovery from I2C errors
-            if not self.node_healthy:
-                self._check_io_recovery()
 
             # Average differential pressures across all valid samples
             dp_avg = [
