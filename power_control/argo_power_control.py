@@ -249,7 +249,8 @@ class PowerController:
         logger.info("Checking if Argo service is already running...")
         self.check_argo_service_status()
         if self.argo_service_running:
-            logger.info("Argo service is already running - checking recording service availability...")
+            logger.info(
+                "Argo service is already running - checking recording service availability...")
             # Give ROS2 a moment to discover services
             import time
             time.sleep(2)
@@ -285,8 +286,9 @@ class PowerController:
     def _detect_and_cache_desktop_user(self):
         """Detect and cache desktop user and display information"""
         try:
-            logger.info("Detecting desktop user and display for notification caching...")
-            
+            logger.info(
+                "Detecting desktop user and display for notification caching...")
+
             # Find the user who owns the desktop session
             desktop_user = None
             display_env = None
@@ -354,17 +356,19 @@ class PowerController:
                                         potential_user = parts[0]
                                         if potential_user != 'root':
                                             desktop_user = potential_user
-                                            logger.info(f"Found desktop user from ps: {desktop_user}")
+                                            logger.info(
+                                                f"Found desktop user from ps: {desktop_user}")
                                             break
                     except Exception as e:
-                        logger.info(f"Could not find desktop user from ps: {e}")
+                        logger.info(
+                            f"Could not find desktop user from ps: {e}")
 
                 # Final fallback
                 if not desktop_user:
                     desktop_user = os.environ.get('SUDO_USER') or os.environ.get(
                         'USER') or os.environ.get('LOGNAME') or 'orangepi'
                     logger.info(f"Using fallback desktop_user: {desktop_user}")
-            
+
             if not display_env:
                 display_env = ':0'  # Default display
                 logger.info(f"Using default display_env: {display_env}")
@@ -373,14 +377,16 @@ class PowerController:
             self.cached_desktop_user = desktop_user
             self.cached_display_env = display_env
             self.desktop_user_detection_failed = False
-            
-            logger.info(f"Cached desktop user: {self.cached_desktop_user}, display: {self.cached_display_env}")
+
+            logger.info(
+                f"Cached desktop user: {self.cached_desktop_user}, display: {self.cached_display_env}")
 
         except Exception as e:
             logger.warning(f"Failed to detect desktop user and display: {e}")
             self.desktop_user_detection_failed = True
             # Set fallback values
-            self.cached_desktop_user = os.environ.get('SUDO_USER') or os.environ.get('USER') or 'orangepi'
+            self.cached_desktop_user = os.environ.get(
+                'SUDO_USER') or os.environ.get('USER') or 'orangepi'
             self.cached_display_env = ':0'
 
     def init_gpio(self):
@@ -419,55 +425,11 @@ class PowerController:
 
             logger.info("GPIO pins configured successfully")
             self.gpio_available = True
-
-<<<<<<< HEAD
-=======
-    def setup_ros2(self):
-        """Setup ROS2 publishers, subscribers, and service clients"""
-        try:
-            self.get_logger().info("Setting up ROS2 components...")
-            
-            # Using default QoS for all publishers
-            
-            # Publishers
-            self.led_status_pub = self.create_publisher(
-                String, 
-                '/argo/power_control/led_status', 
-                10
-            )
-            
-            self.node_health_pub = self.create_publisher(
-                DiagnosticArray,
-                '/argo/power_control/node_health',
-                10
-            )
-            
-            # Subscriber for recording status (use default QoS)
-            self.recording_status_sub = self.create_subscription(
-                Bool,
-                '/argo/recording/status',
-                self.recording_status_callback,
-                10
-            )
-            
-            # Service clients for recording control
-            self.start_recording_client = self.create_client(Empty, '/argo/recording/start')
-            self.stop_recording_client = self.create_client(Empty, '/argo/recording/stop')
-            
-            # Recording state tracking
-            self.recording_active = False
-            
-            # ROS2 timers for periodic tasks
-            self.status_timer = self.create_timer(1.0, self.publish_status)  # 1Hz status updates
-            self.health_timer = self.create_timer(5.0, self.publish_health)  # 5s health checks
-            
-            self.get_logger().info("ROS2 components initialized successfully")
-            
->>>>>>> 24f43f4447496ce71f974ce426d71370a8b8ddc3
         except Exception as e:
             if self.test_mode:
                 logger.warning(f"GPIO not available in test mode: {e}")
-                logger.warning("Continuing in test mode without GPIO functionality")
+                logger.warning(
+                    "Continuing in test mode without GPIO functionality")
                 self.gpio_available = False
                 # Set dummy values for test mode
                 self.chip = None
@@ -481,8 +443,8 @@ class PowerController:
                 raise
 
         # No ROS2 setup needed - using subprocess calls only
-        
-        # Simple state tracking
+
+        # Simple state tracking - initialize these early for test mode compatibility
         self.recording_active = False
         self.argo_service_running = False
         self.recording_service_available = False
@@ -490,7 +452,7 @@ class PowerController:
     def start_recording(self):
         """Start recording via ROS2 service using subprocess call"""
         if self.recording_active:
-            logger.warn("Recording is active - skipping start recording")
+            logger.warning("Recording is active - skipping start recording")
             self.send_desktop_notification(
                 "Recording Error",
                 "Recording is active - skipping start recording",
@@ -501,11 +463,12 @@ class PowerController:
         try:
             # Check if Argo service is running (like ar alias does)
             result = subprocess.run(
-                ['systemctl', 'is-active', 'argo-launch.service'],
+                ['sudo', 'systemctl', 'is-active', 'argo-launch.service'],
                 capture_output=True, text=True, timeout=4
             )
             if result.returncode != 0 or result.stdout.strip() != 'active':
-                logger.error("Argo service is not running - cannot start recording")
+                logger.error(
+                    "Argo service is not running - cannot start recording")
                 self.send_desktop_notification(
                     "Recording Error",
                     "Argo service is not running - start it first with: al",
@@ -515,13 +478,13 @@ class PowerController:
 
             # Call the service using subprocess with proper ROS2 environment (like ar alias)
             logger.info("🎬 Calling recording start service via subprocess...")
-            
+
             # Use subprocess to call the ROS2 service with proper environment sourcing (like ar alias)
             cmd = [
                 'bash', '-c',
                 'source /opt/ros/humble/setup.bash && ros2 service call /argo/recording/start std_srvs/srv/Trigger'
             ]
-            
+
             logger.info(f"Executing command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
@@ -529,24 +492,48 @@ class PowerController:
                 text=True,
                 timeout=30.0
             )
-            
-            logger.info(f"Service call completed - return code: {result.returncode}")
+
+            logger.info(
+                f"Service call completed - return code: {result.returncode}")
             logger.info(f"stdout: {result.stdout}")
             if result.stderr:
                 logger.info(f"stderr: {result.stderr}")
-            
+
             if result.returncode == 0:
-                # Parse the response from stdout
-                if "success: True" in result.stdout:
+                # Parse the response from stdout - handle both formats
+                success = False
+                message = "Recording started successfully"
+
+                # Check for success in different formats
+                if "success: True" in result.stdout or "success=True" in result.stdout:
+                    success = True
+                elif "success: False" in result.stdout or "success=False" in result.stdout:
+                    success = False
+                else:
+                    # Default to success if return code is 0 and no explicit failure
+                    success = True
+
+                if success:
                     # Extract message from response
-                    message = "Recording started successfully"
                     if "message:" in result.stdout:
                         lines = result.stdout.split('\n')
                         for line in lines:
                             if "message:" in line:
-                                message = line.split("message:")[1].strip().strip('"')
+                                message = line.split("message:")[
+                                    1].strip().strip('"')
                                 break
-                    
+                    elif "message=" in result.stdout:
+                        # Handle std_srvs.srv.Trigger_Response format
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if "message=" in line:
+                                # Extract from message='...' format
+                                start = line.find("message='") + 9
+                                end = line.find("'", start)
+                                if start > 8 and end > start:
+                                    message = line[start:end]
+                                break
+
                     logger.info(f"✅ Recording started: {message}")
                     self.recording_active = True  # Update state
                     self.send_desktop_notification(
@@ -562,18 +549,43 @@ class PowerController:
                         lines = result.stdout.split('\n')
                         for line in lines:
                             if "message:" in line:
-                                error_msg = line.split("message:")[1].strip().strip('"')
+                                error_msg = line.split("message:")[
+                                    1].strip().strip('"')
                                 break
-                    
-                    logger.error(f"❌ Recording start failed: {error_msg}")
-                    self.send_desktop_notification(
-                        "Recording Error",
-                        error_msg,
-                        "critical"
-                    )
-                    return False
+                    elif "message=" in result.stdout:
+                        # Handle std_srvs.srv.Trigger_Response format
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if "message=" in line:
+                                # Extract from message='...' format
+                                start = line.find("message='") + 9
+                                end = line.find("'", start)
+                                if start > 8 and end > start:
+                                    error_msg = line[start:end]
+                                break
+
+                    # Check if recording is already in progress
+                    if "already in progress" in error_msg.lower() or "already active" in error_msg.lower():
+                        logger.info(
+                            f"📹 Recording already in progress: {error_msg}")
+                        self.recording_active = True  # Update state to match reality
+                        self.send_desktop_notification(
+                            "Recording Status",
+                            f"Recording was already active: {error_msg}",
+                            "normal"
+                        )
+                        return True  # Return success since recording is active
+                    else:
+                        logger.error(f"❌ Recording start failed: {error_msg}")
+                        self.send_desktop_notification(
+                            "Recording Error",
+                            error_msg,
+                            "critical"
+                        )
+                        return False
             else:
-                logger.error(f"Service call failed with return code {result.returncode}")
+                logger.error(
+                    f"Service call failed with return code {result.returncode}")
                 logger.error(f"Error output: {result.stderr}")
                 self.send_desktop_notification(
                     "Recording Error",
@@ -581,7 +593,7 @@ class PowerController:
                     "critical"
                 )
                 return False
-                
+
         except subprocess.TimeoutExpired:
             logger.error("Service call timed out after 15 seconds")
             self.send_desktop_notification(
@@ -599,11 +611,10 @@ class PowerController:
             )
             return False
 
-
     def stop_recording(self):
         """Stop recording via ROS2 service using subprocess call"""
         if not self.recording_active:
-            logger.warn("Recording is not active - skipping stop recording")
+            logger.warning("Recording is not active - skipping stop recording")
             self.send_desktop_notification(
                 "Recording Error",
                 "Recording is not active - skipping stop recording",
@@ -614,18 +625,19 @@ class PowerController:
         try:
             # Check if recording service is available using our flag
             if not self.recording_service_available:
-                logger.warn("Recording service not available - Argo system may not be running")
+                logger.warning(
+                    "Recording service not available - Argo system may not be running")
                 return False
 
             # Call the service using subprocess with proper ROS2 environment
             logger.info("⏹️ Calling recording stop service via subprocess...")
-            
+
             # Use subprocess to call the ROS2 service with proper environment sourcing (like ac alias)
             cmd = [
                 'bash', '-c',
                 'source /opt/ros/humble/setup.bash && ros2 service call /argo/recording/stop std_srvs/srv/Trigger'
             ]
-            
+
             logger.info(f"Executing command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
@@ -633,26 +645,50 @@ class PowerController:
                 text=True,
                 timeout=30.0
             )
-            
-            logger.info(f"Service call completed - return code: {result.returncode}")
+
+            logger.info(
+                f"Service call completed - return code: {result.returncode}")
             logger.info(f"stdout: {result.stdout}")
             if result.stderr:
                 logger.info(f"stderr: {result.stderr}")
-            
+
             if result.returncode == 0:
-                # Parse the response from stdout
-                if "success: True" in result.stdout:
+                # Parse the response from stdout - handle both formats
+                success = False
+                message = "Recording stopped successfully"
+
+                # Check for success in different formats
+                if "success: True" in result.stdout or "success=True" in result.stdout:
+                    success = True
+                elif "success: False" in result.stdout or "success=False" in result.stdout:
+                    success = False
+                else:
+                    # Default to success if return code is 0 and no explicit failure
+                    success = True
+
+                if success:
                     # Extract message from response
-                    message = "Recording stopped successfully"
                     if "message:" in result.stdout:
-                        # Extract message content
                         lines = result.stdout.split('\n')
                         for line in lines:
                             if "message:" in line:
-                                message = line.split("message:")[1].strip().strip('"')
+                                message = line.split("message:")[
+                                    1].strip().strip('"')
                                 break
-                    
+                    elif "message=" in result.stdout:
+                        # Handle std_srvs.srv.Trigger_Response format
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if "message=" in line:
+                                # Extract from message='...' format
+                                start = line.find("message='") + 9
+                                end = line.find("'", start)
+                                if start > 8 and end > start:
+                                    message = line[start:end]
+                                break
+
                     logger.info(f"✅ Recording stopped: {message}")
+                    self.recording_active = False  # Update state
                     self.send_desktop_notification(
                         "Recording Stopped",
                         message,
@@ -666,9 +702,21 @@ class PowerController:
                         lines = result.stdout.split('\n')
                         for line in lines:
                             if "message:" in line:
-                                error_msg = line.split("message:")[1].strip().strip('"')
+                                error_msg = line.split("message:")[
+                                    1].strip().strip('"')
                                 break
-                    
+                    elif "message=" in result.stdout:
+                        # Handle std_srvs.srv.Trigger_Response format
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if "message=" in line:
+                                # Extract from message='...' format
+                                start = line.find("message='") + 9
+                                end = line.find("'", start)
+                                if start > 8 and end > start:
+                                    error_msg = line[start:end]
+                                break
+
                     logger.error(f"❌ Recording stop failed: {error_msg}")
                     self.send_desktop_notification(
                         "Recording Error",
@@ -677,7 +725,8 @@ class PowerController:
                     )
                     return False
             else:
-                logger.error(f"Service call failed with return code {result.returncode}")
+                logger.error(
+                    f"Service call failed with return code {result.returncode}")
                 logger.error(f"Error output: {result.stderr}")
                 self.send_desktop_notification(
                     "Recording Error",
@@ -685,7 +734,7 @@ class PowerController:
                     "critical"
                 )
                 return False
-                
+
         except subprocess.TimeoutExpired:
             logger.error("Service call timed out after 15 seconds")
             self.send_desktop_notification(
@@ -703,7 +752,6 @@ class PowerController:
             )
             return False
 
-
     def check_recording_service_availability(self):
         """Check if recording service is available and update flag"""
         # In test mode, always check the actual service status
@@ -711,50 +759,78 @@ class PowerController:
             # Check if Argo service is actually running
             try:
                 result = subprocess.run(
-                    ['systemctl', 'is-active', 'argo-launch.service'],
+                    ['sudo', 'systemctl', 'is-active', 'argo-launch.service'],
                     capture_output=True, text=True, timeout=4
                 )
                 is_running = result.returncode == 0 and result.stdout.strip() == 'active'
                 if is_running:
                     self.argo_service_running = True
-                    logger.info("Argo service detected as running in test mode")
+                    logger.info(
+                        "Argo service detected as running in test mode")
                 else:
                     self.argo_service_running = False
                     logger.info("Argo service not running in test mode")
             except Exception as e:
-                logger.warning(f"Error checking Argo service status in test mode: {e}")
+                logger.warning(
+                    f"Error checking Argo service status in test mode: {e}")
                 self.argo_service_running = False
-        
+
         if not self.argo_service_running:
             self.recording_service_available = False
-            logger.info("Recording service is not available because Argo service is not running")
+            logger.info(
+                "Recording service is not available because Argo service is not running")
             return False
 
-        # Test if the recording service is available using subprocess
-        try:
-            # Use subprocess to test if the service is available with proper ROS2 environment
-            result = subprocess.run([
-                'bash', '-c', 
-                'source /opt/ros/humble/setup.bash && ros2 service list'
-            ], capture_output=True, text=True, timeout=5)
-            
-            if result.returncode == 0 and '/argo/recording/start' in result.stdout:
-                self.recording_service_available = True
-                logger.info("Recording service is available")
-                return True
-            else:
-                self.recording_service_available = False
-                logger.info("Recording service is not available - service not found in service list")
-                return False
-        except Exception as e:
-            self.recording_service_available = False
-            logger.info(f"Error checking recording service availability: {e}")
-            return False
+        # Test if the recording service is available using subprocess with retry
+        max_retries = 3
+        retry_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                # Use subprocess to test if the service is available with proper ROS2 environment
+                result = subprocess.run([
+                    'bash', '-c',
+                    'source /opt/ros/humble/setup.bash && ros2 service list'
+                ], capture_output=True, text=True, timeout=5)
+
+                logger.info(
+                    f"ROS2 service list command result (attempt {attempt + 1}/{max_retries}) - return code: {result.returncode}")
+                if attempt == 0:  # Only log full output on first attempt to avoid spam
+                    logger.info(f"ROS2 service list stdout: {result.stdout}")
+                    if result.stderr:
+                        logger.info(
+                            f"ROS2 service list stderr: {result.stderr}")
+
+                if result.returncode == 0 and '/argo/recording/start' in result.stdout:
+                    self.recording_service_available = True
+                    logger.info("Recording service is available")
+                    return True
+                else:
+                    if attempt < max_retries - 1:
+                        logger.info(
+                            f"Recording service not found, retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                    else:
+                        self.recording_service_available = False
+                        logger.info(
+                            "Recording service is not available - service not found in service list after all retries")
+                        return False
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Error checking recording service availability (attempt {attempt + 1}): {e}, retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    self.recording_service_available = False
+                    logger.info(
+                        f"Error checking recording service availability after all retries: {e}")
+                    return False
 
     def query_current_recording_status(self):
         """Query current recording status at startup to sync with actual state"""
         if not self.recording_service_available:
-            logger.info("Recording service not available - skipping status query")
+            logger.info(
+                "Recording service not available - skipping status query")
             return
 
         try:
@@ -763,21 +839,33 @@ class PowerController:
                 'bash', '-c',
                 'source /opt/ros/humble/setup.bash && timeout 5 ros2 topic echo /argo/recording/status --once'
             ], capture_output=True, text=True, timeout=10)
-            
+
             if result.returncode == 0:
                 # Parse the output to get the recording status
+                old_state = self.recording_active
+
                 if "data: true" in result.stdout:
                     self.recording_active = True
-                    logger.info("Current recording status: ACTIVE (synced at startup)")
+                    if old_state != self.recording_active:
+                        logger.info(
+                            "📹 Recording status changed: INACTIVE → ACTIVE (state synchronized)")
+                    else:
+                        logger.debug("Recording status: ACTIVE (confirmed)")
                 elif "data: false" in result.stdout:
                     self.recording_active = False
-                    logger.info("Current recording status: INACTIVE (synced at startup)")
+                    if old_state != self.recording_active:
+                        logger.info(
+                            "📹 Recording status changed: ACTIVE → INACTIVE (state synchronized)")
+                    else:
+                        logger.debug("Recording status: INACTIVE (confirmed)")
                 else:
-                    logger.warn(f"Could not parse recording status from: {result.stdout}")
+                    logger.warning(
+                        f"Could not parse recording status from: {result.stdout}")
             else:
-                logger.warn(f"Failed to query recording status: {result.stderr}")
+                logger.warning(
+                    f"Failed to query recording status: {result.stderr}")
         except Exception as e:
-            logger.warn(f"Error querying current recording status: {e}")
+            logger.warning(f"Error querying current recording status: {e}")
 
     def is_argo_system_running(self):
         """Check if the Argo system is running using simple flag approach"""
@@ -793,7 +881,7 @@ class PowerController:
         """Check if the Argo launch service is running"""
         try:
             result = subprocess.run(
-                ['systemctl', 'is-active', 'argo-launch.service'],
+                ['sudo', 'systemctl', 'is-active', 'argo-launch.service'],
                 capture_output=True, text=True, timeout=4
             )
             is_running = result.returncode == 0 and result.stdout.strip() == 'active'
@@ -820,11 +908,12 @@ class PowerController:
                 return True
             logger.info("Starting Argo launch service...")
             result = subprocess.run(
-                ['systemctl', 'start', 'argo-launch.service'],
+                ['sudo', 'systemctl', 'start', 'argo-launch.service'],
                 capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
-                logger.info("✅ Argo launch service started, waiting for recording service to initialize...")
+                logger.info(
+                    "✅ Argo launch service started, waiting for recording service to initialize...")
                 # Set Argo service flag, but recording service needs time to initialize
                 self.argo_service_running = True
                 # pause to allow record.py to start
@@ -832,10 +921,12 @@ class PowerController:
                 # check recording service availability in loop until it is available
                 self.check_recording_service_availability()
                 while not self.recording_service_available:
-                    logger.info("Recording service not available, waiting for initialization...")
+                    logger.info(
+                        "Recording service not available, waiting for initialization...")
                     time.sleep(1)
                     self.check_recording_service_availability()
-                logger.info("Recording service initialized, setting available flag")
+                logger.info(
+                    "Recording service initialized, setting available flag")
                 self.recording_service_available = True
                 return True
             else:
@@ -854,7 +945,7 @@ class PowerController:
                 return True
 
             result = subprocess.run(
-                ['systemctl', 'stop', 'argo-launch.service'],
+                ['sudo', 'systemctl', 'stop', 'argo-launch.service'],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
@@ -876,7 +967,7 @@ class PowerController:
         try:
             # First check the actual service status to ensure our flag is accurate
             actual_status = self.check_argo_service_status()
-            
+
             if actual_status and self.argo_service_running:
                 logger.info("Double tap detected - stopping Argo service")
                 success = self.stop_argo_service()
@@ -909,10 +1000,12 @@ class PowerController:
                     )
             else:
                 # Service status mismatch - update our flag and try again
-                logger.info(f"Service status mismatch - actual: {actual_status}, flag: {self.argo_service_running}")
+                logger.info(
+                    f"Service status mismatch - actual: {actual_status}, flag: {self.argo_service_running}")
                 self.argo_service_running = actual_status
                 if actual_status:
-                    logger.info("Argo service is already running - no action needed")
+                    logger.info(
+                        "Argo service is already running - no action needed")
                     self.send_desktop_notification(
                         "Argo Service Status",
                         "Argo service is already running",
@@ -943,27 +1036,29 @@ class PowerController:
 
     def signal_handler(self, signum, frame):
         """Handle shutdown signals with graceful termination"""
-        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        logger.info(
+            f"Received signal {signum}, initiating graceful shutdown...")
         self.running = False
-        
+
         # Give the main loop a few seconds to exit gracefully
         logger.info("Waiting for graceful shutdown (5 seconds)...")
         time.sleep(5)
-        
+
         # If we're still here, force exit
         logger.warning("Graceful shutdown timeout - forcing exit")
         try:
             self.cleanup()
         except Exception as e:
             logger.error(f"Error during forced cleanup: {e}")
-        
+
         logger.info("Forcing process exit")
         os._exit(0)
 
     def read_initial_button_state(self):
         """Read initial power button state during startup (before interrupt configuration)"""
         if not self.gpio_available:
-            logger.info("GPIO not available - assuming button released in test mode")
+            logger.info(
+                "GPIO not available - assuming button released in test mode")
             return 1  # Assume released in test mode
         try:
             state = self.power_button_line.get_value()
@@ -977,7 +1072,8 @@ class PowerController:
     def configure_button_for_interrupts(self):
         """Reconfigure button line for interrupt-based monitoring"""
         if not self.gpio_available:
-            logger.info("GPIO not available - skipping button interrupt configuration in test mode")
+            logger.info(
+                "GPIO not available - skipping button interrupt configuration in test mode")
             return
         try:
             # Release the current configuration
@@ -1029,7 +1125,8 @@ class PowerController:
     def set_green_led(self, state):
         """Control green LED (system running indicator)"""
         if not self.gpio_available:
-            logger.debug(f"GPIO not available - simulating green LED {'ON' if state else 'OFF'} in test mode")
+            logger.debug(
+                f"GPIO not available - simulating green LED {'ON' if state else 'OFF'} in test mode")
             self.green_led_state = state
             return
         try:
@@ -1043,7 +1140,8 @@ class PowerController:
     def set_blue_led(self, state):
         """Control blue LED (status/warning indicator)"""
         if not self.gpio_available:
-            logger.debug(f"GPIO not available - simulating blue LED {'ON' if state else 'OFF'} in test mode")
+            logger.debug(
+                f"GPIO not available - simulating blue LED {'ON' if state else 'OFF'} in test mode")
             self.blue_led_state = state
             return
         try:
@@ -1135,7 +1233,6 @@ class PowerController:
                     self._heartbeat_sleep(0.45)  # 450ms pause
 
             else:
-               
 
                 # Determine heartbeat frequency based on Argo service status
                 if self.argo_service_running:
@@ -1264,7 +1361,8 @@ class PowerController:
     def monitor_power_button_interrupts(self):
         """Hardware interrupt-based button monitoring - efficient edge detection with minimal CPU usage"""
         if not self.gpio_available:
-            logger.info("GPIO not available - skipping button monitoring in test mode")
+            logger.info(
+                "GPIO not available - skipping button monitoring in test mode")
             # In test mode without GPIO, just sleep to keep the thread alive
             while self.running:
                 time.sleep(1.0)
@@ -1423,7 +1521,8 @@ class PowerController:
     def get_current_button_state(self):
         """Get current button state - works with interrupt-configured line"""
         if not self.gpio_available:
-            logger.debug("GPIO not available - assuming button released in test mode")
+            logger.debug(
+                "GPIO not available - assuming button released in test mode")
             return 1  # Assume released in test mode
         try:
             # The line is configured for events, but we can still read the current value
@@ -1544,14 +1643,16 @@ class PowerController:
             if new_state:
                 success = self.start_recording()
                 if success:
-                    logger.info("TEST MODE: Recording start service call succeeded")
+                    logger.info(
+                        "TEST MODE: Recording start service call succeeded")
                     self.send_desktop_notification(
                         "Recording Test Success",
                         "Recording start service call succeeded in test mode",
                         "normal"
                     )
                 else:
-                    logger.error("TEST MODE: Recording start service call failed")
+                    logger.error(
+                        "TEST MODE: Recording start service call failed")
                     self.send_desktop_notification(
                         "Recording Test Failed",
                         "Recording start service call failed in test mode",
@@ -1560,14 +1661,16 @@ class PowerController:
             else:
                 success = self.stop_recording()
                 if success:
-                    logger.info("TEST MODE: Recording stop service call succeeded")
+                    logger.info(
+                        "TEST MODE: Recording stop service call succeeded")
                     self.send_desktop_notification(
                         "Recording Test Success",
                         "Recording stop service call succeeded in test mode",
                         "normal"
                     )
                 else:
-                    logger.error("TEST MODE: Recording stop service call failed")
+                    logger.error(
+                        "TEST MODE: Recording stop service call failed")
                     self.send_desktop_notification(
                         "Recording Test Failed",
                         "Recording stop service call failed in test mode",
@@ -1576,8 +1679,13 @@ class PowerController:
             return
 
         # Real mode - ensure Argo service is running first
+        # Always check the actual service status before proceeding
+        self.check_argo_service_status()
+        # Also check recording service availability after Argo service check
+        self.check_recording_service_availability()
         if not self.argo_service_running:
-            logger.info("Triple tap detected - Argo not running, starting it first")
+            logger.info(
+                "Triple tap detected - Argo not running, starting it first")
             self.send_desktop_notification(
                 "Starting Argo Service",
                 "Starting Argo service before recording...",
@@ -1614,7 +1722,8 @@ class PowerController:
 
         # Check if recording service is available
         if not self.recording_service_available:
-            logger.warn("Triple tap detected but recording service is not available")
+            logger.warning(
+                "Triple tap detected but recording service is not available")
             self.send_desktop_notification(
                 "Recording Unavailable",
                 "Recording service is not ready - please wait",
@@ -1661,7 +1770,8 @@ class PowerController:
         try:
             # Check if desktop user detection failed previously
             if self.desktop_user_detection_failed:
-                logger.debug("Desktop user detection previously failed - skipping notification")
+                logger.debug(
+                    "Desktop user detection previously failed - skipping notification")
                 return
 
             # Modify title and message for test mode
@@ -1681,11 +1791,13 @@ class PowerController:
             if os.geteuid() == 0:
                 # Running as root - use cached desktop user and display
                 if not self.cached_desktop_user or not self.cached_display_env:
-                    logger.debug("No cached desktop user/display available - skipping notification")
+                    logger.debug(
+                        "No cached desktop user/display available - skipping notification")
                     return
 
-                logger.debug(f"Using cached desktop_user: {self.cached_desktop_user}, display: {self.cached_display_env}")
-                
+                logger.debug(
+                    f"Using cached desktop_user: {self.cached_desktop_user}, display: {self.cached_display_env}")
+
                 cmd = [
                     'sudo', '-u', self.cached_desktop_user,
                     'DISPLAY=' + self.cached_display_env,
@@ -1859,7 +1971,20 @@ class PowerController:
 
         try:
             # Main loop - just keep running while monitoring threads handle GPIO
+            last_sync_time = 0
+            sync_interval = 300  # Sync every 30 seconds
+
             while self.running:
+                current_time = time.time()
+
+                # Periodic state synchronization
+                if current_time - last_sync_time >= sync_interval:
+                    if self.argo_service_running and self.recording_service_available:
+                        logger.debug(
+                            "Performing periodic recording state synchronization...")
+                        self.query_current_recording_status()
+                    last_sync_time = current_time
+
                 # Sleep in smaller increments to be more responsive to shutdown signals
                 for _ in range(10):  # 10 * 0.1s = 1s total, but check running flag every 0.1s
                     if not self.running:
@@ -2173,7 +2298,8 @@ def main():
         print("Simulating double tap - Toggle Argo service")
         try:
             # Create a temporary power controller instance for testing
-            controller = PowerController(test_mode=True, threshold=args.threshold)
+            controller = PowerController(
+                test_mode=True, threshold=args.threshold)
             # Manually check and set service availability for test mode
             controller.check_recording_service_availability()
             controller.toggle_argo_service()
@@ -2188,7 +2314,8 @@ def main():
         print("Simulating triple tap - Toggle recording")
         try:
             # Create a temporary power controller instance for testing
-            controller = PowerController(test_mode=True, threshold=args.threshold)
+            controller = PowerController(
+                test_mode=True, threshold=args.threshold)
             controller.toggle_recording()
             print("✅ Triple tap simulation completed")
         except Exception as e:
@@ -2227,14 +2354,18 @@ def main():
         print("  - Power relay control is DISABLED")
         print("  - Desktop notifications will be sent")
         print("  - Button presses and actions will be reported")
-        print(f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles Argo service")
-        print(f"  - Triple tap (3 quick taps within {MULTI_TAP_MAX_DURATION_S}s) toggles recording")
+        print(
+            f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles Argo service")
+        print(
+            f"  - Triple tap (3 quick taps within {MULTI_TAP_MAX_DURATION_S}s) toggles recording")
     else:
         print("Starting power control system in NORMAL MODE")
         print("  - Full power control enabled")
         print("  - System will shutdown and cut power on long button press")
-        print(f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles Argo service")
-        print(f"  - Triple tap (3 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles recording")
+        print(
+            f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles Argo service")
+        print(
+            f"  - Triple tap (3 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles recording")
 
     print(f"  - Button press threshold: {args.threshold} seconds")
     print(f"  - Button detection mode: Hardware interrupts (efficient)")
