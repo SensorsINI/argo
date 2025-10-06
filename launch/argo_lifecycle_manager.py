@@ -1004,14 +1004,21 @@ class ArgoLifecycleManager:
             node_status = self._get_node_status()
 
             # Battery and alerts
-            battery_summary, critical_alerts = None, None
+            battery_summary, critical_alerts, charging_status, usb_power_status = None, None, None, None
             if "battery_water.py" in node_status and "RUNNING" in node_status["battery_water.py"]:
-                battery_summary, critical_alerts = self._get_battery_water_status_alerts()
+                battery_summary, critical_alerts, charging_status, usb_power_status = self._get_battery_water_status_alerts()
 
             # Build system info line with optional battery info
             system_info = f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Mem. {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temp. {cpu_temp}°C"
             if battery_summary:
                 system_info += f" | Batt. {battery_summary}"
+                # Add charging and USB power status if available
+                if charging_status is not None:
+                    charging_icon = "🔌" if charging_status else "🔋"
+                    system_info += f" | Charging: {charging_icon}{charging_status}"
+                if usb_power_status is not None:
+                    usb_icon = "⚡" if usb_power_status else "🔌"
+                    system_info += f" | USB: {usb_icon}{usb_power_status}"
             print(system_info)
 
             # Display critical alerts if any
@@ -1226,8 +1233,8 @@ class ArgoLifecycleManager:
 
         return fatal_messages
 
-    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str]]:
-        """Get battery info and alerts using the battery Trigger service client"""
+    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool]]:
+        """Get battery info, alerts, charging status, and USB power status using the battery Trigger service client"""
         try:
             # Use ROS2 service client if available, otherwise fallback to subprocess
             if self.battery_service_client and ROS2_AVAILABLE:
@@ -1239,13 +1246,17 @@ class ArgoLifecycleManager:
                 # Extract battery summary and alerts
                 battery_summary = battery_data.get('battery_summary')
                 critical_alerts = battery_data.get('critical_alerts')
-                return battery_summary, critical_alerts
+                # Extract charging and USB power status from raw_data
+                raw_data = battery_data.get('raw_data', {})
+                charging_status = raw_data.get('charging_status')
+                usb_power_status = raw_data.get('ac_power_present')
+                return battery_summary, critical_alerts, charging_status, usb_power_status
             else:
-                return None, None
+                return None, None, None, None
 
         except Exception as e:
             print(f"    Error getting battery and alerts: {e}")
-            return None, None
+            return None, None, None, None
 
     def _call_battery_service_client(self) -> Optional[Dict[str, Any]]:
         """Call battery service using ROS2 service client"""
@@ -1258,8 +1269,16 @@ class ArgoLifecycleManager:
 
             # Call service with timeout
             future = self.battery_service_client.call_async(request)
-            rclpy.spin_until_future_complete(
-                self.ros2_node, future, timeout_sec=3.0)
+            try:
+                rclpy.spin_until_future_complete(
+                    self.ros2_node, future, timeout_sec=3.0)
+            except Exception as e:
+                print(
+                    "    [WARN] Battery service call timed out or failed: {}".format(e))
+                return None
+            if not future.done():
+                print("    [WARN] Battery service call timed out after 3s")
+                return None
 
             if future.done():
                 response = future.result()
