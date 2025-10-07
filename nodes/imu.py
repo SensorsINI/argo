@@ -334,7 +334,6 @@ class ImuNode(Node):
         time_since_last_success = current_time - self._last_successful_read_time
         time_since_last_recovery_attempt = current_time - self._last_recovery_attempt_time
 
-
         # Try recovery if we've been in retry mode for a while
         # This allows recovery even with ongoing errors, since sensors need re-initialization
         if (time_since_last_success > 5.0 and  # Been in retry mode for at least 5 seconds
