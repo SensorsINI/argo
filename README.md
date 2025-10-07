@@ -25,6 +25,7 @@ See the Argo autonomous sailboat in action at the 2024 CCNW (before current wate
 - **ADC**: MAX11612 for battery/water sensing via I2C0 (0x34)
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
 - **PWM I/O**: Custom kernel module for radio control and servo interfaces with high impedance safety mode
+- **LORA**: Long range radio based on RA-01 radio module from ai-thinker.com using SX1276 LORA chip
 
 ### Servo Control Hardware
 
@@ -362,6 +363,7 @@ ros2 topic echo /rudder_sail_radio
 - **`rudder_sail_radio.py`**: Radio control interface and servo output
 - **`controller.py`**: Autonomous navigation controller
 - **`argo_unified_simulator_bridge.py`**: Unified simulator bridge for local and remote simulation
+- **`lora.py`**: Long range radio node for LORA module
 
 ## Configuration Files
 

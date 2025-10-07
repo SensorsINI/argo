@@ -6,3 +6,7 @@ libnmea_navsat_driver
 functools
 smbus
 pathlib
+
+# Orange Pi hardware interface libraries (for onboard use)
+spidev  # SPI communication for LoRa SX1276/SX1278 module (nodes/lora.py)
+OPi.GPIO  # GPIO control for LoRa control pins (CS/RST/IRQ) and other GPIO operations (nodes/lora.py)
