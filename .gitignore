@@ -138,3 +138,6 @@ ssh_keys/tobi-matebook-putty.ppk
 argo_path-2023-05-11-08-34-16.avi
 argo_path-argo-path-2023-05-11-08-34-16.avi
 argo-path-2023-05-11-08-34-16.html
+
+# RTIMULib2 - external library, not tracked in git
+nodes/RTIMULib2/
