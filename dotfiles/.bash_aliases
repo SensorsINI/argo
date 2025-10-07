@@ -26,3 +26,6 @@ alias alog='journalctl -u argo-launch.service -f --no-pager' # show argo launch 
 alias asim='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py simulate_local' # start argo in LOCAL simulation mode
 alias asimr='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py simulate_remote' # start argo in REMOTE simulation mode
 alias cleanbags='find /home/orangepi/argo/bags -type f -mtime +3 -exec rm -f {} \;' # clean old bags
+# handy shutdown and reboot aliases with confirmation
+alias sd='read -p "Shutdown now? (y/N): " -n 1 -r; echo; if [[ $REPLY =~ ^[Yy]$ ]]; then sudo shutdown now; fi'
+alias rb='read -p "Reboot now? (y/N): " -n 1 -r; echo; if [[ $REPLY =~ ^[Yy]$ ]]; then sudo reboot; fi'
