@@ -20,6 +20,7 @@
 # - temperature_high_threshold_c (default 70.0 C), temperature_critical_threshold_c (default 85.0 C)
 # - temperature_hysteresis_c (default 2.0 C)
 
+from toggle_pause_service import TogglePauseService
 import rclpy
 from rclpy.node import Node
 # Removed QoS imports - using default QoS only
@@ -35,7 +36,6 @@ from rclpy.executors import ExternalShutdownException
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
 
 # constants for high and critical temperatures
 HIGH_TEMPERATURE_THRESHOLD_C = 85.0
@@ -46,10 +46,11 @@ TEMPERATURE_HYSTERESIS_C = 2.0
 class TempMonitorNode(Node):
     def __init__(self):
         super().__init__('temp_monitor_node')
-        
-        # Initialize pause service
-        self.pause_service = TogglePauseService(self)
-        
+
+        # Initialize pause service with namespaced name
+        self.pause_service = TogglePauseService(
+            self, f'{self.get_name()}/toggle_pause')
+
         self.get_logger().info('Initializing Temperature Monitor node...')
 
         # Debug flag
@@ -261,7 +262,7 @@ class TempMonitorNode(Node):
         # Check if node is paused
         if self.pause_service.is_paused():
             return  # Skip processing when paused
-        
+
         current_time = time.monotonic()
         time_since_startup = current_time - self._startup_time
         time_since_last_publish = current_time - self._last_publish_time

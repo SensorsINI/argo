@@ -161,6 +161,10 @@ class BatteryWaterNode(Node):
         # Sensor failure tracking
         self._adc_failure_count = 0
         self._sht_failure_count = 0
+        
+        # I2C failure logging throttling
+        self._last_i2c_error_log_time = 0.0
+        self._i2c_error_log_interval = 30.0  # Log I2C errors max once every 30 seconds
         self._max_failures = 3
         self._shutdown_requested = False
 
@@ -747,20 +751,58 @@ class BatteryWaterNode(Node):
         time_since_last_publish = current_time - self._last_publish_time
         time_since_last_log = current_time - self._last_log_time
 
-        # ADC averages
-        raw0 = self._read_adc_channel_avg(0)
-        raw1 = self._read_adc_channel_avg(1)
-        raw2 = self._read_adc_channel_avg(2)
-        raw3 = self._read_adc_channel_avg(3)  # diagnostic only
+        # ADC averages with proper I2C failure handling
+        try:
+            raw0 = self._read_adc_channel_avg(0)
+            raw1 = self._read_adc_channel_avg(1)
+            raw2 = self._read_adc_channel_avg(2)
+            raw3 = self._read_adc_channel_avg(3)  # diagnostic only
 
-        battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
-        saltwater_voltage = raw1 * self.lsb_value
-        sail_current = raw2 * self.lsb_value
+            battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
+            saltwater_voltage = raw1 * self.lsb_value
+            sail_current = raw2 * self.lsb_value
 
-        # Store latest values for service
-        self._latest_battery_voltage = battery_voltage
-        self._latest_saltwater_voltage = saltwater_voltage
-        self._latest_sail_current = sail_current
+            # Store latest values for service
+            self._latest_battery_voltage = battery_voltage
+            self._latest_saltwater_voltage = saltwater_voltage
+            self._latest_sail_current = sail_current
+            
+        except Exception as e:
+            # CRITICAL: I2C failure should NOT trigger battery halt!
+            # Use throttled logging for I2C errors
+            current_time = time.monotonic()
+            if current_time - self._last_i2c_error_log_time >= self._i2c_error_log_interval:
+                self.get_logger().error(f"I2C sensor read failed: {e}")
+                # Log to dmesg as well
+                import subprocess
+                try:
+                    subprocess.run(['echo', f'ARGO I2C ERROR: Battery sensor read failed - {str(e)[:100]}'], 
+                                 stdout=open('/dev/kmsg', 'w'), stderr=subprocess.DEVNULL, timeout=1)
+                except Exception:
+                    pass  # Ignore dmesg logging failures
+                self._last_i2c_error_log_time = current_time
+            
+            # Use last known values instead of 0 (which would trigger false critical battery)
+            # Only update if we have previous values
+            if self._latest_battery_voltage > 0:
+                if current_time - self._last_i2c_error_log_time < self._i2c_error_log_interval:
+                    # Only log this once per interval
+                    pass
+                else:
+                    self.get_logger().warn(f"Using last known battery voltage: {self._latest_battery_voltage:.3f}V")
+            else:
+                # If no previous values, use a safe default above critical threshold
+                if current_time - self._last_i2c_error_log_time < self._i2c_error_log_interval:
+                    # Only log this once per interval
+                    pass
+                else:
+                    self.get_logger().error("No previous battery readings available - using safe default 8.0V")
+                    self._latest_battery_voltage = 8.0  # Safe default above 6.5V critical threshold
+                    self._latest_saltwater_voltage = 0.0
+                    self._latest_sail_current = 0.0
+            
+            # Don't process further sensor data this cycle
+            return
 
         # Calculate battery remaining percentage (per-cell formula)
         battery_remaining_pct = None

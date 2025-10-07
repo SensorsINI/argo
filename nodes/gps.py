@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ROS2 version of gps.py
 
+from toggle_pause_service import TogglePauseService
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
@@ -20,7 +21,6 @@ import pynmea2
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
 
 
 class GpsNode(Node):
@@ -64,8 +64,9 @@ class GpsNode(Node):
     def __init__(self, debug_mode=False):
         super().__init__('gps_node')
 
-        # Initialize pause service
-        self.pause_service = TogglePauseService(self)
+        # Initialize pause service with namespaced name
+        self.pause_service = TogglePauseService(
+            self, f'{self.get_name()}/toggle_pause')
 
         # Set logger level to DEBUG if debug mode is enabled
         if debug_mode:
@@ -643,7 +644,7 @@ class GpsNode(Node):
         # Check if node is paused
         if self.pause_service.is_paused():
             return  # Skip processing when paused
-        
+
         # Check for GPS communication timeout
         current_time = time.time()
         if current_time - self.last_data_received_time > self.gps_timeout_seconds:

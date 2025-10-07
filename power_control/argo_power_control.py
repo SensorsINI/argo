@@ -161,9 +161,10 @@ FINAL_SHUTDOWN_NOTIFICATION_MS = 0
 # Main control loop sleep interval (seconds)
 MAIN_LOOP_SLEEP_S = 1
 
-# Critical Battery Monitoring
-CRITICAL_BATTERY_THRESHOLD_V = 6.5  # Critical battery voltage threshold (6.5V)
-BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage every 30 seconds
+# Battery Monitoring
+LOW_BATTERY_THRESHOLD_V = 7.6      # Low battery warning threshold (SOS LED pattern)
+CRITICAL_BATTERY_THRESHOLD_V = 7.2  # Critical battery voltage threshold (halt system)
+BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage interval (seconds)
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 
@@ -232,10 +233,12 @@ class PowerController:
         self.cached_display_env = None
         self.desktop_user_detection_failed = False
 
-        # Critical battery monitoring state
+        # Battery monitoring state
+        self.low_battery_detected = False
         self.critical_battery_detected = False
         self.last_battery_check_time = 0.0
         self.battery_monitoring_active = False
+        self.sos_led_active = False
 
         # GPIO Configuration
         self.GPIO_CHIP = '/dev/gpiochip0'
@@ -1275,6 +1278,63 @@ class PowerController:
             time.sleep(increment)
             sleep_time += increment
 
+    def sos_led_pattern(self):
+        """SOS LED pattern for low battery warning - Blue LED blinks SOS in Morse code"""
+        logger.info("Starting SOS LED pattern for low battery warning")
+        self.sos_led_active = True
+
+        # SOS in Morse code: ... --- ... (short-short-short, long-long-long, short-short-short)
+        # Timing: short = 0.2s, long = 0.6s, pause between letters = 0.6s, pause between SOS = 1.8s
+        sos_pattern = [
+            # S: ... (short-short-short)
+            (0.2, True),   # Short on
+            (0.2, False),  # Short off
+            (0.2, True),   # Short on
+            (0.2, False),  # Short off
+            (0.2, True),   # Short on
+            (0.6, False),  # Long pause between letters
+            
+            # O: --- (long-long-long)
+            (0.6, True),   # Long on
+            (0.2, False),  # Short off
+            (0.6, True),   # Long on
+            (0.2, False),  # Short off
+            (0.6, True),   # Long on
+            (0.6, False),  # Long pause between letters
+            
+            # S: ... (short-short-short)
+            (0.2, True),   # Short on
+            (0.2, False),  # Short off
+            (0.2, True),   # Short on
+            (0.2, False),  # Short off
+            (0.2, True),   # Short on
+            (1.8, False),  # Long pause between SOS cycles
+        ]
+
+        while self.running and self.sos_led_active and self.low_battery_detected and not self.critical_battery_detected:
+            try:
+                for duration, led_state in sos_pattern:
+                    if not self.running or not self.sos_led_active or not self.low_battery_detected or self.critical_battery_detected:
+                        break
+                    
+                    # Set blue LED state (red LED is not GPIO controlled, so we use blue LED)
+                    self.set_blue_led(led_state)
+                    
+                    # Sleep in small increments for responsive shutdown
+                    sleep_time = 0
+                    while sleep_time < duration and self.running and self.sos_led_active and self.low_battery_detected and not self.critical_battery_detected:
+                        time.sleep(0.01)  # Sleep in 10ms increments
+                        sleep_time += 0.01
+
+            except Exception as e:
+                logger.error(f"Error in SOS LED pattern: {e}")
+                break
+
+        # Turn off blue LED when done
+        self.set_blue_led(False)
+        self.sos_led_active = False
+        logger.info("SOS LED pattern completed")
+
     def shutdown_led_pattern(self):
         """1Hz LED pattern with configurable duty cycle during shutdown sequence"""
         logger.info(
@@ -2029,21 +2089,61 @@ class PowerController:
                 battery_data = self._call_battery_service()
                 if battery_data:
                     battery_voltage = battery_data.get('battery_voltage', 0)
+                    
+                    # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
+                    # Never halt on obviously invalid readings (0V, negative, or extremely low)
+                    if battery_voltage <= 0 or battery_voltage < 3.0:
+                        logger.error(f"Invalid battery voltage reading: {battery_voltage:.3f}V - ignoring (likely I2C failure)")
+                        # Don't process this reading - it's clearly invalid
+                        continue
+                    
                     logger.info(
-                        f"Battery voltage check: {battery_voltage:.3f}V (critical threshold: {CRITICAL_BATTERY_THRESHOLD_V}V)")
+                        f"Battery voltage check: {battery_voltage:.3f}V (low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V)")
 
+                    # Check for critical battery first (highest priority)
                     if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
                         if not self.critical_battery_detected:
                             logger.critical(
                                 f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V")
                             self.critical_battery_detected = True
-                            self.initiate_critical_battery_halt(
-                                battery_voltage)
+                            # Stop SOS pattern if running (critical takes priority)
+                            if self.sos_led_active:
+                                self.sos_led_active = False
+                            self.initiate_critical_battery_halt(battery_voltage)
+                    
+                    # Check for low battery (SOS warning)
+                    elif battery_voltage < LOW_BATTERY_THRESHOLD_V:
+                        if not self.low_battery_detected:
+                            logger.warning(
+                                f"LOW BATTERY DETECTED: {battery_voltage:.3f}V < {LOW_BATTERY_THRESHOLD_V}V - Starting SOS LED pattern")
+                            self.low_battery_detected = True
+                            # Start SOS LED pattern in separate thread
+                            threading.Thread(target=self.sos_led_pattern, daemon=True).start()
+                            # Send desktop notification
+                            self.send_desktop_notification(
+                                "Low Battery Warning",
+                                f"Battery voltage low: {battery_voltage:.3f}V\nSOS LED pattern activated\nReturn to shore or charge battery",
+                                "critical"
+                            )
+                    
+                    # Battery voltage recovered above low threshold
                     else:
-                        # Battery voltage recovered above threshold
+                        # Check if we were in low battery state
+                        if self.low_battery_detected:
+                            logger.info(
+                                f"Battery voltage recovered from low: {battery_voltage:.3f}V >= {LOW_BATTERY_THRESHOLD_V}V")
+                            self.low_battery_detected = False
+                            self.sos_led_active = False  # Stop SOS pattern
+                            self.send_desktop_notification(
+                                "Battery Recovered",
+                                f"Battery voltage recovered: {battery_voltage:.3f}V\nSOS LED pattern stopped",
+                                "normal"
+                            )
+                        
+                        # Check if we were in critical battery state
                         if self.critical_battery_detected:
                             logger.info(
-                                f"Battery voltage recovered: {battery_voltage:.3f}V >= {CRITICAL_BATTERY_THRESHOLD_V}V")
+                                f"Battery voltage recovered from critical: {battery_voltage:.3f}V >= {CRITICAL_BATTERY_THRESHOLD_V}V")
                             self.critical_battery_detected = False
                             self._clear_critical_battery_flag()
                 else:
@@ -2154,8 +2254,87 @@ class PowerController:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 
+    def show_critical_battery_confirmation_dialog(self, battery_voltage):
+        """Show desktop confirmation dialog for critical battery shutdown"""
+        try:
+            # Try to show a zenity dialog first (most reliable on desktop)
+            dialog_cmd = [
+                'zenity',
+                '--question',
+                '--title=CRITICAL BATTERY SHUTDOWN',
+                f'--text=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\nClick "Cancel" to abort shutdown.\nClick "OK" to proceed with immediate shutdown.',
+                '--ok-label=Shutdown Now',
+                '--cancel-label=Cancel Shutdown',
+                '--timeout=30',
+                '--width=500',
+                '--height=300'
+            ]
+            
+            logger.info("Showing critical battery confirmation dialog...")
+            result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
+            
+            if result.returncode == 0:
+                logger.info("User confirmed critical battery shutdown")
+                return True
+            elif result.returncode == 1:
+                logger.info("User cancelled critical battery shutdown")
+                return False
+            else:
+                logger.warning(f"Dialog returned unexpected code: {result.returncode}")
+                return True  # Default to shutdown if dialog fails
+                
+        except subprocess.TimeoutExpired:
+            logger.info("Critical battery dialog timed out - proceeding with shutdown")
+            return True
+        except FileNotFoundError:
+            logger.warning("zenity not found - trying kdialog...")
+            try:
+                # Fallback to kdialog
+                dialog_cmd = [
+                    'kdialog',
+                    '--title=CRITICAL BATTERY SHUTDOWN',
+                    '--yesno=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\nClick "No" to abort shutdown.\nClick "Yes" to proceed with immediate shutdown.',
+                    '--yes-label=Shutdown Now',
+                    '--no-label=Cancel Shutdown'
+                ]
+                
+                result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
+                
+                if result.returncode == 0:
+                    logger.info("User confirmed critical battery shutdown (kdialog)")
+                    return True
+                else:
+                    logger.info("User cancelled critical battery shutdown (kdialog)")
+                    return False
+                    
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                logger.warning("kdialog also not available or timed out - trying simple yad...")
+                try:
+                    # Fallback to yad (Yet Another Dialog)
+                    dialog_cmd = [
+                        'yad',
+                        '--title=CRITICAL BATTERY SHUTDOWN',
+                        '--text=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.',
+                        '--button=Shutdown Now:0',
+                        '--button=Cancel Shutdown:1',
+                        '--timeout=30',
+                        '--width=500',
+                        '--height=300'
+                    ]
+                    
+                    result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
+                    return result.returncode == 0
+                    
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    logger.warning("No dialog tools available - proceeding with shutdown after pause")
+                    return True
+        except Exception as e:
+            logger.error(f"Error showing critical battery dialog: {e}")
+            logger.info("Proceeding with shutdown after pause due to dialog error")
+            return True
+
     def initiate_critical_battery_halt(self, battery_voltage):
-        """Initiate critical battery halt sequence"""
+        """Initiate critical battery halt sequence with confirmation dialog"""
         logger.critical(
             f"CRITICAL BATTERY HALT: {battery_voltage:.3f}V - System will halt to preserve power")
 
@@ -2165,20 +2344,37 @@ class PowerController:
         # Send critical notification
         self.send_desktop_notification(
             "CRITICAL BATTERY",
-            f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will halt to preserve power for manual sailing",
+            f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will halt in 30 seconds to preserve power for manual sailing",
             "critical",
-            FINAL_SHUTDOWN_NOTIFICATION_MS  # No timeout - stays until dismissed
+            30000  # 30 second timeout for notification
         )
 
         # Broadcast wall message
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"CRITICAL BATTERY: {battery_voltage:.3f}V at {timestamp}\nSystem halting to preserve power for manual sailing via radio control"
+            message = f"CRITICAL BATTERY: {battery_voltage:.3f}V at {timestamp}\nSystem will halt in 30 seconds to preserve power for manual sailing via radio control"
             subprocess.run(['wall', message], check=True,
                            timeout=WALL_MESSAGE_TIMEOUT_S)
             logger.info("Critical battery wall message broadcasted")
         except Exception as e:
             logger.error(f"Failed to broadcast critical battery message: {e}")
+
+        # Show confirmation dialog and wait for user response
+        logger.info("Showing critical battery confirmation dialog...")
+        should_shutdown = self.show_critical_battery_confirmation_dialog(battery_voltage)
+        
+        if not should_shutdown:
+            logger.info("Critical battery shutdown cancelled by user")
+            # Clear the critical battery flag since we're not shutting down
+            self._clear_critical_battery_flag()
+            # Send cancellation notification
+            self.send_desktop_notification(
+                "SHUTDOWN CANCELLED",
+                "Critical battery shutdown was cancelled by user",
+                "normal",
+                5000
+            )
+            return  # Exit without shutting down
 
         # Stop battery monitoring to prevent repeated alerts
         self.battery_monitoring_active = False
@@ -2221,6 +2417,9 @@ class PowerController:
         try:
             # Stop battery monitoring
             self.battery_monitoring_active = False
+
+            # Stop SOS LED pattern if active
+            self.sos_led_active = False
 
             # Clear critical battery flag if set
             if self.critical_battery_detected:
@@ -2356,6 +2555,7 @@ OPTIONS:
   --simulate-double-tap          Simulate a double tap to toggle Argo service
   --simulate-triple-tap          Simulate a triple tap to toggle recording
   --simulate-critical-battery    Simulate critical battery condition for testing
+  --simulate-low-battery         Simulate low battery condition (SOS LED pattern) for testing
 EXAMPLES:
   ./argo_power_control.py                         # Normal operation
   ./argo_power_control.py --test-mode             # Test mode (safe)
@@ -2371,6 +2571,7 @@ EXAMPLES:
   ./argo_power_control.py --simulate-double-tap   # Simulate double tap (Argo service toggle)
   ./argo_power_control.py --simulate-triple-tap   # Simulate triple tap (recording toggle)
   ./argo_power_control.py --simulate-critical-battery  # Test critical battery halt sequence
+  ./argo_power_control.py --simulate-low-battery   # Test low battery SOS LED pattern
 
 REQUIREMENTS:
   - User must be member of 'gpio' group (for GPIO access)
@@ -2412,6 +2613,8 @@ def main():
                         help='Simulate a triple tap to toggle recording')
     parser.add_argument('--simulate-critical-battery', action='store_true',
                         help='Simulate critical battery condition for testing')
+    parser.add_argument('--simulate-low-battery', action='store_true',
+                        help='Simulate low battery condition (SOS LED pattern) for testing')
 
     args = parser.parse_args()
 
@@ -2552,18 +2755,49 @@ def main():
 
     # Handle simulate critical battery
     if args.simulate_critical_battery:
-        print("Simulating critical battery condition")
+        print("Simulating critical battery condition with confirmation dialog")
         try:
             # Create a temporary power controller instance for testing
             controller = PowerController(
                 test_mode=True, threshold=args.threshold)
             # Simulate critical battery voltage
-            test_voltage = 6.2  # Below 6.5V threshold
+            test_voltage = 6.2  # Below 7.2V threshold
             print(f"Simulating critical battery voltage: {test_voltage}V")
+            print("This will show the confirmation dialog - you can test cancellation")
             controller.initiate_critical_battery_halt(test_voltage)
             print("✅ Critical battery simulation completed")
         except Exception as e:
             print(f"Error simulating critical battery: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    # Handle simulate low battery
+    if args.simulate_low_battery:
+        print("Simulating low battery condition (SOS LED pattern)")
+        try:
+            # Create a temporary power controller instance for testing
+            controller = PowerController(
+                test_mode=True, threshold=args.threshold)
+            # Simulate low battery voltage
+            test_voltage = 7.4  # Below 7.6V threshold but above 7.2V critical
+            print(f"Simulating low battery voltage: {test_voltage}V")
+            controller.low_battery_detected = True
+            # Start SOS LED pattern in separate thread
+            import threading
+            sos_thread = threading.Thread(target=controller.sos_led_pattern, daemon=True)
+            sos_thread.start()
+            print("✅ Low battery simulation completed - SOS LED pattern running")
+            print("Press Ctrl+C to stop the SOS pattern test")
+            # Let the SOS pattern run for demonstration
+            try:
+                while controller.sos_led_active:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nStopping SOS pattern test...")
+                controller.sos_led_active = False
+                controller.set_blue_led(False)
+        except Exception as e:
+            print(f"Error simulating low battery: {e}")
             sys.exit(1)
         sys.exit(0)
 
@@ -2599,7 +2833,7 @@ def main():
         print("  - Desktop notifications will be sent")
         print("  - Button presses and actions will be reported")
         print(
-            f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles Argo service")
+            f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}s) toggles Argo service")
         print(
             f"  - Triple tap (3 quick taps within {MULTI_TAP_MAX_DURATION_S}s) toggles recording")
     else:
@@ -2614,7 +2848,7 @@ def main():
     print(f"  - Button press threshold: {args.threshold} seconds")
     print(f"  - Button detection mode: Hardware interrupts (efficient)")
     print(
-        f"  - Critical battery monitoring: {CRITICAL_BATTERY_THRESHOLD_V}V threshold")
+        f"  - Battery monitoring: Low warning {LOW_BATTERY_THRESHOLD_V}V (SOS LED), Critical {CRITICAL_BATTERY_THRESHOLD_V}V (halt)")
     print("  - Press Ctrl+C to stop")
     print()
 

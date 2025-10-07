@@ -75,7 +75,7 @@ class ArgoLifecycleManager:
                 self.ros2_node = Node('argo_lifecycle_manager')
                 self.battery_service_client = self.ros2_node.create_client(
                     Trigger, '/battery_status')
-                
+
                 # Create toggle_pause service for managing node pause state
                 self.toggle_pause_service = self.ros2_node.create_service(
                     Trigger,
@@ -123,7 +123,7 @@ class ArgoLifecycleManager:
 
         # Define critical nodes (essential for boat operation)
         self.critical_nodes = ['pwm.py', 'control.py']
-        
+
         # Define nodes that should NOT be paused (critical for safety/monitoring)
         self.no_pause_nodes = ['battery_water.py', 'temp_monitor.py']
 
@@ -158,37 +158,41 @@ class ArgoLifecycleManager:
         try:
             # Get current node status to determine which nodes are running
             node_status = self._get_node_status()
-            running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
-            
+            running_nodes = [
+                node for node, status in node_status.items() if "RUNNING" in status]
+
             if not running_nodes:
                 response.success = False
                 response.message = "No nodes are currently running"
                 return response
-            
+
             # Determine if we should pause or unpause based on current state
             # We'll check a few nodes to determine the current pause state
             should_pause = self._should_pause_nodes(running_nodes)
-            
+
             # Filter out nodes that should not be paused
-            nodes_to_control = [node for node in running_nodes if node not in self.no_pause_nodes]
-            no_pause_list = [node for node in running_nodes if node in self.no_pause_nodes]
-            
+            nodes_to_control = [
+                node for node in running_nodes if node not in self.no_pause_nodes]
+            no_pause_list = [
+                node for node in running_nodes if node in self.no_pause_nodes]
+
             action = "pause" if should_pause else "unpause"
             print(f"🔄 {action.upper()}ING {len(nodes_to_control)} nodes...")
-            
+
             if no_pause_list:
-                print(f"⚠️  Skipping {len(no_pause_list)} critical nodes: {', '.join(no_pause_list)}")
-            
+                print(
+                    f"⚠️  Skipping {len(no_pause_list)} critical nodes: {', '.join(no_pause_list)}")
+
             # Call toggle_pause service on each node
             success_count = 0
             failed_nodes = []
-            
+
             for node in nodes_to_control:
                 if self._call_node_toggle_pause(node):
                     success_count += 1
                 else:
                     failed_nodes.append(node)
-            
+
             # Prepare response
             if success_count == len(nodes_to_control):
                 response.success = True
@@ -205,14 +209,14 @@ class ArgoLifecycleManager:
                 response.message = f"Failed to {action} any nodes"
                 if failed_nodes:
                     response.message += f" (failed: {', '.join(failed_nodes)})"
-            
+
             print(f"✅ Toggle pause result: {response.message}")
-            
+
         except Exception as e:
             print(f"❌ Error in toggle_pause handler: {e}")
             response.success = False
             response.message = f"Error: {str(e)}"
-        
+
         return response
 
     def _should_pause_nodes(self, running_nodes):
@@ -221,18 +225,18 @@ class ArgoLifecycleManager:
         # We'll use the health topics to determine pause state
         paused_count = 0
         checked_count = 0
-        
+
         for node in running_nodes[:3]:  # Check first 3 nodes
             if node in self.no_pause_nodes:
                 continue
-                
+
             try:
                 # Check health topic to see if node is paused
                 health_topic = f'/{node.replace(".py", "")}_health'
                 result = subprocess.run([
                     'ros2', 'topic', 'echo', health_topic, '--once'
                 ], capture_output=True, text=True, timeout=2)
-                
+
                 if result.returncode == 0 and result.stdout.strip():
                     lines = result.stdout.strip().split('\n')
                     for line in lines:
@@ -245,11 +249,11 @@ class ArgoLifecycleManager:
                             break
             except Exception:
                 pass
-        
+
         # If we couldn't check any nodes, default to pause
         if checked_count == 0:
             return True
-        
+
         # If more than half are paused, unpause; otherwise pause
         return paused_count < (checked_count / 2)
 
@@ -257,22 +261,33 @@ class ArgoLifecycleManager:
         """Call the toggle_pause service on a specific node."""
         try:
             # Convert node name to service name
-            service_name = f'/{node_name.replace(".py", "")}/toggle_pause'
-            
-            # Call the service
-            result = subprocess.run([
-                'ros2', 'service', 'call', service_name, 'std_srvs/srv/Trigger'
-            ], capture_output=True, text=True, timeout=5)
-            
-            if result.returncode == 0:
+            # Map .py filenames to actual ROS2 node names
+            node_mapping = {
+                'controller.py': 'controller_node',
+                'anem.py': 'anem_node',
+                'imu.py': 'imu_node',
+                'record.py': 'record',
+                'rudder_sail_radio.py': 'rudder_sail_radio_node',
+                'sailing_area_publisher.py': 'sailing_area_publisher',
+                'temp_monitor.py': 'temp_monitor_node',
+                'foxglove_bridge': 'foxglove_bridge'
+            }
+
+            ros2_node_name = node_mapping.get(
+                node_name, node_name.replace(".py", ""))
+            service_name = f'/{ros2_node_name}/toggle_pause'
+
+            # Use centralized Trigger service call
+            success, message = self._call_trigger_service(
+                service_name, timeout_sec=5.0, debug=False)
+
+            if success:
                 return True
             else:
-                print(f"⚠️  Failed to call toggle_pause on {node_name}: {result.stderr}")
+                print(
+                    f"⚠️  Failed to call toggle_pause on {node_name}: {message}")
                 return False
-                
-        except subprocess.TimeoutExpired:
-            print(f"⚠️  Timeout calling toggle_pause on {node_name}")
-            return False
+
         except Exception as e:
             print(f"⚠️  Error calling toggle_pause on {node_name}: {e}")
             return False
@@ -1408,6 +1423,91 @@ class ArgoLifecycleManager:
 
         return fatal_messages
 
+    def _call_trigger_service(self, service_name: str, timeout_sec: float = 1.0, debug: bool = False) -> tuple[bool, str]:
+        """
+        Centralized function for calling ROS2 Trigger services.
+
+        Args:
+            service_name: Name of the service (e.g., '/toggle_pause', '/battery_status')
+            timeout_sec: Timeout for service call
+            debug: Enable debug output
+
+        Returns:
+            tuple: (success: bool, message: str)
+        """
+        try:
+            if debug:
+                print(f"🔧 DEBUG: Calling Trigger service: {service_name}")
+
+            # Check if ROS2 node is available
+            if not self.ros2_node:
+                error_msg = "ROS2 node not available"
+                if debug:
+                    print(f"🔧 DEBUG: {error_msg}")
+                return False, error_msg
+
+            # Create a service client
+            service_client = self.ros2_node.create_client(
+                Trigger, service_name)
+
+            # Wait for the service to be available
+            if not service_client.wait_for_service(timeout_sec=1.0):
+                error_msg = f"Service {service_name} not available"
+                if debug:
+                    print(f"🔧 DEBUG: {error_msg}")
+                return False, error_msg
+
+            if debug:
+                print(
+                    f"🔧 DEBUG: Service {service_name} is available, making request...")
+
+            # Create the request
+            request = Trigger.Request()
+
+            # Call the service
+            future = service_client.call_async(request)
+
+            # Wait for the response with timeout
+            rclpy.spin_until_future_complete(
+                self.ros2_node, future, timeout_sec=timeout_sec)
+
+            if future.done():
+                response = future.result()
+
+                if debug:
+                    print(
+                        f"🔧 DEBUG: Service {service_name} response: success={response.success}, message='{response.message}'")
+
+                return response.success, response.message
+            else:
+                error_msg = f"Service {service_name} call timed out after {timeout_sec}s"
+                if debug:
+                    print(f"🔧 DEBUG: {error_msg}")
+                return False, error_msg
+
+        except Exception as e:
+            error_msg = f"Error calling service {service_name}: {e}"
+            if debug:
+                print(f"🔧 DEBUG: {error_msg}")
+                import traceback
+                traceback.print_exc()
+            return False, error_msg
+
+    def toggle_pause_nodes(self, debug: bool = False) -> bool:
+        """Toggle pause state of all pausable nodes via ROS2 service call."""
+        print("🔄 Toggling pause state of all pausable nodes...")
+
+        # Use centralized Trigger service call
+        success, message = self._call_trigger_service(
+            '/toggle_pause', timeout_sec=1.0, debug=debug)
+
+        if success:
+            print(f"✅ {message}")
+            return True
+        else:
+            print(f"❌ Toggle pause failed: {message}")
+            return False
+
     def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool]]:
         """Get battery info, alerts, charging status, and USB power status using the battery Trigger service client"""
         try:
@@ -1434,34 +1534,15 @@ class ArgoLifecycleManager:
             return None, None, None, None
 
     def _call_battery_service_client(self) -> Optional[Dict[str, Any]]:
-        """Call battery service using ROS2 service client"""
+        """Call battery service using centralized Trigger service call"""
         try:
-            if not self.battery_service_client.service_is_ready():
-                return None
+            # Use centralized Trigger service call
+            success, message = self._call_trigger_service(
+                '/battery_status', timeout_sec=1.0, debug=False)
 
-            # Create request
-            request = Trigger.Request()
-
-            # Call service with timeout
-            future = self.battery_service_client.call_async(request)
-            try:
-                rclpy.spin_until_future_complete(
-                    self.ros2_node, future, timeout_sec=3.0)
-            except Exception as e:
-                print(
-                    "    [WARN] Battery service call timed out or failed: {}".format(e))
-                return None
-            if not future.done():
-                print("    [WARN] Battery service call timed out after 3s")
-                return None
-
-            if future.done():
-                response = future.result()
-                if response.success:
-                    # Parse JSON from response message
-                    return json.loads(response.message)
-                else:
-                    return None
+            if success:
+                # Parse JSON from response message
+                return json.loads(message)
             else:
                 return None
 
@@ -1469,51 +1550,19 @@ class ArgoLifecycleManager:
             return None
 
     def _call_battery_service_subprocess(self) -> Optional[Dict[str, Any]]:
-        """Fallback: Call battery service using subprocess"""
+        """Fallback: Call battery service using inline ROS2 client"""
         try:
-            result = subprocess.run([
-                'ros2', 'service', 'call', '/battery_status', 'std_srvs/srv/Trigger'
-            ], capture_output=True, text=True, timeout=5)
+            # Use centralized Trigger service call
+            success, message = self._call_trigger_service(
+                '/battery_status', timeout_sec=1.0, debug=False)
 
-            if result.returncode == 0 and result.stdout.strip():
-                return self._parse_trigger_response_subprocess(result.stdout)
+            if success:
+                # Parse JSON from response message
+                return json.loads(message)
             else:
                 return None
-        except subprocess.TimeoutExpired:
-            return None
+
         except Exception as e:
-            return None
-
-    def _parse_trigger_response_subprocess(self, output: str) -> Optional[Dict[str, Any]]:
-        """Parse ROS2 Trigger service response from subprocess output"""
-        try:
-            # Look for the message field in the Trigger response
-            lines = output.strip().split('\n')
-            message_content = None
-
-            for line in lines:
-                line = line.strip()
-                if line.startswith('message:'):
-                    # Extract the JSON content from the message field
-                    message_part = line.split(':', 1)[1].strip()
-                    # Remove quotes if present
-                    if message_part.startswith('"') and message_part.endswith('"'):
-                        message_part = message_part[1:-1]
-                    # Unescape newlines and quotes
-                    message_part = message_part.replace(
-                        '\\n', '\n').replace('\\"', '"')
-                    message_content = message_part
-                    break
-
-            if message_content:
-                # Parse the JSON content
-                return json.loads(message_content)
-            else:
-                return None
-
-        except json.JSONDecodeError:
-            return None
-        except Exception:
             return None
 
     def _print_i2c_health(self, bus: int = 0) -> None:
@@ -1552,19 +1601,140 @@ class ArgoLifecycleManager:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Argo ROS2 Lifecycle Manager')
-    parser.add_argument('command', choices=['run', 'stop', 'restart', 'status', 'simulate_local', 'simulate_remote'],
-                        help='Command to execute')
+    parser = argparse.ArgumentParser(
+        description='Argo ROS2 Lifecycle Manager - Comprehensive node management for Argo sailboat control system',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+COMMANDS:
+  run              Start all Argo ROS2 nodes and keep running (for systemd service)
+                   - Launches all discovered nodes except excluded ones
+                   - Monitors node health continuously
+                   - Provides fault tolerance and status reporting
+                   - Use this for production operation
+
+  stop             Stop all Argo ROS2 nodes and related processes
+                   - Terminates all node processes gracefully
+                   - Cleans up remote simulation processes if running
+                   - Stops both regular and special nodes (foxglove_bridge)
+
+  restart          Restart all Argo ROS2 nodes
+                   - Performs stop followed by start
+                   - Useful for applying configuration changes
+
+  status           Show comprehensive status of Argo system
+                   - Displays service status (power control, battery monitor, launch service)
+                   - Shows individual node status with error details
+                   - Provides system health info (CPU, memory, temperature, battery)
+                   - Shows I2C bus health when nodes are not running
+                   - Extracts and displays recent error messages from systemd journal
+
+  simulate_local   Start Argo in local simulation mode
+                   - Runs sailboat simulator directly on Orange Pi
+                   - Excludes conflicting hardware nodes (gps.py, imu.py, anem.py, rudder_sail_radio.py)
+                   - Includes simulator bridge, controller, and monitoring nodes
+                   - Provides keyboard control via curses interface
+                   - Enables Foxglove visualization at ws://localhost:9090
+
+  simulate_remote  Start Argo in remote simulation mode
+                   - Connects to simulator running on remote machine via SSH
+                   - Requires manual setup of remote simulator and SSH tunnel
+                   - Better performance for resource-constrained hardware
+                   - Same node exclusions as local simulation
+
+PAUSE TOGGLING:
+  The lifecycle manager provides multiple ways to pause/unpause nodes:
+  
+  Command Line Option:
+    python3 argo_lifecycle_manager.py --toggle_pause
+    
+  ROS2 Service:
+    Service: /toggle_pause (std_srvs/srv/Trigger)
+    Usage: ros2 service call /toggle_pause std_srvs/srv/Trigger
+    
+  Behavior:
+    - Automatically detects current pause state of nodes
+    - Pauses all running nodes if they are currently unpaused
+    - Unpauses all paused nodes if they are currently paused
+    - Excludes critical nodes from pause control (battery_water.py, temp_monitor.py)
+    - Provides detailed response about which nodes were affected
+    
+  Critical Nodes (Never Paused):
+    - battery_water.py: Critical battery monitoring
+    - temp_monitor.py: System temperature monitoring
+    
+  Pauseable Nodes:
+    - pwm.py: Servo control
+    - control.py: Autonomous navigation
+    - gps.py: GPS navigation
+    - imu.py: IMU/compass data
+    - anem.py: Wind sensor
+    - rudder_sail_radio.py: Radio control interface
+    - record.py: Data recording
+    - foxglove_bridge: Visualization bridge
+
+NODE MANAGEMENT:
+  Excluded Nodes (Hardware Not Ready):
+    - lora: LoRa radio hardware not installed
+    - battery_water: Runs as independent systemd service for critical monitoring
+  
+  Critical Nodes (Essential for Operation):
+    - pwm.py: Servo control for rudder and sail
+    - control.py: Autonomous navigation logic
+  
+  Special Nodes:
+    - foxglove_bridge: ROS2 package launched via 'ros2 run'
+
+MONITORING:
+  - Continuous health monitoring during operation
+  - Automatic failure detection and reporting
+  - Systemd journal integration for error tracking
+  - I2C bus health diagnostics
+  - Battery and power status monitoring
+  - CPU, memory, and temperature monitoring
+
+EXAMPLES:
+  # Start Argo system
+  python3 argo_lifecycle_manager.py run
+  
+  # Check system status
+  python3 argo_lifecycle_manager.py status
+  
+  # Start local simulation
+  python3 argo_lifecycle_manager.py simulate_local
+  
+  # Pause all nodes (via ROS2 service)
+  ros2 service call /toggle_pause std_srvs/srv/Trigger
+  
+  # Toggle pause state (command line option)
+  python3 argo_lifecycle_manager.py --toggle_pause
+  
+  # Stop all nodes
+  python3 argo_lifecycle_manager.py stop
+        """)
+
+    parser.add_argument('command',
+                        choices=['run', 'stop', 'restart', 'status',
+                                 'simulate_local', 'simulate_remote'],
+                        nargs='?',  # Make command optional
+                        help='Command to execute (see detailed descriptions below)')
     parser.add_argument('--debug', action='store_true',
-                        help='Enable debug output')
+                        help='Enable debug output for troubleshooting')
+    parser.add_argument('--toggle_pause', action='store_true',
+                        help='Toggle pause state of all pausable nodes (requires lifecycle manager to be running)')
 
     args = parser.parse_args()
+
+    # Validate that either a command or --toggle_pause is provided
+    if not args.command and not args.toggle_pause:
+        parser.error(
+            "Either a command or --toggle_pause option must be provided")
 
     manager = ArgoLifecycleManager()
     if args.debug:
         print("🔧 DEBUG: Debug mode enabled")
 
     try:
+        # Execute the command first (if provided)
         if args.command == 'run':
             success = manager.continuous()
             sys.exit(0 if success else 1)
@@ -1581,6 +1751,11 @@ def main():
             sys.exit(0 if success else 1)
         elif args.command == 'simulate_remote':
             success = manager.simulate_remote()
+            sys.exit(0 if success else 1)
+
+        # Handle --toggle_pause option (after command execution or standalone)
+        if args.toggle_pause:
+            success = manager.toggle_pause_nodes(debug=args.debug)
             sys.exit(0 if success else 1)
     finally:
         # Ensure ROS2 cleanup

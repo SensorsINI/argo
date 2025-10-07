@@ -85,6 +85,7 @@ License: MIT
 Version: 3.2 - Enhanced control logging, fail-safe exit handling, and human control timeout constant
 """
 
+from toggle_pause_service import TogglePauseService
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float64
@@ -106,7 +107,6 @@ import select
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
 
 # --- Hardware Configuration ---
 SYS_BASE_PATH = Path("/sys/kernel/argo_radio_servo")
@@ -315,10 +315,11 @@ class RudderSailRadioNode(Node):
 
     def __init__(self):
         super().__init__('rudder_sail_radio_node')
-        
-        # Initialize pause service
-        self.pause_service = TogglePauseService(self)
-        
+
+        # Initialize pause service with namespaced name
+        self.pause_service = TogglePauseService(
+            self, f'{self.get_name()}/toggle_pause')
+
         self.get_logger().info(
             'Rudder/Sail Radio node starting with high impedance safety mode...')
 
@@ -667,7 +668,7 @@ class RudderSailRadioNode(Node):
         # Check if node is paused
         if self.pause_service.is_paused():
             return  # Skip processing when paused
-        
+
         # 1. Read radio inputs from hardware
         if not self.read_radio_inputs():
             return  # Skip this cycle if radio inputs are invalid

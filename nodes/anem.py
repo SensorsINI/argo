@@ -73,6 +73,14 @@
 #   data: true when node is healthy, false when unhealthy or shutting down
 #   Published only on state changes, startup, and shutdown
 
+from collections import deque
+import math
+from rclpy.logging import LoggingSeverity
+import argparse
+import numpy as np
+import time
+import smbus
+from toggle_pause_service import TogglePauseService
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
@@ -82,15 +90,6 @@ from std_msgs.msg import Bool
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
-import smbus
-import time
-import numpy as np
-import argparse
-from rclpy.logging import LoggingSeverity
-import math
-import sys
-from collections import deque
 
 # I2C sensor addresses
 I2C_CTR = 0x21  # Center sensor (0° - front/back)
@@ -305,10 +304,11 @@ def calculate_speed_mps(dp_ctr, dp_cw, dp_ccw, temp_celsius):
 class AnemNode(Node):
     def __init__(self, debug_visually: bool = False):
         super().__init__('anem_node')
-        
-        # Initialize pause service
-        self.pause_service = TogglePauseService(self)
-        
+
+        # Initialize pause service with namespaced name
+        self.pause_service = TogglePauseService(
+            self, f'{self.get_name()}/toggle_pause')
+
         self.get_logger().info('Initializing Anemometer node...')
 
         # Publishers
@@ -726,7 +726,7 @@ class AnemNode(Node):
         # Check if node is paused
         if self.pause_service.is_paused():
             return  # Skip processing when paused
-        
+
         try:
             # Read multiple samples and accumulate for averaging
             dp_samples = []

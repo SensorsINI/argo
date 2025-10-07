@@ -18,6 +18,7 @@ alias aq='/home/orangepi/argo/launch/argo_stop.sh'            # Stop Argo nodes
 alias ars='/home/orangepi/argo/launch/argo_restart.sh'        # Restart Argo nodes
 alias as='/home/orangepi/argo/launch/argo_status.sh'          # Show Argo status
 alias am='/home/orangepi/argo/launch/argo_monitor.sh'  # Monitor mode - continuous status display
+alias ap='python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py toggle_pause'  # Pause Argo nodes
 alias ar='if systemctl is-active --quiet argo-launch.service; then timeout 10 ros2 service call /argo/recording/start std_srvs/srv/Trigger; else echo "❌ Error: argo-launch.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo-launch.service)"; fi'  # Start recording
 alias ac='if systemctl is-active --quiet argo-launch.service; then timeout 10 ros2 service call /argo/recording/stop std_srvs/srv/Trigger; else echo "❌ Error: argo-launch.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo-launch.service)"; fi'   # Stop recording
 alias ah='bash /home/orangepi/argo/launch/argo_help.sh' # show argo help

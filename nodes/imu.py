@@ -46,6 +46,10 @@ Usage Examples:
   python3 imu.py --calib_compass    # Calibrate magnetometer
 """
 
+from datetime import datetime
+import json
+import argparse
+from toggle_pause_service import TogglePauseService
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
@@ -60,11 +64,6 @@ import math
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
-import argparse
-import sys
-import json
-from datetime import datetime
 
 
 def _to_int16(msb, lsb):
@@ -178,10 +177,11 @@ class ICM20948:
 class ImuNode(Node):
     def __init__(self, debug=False):
         super().__init__('imu_node')
-        
-        # Initialize pause service
-        self.pause_service = TogglePauseService(self)
-        
+
+        # Initialize pause service with namespaced name
+        self.pause_service = TogglePauseService(
+            self, f'{self.get_name()}/toggle_pause')
+
         self.debug = debug
         self.get_logger().info('Initializing IMU node...')
 
@@ -416,7 +416,7 @@ class ImuNode(Node):
         # Check if node is paused
         if self.pause_service.is_paused():
             return  # Skip processing when paused
-        
+
         # Check for recovery from I2C errors (do this even if no valid samples)
         if not self.node_healthy:
             self._check_io_recovery()
