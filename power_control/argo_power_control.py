@@ -164,7 +164,8 @@ MAIN_LOOP_SLEEP_S = 1
 # Critical Battery Monitoring
 CRITICAL_BATTERY_THRESHOLD_V = 6.5  # Critical battery voltage threshold (6.5V)
 BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage every 30 seconds
-CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'  # Flag file for shutdown hook
+# Flag file for shutdown hook
+CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 
 # Configure logging
 
@@ -2018,46 +2019,50 @@ class PowerController:
         """Monitor battery voltage every 30 seconds for critical low voltage"""
         logger.info("Starting critical battery monitoring thread")
         self.battery_monitoring_active = True
-        
+
         while self.running and self.battery_monitoring_active:
             try:
-                # Check if battery_water service is available
-                if not self.is_argo_system_running():
-                    logger.debug("Argo system not running - skipping battery check")
-                    time.sleep(BATTERY_MONITORING_INTERVAL_S)
-                    continue
-                
+                # Always attempt to check battery, even if argo-launch is stopped
+                # This is CRITICAL for safety - battery monitoring must never stop
+
                 # Call battery service to get voltage
                 battery_data = self._call_battery_service()
                 if battery_data:
                     battery_voltage = battery_data.get('battery_voltage', 0)
-                    logger.debug(f"Battery voltage check: {battery_voltage:.3f}V")
-                    
+                    logger.info(
+                        f"Battery voltage check: {battery_voltage:.3f}V (critical threshold: {CRITICAL_BATTERY_THRESHOLD_V}V)")
+
                     if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
                         if not self.critical_battery_detected:
-                            logger.critical(f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V")
+                            logger.critical(
+                                f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V")
                             self.critical_battery_detected = True
-                            self.initiate_critical_battery_halt(battery_voltage)
+                            self.initiate_critical_battery_halt(
+                                battery_voltage)
                     else:
                         # Battery voltage recovered above threshold
                         if self.critical_battery_detected:
-                            logger.info(f"Battery voltage recovered: {battery_voltage:.3f}V >= {CRITICAL_BATTERY_THRESHOLD_V}V")
+                            logger.info(
+                                f"Battery voltage recovered: {battery_voltage:.3f}V >= {CRITICAL_BATTERY_THRESHOLD_V}V")
                             self.critical_battery_detected = False
                             self._clear_critical_battery_flag()
                 else:
-                    logger.warning("Could not retrieve battery data - service may be unavailable")
-                
+                    # Service unavailable - log at info level to see what's happening
+                    # This is expected when argo-launch.service is stopped
+                    logger.info(
+                        "Could not retrieve battery data - battery_water service may not be running")
+
                 self.last_battery_check_time = time.time()
-                
+
             except Exception as e:
                 logger.error(f"Error in critical battery monitoring: {e}")
-            
+
             # Sleep for monitoring interval
             sleep_time = 0
             while sleep_time < BATTERY_MONITORING_INTERVAL_S and self.running and self.battery_monitoring_active:
                 time.sleep(1.0)
                 sleep_time += 1.0
-        
+
         logger.info("Critical battery monitoring thread stopped")
 
     def _call_battery_service(self):
@@ -2068,9 +2073,10 @@ class PowerController:
                 'bash', '-c',
                 'source /opt/ros/humble/setup.bash && ros2 service call /battery_status std_srvs/srv/Trigger'
             ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            
+
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10)
+
             if result.returncode == 0:
                 # Parse the JSON response from the service
                 try:
@@ -2078,47 +2084,84 @@ class PowerController:
                     # Extract message content from ROS2 service response
                     lines = result.stdout.strip().split('\n')
                     message_content = None
-                    
+
+                    logger.info(
+                        f"Battery service response has {len(lines)} lines")
+
                     for line in lines:
                         line = line.strip()
-                        if line.startswith('message:'):
+                        # Look for Trigger_Response format: message='...'
+                        if 'message=' in line:
+                            # Extract content between message=' and the closing '
+                            import re
+                            match = re.search(
+                                r"message='(.*)'", line, re.DOTALL)
+                            if match:
+                                message_part = match.group(1)
+                                # Unescape newlines and quotes
+                                message_part = message_part.replace(
+                                    '\\n', '\n').replace('\\"', '"')
+                                message_content = message_part
+                                logger.info(
+                                    "Found message content in Trigger_Response")
+                                break
+                        # Also support old format: message:
+                        elif line.startswith('message:'):
                             # Extract the JSON content from the message field
                             message_part = line.split(':', 1)[1].strip()
                             # Remove quotes if present
                             if message_part.startswith('"') and message_part.endswith('"'):
                                 message_part = message_part[1:-1]
                             # Unescape newlines and quotes
-                            message_part = message_part.replace('\\n', '\n').replace('\\"', '"')
+                            message_part = message_part.replace(
+                                '\\n', '\n').replace('\\"', '"')
                             message_content = message_part
+                            logger.info("Found message content in old format")
                             break
-                    
+
                     if message_content:
                         # Parse the JSON content
                         response_data = json.loads(message_content)
                         # Extract raw_data from the response
-                        return response_data.get('raw_data', {})
-                    
+                        raw_data = response_data.get('raw_data', {})
+                        logger.info(
+                            f"Successfully parsed battery data: {raw_data.get('battery_voltage', 'N/A')}V")
+                        return raw_data
+                    else:
+                        logger.error("No message content found in response")
+                        logger.error(f"Response stdout: {result.stdout[:500]}")
+                        return None
+
                 except (json.JSONDecodeError, KeyError) as e:
-                    logger.error(f"Error parsing battery service response: {e}")
+                    logger.error(
+                        f"Error parsing battery service response: {e}")
+                    logger.error(
+                        f"Message content was: {message_content[:200] if message_content else 'None'}")
                     return None
             else:
-                logger.error(f"Battery service call failed with return code {result.returncode}")
+                logger.error(
+                    f"Battery service call failed with return code {result.returncode}")
+                logger.error(f"Stdout: {result.stdout[:200]}")
+                logger.error(f"Stderr: {result.stderr[:200]}")
                 return None
-                
+
         except subprocess.TimeoutExpired:
-            logger.error("Battery service call timed out")
+            logger.error("Battery service call timed out after 10 seconds")
             return None
         except Exception as e:
             logger.error(f"Error calling battery service: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 
     def initiate_critical_battery_halt(self, battery_voltage):
         """Initiate critical battery halt sequence"""
-        logger.critical(f"CRITICAL BATTERY HALT: {battery_voltage:.3f}V - System will halt to preserve power")
-        
+        logger.critical(
+            f"CRITICAL BATTERY HALT: {battery_voltage:.3f}V - System will halt to preserve power")
+
         # Set critical battery flag for shutdown hook
         self._set_critical_battery_flag()
-        
+
         # Send critical notification
         self.send_desktop_notification(
             "CRITICAL BATTERY",
@@ -2126,34 +2169,39 @@ class PowerController:
             "critical",
             FINAL_SHUTDOWN_NOTIFICATION_MS  # No timeout - stays until dismissed
         )
-        
+
         # Broadcast wall message
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             message = f"CRITICAL BATTERY: {battery_voltage:.3f}V at {timestamp}\nSystem halting to preserve power for manual sailing via radio control"
-            subprocess.run(['wall', message], check=True, timeout=WALL_MESSAGE_TIMEOUT_S)
+            subprocess.run(['wall', message], check=True,
+                           timeout=WALL_MESSAGE_TIMEOUT_S)
             logger.info("Critical battery wall message broadcasted")
         except Exception as e:
             logger.error(f"Failed to broadcast critical battery message: {e}")
-        
+
         # Stop battery monitoring to prevent repeated alerts
         self.battery_monitoring_active = False
-        
+
         # Execute halt command (not shutdown - preserves power relay)
         if self.test_mode:
-            logger.info("TEST MODE: Would execute 'halt' command for critical battery")
+            logger.info(
+                "TEST MODE: Would execute 'sudo halt' command for critical battery")
             logger.info("TEST MODE: Critical battery halt sequence completed")
         else:
-            logger.critical("Executing halt command for critical battery preservation")
-            subprocess.run(['halt'], check=True)
+            logger.critical(
+                "Executing halt command for critical battery preservation")
+            subprocess.run(['sudo', 'halt'], check=True)
             logger.critical("Halt command executed - system should halt now")
 
     def _set_critical_battery_flag(self):
         """Set critical battery flag file for shutdown hook"""
         try:
             with open(CRITICAL_BATTERY_FLAG_FILE, 'w') as f:
-                f.write(f"CRITICAL_BATTERY_DETECTED\nTimestamp: {datetime.now().isoformat()}\n")
-            logger.info(f"Critical battery flag set: {CRITICAL_BATTERY_FLAG_FILE}")
+                f.write(
+                    f"CRITICAL_BATTERY_DETECTED\nTimestamp: {datetime.now().isoformat()}\n")
+            logger.info(
+                f"Critical battery flag set: {CRITICAL_BATTERY_FLAG_FILE}")
         except Exception as e:
             logger.error(f"Error setting critical battery flag: {e}")
 
@@ -2173,11 +2221,11 @@ class PowerController:
         try:
             # Stop battery monitoring
             self.battery_monitoring_active = False
-            
+
             # Clear critical battery flag if set
             if self.critical_battery_detected:
                 self._clear_critical_battery_flag()
-            
+
             # Cancel any pending tap timeout timer
             if self.tap_timeout_timer:
                 self.tap_timeout_timer.cancel()
@@ -2565,7 +2613,8 @@ def main():
 
     print(f"  - Button press threshold: {args.threshold} seconds")
     print(f"  - Button detection mode: Hardware interrupts (efficient)")
-    print(f"  - Critical battery monitoring: {CRITICAL_BATTERY_THRESHOLD_V}V threshold")
+    print(
+        f"  - Critical battery monitoring: {CRITICAL_BATTERY_THRESHOLD_V}V threshold")
     print("  - Press Ctrl+C to stop")
     print()
 

@@ -86,16 +86,28 @@ class ArgoLifecycleManager:
         # Discover expected nodes dynamically
         discovered_nodes = self.node_manager.discover_nodes()
 
+        # Nodes to exclude (running as independent services)
+        # - lora: LoRa hardware not installed yet
+        # - battery_water: Runs as independent service for critical battery monitoring
+        self.excluded_nodes = ['lora', 'battery_water']
+
         # Convert to .py format for process matching and handle special nodes
         self.expected_nodes = []
         self.special_nodes = []
 
         for node in discovered_nodes:
-            if node == 'foxglove_bridge':
+            if node in self.excluded_nodes:
+                continue  # Skip excluded nodes
+            elif node == 'foxglove_bridge':
                 self.special_nodes.append(node)  # Special handling needed
             else:
                 self.expected_nodes.append(
                     f"{node}.py")  # Regular Python nodes
+
+        # Log excluded nodes for visibility
+        if self.excluded_nodes:
+            print(
+                f"ℹ️  Excluded nodes (hardware not ready): {', '.join(self.excluded_nodes)}")
 
         # Combine all expected nodes for monitoring
         self.all_expected_nodes = self.expected_nodes + self.special_nodes
@@ -174,7 +186,8 @@ class ArgoLifecycleManager:
             discovered_nodes = self.node_manager.discover_nodes(
                 exclude_simulation_only=True)
             node_scripts = [
-                f"{node}.py" for node in discovered_nodes if node != 'foxglove_bridge']
+                f"{node}.py" for node in discovered_nodes
+                if node != 'foxglove_bridge' and node not in self.excluded_nodes]
 
         # Launch each node in a separate process
         self.node_processes = []
@@ -211,10 +224,11 @@ class ArgoLifecycleManager:
             # Simulation mode: use explicitly defined special nodes
             special_nodes_to_launch = self.special_nodes
         elif not (hasattr(self, 'expected_nodes') and self.expected_nodes):
-            # Normal mode: discover all special nodes
+            # Normal mode: discover all special nodes (excluding hardware not ready)
             discovered_nodes = self.node_manager.discover_nodes()
             special_nodes_to_launch = [
-                node for node in discovered_nodes if node == 'foxglove_bridge']
+                node for node in discovered_nodes
+                if node == 'foxglove_bridge' and node not in self.excluded_nodes]
 
         for special_node in special_nodes_to_launch:
             if special_node == 'foxglove_bridge':
@@ -547,6 +561,7 @@ class ArgoLifecycleManager:
                 self.node_processes = []
 
             # Also use pkill as backup to catch any remaining processes
+            # Note: excluded_nodes are not in expected_nodes, so no need to filter here
             for node in self.expected_nodes:
                 subprocess.run(['pkill', '-f', f'/{node}'],
                                capture_output=True, timeout=2)
@@ -632,11 +647,11 @@ class ArgoLifecycleManager:
             return False
 
         # Define simulation mode node scripts (exclude conflicting hardware nodes)
+        # Note: battery_water.py runs as independent service for critical monitoring
         self.expected_nodes = [
             # Provides simulated sensor data + keyboard control
             "argo_unified_simulator_bridge.py",
             "controller.py",                     # Autonomous navigation
-            "battery_water.py",                  # Hardware monitoring
             "temp_monitor.py"                    # Hardware monitoring
         ]
 
@@ -821,6 +836,20 @@ class ArgoLifecycleManager:
         else:
             print("⚡ POWER CONTROL: 🔴 STOPPED")
 
+        # Check if battery_water.service is running (independent service)
+        battery_service_running = False
+        try:
+            result = subprocess.run(['systemctl', 'is-active', 'battery_water.service'],
+                                    capture_output=True, text=True, timeout=2)
+            battery_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
+        except Exception:
+            battery_service_running = False
+
+        if battery_service_running:
+            print("🔋 BATTERY MONITOR: 🟢 RUNNING")
+        else:
+            print("🔋 BATTERY MONITOR: 🔴 STOPPED")
+
         # Check if argo-launch.service is running
         service_running = False
         try:
@@ -1004,8 +1033,18 @@ class ArgoLifecycleManager:
             node_status = self._get_node_status()
 
             # Battery and alerts
+            # Note: battery_water.py runs as independent service
             battery_summary, critical_alerts, charging_status, usb_power_status = None, None, None, None
-            if "battery_water.py" in node_status and "RUNNING" in node_status["battery_water.py"]:
+            # Check if battery_water service is running independently
+            battery_service_running = False
+            try:
+                result = subprocess.run(['systemctl', 'is-active', 'battery_water.service'],
+                                        capture_output=True, text=True, timeout=2)
+                battery_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
+            except Exception:
+                pass
+
+            if battery_service_running:
                 battery_summary, critical_alerts, charging_status, usb_power_status = self._get_battery_water_status_alerts()
 
             # Build system info line with optional battery info

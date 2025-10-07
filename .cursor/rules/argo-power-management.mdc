@@ -1,0 +1,293 @@
+---
+alwaysApply: false
+description: "Power management patterns and critical battery monitoring for Argo sailboat autonomous control"
+---
+
+# Argo Power Management System
+
+## Core Architecture
+
+The Argo power management system provides comprehensive power control, monitoring, and failsafe operation through these key components:
+
+### Main Components
+- **[power_control/argo_power_control.py](mdc:power_control/argo_power_control.py)** - Primary power control service with critical battery monitoring
+- **[power_control/argo_poweroff.shutdown](mdc:power_control/argo_poweroff.shutdown)** - Late shutdown hook for power relay control
+- **[nodes/battery_water.py](mdc:nodes/battery_water.py)** - Battery monitoring and GPIO status (normal ROS2 node)
+- **[power_control/README.md](mdc:power_control/README.md)** - Hardware documentation and GPIO references
+
+### Service Architecture
+- **`argo_power_control.service`**: Independent systemd service (runs at boot, not managed by lifecycle manager)
+- **`battery_water.service`**: Independent systemd service (runs at boot, provides critical battery monitoring)
+- **`argo-launch.service`**: Managed by lifecycle manager, excludes battery_water (runs independently)
+- **Critical battery monitoring**: Power control polls battery service every 30 seconds for failsafe operation
+
+### Critical Design: battery_water.py as Independent Service
+- **`battery_water.py`** runs as independent systemd service `battery_water.service`
+- **Excluded from lifecycle manager**: Not managed by argo-launch.service
+- **Always running**: Provides battery monitoring even when main Argo system is stopped
+- **Power control service** monitors battery by calling `/battery_status` service every 30 seconds
+- **When argo-launch stops** (via `aq` alias):
+  - ✅ `battery_water.service` **continues running** (independent service)
+  - ✅ Critical battery monitoring **always works** (safety critical!)
+  - ✅ Battery data remains available via ROS2 service
+  - ✅ Critical battery halt works even when robot is offline
+- **This ensures**: True failsafe operation - critical battery monitoring NEVER stops
+
+### Installation
+```bash
+cd /home/orangepi/argo/nodes
+sudo make install enable start  # Install and start battery service
+make status                     # Check service status
+```
+
+## Critical Battery Monitoring
+
+### Threshold and Timing
+```python
+# Critical battery constants
+CRITICAL_BATTERY_THRESHOLD_V = 6.5  # Critical battery voltage threshold
+BATTERY_MONITORING_INTERVAL_S = 30  # Check every 30 seconds
+CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'  # Flag for shutdown hook
+```
+
+### Monitoring Thread Pattern
+```python
+def monitor_critical_battery(self):
+    """Monitor battery voltage every 30 seconds for critical low voltage"""
+    while self.running and self.battery_monitoring_active:
+        # CRITICAL: Always attempt to check battery, even if argo-launch is stopped
+        # Battery monitoring must NEVER stop for safety
+        
+        # Call battery service to get voltage
+        battery_data = self._call_battery_service()
+        if battery_data:
+            battery_voltage = battery_data.get('battery_voltage', 0)
+            
+            if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
+                if not self.critical_battery_detected:
+                    self.initiate_critical_battery_halt(battery_voltage)
+        else:
+            # Service unavailable (expected when argo-launch is stopped)
+            # Log at debug level to avoid spam
+            logger.debug("Battery service unavailable")
+```
+
+### Service Call Integration
+```python
+def _call_battery_service(self):
+    """Call battery_water service to get current battery data"""
+    cmd = [
+        'bash', '-c',
+        'source /opt/ros/humble/setup.bash && ros2 service call /battery_status std_srvs/srv/Trigger'
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    # Parse JSON response and extract raw_data
+```
+
+## Critical Battery Halt Sequence
+
+### Failsafe Design
+When critical battery is detected, the system executes a halt sequence (not shutdown) to preserve power relay:
+
+```python
+def initiate_critical_battery_halt(self, battery_voltage):
+    """Initiate critical battery halt sequence"""
+    # Set critical battery flag for shutdown hook
+    self._set_critical_battery_flag()
+    
+    # Send notifications
+    self.send_desktop_notification("CRITICAL BATTERY", ...)
+    subprocess.run(['wall', message], ...)
+    
+    # Execute halt (preserves power relay)
+    subprocess.run(['halt'], check=True)
+```
+
+### Power Relay Preservation
+The shutdown hook checks for critical battery flag and preserves power relay:
+
+```bash
+# In argo_poweroff.shutdown
+CRITICAL_BATTERY_FLAG="/tmp/argo_critical_battery"
+if [ -f "$CRITICAL_BATTERY_FLAG" ]; then
+    c_echo "CRITICAL BATTERY FLAG DETECTED -> preserving power for manual sailing"
+    c_echo "Power relay will remain energized for radio control"
+    exit 0  # Skip power relay cut
+fi
+```
+
+## GPIO Configuration
+
+### Hardware Pin References (Orange Pi Zero 2W H616)
+```bash
+# GPIO quick refs (H616)
+- PI3: 259, PI9: 265, PH4: 228, PI1: 257, PC12: 76, PH9: 233
+```
+
+### MP2672GD Charger Monitoring
+- **PC12 (line 76)**: `!CHARGING` - Charging status (active low)
+- **PH9 (line 233)**: `!ACOK` - USB power present (active low)
+
+### Power Control Pins
+- **PI3 (line 259)**: Power relay control (asserted during shutdown)
+- **PI1 (line 257)**: Power button input (interrupt-driven)
+
+## Button Control Patterns
+
+### Multi-Tap Detection
+```python
+# Button timing constants
+MULTI_TAP_MAX_DURATION_S = 1.5  # Maximum duration for multi-tap sequences
+SINGLE_TAP_MAX_DURATION_S = 0.5  # Maximum duration for single tap
+
+# Tap sequence detection
+def handle_button_release(self, press_duration):
+    if press_duration < SINGLE_TAP_MAX_DURATION_S:
+        self.handle_single_tap()
+    elif press_duration < MULTI_TAP_MAX_DURATION_S:
+        self.handle_long_press(press_duration)
+```
+
+### Control Functions
+- **Single tap**: Toggle Argo service (start/stop argo-launch.service)
+- **Double tap**: Toggle Argo service (same as single tap)
+- **Triple tap**: Toggle recording service
+- **Long press**: Initiate shutdown sequence with countdown
+
+## Service Integration Patterns
+
+### Independent Operation
+The power control service operates independently of normal ROS2 lifecycle:
+- **Runs at boot**: Started by systemd, not lifecycle manager
+- **Monitors argo-launch**: Can start/stop the main service
+- **Battery monitoring**: Works even when argo-launch is stopped
+- **Critical decisions**: Handles shutdown scenarios independently
+
+### ROS2 Service Calls
+```python
+# Always source ROS2 environment for subprocess calls
+cmd = ['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 service call ...']
+result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+```
+
+## Testing Patterns
+
+### Test Mode Support
+```python
+# Test mode prevents actual shutdown/halt commands
+if self.test_mode:
+    logger.info("TEST MODE: Would execute 'halt' command for critical battery")
+else:
+    subprocess.run(['halt'], check=True)
+```
+
+### Simulation Options
+```bash
+# Test critical battery halt sequence
+sudo python3 argo_power_control.py --simulate-critical-battery
+
+# Test button functions
+sudo python3 argo_power_control.py --simulate-double-tap
+sudo python3 argo_power_control.py --simulate-triple-tap
+```
+
+## Error Handling Patterns
+
+### Graceful Degradation
+```python
+# Handle battery service unavailable
+if not battery_data:
+    logger.warning("Could not retrieve battery data - service may be unavailable")
+    time.sleep(BATTERY_MONITORING_INTERVAL_S)
+    continue
+
+# Handle GPIO failures
+try:
+    # GPIO operations
+except Exception as e:
+    logger.error(f"GPIO operation failed: {e}")
+    # Continue operation where possible
+```
+
+### Timeout Handling
+```python
+# Service call timeouts
+try:
+    result = subprocess.run(cmd, timeout=10)
+except subprocess.TimeoutExpired:
+    logger.error("Service call timed out")
+    return None
+```
+
+## Failsafe Design Principles
+
+### High Impedance Safety Mode
+- **Default state**: Servo outputs in high impedance mode
+- **Radio control passthrough**: Direct radio control when PWM disabled
+- **Automatic fallback**: System switches to high impedance on errors
+
+### Power Preservation
+- **Critical battery halt**: Preserves power relay for manual sailing
+- **Radio control availability**: Servos remain controllable via radio
+- **Graceful degradation**: System fails safe to manual operation
+
+## Installation and Service Management
+
+### Service Installation
+```bash
+# Install power control service
+sudo systemctl enable argo-power-control.service
+sudo systemctl start argo-power-control.service
+
+# Install shutdown hook
+sudo cp power_control/argo_poweroff.shutdown /lib/systemd/system-shutdown/argo_poweroff
+sudo chmod +x /lib/systemd/system-shutdown/argo_poweroff
+```
+
+### Service Status
+```bash
+# Check service status
+sudo systemctl status argo-power-control.service
+
+# View logs
+sudo journalctl -u argo-power-control.service -f
+```
+
+## Development Patterns
+
+### When Adding New Power Features
+1. **Add constants** for thresholds and timing
+2. **Use test mode** for safe development
+3. **Add simulation options** for testing
+4. **Follow failsafe principles** - preserve manual control
+5. **Update shutdown hook** if power relay behavior changes
+
+### When Modifying Battery Monitoring
+1. **Keep battery_water.py as normal ROS2 node**
+2. **Use service calls** for data access
+3. **Handle service unavailable** gracefully
+4. **Test with simulation** before hardware testing
+5. **Verify power relay preservation** during critical scenarios
+
+## Quick Reference
+
+### Essential Commands
+```bash
+# Service management
+sudo systemctl status argo-power-control.service
+sudo journalctl -u argo-power-control.service -f
+
+# Testing
+sudo python3 power_control/argo_power_control.py --simulate-critical-battery
+sudo python3 power_control/argo_power_control.py --test-mode
+
+# Battery status
+bash -c 'source /opt/ros/humble/setup.bash && ros2 service call /battery_status std_srvs/srv/Trigger'
+```
+
+### Critical Files
+- **Power control service**: `power_control/argo_power_control.py`
+- **Shutdown hook**: `power_control/argo_poweroff.shutdown`
+- **Battery monitoring**: `nodes/battery_water.py`
+- **Service config**: `power_control/argo_power_control.service`
+- **Hardware docs**: `power_control/README.md`
