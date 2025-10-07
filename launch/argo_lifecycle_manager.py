@@ -67,6 +67,7 @@ class ArgoLifecycleManager:
         # Initialize ROS2 for service client if available
         self.ros2_node = None
         self.battery_service_client = None
+        self.toggle_pause_service = None
         if ROS2_AVAILABLE:
             try:
                 if not rclpy.ok():
@@ -74,11 +75,19 @@ class ArgoLifecycleManager:
                 self.ros2_node = Node('argo_lifecycle_manager')
                 self.battery_service_client = self.ros2_node.create_client(
                     Trigger, '/battery_status')
+                
+                # Create toggle_pause service for managing node pause state
+                self.toggle_pause_service = self.ros2_node.create_service(
+                    Trigger,
+                    'toggle_pause',
+                    self._handle_toggle_pause
+                )
             except Exception as e:
                 print(
                     f"Warning: Could not initialize ROS2 service client: {e}")
                 self.ros2_node = None
                 self.battery_service_client = None
+                self.toggle_pause_service = None
 
         # Initialize node manager for discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
@@ -114,6 +123,9 @@ class ArgoLifecycleManager:
 
         # Define critical nodes (essential for boat operation)
         self.critical_nodes = ['pwm.py', 'control.py']
+        
+        # Define nodes that should NOT be paused (critical for safety/monitoring)
+        self.no_pause_nodes = ['battery_water.py', 'temp_monitor.py']
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -140,6 +152,130 @@ class ArgoLifecycleManager:
                 rclpy.shutdown()
             except Exception:
                 pass
+
+    def _handle_toggle_pause(self, request, response):
+        """Handle toggle_pause service requests to pause/unpause all managed nodes."""
+        try:
+            # Get current node status to determine which nodes are running
+            node_status = self._get_node_status()
+            running_nodes = [node for node, status in node_status.items() if "RUNNING" in status]
+            
+            if not running_nodes:
+                response.success = False
+                response.message = "No nodes are currently running"
+                return response
+            
+            # Determine if we should pause or unpause based on current state
+            # We'll check a few nodes to determine the current pause state
+            should_pause = self._should_pause_nodes(running_nodes)
+            
+            # Filter out nodes that should not be paused
+            nodes_to_control = [node for node in running_nodes if node not in self.no_pause_nodes]
+            no_pause_list = [node for node in running_nodes if node in self.no_pause_nodes]
+            
+            action = "pause" if should_pause else "unpause"
+            print(f"🔄 {action.upper()}ING {len(nodes_to_control)} nodes...")
+            
+            if no_pause_list:
+                print(f"⚠️  Skipping {len(no_pause_list)} critical nodes: {', '.join(no_pause_list)}")
+            
+            # Call toggle_pause service on each node
+            success_count = 0
+            failed_nodes = []
+            
+            for node in nodes_to_control:
+                if self._call_node_toggle_pause(node):
+                    success_count += 1
+                else:
+                    failed_nodes.append(node)
+            
+            # Prepare response
+            if success_count == len(nodes_to_control):
+                response.success = True
+                response.message = f"Successfully {action}d {success_count} nodes"
+                if no_pause_list:
+                    response.message += f" (skipped {len(no_pause_list)} critical nodes)"
+            elif success_count > 0:
+                response.success = True
+                response.message = f"Partially successful: {action}d {success_count}/{len(nodes_to_control)} nodes"
+                if failed_nodes:
+                    response.message += f" (failed: {', '.join(failed_nodes)})"
+            else:
+                response.success = False
+                response.message = f"Failed to {action} any nodes"
+                if failed_nodes:
+                    response.message += f" (failed: {', '.join(failed_nodes)})"
+            
+            print(f"✅ Toggle pause result: {response.message}")
+            
+        except Exception as e:
+            print(f"❌ Error in toggle_pause handler: {e}")
+            response.success = False
+            response.message = f"Error: {str(e)}"
+        
+        return response
+
+    def _should_pause_nodes(self, running_nodes):
+        """Determine if we should pause nodes based on current state."""
+        # Check a few nodes to see if they're currently paused
+        # We'll use the health topics to determine pause state
+        paused_count = 0
+        checked_count = 0
+        
+        for node in running_nodes[:3]:  # Check first 3 nodes
+            if node in self.no_pause_nodes:
+                continue
+                
+            try:
+                # Check health topic to see if node is paused
+                health_topic = f'/{node.replace(".py", "")}_health'
+                result = subprocess.run([
+                    'ros2', 'topic', 'echo', health_topic, '--once'
+                ], capture_output=True, text=True, timeout=2)
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines:
+                        if line.startswith('data:'):
+                            data_str = line.split(':', 1)[1].strip()
+                            is_healthy = data_str.lower() == 'true'
+                            if not is_healthy:  # False health means paused
+                                paused_count += 1
+                            checked_count += 1
+                            break
+            except Exception:
+                pass
+        
+        # If we couldn't check any nodes, default to pause
+        if checked_count == 0:
+            return True
+        
+        # If more than half are paused, unpause; otherwise pause
+        return paused_count < (checked_count / 2)
+
+    def _call_node_toggle_pause(self, node_name):
+        """Call the toggle_pause service on a specific node."""
+        try:
+            # Convert node name to service name
+            service_name = f'/{node_name.replace(".py", "")}/toggle_pause'
+            
+            # Call the service
+            result = subprocess.run([
+                'ros2', 'service', 'call', service_name, 'std_srvs/srv/Trigger'
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                return True
+            else:
+                print(f"⚠️  Failed to call toggle_pause on {node_name}: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print(f"⚠️  Timeout calling toggle_pause on {node_name}")
+            return False
+        except Exception as e:
+            print(f"⚠️  Error calling toggle_pause on {node_name}: {e}")
+            return False
 
     def _get_ros2_processes(self) -> List[psutil.Process]:
         """Get all ROS2 processes related to Argo using node manager"""

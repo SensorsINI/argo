@@ -16,6 +16,12 @@ import math
 from functools import reduce
 import pynmea2
 
+# Import the shared pause service
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from toggle_pause_service import TogglePauseService
+
 
 class GpsNode(Node):
     """
@@ -57,6 +63,9 @@ class GpsNode(Node):
 
     def __init__(self, debug_mode=False):
         super().__init__('gps_node')
+
+        # Initialize pause service
+        self.pause_service = TogglePauseService(self)
 
         # Set logger level to DEBUG if debug mode is enabled
         if debug_mode:
@@ -631,6 +640,10 @@ class GpsNode(Node):
 
     def read_and_publish(self):
         """Reads data from the serial port and publishes it."""
+        # Check if node is paused
+        if self.pause_service.is_paused():
+            return  # Skip processing when paused
+        
         # Check for GPS communication timeout
         current_time = time.time()
         if current_time - self.last_data_received_time > self.gps_timeout_seconds:
