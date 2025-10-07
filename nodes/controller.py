@@ -9,6 +9,12 @@ from std_msgs.msg import Bool, Float64, Float32
 from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
 
+# Import the shared pause service
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from toggle_pause_service import TogglePauseService
+
 import yaml
 import argparse
 from pathlib import Path
@@ -276,6 +282,9 @@ class ControllerNode(Node):
         super().__init__('controller_node')
         self.get_logger().info('Controller node starting...')
 
+        # Initialize pause service
+        self.pause_service = TogglePauseService(self)
+
         # --- Parameters ---
         self.declare_parameter('param_file_path', 'argo.yaml')
         self.declare_parameter('controller_type', 'proportional')
@@ -394,6 +403,7 @@ class ControllerNode(Node):
     # --- Sensor Callbacks ---
     def human_control_callback(self, msg):
         """Receive control authority status from rudder_sail_radio.py."""
+        # Always process control authority changes, even when paused
         old_human_control = self.boat_state.human_controlled
         self.boat_state.human_controlled = msg.data
         
@@ -417,27 +427,43 @@ class ControllerNode(Node):
         self.boat_state.radio_sail = msg.y
     
     def pose_callback(self, msg):
+        if self.pause_service.is_paused():
+            return
         self.boat_state.compass_heading = msg.z
     
     def gps_cog_callback(self, msg):
+        if self.pause_service.is_paused():
+            return
         self.boat_state.gps_cog = msg.data
     
     def gps_sog_callback(self, msg):
+        if self.pause_service.is_paused():
+            return
         self.boat_state.gps_sog = msg.data
     
     def gps_velocity_callback(self, msg):
+        if self.pause_service.is_paused():
+            return
         self.boat_state.gps_velocity = msg
     
     def accel_callback(self, msg):
+        if self.pause_service.is_paused():
+            return
         self.boat_state.accel = msg
     
     def gyro_callback(self, msg):
+        if self.pause_service.is_paused():
+            return
         self.boat_state.gyro = msg
     
     def compass_callback(self, msg):
+        if self.pause_service.is_paused():
+            return
         self.boat_state.compass_raw = msg
     
     def wind_callback(self, msg):
+        if self.pause_service.is_paused():
+            return
         self.boat_state.wind_speed = msg.x
         self.boat_state.wind_angle = msg.y
         self.boat_state.wind_temp = msg.z
@@ -445,32 +471,41 @@ class ControllerNode(Node):
     # --- Battery/Water Monitoring Callbacks ---
     def battery_voltage_callback(self, msg):
         """Receive battery voltage from battery_water node"""
+        # Always process battery data for safety, even when paused
         self.boat_state.battery_voltage = msg.data
     
     def battery_remaining_callback(self, msg):
         """Receive battery remaining percentage from battery_water node"""
+        # Always process battery data for safety, even when paused
         self.boat_state.battery_remaining_pct = msg.data
     
     def battery_low_alert_callback(self, msg):
         """Receive battery low alert from battery_water node"""
+        # Always process safety alerts, even when paused
         self.boat_state.battery_low_alert = msg.data
         if msg.data:
             self.get_logger().warn("🔋 LOW BATTERY ALERT - Consider returning to shore")
     
     def saltwater_alert_callback(self, msg):
         """Receive saltwater intrusion alert from battery_water node"""
+        # Always process safety alerts, even when paused
         self.boat_state.saltwater_alert = msg.data
         if msg.data:
             self.get_logger().warn("💧 SALTWATER INTRUSION ALERT - Check hull integrity")
     
     def humidity_alert_callback(self, msg):
         """Receive humidity alert from battery_water node"""
+        # Always process safety alerts, even when paused
         self.boat_state.humidity_alert = msg.data
         if msg.data:
             self.get_logger().warn("💦 HIGH HUMIDITY ALERT - Check ventilation")
     
     def timer_callback(self):
         """Main control loop - generates autonomous control commands."""
+        # Check if node is paused
+        if self.pause_service.is_paused():
+            return  # Skip processing when paused
+        
         self.boat_state.timestamp = time.time()
         
         # CPU monitoring (periodic check)

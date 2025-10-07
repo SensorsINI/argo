@@ -77,6 +77,12 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
 from std_msgs.msg import Bool
+
+# Import the shared pause service
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from toggle_pause_service import TogglePauseService
 import smbus
 import time
 import numpy as np
@@ -299,6 +305,10 @@ def calculate_speed_mps(dp_ctr, dp_cw, dp_ccw, temp_celsius):
 class AnemNode(Node):
     def __init__(self, debug_visually: bool = False):
         super().__init__('anem_node')
+        
+        # Initialize pause service
+        self.pause_service = TogglePauseService(self)
+        
         self.get_logger().info('Initializing Anemometer node...')
 
         # Publishers
@@ -641,6 +651,10 @@ class AnemNode(Node):
 
     def publish_callback(self):
         """ROS2 timer callback - reads multiple sensor samples and publishes averaged data at PUBLISHING_RATE"""
+        # Check if node is paused
+        if self.pause_service.is_paused():
+            return  # Skip processing when paused
+        
         try:
             # Read multiple samples and accumulate for averaging
             dp_samples = []

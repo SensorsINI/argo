@@ -48,6 +48,12 @@ from std_msgs.msg import Bool, Float64
 import struct
 import time
 import math
+
+# Import the shared pause service
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from toggle_pause_service import TogglePauseService
 import argparse
 import sys
 import json
@@ -165,6 +171,10 @@ class ICM20948:
 class ImuNode(Node):
     def __init__(self, debug=False):
         super().__init__('imu_node')
+        
+        # Initialize pause service
+        self.pause_service = TogglePauseService(self)
+        
         self.debug = debug
         self.get_logger().info('Initializing IMU node...')
 
@@ -299,6 +309,10 @@ class ImuNode(Node):
         return '[' + ''.join(left) + '|' + ''.join(right) + ']'
 
     def timer_callback(self):
+        # Check if node is paused
+        if self.pause_service.is_paused():
+            return  # Skip processing when paused
+        
         try:
             ax_cnt, ay_cnt, az_cnt = self.icm.read_accel()
             gx_cnt, gy_cnt, gz_cnt = self.icm.read_gyro()
