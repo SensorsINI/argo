@@ -28,6 +28,117 @@ import sys
 import os
 from datetime import datetime, timedelta
 import argparse
+import gc
+
+# Global font scale parameter for consistent sizing
+FONT_SCALE = 2.0  # Base scale - can be adjusted for different display sizes
+
+# Font size constants based on scale
+TITLE_FONT_SIZE = int(14 * FONT_SCALE)
+SUBTITLE_FONT_SIZE = int(12 * FONT_SCALE)
+AXIS_FONT_SIZE = int(10 * FONT_SCALE)
+LABEL_FONT_SIZE = int(9 * FONT_SCALE)
+LEGEND_FONT_SIZE = int(8 * FONT_SCALE)
+
+# Performance settings
+MAX_DATA_POINTS = 5000  # Maximum points to plot to prevent OOM
+SAMPLE_RATIO = 0.1  # Sample ratio for large datasets
+
+
+def sample_data_for_plotting(df, max_points=MAX_DATA_POINTS):
+    """Sample data to prevent OOM issues with large datasets"""
+    if len(df) <= max_points:
+        return df
+
+    # Use every nth point to get approximately max_points
+    step = len(df) // max_points
+    sampled_df = df.iloc[::step].copy()
+    print(
+        f"Sampled {len(df)} points down to {len(sampled_df)} for plotting (every {step} points)")
+    return sampled_df
+
+
+def plot_with_gaps(ax, timestamps, values, color, linewidth, label, marker=None, markersize=None):
+    """Plot data with line breaks at large time gaps"""
+    if len(timestamps) < 2:
+        return
+
+    # Calculate time differences between consecutive points
+    time_diffs = pd.Series(timestamps).diff().dt.total_seconds()
+
+    # Define gap threshold (e.g., 5 minutes = 300 seconds)
+    gap_threshold = 300  # 5 minutes
+
+    # Find indices where gaps exceed threshold
+    gap_indices = time_diffs > gap_threshold
+
+    if not gap_indices.any():
+        # No gaps, plot normally
+        if marker:
+            ax.plot(timestamps, values, color=color, linewidth=linewidth,
+                    label=label, marker=marker, markersize=markersize)
+        else:
+            ax.plot(timestamps, values, color=color,
+                    linewidth=linewidth, label=label)
+    else:
+        # Plot segments between gaps
+        start_idx = 0
+        segment_num = 0
+
+        for i, is_gap in enumerate(gap_indices):
+            if is_gap:
+                # Plot segment up to this gap
+                end_idx = i
+                if end_idx > start_idx:
+                    segment_times = timestamps[start_idx:end_idx+1]
+                    segment_values = values[start_idx:end_idx+1]
+
+                    # Only add label to first segment
+                    segment_label = label if segment_num == 0 else None
+
+                    if marker:
+                        ax.plot(segment_times, segment_values, color=color, linewidth=linewidth,
+                                label=segment_label, marker=marker, markersize=markersize)
+                    else:
+                        ax.plot(segment_times, segment_values, color=color, linewidth=linewidth,
+                                label=segment_label)
+
+                    segment_num += 1
+
+                # Start new segment after gap
+                start_idx = i + 1
+
+        # Plot final segment if it exists
+        if start_idx < len(timestamps):
+            segment_times = timestamps[start_idx:]
+            segment_values = values[start_idx:]
+
+            segment_label = label if segment_num == 0 else None
+
+            if marker:
+                ax.plot(segment_times, segment_values, color=color, linewidth=linewidth,
+                        label=segment_label, marker=marker, markersize=markersize)
+            else:
+                ax.plot(segment_times, segment_values, color=color, linewidth=linewidth,
+                        label=segment_label)
+
+
+def format_time_axis(ax, df):
+    """Format time axis with smart tick spacing based on data duration"""
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+
+    # Smart tick spacing based on data duration
+    time_span = df['timestamp'].max() - df['timestamp'].min()
+    if time_span.total_seconds() < 3600:  # Less than 1 hour
+        ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
+    elif time_span.total_seconds() < 86400:  # Less than 1 day
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    else:  # More than 1 day
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    plt.xticks(rotation=45)
+
+    # Apply font scaling to axis labels
+    ax.tick_params(axis='both', which='major', labelsize=LABEL_FONT_SIZE)
 
 
 def find_latest_csv_file():
@@ -48,10 +159,12 @@ def find_latest_csv_file():
         if filename.startswith("battery-monitor-") and filename.endswith(".csv"):
             filepath = os.path.join(log_dir, filename)
             csv_files.append((filepath, os.path.getmtime(filepath)))
+            print(f"Found CSV file: {filepath}")
 
     if csv_files:
         # Return the most recent file
         csv_files.sort(key=lambda x: x[1], reverse=True)
+        print(f"Most recent CSV file: {csv_files[0][0]}")
         return csv_files[0][0]
 
     return None
@@ -65,13 +178,15 @@ def load_battery_data(csv_file_path):
 
     try:
         # Try to read with headers first
-        try:
-            df = pd.read_csv(csv_file_path)
-            # Check if we have the expected columns
-            if 'timestamp' not in df.columns:
-                raise ValueError("No timestamp column found")
-        except (ValueError, KeyError):
-            # If that fails, read without headers and assign column names
+        df = pd.read_csv(csv_file_path)
+
+        # Clean column names (remove any whitespace)
+        df.columns = df.columns.str.strip()
+
+        # Check if we have the expected columns
+        if 'timestamp' not in df.columns:
+            # If timestamp column is missing, try reading without headers
+            # Updated column names to match current battery_water.py output
             column_names = [
                 'timestamp', 'battery_voltage', 'battery_remaining_pct',
                 'saltwater_voltage', 'sail_current', 'pcb_temperature',
@@ -82,7 +197,9 @@ def load_battery_data(csv_file_path):
             print(
                 f"Loaded {len(df)} data points from {csv_file_path} (no headers detected)")
         else:
-            print(f"Loaded {len(df)} data points from {csv_file_path}")
+            print(
+                f"Loaded {len(df)} data points from {csv_file_path} (headers detected)")
+            print(f"Columns found: {list(df.columns)}")
 
         # Convert timestamp to datetime
         df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -99,37 +216,56 @@ def load_battery_data(csv_file_path):
 
 def plot_battery_voltage_decay(df, output_dir):
     """Plot battery voltage over time to show decay patterns"""
-    plt.figure(figsize=(14, 8))
+    # Sample data to prevent OOM
+    plot_df = sample_data_for_plotting(df)
+
+    plt.figure(figsize=(14, 12))  # Increased height for 3 subplots
 
     # Main voltage plot
-    plt.subplot(2, 1, 1)
-    plt.plot(df['timestamp'], df['battery_voltage'],
-             'b-', linewidth=2, label='Battery Voltage')
+    plt.subplot(3, 1, 1)
+    plot_with_gaps(plt.gca(), plot_df['timestamp'], plot_df['battery_voltage'],
+                   'b', 2, 'Battery Voltage')
     plt.title('Battery Voltage Decay Over Time',
-              fontsize=14, fontweight='bold')
-    plt.ylabel('Voltage (V)', fontsize=12)
+              fontsize=TITLE_FONT_SIZE, fontweight='bold')
+    plt.ylabel('Voltage (V)', fontsize=AXIS_FONT_SIZE)
     plt.grid(True, alpha=0.3)
-    plt.legend()
+    plt.legend(fontsize=LEGEND_FONT_SIZE)
 
     # Format x-axis
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=1))
-    plt.xticks(rotation=45)
+    format_time_axis(plt.gca(), plot_df)
 
     # Battery percentage plot
-    plt.subplot(2, 1, 2)
-    plt.plot(df['timestamp'], df['battery_remaining_pct'],
-             'g-', linewidth=2, label='Battery %')
-    plt.title('Battery State of Charge', fontsize=14, fontweight='bold')
-    plt.ylabel('Percentage (%)', fontsize=12)
-    plt.xlabel('Time', fontsize=12)
+    plt.subplot(3, 1, 2)
+    plot_with_gaps(plt.gca(), plot_df['timestamp'], plot_df['battery_remaining_pct'],
+                   'g', 2, 'Battery %')
+    plt.title('Battery State of Charge',
+              fontsize=TITLE_FONT_SIZE, fontweight='bold')
+    plt.ylabel('Percentage (%)', fontsize=AXIS_FONT_SIZE)
     plt.grid(True, alpha=0.3)
-    plt.legend()
+    plt.legend(fontsize=LEGEND_FONT_SIZE)
 
     # Format x-axis
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=1))
-    plt.xticks(rotation=45)
+    format_time_axis(plt.gca(), plot_df)
+
+    # Charging and Power Status plot
+    plt.subplot(3, 1, 3)
+
+    # Plot charging status and AC power present
+    plot_with_gaps(plt.gca(), plot_df['timestamp'], plot_df['charging_status'],
+                   'orange', 2, 'Charging Active', marker='o', markersize=3)
+    plot_with_gaps(plt.gca(), plot_df['timestamp'], plot_df['ac_power_present'],
+                   'purple', 2, 'AC Power Present', marker='s', markersize=3)
+
+    plt.title('Charging and Power Status',
+              fontsize=TITLE_FONT_SIZE, fontweight='bold')
+    plt.ylabel('Status (0/1)', fontsize=AXIS_FONT_SIZE)
+    plt.xlabel('Time', fontsize=AXIS_FONT_SIZE)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=LEGEND_FONT_SIZE)
+    plt.ylim(-0.1, 1.1)  # Set y-axis limits for binary status
+
+    # Format x-axis
+    format_time_axis(plt.gca(), plot_df)
 
     plt.tight_layout()
 
@@ -139,115 +275,119 @@ def plot_battery_voltage_decay(df, output_dir):
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Battery voltage decay plot saved: {output_path}")
     plt.close()
+    gc.collect()  # Force garbage collection
 
 
 def plot_critical_battery_analysis(df, output_dir):
     """Plot detailed battery voltage analysis for critical monitoring"""
+    # Sample data more aggressively for this memory-intensive plot
+    plot_df = sample_data_for_plotting(df, max_points=2000)
+
     plt.figure(figsize=(16, 12))
 
     # Main voltage plot with enhanced features
     plt.subplot(3, 1, 1)
-    
-    # Plot voltage with gradient coloring to show decay
-    voltage = df['battery_voltage'].values
-    timestamps = df['timestamp'].values
-    
-    # Create gradient line plot
-    for i in range(len(voltage) - 1):
-        # Color gradient from blue (high) to red (low)
-        color_intensity = (voltage[i] - voltage.min()) / (voltage.max() - voltage.min())
-        color = plt.cm.RdYlBu_r(color_intensity)  # Red-Yellow-Blue reversed
-        plt.plot([timestamps[i], timestamps[i+1]], 
-                [voltage[i], voltage[i+1]], 
-                color=color, linewidth=2.5, alpha=0.8)
-    
+
+    # Plot voltage with simplified coloring to prevent OOM
+    voltage = plot_df['battery_voltage'].values
+    timestamps = plot_df['timestamp'].values
+
+    # Use scatter plot with color mapping instead of individual line segments
+    scatter = plt.scatter(timestamps, voltage, c=voltage, cmap='RdYlBu_r',
+                          s=20, alpha=0.7, edgecolors='none')
+    plt.colorbar(scatter, label='Voltage (V)')
+
+    # Also plot a simple line for trend
+    plt.plot(timestamps, voltage, 'k-', linewidth=1, alpha=0.5)
+
     # Add reference lines for critical voltages
     min_voltage = voltage.min()
     max_voltage = voltage.max()
     avg_voltage = voltage.mean()
-    
-    plt.axhline(y=avg_voltage, color='green', linestyle='--', alpha=0.7, 
+
+    plt.axhline(y=avg_voltage, color='green', linestyle='--', alpha=0.7,
                 label=f'Average: {avg_voltage:.2f}V')
-    plt.axhline(y=min_voltage, color='red', linestyle='--', alpha=0.7, 
+    plt.axhline(y=min_voltage, color='red', linestyle='--', alpha=0.7,
                 label=f'Minimum: {min_voltage:.2f}V')
-    plt.axhline(y=max_voltage, color='blue', linestyle='--', alpha=0.7, 
+    plt.axhline(y=max_voltage, color='blue', linestyle='--', alpha=0.7,
                 label=f'Maximum: {max_voltage:.2f}V')
-    
+
     # Add critical voltage thresholds (typical for Li-ion)
-    plt.axhline(y=3.2, color='orange', linestyle=':', alpha=0.8, 
+    plt.axhline(y=3.2, color='orange', linestyle=':', alpha=0.8,
                 label='Critical Low (3.2V)', linewidth=2)
-    plt.axhline(y=3.7, color='yellow', linestyle=':', alpha=0.8, 
+    plt.axhline(y=3.7, color='yellow', linestyle=':', alpha=0.8,
                 label='Low Battery (3.7V)', linewidth=2)
-    
-    plt.title('Critical Battery Voltage Analysis - Enhanced Decay Visualization', 
-              fontsize=16, fontweight='bold')
-    plt.ylabel('Voltage (V)', fontsize=14)
+
+    plt.title('Critical Battery Voltage Analysis - Enhanced Decay Visualization',
+              fontsize=TITLE_FONT_SIZE, fontweight='bold')
+    plt.ylabel('Voltage (V)', fontsize=AXIS_FONT_SIZE)
     plt.grid(True, alpha=0.3)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left',
+               fontsize=LEGEND_FONT_SIZE)
+
     # Format x-axis
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=1))
-    plt.xticks(rotation=45)
+    format_time_axis(plt.gca(), plot_df)
 
     # Voltage decay rate analysis
     plt.subplot(3, 1, 2)
-    
-    # Calculate voltage decay rate (V/hour)
-    time_diff_hours = (df['timestamp'].diff().dt.total_seconds() / 3600)
-    voltage_diff = df['battery_voltage'].diff()
+
+    # Calculate voltage decay rate (V/hour) using sampled data
+    time_diff_hours = (plot_df['timestamp'].diff().dt.total_seconds() / 3600)
+    voltage_diff = plot_df['battery_voltage'].diff()
     decay_rate = voltage_diff / time_diff_hours
-    
+
     # Plot decay rate
-    plt.plot(df['timestamp'][1:], decay_rate[1:], 
+    plt.plot(plot_df['timestamp'][1:], decay_rate[1:],
              'purple', linewidth=2, label='Voltage Decay Rate')
     plt.axhline(y=0, color='black', linestyle='-', alpha=0.5)
-    plt.axhline(y=-0.1, color='red', linestyle='--', alpha=0.7, 
+    plt.axhline(y=-0.1, color='red', linestyle='--', alpha=0.7,
                 label='Fast Decay Threshold (-0.1V/h)')
-    
-    plt.title('Battery Voltage Decay Rate Over Time', fontsize=14, fontweight='bold')
-    plt.ylabel('Decay Rate (V/hour)', fontsize=12)
+
+    plt.title('Battery Voltage Decay Rate Over Time',
+              fontsize=TITLE_FONT_SIZE, fontweight='bold')
+    plt.ylabel('Decay Rate (V/hour)', fontsize=AXIS_FONT_SIZE)
     plt.grid(True, alpha=0.3)
-    plt.legend()
-    
+    plt.legend(fontsize=LEGEND_FONT_SIZE)
+
     # Format x-axis
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=1))
-    plt.xticks(rotation=45)
+    format_time_axis(plt.gca(), plot_df)
 
     # Battery percentage with voltage overlay
     plt.subplot(3, 1, 3)
-    
+
     # Create dual y-axis plot
     ax1 = plt.gca()
     color1 = 'tab:green'
-    ax1.set_xlabel('Time', fontsize=12)
-    ax1.set_ylabel('Battery Percentage (%)', color=color1, fontsize=12)
-    line1 = ax1.plot(df['timestamp'], df['battery_remaining_pct'], 
+    ax1.set_xlabel('Time', fontsize=AXIS_FONT_SIZE)
+    ax1.set_ylabel('Battery Percentage (%)',
+                   color=color1, fontsize=AXIS_FONT_SIZE)
+    line1 = ax1.plot(plot_df['timestamp'], plot_df['battery_remaining_pct'],
                      color=color1, linewidth=2, label='Battery %')
-    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.tick_params(axis='y', labelcolor=color1, labelsize=LABEL_FONT_SIZE)
     ax1.grid(True, alpha=0.3)
-    
+
     # Second y-axis for voltage
     ax2 = ax1.twinx()
     color2 = 'tab:blue'
-    ax2.set_ylabel('Battery Voltage (V)', color=color2, fontsize=12)
-    line2 = ax2.plot(df['timestamp'], df['battery_voltage'], 
+    ax2.set_ylabel('Battery Voltage (V)', color=color2,
+                   fontsize=AXIS_FONT_SIZE)
+    line2 = ax2.plot(plot_df['timestamp'], plot_df['battery_voltage'],
                      color=color2, linewidth=2, alpha=0.7, label='Battery Voltage')
-    ax2.tick_params(axis='y', labelcolor=color2)
-    
+    ax2.tick_params(axis='y', labelcolor=color2, labelsize=LABEL_FONT_SIZE)
+
     # Add legend
     lines = line1 + line2
     labels = [l.get_label() for l in lines]
-    ax1.legend(lines, labels, loc='upper right')
-    
-    plt.title('Battery State of Charge vs Voltage Correlation', 
-              fontsize=14, fontweight='bold')
-    
+    ax1.legend(lines, labels, loc='upper right', fontsize=LEGEND_FONT_SIZE)
+
+    plt.title('Battery State of Charge vs Voltage Correlation',
+              fontsize=TITLE_FONT_SIZE, fontweight='bold')
+
     # Format x-axis
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax1.xaxis.set_major_locator(mdates.HourLocator(interval=1))
     plt.xticks(rotation=45)
+    ax1.tick_params(axis='x', labelsize=LABEL_FONT_SIZE)
 
     plt.tight_layout()
 
@@ -257,59 +397,65 @@ def plot_critical_battery_analysis(df, output_dir):
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Critical battery analysis plot saved: {output_path}")
     plt.close()
+    gc.collect()  # Force garbage collection
 
 
 def plot_sensor_trends(df, output_dir):
     """Plot all sensor trends in a comprehensive view"""
+    # Sample data to prevent OOM
+    plot_df = sample_data_for_plotting(df)
+
     fig, axes = plt.subplots(3, 2, figsize=(16, 12))
-    fig.suptitle('Battery Water Sensor Trends', fontsize=16, fontweight='bold')
+    fig.suptitle('Battery Water Sensor Trends',
+                 fontsize=TITLE_FONT_SIZE, fontweight='bold')
 
     # Battery voltage
-    axes[0, 0].plot(df['timestamp'], df['battery_voltage'],
+    axes[0, 0].plot(plot_df['timestamp'], plot_df['battery_voltage'],
                     'b-', linewidth=1.5)
-    axes[0, 0].set_title('Battery Voltage')
-    axes[0, 0].set_ylabel('Voltage (V)')
+    axes[0, 0].set_title('Battery Voltage', fontsize=SUBTITLE_FONT_SIZE)
+    axes[0, 0].set_ylabel('Voltage (V)', fontsize=AXIS_FONT_SIZE)
     axes[0, 0].grid(True, alpha=0.3)
 
     # Battery percentage
-    axes[0, 1].plot(df['timestamp'],
-                    df['battery_remaining_pct'], 'g-', linewidth=1.5)
-    axes[0, 1].set_title('Battery State of Charge')
-    axes[0, 1].set_ylabel('Percentage (%)')
+    axes[0, 1].plot(plot_df['timestamp'],
+                    plot_df['battery_remaining_pct'], 'g-', linewidth=1.5)
+    axes[0, 1].set_title('Battery State of Charge',
+                         fontsize=SUBTITLE_FONT_SIZE)
+    axes[0, 1].set_ylabel('Percentage (%)', fontsize=AXIS_FONT_SIZE)
     axes[0, 1].grid(True, alpha=0.3)
 
     # Saltwater voltage
-    axes[1, 0].plot(df['timestamp'], df['saltwater_voltage'],
+    axes[1, 0].plot(plot_df['timestamp'], plot_df['saltwater_voltage'],
                     'r-', linewidth=1.5)
-    axes[1, 0].set_title('Saltwater Probe Voltage')
-    axes[1, 0].set_ylabel('Voltage (V)')
+    axes[1, 0].set_title('Saltwater Probe Voltage',
+                         fontsize=SUBTITLE_FONT_SIZE)
+    axes[1, 0].set_ylabel('Voltage (V)', fontsize=AXIS_FONT_SIZE)
     axes[1, 0].grid(True, alpha=0.3)
 
     # Sail current
-    axes[1, 1].plot(df['timestamp'], df['sail_current'], 'm-', linewidth=1.5)
-    axes[1, 1].set_title('Sail Winch Current')
-    axes[1, 1].set_ylabel('Current (A)')
+    axes[1, 1].plot(plot_df['timestamp'],
+                    plot_df['sail_current'], 'm-', linewidth=1.5)
+    axes[1, 1].set_title('Sail Winch Current', fontsize=SUBTITLE_FONT_SIZE)
+    axes[1, 1].set_ylabel('Current (A)', fontsize=AXIS_FONT_SIZE)
     axes[1, 1].grid(True, alpha=0.3)
 
     # PCB Temperature
-    axes[2, 0].plot(df['timestamp'], df['pcb_temperature'],
+    axes[2, 0].plot(plot_df['timestamp'], plot_df['pcb_temperature'],
                     'orange', linewidth=1.5)
-    axes[2, 0].set_title('PCB Temperature')
-    axes[2, 0].set_ylabel('Temperature (°C)')
+    axes[2, 0].set_title('PCB Temperature', fontsize=SUBTITLE_FONT_SIZE)
+    axes[2, 0].set_ylabel('Temperature (°C)', fontsize=AXIS_FONT_SIZE)
     axes[2, 0].grid(True, alpha=0.3)
 
     # Relative Humidity
-    axes[2, 1].plot(df['timestamp'], df['relative_humidity'],
+    axes[2, 1].plot(plot_df['timestamp'], plot_df['relative_humidity'],
                     'c-', linewidth=1.5)
-    axes[2, 1].set_title('Relative Humidity')
-    axes[2, 1].set_ylabel('Humidity (%)')
+    axes[2, 1].set_title('Relative Humidity', fontsize=SUBTITLE_FONT_SIZE)
+    axes[2, 1].set_ylabel('Humidity (%)', fontsize=AXIS_FONT_SIZE)
     axes[2, 1].grid(True, alpha=0.3)
 
     # Format all x-axes
     for ax in axes.flat:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-        ax.tick_params(axis='x', rotation=45)
+        format_time_axis(ax, plot_df)
 
     plt.tight_layout()
 
@@ -319,54 +465,59 @@ def plot_sensor_trends(df, output_dir):
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Sensor trends plot saved: {output_path}")
     plt.close()
+    gc.collect()  # Force garbage collection
 
 
 def plot_alerts(df, output_dir):
     """Plot alert patterns over time"""
+    # Sample data to prevent OOM
+    plot_df = sample_data_for_plotting(df)
+
     plt.figure(figsize=(14, 8))
 
     # Create alert timeline
     plt.subplot(3, 1, 1)
-    plt.plot(df['timestamp'], df['battery_low_alert'],
+    plt.plot(plot_df['timestamp'], plot_df['battery_low_alert'],
              'r-', linewidth=2, label='Battery Low Alert')
-    plt.plot(df['timestamp'], df['saltwater_alert'],
+    plt.plot(plot_df['timestamp'], plot_df['saltwater_alert'],
              'b-', linewidth=2, label='Saltwater Alert')
-    plt.plot(df['timestamp'], df['humidity_alert'],
+    plt.plot(plot_df['timestamp'], plot_df['humidity_alert'],
              'g-', linewidth=2, label='Humidity Alert')
-    plt.title('Alert Status Over Time', fontsize=14, fontweight='bold')
-    plt.ylabel('Alert Status (0/1)', fontsize=12)
-    plt.legend()
+    plt.title('Alert Status Over Time',
+              fontsize=SUBTITLE_FONT_SIZE, fontweight='bold')
+    plt.ylabel('Alert Status (0/1)', fontsize=AXIS_FONT_SIZE)
+    plt.legend(fontsize=LEGEND_FONT_SIZE)
     plt.grid(True, alpha=0.3)
     plt.ylim(-0.1, 1.1)
 
     # Charging status
     plt.subplot(3, 1, 2)
-    plt.plot(df['timestamp'], df['charging_status'],
+    plt.plot(plot_df['timestamp'], plot_df['charging_status'],
              'orange', linewidth=2, label='Charging Status')
-    plt.plot(df['timestamp'], df['ac_power_present'],
+    plt.plot(plot_df['timestamp'], plot_df['ac_power_present'],
              'purple', linewidth=2, label='AC Power Present')
-    plt.title('MP2672GD Charger Status', fontsize=14, fontweight='bold')
-    plt.ylabel('Status (0/1)', fontsize=12)
-    plt.legend()
+    plt.title('MP2672GD Charger Status',
+              fontsize=SUBTITLE_FONT_SIZE, fontweight='bold')
+    plt.ylabel('Status (0/1)', fontsize=AXIS_FONT_SIZE)
+    plt.legend(fontsize=LEGEND_FONT_SIZE)
     plt.grid(True, alpha=0.3)
     plt.ylim(-0.1, 1.1)
 
     # Health status
     plt.subplot(3, 1, 3)
-    plt.plot(df['timestamp'], df['battery_water_health'],
+    plt.plot(plot_df['timestamp'], plot_df['battery_water_health'],
              'k-', linewidth=2, label='System Health')
-    plt.title('Battery Water System Health', fontsize=14, fontweight='bold')
-    plt.ylabel('Health Status (0/1)', fontsize=12)
-    plt.xlabel('Time', fontsize=12)
-    plt.legend()
+    plt.title('Battery Water System Health',
+              fontsize=SUBTITLE_FONT_SIZE, fontweight='bold')
+    plt.ylabel('Health Status (0/1)', fontsize=AXIS_FONT_SIZE)
+    plt.xlabel('Time', fontsize=AXIS_FONT_SIZE)
+    plt.legend(fontsize=LEGEND_FONT_SIZE)
     plt.grid(True, alpha=0.3)
     plt.ylim(-0.1, 1.1)
 
     # Format x-axis
     for ax in plt.gcf().axes:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-        ax.tick_params(axis='x', rotation=45)
+        format_time_axis(ax, plot_df)
 
     plt.tight_layout()
 
@@ -376,6 +527,7 @@ def plot_alerts(df, output_dir):
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Alert patterns plot saved: {output_path}")
     plt.close()
+    gc.collect()  # Force garbage collection
 
 
 def print_data_summary(df):
@@ -386,8 +538,15 @@ def print_data_summary(df):
 
     print(f"Data points: {len(df)}")
     print(f"Time span: {df['timestamp'].max() - df['timestamp'].min()}")
-    print(
-        f"Sampling rate: ~{len(df) / ((df['timestamp'].max() - df['timestamp'].min()).total_seconds() / 3600):.1f} points/hour")
+
+    # Calculate sampling rate, handling single data point case
+    time_span_seconds = (df['timestamp'].max() -
+                         df['timestamp'].min()).total_seconds()
+    if time_span_seconds > 0:
+        sampling_rate = len(df) / (time_span_seconds / 3600)
+        print(f"Sampling rate: ~{sampling_rate:.1f} points/hour")
+    else:
+        print("Sampling rate: N/A (single data point)")
 
     print(f"\nBattery Voltage:")
     print(f"  Min: {df['battery_voltage'].min():.3f} V")
@@ -440,8 +599,10 @@ def print_data_summary(df):
         print(f"\nCharging Status:")
         print(f"  Charging Active: {charging_active} samples")
         print(f"  AC Power Present: {ac_power_active} samples")
-        print(f"  Charging Percentage: {(charging_active / len(df) * 100):.1f}%")
-        print(f"  AC Power Percentage: {(ac_power_active / len(df) * 100):.1f}%")
+        print(
+            f"  Charging Percentage: {(charging_active / len(df) * 100):.1f}%")
+        print(
+            f"  AC Power Percentage: {(ac_power_active / len(df) * 100):.1f}%")
 
     print("="*60)
 
@@ -463,8 +624,23 @@ Examples:
                         help='Output directory for plots (default: /var/log.hdd/persistent)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Only print data summary, do not generate plots')
+    parser.add_argument('--font-scale', type=float, default=1.0,
+                        help='Font scale factor for plot text sizing (default: 1.0)')
+    parser.add_argument('--max-points', type=int, default=5000,
+                        help='Maximum data points to plot (default: 5000)')
 
     args = parser.parse_args()
+
+    # Update font scale and max points based on arguments
+    FONT_SCALE = args.font_scale
+    MAX_DATA_POINTS = args.max_points
+
+    # Update font size constants based on new scale
+    TITLE_FONT_SIZE = int(14 * FONT_SCALE)
+    SUBTITLE_FONT_SIZE = int(12 * FONT_SCALE)
+    AXIS_FONT_SIZE = int(10 * FONT_SCALE)
+    LABEL_FONT_SIZE = int(9 * FONT_SCALE)
+    LEGEND_FONT_SIZE = int(8 * FONT_SCALE)
 
     # Determine CSV file path
     if args.csv_file:
