@@ -1,0 +1,289 @@
+---
+description: "ROS2 inter-node communication patterns and service integration for Argo sailboat system"
+---
+
+# Argo ROS2 Inter-Node Communication Patterns
+
+## Service Communication Architecture
+
+### Standard Service Integration Pattern
+The Argo system uses standard ROS2 services for critical inter-node communication:
+
+#### Service Provider Pattern (battery_water.py)
+```python
+# Use standard Trigger service for maximum compatibility
+from std_srvs.srv import Trigger
+
+# Service creation with descriptive name
+self.srv_battery_status = self.create_service(
+    Trigger, 'battery_status', self.battery_status_callback)
+
+def battery_status_callback(self, request, response):
+    """Service callback with comprehensive data and error handling"""
+    try:
+        import json
+        
+        # Build structured response data
+        response_data = {
+            'battery_summary': f"{voltage:.1f}V ({percent:.0f}%)",
+            'critical_alerts': " | ".join(active_alerts) if active_alerts else None,
+            'raw_data': {
+                'battery_voltage': self._latest_battery_voltage,
+                'timestamp_sec': now.seconds_nanoseconds()[0],
+                'timestamp_nanosec': now.seconds_nanoseconds()[1]
+            }
+        }
+        
+        # Return in standard Trigger response format
+        response.success = True
+        response.message = json.dumps(response_data, indent=2)
+        return response
+        
+    except Exception as e:
+        self.get_logger().error(f"Error in service callback: {e}")
+        response.success = False
+        response.message = f"Error: {str(e)}"
+        return response
+```
+
+#### Service Client Pattern (argo_power_control.py)
+```python
+def _call_battery_service(self):
+    """Call external ROS2 service with proper environment sourcing"""
+    try:
+        # CRITICAL: Use bash -c with ROS2 environment sourcing for sudo commands
+        result = subprocess.run([
+            'bash', '-c', 
+            'source /opt/ros/humble/setup.bash && ros2 service call /battery_status std_srvs/srv/Trigger'
+        ], capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            # Parse ROS2 service response format correctly
+            # Format: std_srvs.srv.Trigger_Response(success=True, message='...')
+            lines = result.stdout.strip().split('\n')
+            
+            # Find message line containing JSON data
+            message_line = None
+            for line in lines:
+                if 'message:' in line and '{' in line:
+                    message_line = line
+                    break
+            
+            if message_line:
+                # Extract JSON from response
+                json_start = message_line.find('{')
+                json_end = message_line.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_str = message_line[json_start:json_end]
+                    data = json.loads(json_str)
+                    return data.get('raw_data', {}).get('battery_voltage')
+        
+        logger.error(f"Service call failed: {result.stderr}")
+        return None
+        
+    except subprocess.TimeoutExpired:
+        logger.error("Service call timed out")
+        return None
+    except Exception as e:
+        logger.error(f"Error calling battery service: {e}")
+        return None
+```
+
+## Environment Sourcing for Sudo Commands
+
+### Critical Pattern: ROS2 Environment Inheritance
+When making ROS2 service calls from processes running as root (systemd services), the ROS2 environment is NOT automatically inherited:
+
+#### ❌ DON'T: Direct sudo ROS2 commands
+```bash
+# This will fail with ModuleNotFoundError: No module named 'rclpy'
+sudo ros2 service call /battery_status std_srvs/srv/Trigger
+sudo python3 /path/to/ros2_script.py
+```
+
+#### ✅ DO: Use bash -c with environment sourcing
+```bash
+# For single ROS2 commands
+sudo bash -c 'source /opt/ros/humble/setup.bash && ros2 service call /battery_status std_srvs/srv/Trigger'
+
+# For Python scripts that use ROS2
+sudo bash -c 'source /opt/ros/humble/setup.bash && python3 /path/to/ros2_script.py'
+
+# In Python subprocess calls
+result = subprocess.run([
+    'bash', '-c', 
+    'source /opt/ros/humble/setup.bash && ros2 service call /battery_status std_srvs/srv/Trigger'
+], capture_output=True, text=True, timeout=10)
+```
+
+## Service Response Parsing Patterns
+
+### Standard ROS2 Service Response Format
+ROS2 services return responses in this format:
+```
+response:
+std_srvs.srv.Trigger_Response(success=True, message='{"key": "value"}')
+```
+
+### Parsing Strategy
+```python
+def parse_ros2_service_response(stdout_output):
+    """Parse standard ROS2 service response format"""
+    lines = stdout_output.strip().split('\n')
+    
+    # Find the message line containing JSON data
+    message_line = None
+    for line in lines:
+        if 'message:' in line and '{' in line:
+            message_line = line
+            break
+    
+    if message_line:
+        # Extract JSON string from response
+        json_start = message_line.find('{')
+        json_end = message_line.rfind('}') + 1
+        if json_start >= 0 and json_end > json_start:
+            json_str = message_line[json_start:json_end]
+            return json.loads(json_str)
+    
+    return None
+```
+
+## Error Handling and Resilience
+
+### Service Call Error Handling
+```python
+def robust_service_call(service_name, service_type, timeout=10):
+    """Robust service call with comprehensive error handling"""
+    try:
+        result = subprocess.run([
+            'bash', '-c', 
+            f'source /opt/ros/humble/setup.bash && ros2 service call {service_name} {service_type}'
+        ], capture_output=True, text=True, timeout=timeout)
+        
+        if result.returncode == 0:
+            return parse_ros2_service_response(result.stdout)
+        else:
+            logger.error(f"Service call failed with return code {result.returncode}: {result.stderr}")
+            return None
+            
+    except subprocess.TimeoutExpired:
+        logger.error(f"Service call to {service_name} timed out after {timeout}s")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error calling {service_name}: {e}")
+        return None
+```
+
+### Graceful Degradation Pattern
+```python
+def get_battery_voltage_with_fallback(self):
+    """Get battery voltage with graceful fallback on service failure"""
+    # Try service call first
+    voltage = self._call_battery_service()
+    
+    if voltage is not None:
+        return voltage
+    
+    # Fallback to last known value or safe default
+    if self._last_known_voltage > 0:
+        logger.warn(f"Using last known battery voltage: {self._last_known_voltage:.3f}V")
+        return self._last_known_voltage
+    else:
+        logger.error("No battery data available - using safe default 8.0V")
+        return 8.0  # Safe default above critical threshold
+```
+
+## Topic Communication Patterns
+
+### QoS Configuration for Critical Data
+```python
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+
+# Persistent QoS for critical control status (late-joining nodes get immediate access)
+persistent_qos = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    depth=1  # Keep only the latest value
+)
+
+# Standard QoS for real-time data
+standard_qos = 10
+
+# Use appropriate QoS for different data types
+self.pub_control_authority = self.create_publisher(Bool, '/human_controlled', persistent_qos)
+self.pub_sensor_data = self.create_publisher(Float32, '/battery_voltage', standard_qos)
+```
+
+### Message Format Standards
+```python
+# Standardized message formats for consistency
+def create_battery_message(voltage, percentage, timestamp):
+    """Create standardized battery status message"""
+    return {
+        'voltage': voltage,
+        'percentage': percentage,
+        'timestamp_sec': timestamp.seconds_nanoseconds()[0],
+        'timestamp_nanosec': timestamp.seconds_nanoseconds()[1],
+        'health_status': True
+    }
+```
+
+## Integration Testing Patterns
+
+### Service Availability Testing
+```python
+def test_service_availability(service_name, timeout=5):
+    """Test if a ROS2 service is available and responding"""
+    try:
+        result = subprocess.run([
+            'bash', '-c', 
+            f'source /opt/ros/humble/setup.bash && timeout {timeout} ros2 service call {service_name} std_srvs/srv/Trigger'
+        ], capture_output=True, text=True)
+        
+        return result.returncode == 0
+    except Exception:
+        return False
+```
+
+### Health Check Pattern
+```python
+def health_check_services(self):
+    """Check health of all required services"""
+    required_services = ['/battery_status', '/recording/start', '/recording/stop']
+    
+    for service in required_services:
+        if not test_service_availability(service):
+            logger.error(f"Required service {service} is not available")
+            return False
+    
+    return True
+```
+
+## Best Practices Summary
+
+### Service Design
+- Use standard ROS2 service types (Trigger, Empty) for maximum compatibility
+- Return structured JSON data in service responses
+- Include comprehensive error handling and logging
+- Provide both summary and raw data in responses
+
+### Client Implementation
+- Always source ROS2 environment for sudo commands
+- Use proper timeouts to prevent hanging
+- Implement graceful fallbacks for service failures
+- Parse ROS2 service responses correctly
+
+### Error Handling
+- Log service call failures with context
+- Provide safe defaults for critical data
+- Implement retry logic for transient failures
+- Use throttled logging to prevent log spam
+
+### Testing and Validation
+- Test service availability before critical operations
+- Validate service response parsing
+- Test error conditions and fallback behavior
+- Monitor service call performance and timeouts
+
+This pattern ensures reliable inter-node communication in the Argo autonomous sailboat system, with proper error handling and graceful degradation when services are unavailable.
