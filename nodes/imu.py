@@ -811,7 +811,30 @@ def main(args=None):
                     return False
                 return default_yes
 
+            def _backup_existing_calibration(calib_filename: str) -> None:
+                """Backup existing calibration file with datestamp from file creation date."""
+                if not os.path.exists(calib_filename):
+                    return  # No existing file to backup
+                
+                # Get file modification time (creation date)
+                file_mtime = os.path.getmtime(calib_filename)
+                file_date = datetime.fromtimestamp(file_mtime).strftime('%Y%m%d_%H%M%S')
+                
+                # Create backup directory if it doesn't exist
+                backup_dir = 'imu_calib_backups'
+                os.makedirs(backup_dir, exist_ok=True)
+                
+                # Create backup filename with datestamp
+                base_name = os.path.splitext(os.path.basename(calib_filename))[0]
+                backup_filename = os.path.join(backup_dir, f"{base_name}_{file_date}.json")
+                
+                # Copy to backup
+                shutil.copy2(calib_filename, backup_filename)
+                print(f"Backed up previous calibration to: {backup_filename}")
+
             if _prompt_yes_no("Save calibration to invensense-20948-compass-calibration.json?", default_yes=True):
+                # Backup existing calibration before saving new one
+                _backup_existing_calibration('invensense-20948-compass-calibration.json')
                 with open('invensense-20948-compass-calibration.json', 'w') as f:
                     json.dump(calib, f, indent=2)
                 print(
