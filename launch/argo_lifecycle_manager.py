@@ -116,7 +116,7 @@ class ArgoLifecycleManager:
         # Log excluded nodes for visibility
         if self.excluded_nodes:
             print(
-                f"ℹ️  Excluded nodes (hardware not ready): {', '.join(self.excluded_nodes)}")
+                f"ℹ️  Excluded nodes (critical services or hardware not ready): {', '.join(self.excluded_nodes)}")
 
         # Combine all expected nodes for monitoring
         self.all_expected_nodes = self.expected_nodes + self.special_nodes
