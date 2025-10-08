@@ -45,25 +45,40 @@ Usage Examples:
   python3 imu.py --debug            # With debug output
   python3 imu.py --calib_compass    # Calibrate magnetometer
 """
-
-# Import the shared pause service
+# Standard library imports
+from rclpy.logging import LoggingSeverity
+import math
+import time
+import struct
+import argparse
+import json
+from datetime import datetime
+import os.path
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from datetime import datetime
-import json
-import argparse
-from toggle_pause_service import TogglePauseService
-import rclpy
-from rclpy.node import Node
-from rclpy.executors import ExternalShutdownException
-import os.path
-from geometry_msgs.msg import Vector3
-from std_msgs.msg import Bool, Float64
-import struct
-import time
-import math
+import shutil
 
+# ROS imports
+from std_msgs.msg import Bool, Float64
+from geometry_msgs.msg import Vector3
+from rclpy.executors import ExternalShutdownException
+from rclpy.node import Node
+import rclpy
+
+# Add custom import path BEFORE importing from it
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+
+# Local imports from custom paths (after sys.path is modified)
+from toggle_pause_service import TogglePauseService
+
+# Debug visualization configuration
+def get_terminal_size():
+    """Get current terminal size (width, height), with fallback."""
+    try:
+        size = shutil.get_terminal_size()
+        return size.columns, size.lines
+    except:
+        return 80, 24  # fallback width, height
 
 
 def _to_int16(msb, lsb):
@@ -412,6 +427,74 @@ class ImuNode(Node):
         # build
         return '[' + ''.join(left) + '|' + ''.join(right) + ']'
 
+    def _render_compass(self, heading_deg: float, width: int = 40, height: int = 20) -> list:
+        """Render compass heading as a point on a circle with N at top
+
+        Args:
+            heading_deg: Compass heading in degrees (0=North, 90=East, 180=South, 270=West)
+            width: Width of the display in characters
+            height: Height of the display in characters
+
+        Returns:
+            List of strings representing the compass display
+        """
+        # Ensure dimensions are reasonable
+        width = max(20, width)
+        height = max(10, height)
+
+        cx = width // 2
+        cy = height // 2
+        radius = min(cx - 3, cy - 2)
+
+        # Create grid
+        grid = [[' ' for _ in range(width)] for _ in range(height)]
+
+        # Draw circle (octagon approximation)
+        for angle in range(0, 360, 5):
+            rad = math.radians(angle)
+            x = cx + int(round(radius * math.sin(rad)))
+            y = cy - int(round(radius * math.cos(rad)))
+            if 0 <= y < height and 0 <= x < width:
+                grid[y][x] = '.'
+
+        # Mark cardinal directions
+        # North (0°) - top
+        if cy - radius >= 0:
+            grid[cy - radius][cx] = 'N'
+        # East (90°) - right
+        if cx + radius < width:
+            grid[cy][cx + radius] = 'E'
+        # South (180°) - bottom
+        if cy + radius < height:
+            grid[cy + radius][cx] = 'S'
+        # West (270°) - left
+        if cx - radius >= 0:
+            grid[cy][cx - radius] = 'W'
+
+        # Draw center
+        grid[cy][cx] = '+'
+
+        # Draw heading indicator (point on circle)
+        theta = math.radians(heading_deg)
+        hx = cx + int(round(radius * math.sin(theta)))
+        hy = cy - int(round(radius * math.cos(theta)))
+        if 0 <= hy < height and 0 <= hx < width:
+            grid[hy][hx] = 'O'  # Heading marker
+
+        # Draw line from center to heading point for better visibility
+        # Simple line drawing using small steps
+        steps = int(radius)
+        for i in range(1, steps):
+            frac = i / float(steps)
+            lx = cx + int(round(frac * radius * math.sin(theta)))
+            ly = cy - int(round(frac * radius * math.cos(theta)))
+            if 0 <= ly < height and 0 <= lx < width:
+                if grid[ly][lx] == ' ':
+                    grid[ly][lx] = '*'
+
+        # Convert grid to strings
+        return [''.join(row) for row in grid]
+
     def timer_callback(self):
         # Check if node is paused
         if self.pause_service.is_paused():
@@ -451,35 +534,65 @@ class ImuNode(Node):
                     if heading_deg < 0:
                         heading_deg += 360.0
 
-                    sys.stdout.write('\x1b[H')  # home
+                    sys.stdout.write('\x1b[2J')    # clear
+                    sys.stdout.write('\x1b[H')     # home
+                    sys.stdout.flush()
                     # Nominal limits for bars
                     a_lim = 2.0   # g
                     g_lim = 500.0  # dps
                     m_lim = 100.0  # uT
-                    lines = [
+
+                    # Get terminal size for dynamic sizing
+                    term_width, term_height = get_terminal_size()
+                    bar_width = term_width - 20  # Reserve 20 chars for labels
+
+                    # Build sensor data lines
+                    sensor_lines = [
+                        "=== IMU Sensor Data (ICM-20948) ===",
+                        "",
+                        "Accelerometer:",
                         f"Ax {ax_g:+7.3f} g   " +
-                        self._signed_bar(ax_g, a_lim),
+                        self._signed_bar(ax_g, a_lim, bar_width),
                         f"Ay {ay_g:+7.3f} g   " +
-                        self._signed_bar(ay_g, a_lim),
+                        self._signed_bar(ay_g, a_lim, bar_width),
                         f"Az {az_g:+7.3f} g   " +
-                        self._signed_bar(az_g, a_lim),
+                        self._signed_bar(az_g, a_lim, bar_width),
+                        "",
+                        "Gyroscope:",
                         f"Gx {gx_dps:+7.1f} dps " +
-                        self._signed_bar(gx_dps, g_lim),
+                        self._signed_bar(gx_dps, g_lim, bar_width),
                         f"Gy {gy_dps:+7.1f} dps " +
-                        self._signed_bar(gy_dps, g_lim),
+                        self._signed_bar(gy_dps, g_lim, bar_width),
                         f"Gz {gz_dps:+7.1f} dps " +
-                        self._signed_bar(gz_dps, g_lim),
+                        self._signed_bar(gz_dps, g_lim, bar_width),
+                        "",
+                        "Magnetometer:",
                         f"Mx {mx_uT:+7.1f} uT  " +
-                        self._signed_bar(mx_uT, m_lim),
+                        self._signed_bar(mx_uT, m_lim, bar_width),
                         f"My {my_uT:+7.1f} uT  " +
-                        self._signed_bar(my_uT, m_lim),
+                        self._signed_bar(my_uT, m_lim, bar_width),
                         f"Mz {mz_uT:+7.1f} uT  " +
-                        self._signed_bar(mz_uT, m_lim),
-                        f"Hd {heading_deg:+7.1f}°    " +
-                        # Center on 180°
-                        self._signed_bar(heading_deg - 180, 180),
-                        "Ctrl-C to exit"
+                        self._signed_bar(mz_uT, m_lim, bar_width),
+                        "",
+                        f"=== Compass Heading: {heading_deg:6.1f}° (0°=N, 90°=E, 180°=S, 270°=W) ===",
+                        ""
                     ]
+
+                    # Calculate available height for compass (sensor data + footer takes ~20 lines)
+                    sensor_lines_count = len(sensor_lines)
+                    footer_lines_count = 2  # blank line + "Ctrl-C to exit"
+                    available_height = term_height - sensor_lines_count - footer_lines_count
+                    
+                    # Generate compass display to fit available height
+                    compass_width = term_width
+                    compass_height = max(5, available_height)  # Minimum 5 lines for compass
+                    compass_lines = self._render_compass(
+                        heading_deg, width=compass_width, height=compass_height)
+
+                    # Combine all lines
+                    lines = sensor_lines + compass_lines + \
+                        ["", "Ctrl-C to exit"]
+
                     for ln in lines:
                         sys.stdout.write(ln + '\n')
                     sys.stdout.flush()
@@ -522,8 +635,12 @@ class ImuNode(Node):
             self._handle_io_error(e)
 
     def _quiet_shutdown(self) -> None:
-        # Publish health status as failed on shutdown
-        self._publish_health_status(False)
+        # Publish health status as failed on shutdown (only if ROS context is still valid)
+        try:
+            if rclpy.ok():
+                self._publish_health_status(False)
+        except Exception:
+            pass  # Suppress any publishing errors during shutdown
 
         # Teardown ASCII view
         self._teardown_ascii_vis()
@@ -567,7 +684,6 @@ def main(args=None):
             # Tracking minima and maxima
             minx = miny = minz = float('inf')
             maxx = maxy = maxz = float('-inf')
-            bar_width = 50
             # Terminal setup
             try:
                 sys.stdout.write('\x1b[?25l')  # hide cursor
@@ -584,6 +700,9 @@ def main(args=None):
                          maxy - miny if miny != float('inf') else 0.0,
                          maxz - minz if minz != float('inf') else 0.0]
                 lines = []
+                # Get current terminal width for resize support
+                term_width, _ = get_terminal_size()
+                bar_width = term_width - 30  # Reserve space for labels
                 for name, mn, mx, span in [("X", minx, maxx, spans[0]), ("Y", miny, maxy, spans[1]), ("Z", minz, maxz, spans[2])]:
                     frac = max(0.0, min(1.0, span / fs))
                     fill = int(round(frac * bar_width))
@@ -709,34 +828,38 @@ def main(args=None):
                 pass
         return
 
-    imu_node = ImuNode(debug=parsed_args.debug)
+    imu_node = None
+    try:
+        imu_node = ImuNode(debug=parsed_args.debug)
+        rclpy.spin(imu_node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # This handles Ctrl+C or external shutdown requests gracefully.
+        if imu_node:
+            try:
+                imu_node._quiet_shutdown()
+            except Exception:
+                pass  # Suppress any errors during quiet shutdown
+    except Exception as e:
+        # Handle any other unexpected exceptions
+        if imu_node:
+            imu_node.get_logger().error(f"Unexpected error: {e}")
+        else:
+            print(f"Error before node creation: {e}")
+    finally:
+        # Clean shutdown
+        if imu_node:
+            try:
+                imu_node.destroy_node()
+            except Exception:
+                pass  # Suppress any errors during node destruction
 
-    if rclpy.ok():
         try:
-            rclpy.spin(imu_node)
-        except KeyboardInterrupt:
-            # Quiet shutdown to avoid traceback on Ctrl+C
-            imu_node._quiet_shutdown()
-            try:
-                imu_node.destroy_node()
-            except Exception:
-                pass
-            try:
+            # Check if ROS is still initialized before shutdown
+            if rclpy.ok():
                 rclpy.shutdown()
-            except Exception:
-                pass
-            sys.exit(0)
-        except ExternalShutdownException:
-            imu_node._quiet_shutdown()
-            try:
-                imu_node.destroy_node()
-            except Exception:
-                pass
-            try:
-                rclpy.shutdown()
-            except Exception:
-                pass
-            sys.exit(0)
+        except Exception:
+            # Suppress ROS shutdown errors (like "already called" errors)
+            pass
 
 
 if __name__ == '__main__':
