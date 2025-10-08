@@ -168,6 +168,13 @@ class BatteryWaterNode(Node):
         self._i2c_error_log_interval = 30.0  # Log I2C errors max once every 30 seconds
         self._max_failures = 3
         self._shutdown_requested = False
+        
+        # I2C recovery tracking (similar to imu.py)
+        self.node_healthy = True
+        self._consecutive_io_errors = 0
+        self._last_successful_read_time = time.monotonic()
+        self._last_recovery_attempt_time = 0.0
+        self._recovery_attempt_count = 0
 
         # Timing and change detection for optimized publishing
         self._startup_time = time.monotonic()
@@ -492,27 +499,13 @@ class BatteryWaterNode(Node):
         # SCAN=01: convert selected input eight times
         cfg = self._build_config(reg=0, scan=0b01, cs=ch, sgl_dif=1)
         acc = 0
-        try:
-            self._i2c_write(self.adc_addr, cfg)
-            time.sleep(settle_delay_s)
-            for _ in range(repeats):
-                d = self._i2c_read(self.adc_addr, 2)
-                code = ((d[0] & 0x0F) << 8) | d[1]
-                acc += code
-            # Reset failure count on successful read
-            self._adc_failure_count = 0
-            return acc // repeats
-        except Exception as e:
-            self._adc_failure_count += 1
-            self.get_logger().error(
-                f'ADC read ch{ch} failed (attempt {self._adc_failure_count}/{self._max_failures}): {e}')
-
-            if self._adc_failure_count >= self._max_failures:
-                self.get_logger().fatal(
-                    f'ADC sensor failed {self._max_failures} times consecutively. Shutting down node.')
-                self._request_shutdown()
-
-            return 0
+        self._i2c_write(self.adc_addr, cfg)
+        time.sleep(settle_delay_s)
+        for _ in range(repeats):
+            d = self._i2c_read(self.adc_addr, 2)
+            code = ((d[0] & 0x0F) << 8) | d[1]
+            acc += code
+        return acc // repeats
 
     # ---------- SHT45 helpers ----------
     def _sht_crc(self, data):
@@ -527,44 +520,29 @@ class BatteryWaterNode(Node):
         return crc & 0xFF
 
     def _read_sht45(self):
-        try:
-            # pure write command
-            w = i2c_msg.write(self.sht_addr, [self.SHT45_HIGH_PRECISION_CMD])
-            with smbus2.SMBus(I2C_BUS_NUMBER) as b:
-                b.i2c_rdwr(w)
-            time.sleep(self.SHT45_MEASUREMENT_DELAY)
-            # pure read of 6 bytes
-            r = i2c_msg.read(self.sht_addr, 6)
-            with smbus2.SMBus(I2C_BUS_NUMBER) as b:
-                b.i2c_rdwr(r)
-            data = list(r)
-            temp_data = data[0:2]
-            temp_crc = data[2]
-            humid_data = data[3:5]
-            humid_crc = data[5]
-            if self._sht_crc(temp_data) != temp_crc or self._sht_crc(humid_data) != humid_crc:
-                self.get_logger().warn('SHT45 CRC mismatch')
-                return None, None
-            raw_temp = (temp_data[0] << 8) | temp_data[1]
-            raw_hum = (humid_data[0] << 8) | humid_data[1]
-            # Convert per datasheet
-            temperature = -45.0 + 175.0 * (raw_temp / 65535.0)
-            humidity = -6.0 + 125.0 * (raw_hum / 65535.0)
-            humidity = max(0.0, min(100.0, humidity))
-            # Reset failure count on successful read
-            self._sht_failure_count = 0
-            return temperature, humidity
-        except Exception as e:
-            self._sht_failure_count += 1
-            self.get_logger().error(
-                f'SHT45 read failed (attempt {self._sht_failure_count}/{self._max_failures}): {e}')
-
-            if self._sht_failure_count >= self._max_failures:
-                self.get_logger().fatal(
-                    f'SHT45 sensor failed {self._max_failures} times consecutively. Shutting down node.')
-                self._request_shutdown()
-
-            return None, None
+        # pure write command
+        w = i2c_msg.write(self.sht_addr, [self.SHT45_HIGH_PRECISION_CMD])
+        with smbus2.SMBus(I2C_BUS_NUMBER) as b:
+            b.i2c_rdwr(w)
+        time.sleep(self.SHT45_MEASUREMENT_DELAY)
+        # pure read of 6 bytes
+        r = i2c_msg.read(self.sht_addr, 6)
+        with smbus2.SMBus(I2C_BUS_NUMBER) as b:
+            b.i2c_rdwr(r)
+        data = list(r)
+        temp_data = data[0:2]
+        temp_crc = data[2]
+        humid_data = data[3:5]
+        humid_crc = data[5]
+        if self._sht_crc(temp_data) != temp_crc or self._sht_crc(humid_data) != humid_crc:
+            raise RuntimeError('SHT45 CRC mismatch')
+        raw_temp = (temp_data[0] << 8) | temp_data[1]
+        raw_hum = (humid_data[0] << 8) | humid_data[1]
+        # Convert per datasheet
+        temperature = -45.0 + 175.0 * (raw_temp / 65535.0)
+        humidity = -6.0 + 125.0 * (raw_hum / 65535.0)
+        humidity = max(0.0, min(100.0, humidity))
+        return temperature, humidity
 
     # ---------- GPIO reading helpers ----------
     def _read_gpio_status(self):
@@ -590,6 +568,131 @@ class BatteryWaterNode(Node):
             self.get_logger().error(f'GPIO read failed: {e}')
             
         return charging_status, ac_power_present
+
+    # ---------- I2C Recovery Methods (similar to imu.py) ----------
+    def _handle_io_error(self, error, sensor_name="I2C"):
+        """Handle I2C IOError with health tracking and throttled logging"""
+        current_time = time.monotonic()
+        self._consecutive_io_errors += 1
+
+        # Log error with throttling (max once per 5 seconds)
+        if current_time - self._last_i2c_error_log_time >= 5.0:
+            self.get_logger().warn(
+                f"Transient {sensor_name} error (attempt {self._consecutive_io_errors}): {error}")
+            self._last_i2c_error_log_time = current_time
+
+        # Mark node as unhealthy after first IO error
+        if self.node_healthy:
+            self.node_healthy = False
+            self._publish_health_status(False)
+            self.get_logger().warn(
+                f"Node health set to UNHEALTHY due to {sensor_name} errors. Switching to low-frequency retry mode.")
+            # Switch to low-frequency retry mode
+            self._switch_to_retry_mode()
+
+    def _switch_to_retry_mode(self):
+        """Switch timers to low-frequency retry mode"""
+        # Cancel existing timers
+        if hasattr(self, 'sail_current_timer'):
+            self.sail_current_timer.cancel()
+        if hasattr(self, 'battery_safety_timer'):
+            self.battery_safety_timer.cancel()
+        
+        # Create single low-frequency retry timer (1 Hz)
+        self.retry_timer = self.create_timer(1.0, self._retry_callback)
+        self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
+        
+        # Reset consecutive error counter for recovery tracking
+        self._consecutive_io_errors = 0
+
+    def _switch_to_normal_mode(self):
+        """Switch timers back to normal frequency"""
+        # Cancel retry timer if it exists
+        if hasattr(self, 'retry_timer'):
+            self.retry_timer.cancel()
+        
+        # Recreate normal timers
+        self.sail_current_timer = self.create_timer(
+            1.0 / SAIL_CURRENT_RATE_HZ, self.read_sail_current)
+        self.battery_safety_timer = self.create_timer(
+            BATTERY_SAFETY_INTERVAL_S, self.read_battery_safety_sensors)
+        
+        self.get_logger().info("Switched back to normal mode - I2C communication recovered")
+
+    def _reinitialize_sensors(self):
+        """Re-initialize ADC and SHT45 sensors after I2C recovery"""
+        self.get_logger().info("Re-initializing ADC and SHT45 sensors...")
+        
+        try:
+            # Re-initialize ADC
+            setup_byte = self._build_setup(
+                reg=1, sel=0b101, clk=0, bip_uni=0, rst=1, x=0)
+            self._i2c_write(self.adc_addr, setup_byte)
+            time.sleep(0.05)
+            
+            # SHT45 doesn't need re-init, but we can verify communication
+            # by attempting a read (the actual read will be done in normal operation)
+            
+            self.get_logger().info("Sensor re-initialization successful")
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Sensor re-initialization failed: {e}")
+            return False
+
+    def _check_io_recovery(self):
+        """Check if I2C communication has recovered and switch back to normal mode"""
+        current_time = time.monotonic()
+        time_since_last_success = current_time - self._last_successful_read_time
+        time_since_last_recovery_attempt = current_time - self._last_recovery_attempt_time
+
+        # Try recovery if we've been in retry mode for a while
+        if (time_since_last_success > 5.0 and  # Been in retry mode for at least 5 seconds
+                time_since_last_recovery_attempt > 3.0):  # Wait at least 3 seconds between attempts
+
+            self._recovery_attempt_count += 1
+            self._last_recovery_attempt_time = current_time
+
+            self.get_logger().info(
+                f"Attempting sensor re-initialization (attempt {self._recovery_attempt_count})...")
+            
+            if self._reinitialize_sensors():
+                self.node_healthy = True
+                self._publish_health_status(True)
+                self._switch_to_normal_mode()
+                self._recovery_attempt_count = 0  # Reset counter on success
+                self.get_logger().info(
+                    f"Sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
+            else:
+                self.get_logger().error(
+                    f"Sensor re-initialization failed (attempt {self._recovery_attempt_count}), staying in retry mode")
+
+    def _retry_callback(self):
+        """Retry callback for low-frequency I2C recovery attempts"""
+        if self._shutdown_requested:
+            return
+        
+        # Check for recovery
+        self._check_io_recovery()
+        
+        # Try to read sensors (will mark as healthy if successful)
+        try:
+            # Try a simple ADC read to test I2C
+            raw0 = self._read_adc_channel_avg(0, repeats=4, settle_delay_s=0.001)
+            if raw0 > 0:  # Successful read
+                self._last_successful_read_time = time.monotonic()
+                self._consecutive_io_errors = 0
+                
+                # Automatic recovery on successful read
+                if not self.node_healthy:
+                    self.node_healthy = True
+                    self._publish_health_status(True)
+                    self._switch_to_normal_mode()
+                    self._recovery_attempt_count = 0
+                    self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
+        except Exception as e:
+            # Continue in retry mode
+            pass
 
     # ---------- Test: RC decay of REFOUT on AIN3 with sampling & PNG ----------
     def _set_ain3_mode(self, sel_bits: int):
@@ -755,6 +858,17 @@ class BatteryWaterNode(Node):
             raw2 = self._read_adc_channel_avg(2, repeats=4, settle_delay_s=0.0005)  # Faster for 10Hz
             sail_current = raw2 * self.lsb_value
             
+            # Update successful read time
+            self._last_successful_read_time = time.monotonic()
+            
+            # If we were unhealthy but now have successful reads, recover to normal mode
+            if not self.node_healthy:
+                self.node_healthy = True
+                self._publish_health_status(True)
+                self._switch_to_normal_mode()
+                self._recovery_attempt_count = 0
+                self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
+            
             self._latest_sail_current = sail_current
             
             if rclpy.ok():
@@ -766,7 +880,7 @@ class BatteryWaterNode(Node):
             self._prev_sail_current = sail_current
             
         except Exception as e:
-            self.get_logger().debug(f'Sail current read failed: {e}')
+            self._handle_io_error(e, "ADC (sail current)")
 
     # ---------- Low-frequency battery safety sensors (30s) ----------
     def read_battery_safety_sensors(self):
@@ -776,43 +890,37 @@ class BatteryWaterNode(Node):
 
         current_time = time.monotonic()
         
-        # ADC averages for battery and saltwater
         try:
+            # ADC averages for battery and saltwater
             raw0 = self._read_adc_channel_avg(0)
             raw1 = self._read_adc_channel_avg(1)
 
             battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
             saltwater_voltage = raw1 * self.lsb_value
 
+            # SHT45
+            temperature, humidity = self._read_sht45()
+            
+            # Update successful read time
+            self._last_successful_read_time = time.monotonic()
+            
+            # If we were unhealthy but now have successful reads, recover to normal mode
+            if not self.node_healthy:
+                self.node_healthy = True
+                self._publish_health_status(True)
+                self._switch_to_normal_mode()
+                self._recovery_attempt_count = 0
+                self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
+
+            # Update latest sensor values
             self._latest_battery_voltage = battery_voltage
             self._latest_saltwater_voltage = saltwater_voltage
+            self._latest_temperature = temperature
+            self._latest_humidity = humidity
             
         except Exception as e:
-            current_time = time.monotonic()
-            if current_time - self._last_i2c_error_log_time >= self._i2c_error_log_interval:
-                self.get_logger().error(f"I2C sensor read failed: {e}")
-                import subprocess
-                try:
-                    subprocess.run(['echo', f'ARGO I2C ERROR: Battery sensor read failed - {str(e)[:100]}'], 
-                                 stdout=open('/dev/kmsg', 'w'), stderr=subprocess.DEVNULL, timeout=1)
-                except Exception:
-                    pass
-                self._last_i2c_error_log_time = current_time
-            
-            if self._latest_battery_voltage > 0:
-                if not (current_time - self._last_i2c_error_log_time < self._i2c_error_log_interval):
-                    self.get_logger().warn(f"Using last known battery voltage: {self._latest_battery_voltage:.3f}V")
-            else:
-                if not (current_time - self._last_i2c_error_log_time < self._i2c_error_log_interval):
-                    self.get_logger().error("No previous battery readings available - using safe default 8.0V")
-                    self._latest_battery_voltage = 8.0
-            battery_voltage = self._latest_battery_voltage
-            saltwater_voltage = self._latest_saltwater_voltage if self._latest_saltwater_voltage is not None else 0.0
-
-        # SHT45
-        temperature, humidity = self._read_sht45()
-        self._latest_temperature = temperature
-        self._latest_humidity = humidity
+            self._handle_io_error(e, "I2C sensors")
+            return  # Skip publishing on error
 
         # Calculate battery remaining percentage
         battery_remaining_pct = None
