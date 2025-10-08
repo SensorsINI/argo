@@ -370,7 +370,7 @@ class ControllerNode(Node):
         self.create_subscription(Vector3, '/accel', self.accel_callback, 10)
         self.create_subscription(Vector3, '/gyro', self.gyro_callback, 10)
         self.create_subscription(
-            Vector3, '/compass', self.compass_callback, 10)
+            Vector3, '/magnetometer', self.compass_callback, 10)
 
         # Wind sensor (real-time data)
         self.create_subscription(

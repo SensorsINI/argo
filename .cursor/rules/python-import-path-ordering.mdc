@@ -1,0 +1,57 @@
+---
+globs: *.py
+description: "Python import path ordering and sys.path modifications"
+---
+# Python Import Path Ordering
+
+## Import Order Requirements
+
+When Python files need to modify `sys.path` to add custom import directories, follow this strict ordering:
+
+1. **Standard library imports** (os, sys, time, datetime, json, argparse, struct, math, etc.)
+2. **ROS/Third-party imports** (rclpy, geometry_msgs, std_msgs, numpy, etc.)
+3. **Path modifications** (`sys.path.append()`, `sys.path.insert()`)
+4. **Local/custom imports** (modules from custom paths added via sys.path)
+
+## Correct Pattern
+
+```python
+# 1. Standard library imports first
+import os
+import sys
+import os.path
+from datetime import datetime
+import json
+import argparse
+import struct
+import time
+import math
+
+# 2. ROS imports (or other third-party libraries)
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+from geometry_msgs.msg import Vector3
+from std_msgs.msg import Bool, Float64
+
+# 3. Custom path additions BEFORE importing from those paths
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+
+# 4. Local imports from custom paths (after sys.path is modified)
+from toggle_pause_service import TogglePauseService
+```
+
+## Why This Matters
+
+- Standard library imports come first (Python convention)
+- ROS/third-party imports come second (external dependencies)
+- `sys.path.append()` must execute **before** any imports that depend on those custom paths
+- Python's import system resolves imports immediately when encountered
+- Placing path modifications after custom imports will cause `ModuleNotFoundError`
+
+## Common Locations
+
+This pattern is used in:
+- [nodes/imu.py](mdc:nodes/imu.py)
+- [nodes/anem.py](mdc:nodes/anem.py)
+- Other ROS2 node files that import from `nodes/support/` directory

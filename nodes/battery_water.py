@@ -52,8 +52,9 @@ I2C_BUS_NUMBER = 0  # Orange Pi Zero 2W default I2C bus
 CHARGING_GPIO_LINE = 76   # PC12 (pin 36) - !CHARGING from MP2672GD
 ACOK_GPIO_LINE = 233      # PH9 (pin 26) - !ACOK from MP2672GD
 
-# Sample rate configuration
-SAMPLE_RATE_HZ = 1/3.0  # 1/3 Hz = 3 second intervals
+# Sample rate configuration - dual timers for different sensor requirements
+SAIL_CURRENT_RATE_HZ = 10.0  # 10 Hz for sail current (control critical)
+BATTERY_SAFETY_INTERVAL_S = 30.0  # 30 seconds for battery/saltwater/humidity (safety critical)
 
 # only publish if the change is greater than this percentage
 THRESHOLD_CHANGE_PCT = 0.1  # Reduced from 1.0 to 0.1% for more frequent publishing
@@ -261,7 +262,7 @@ class BatteryWaterNode(Node):
         if self._vis_ascii:
             self._init_ascii_vis()
 
-        # Timer: 1 Hz
+        # Dual timers for different sampling requirements
         if self.test_adc:
             # Pause for user confirmation
             try:
@@ -284,10 +285,17 @@ class BatteryWaterNode(Node):
             self.get_logger().info(
                 'Battery/Water node is idle after --test-adc capture. Press Ctrl+C to exit.')
         else:
-            self.timer = self.create_timer(
-                1.0 / SAMPLE_RATE_HZ, self.read_and_publish)
+            # High-frequency timer for sail current (control critical - 10Hz)
+            self.sail_current_timer = self.create_timer(
+                1.0 / SAIL_CURRENT_RATE_HZ, self.read_sail_current)
+            
+            # Low-frequency timer for battery safety sensors (30 second interval)
+            self.battery_safety_timer = self.create_timer(
+                BATTERY_SAFETY_INTERVAL_S, self.read_battery_safety_sensors)
+            
             self.get_logger().info(
-                f'Battery/Water node initialized and reading at {SAMPLE_RATE_HZ} Hz.')
+                f'Battery/Water node initialized - Sail current: {SAIL_CURRENT_RATE_HZ}Hz, '
+                f'Battery safety: {BATTERY_SAFETY_INTERVAL_S}s intervals')
 
             # Publish initial health status as healthy
             self._publish_health_status(True)
@@ -717,9 +725,11 @@ class BatteryWaterNode(Node):
         self.get_logger().fatal("Node shutting down due to critical sensor failure")
         # Publish health status as failed
         self._publish_health_status(False)
-        # Cancel timer to stop further execution
-        if hasattr(self, 'timer'):
-            self.timer.cancel()
+        # Cancel timers to stop further execution
+        if hasattr(self, 'sail_current_timer'):
+            self.sail_current_timer.cancel()
+        if hasattr(self, 'battery_safety_timer'):
+            self.battery_safety_timer.cancel()
 
     def _has_significant_change(self, current_value, previous_value, threshold_pct=THRESHOLD_CHANGE_PCT):
         """Check if current value has changed by more than threshold_pct from previous value"""
@@ -734,308 +744,215 @@ class BatteryWaterNode(Node):
                          previous_value) * 100.0
         return change_pct >= threshold_pct
 
-    # ---------- Main read/publish ----------
-    def read_and_publish(self):
-        # Check if shutdown was requested due to sensor failures
+    # ---------- High-frequency sail current reading (10Hz) ----------
+    def read_sail_current(self):
+        """High-frequency reading of sail current for control purposes (10Hz)"""
         if self._shutdown_requested:
-            self.get_logger().fatal("Shutting down due to critical sensor failure")
-            try:
-                if hasattr(self, '_teardown_ascii_vis'):
-                    self._teardown_ascii_vis()
-            except Exception:
-                pass
+            return
+            
+        try:
+            # Read only sail current channel (AIN2) - minimal I2C overhead
+            raw2 = self._read_adc_channel_avg(2, repeats=4, settle_delay_s=0.0005)  # Faster for 10Hz
+            sail_current = raw2 * self.lsb_value
+            
+            self._latest_sail_current = sail_current
+            
+            if rclpy.ok():
+                try:
+                    self.pub_sail_current.publish(Float32(data=sail_current))
+                except Exception:
+                    pass  # Ignore publish errors during shutdown
+                    
+            self._prev_sail_current = sail_current
+            
+        except Exception as e:
+            self.get_logger().debug(f'Sail current read failed: {e}')
+
+    # ---------- Low-frequency battery safety sensors (30s) ----------
+    def read_battery_safety_sensors(self):
+        """Low-frequency reading of battery, saltwater, temperature, humidity (30s interval)"""
+        if self._shutdown_requested:
             return
 
         current_time = time.monotonic()
-        time_since_startup = current_time - self._startup_time
-        time_since_last_publish = current_time - self._last_publish_time
-        time_since_last_log = current_time - self._last_log_time
-
-        # ADC averages with proper I2C failure handling
+        
+        # ADC averages for battery and saltwater
         try:
             raw0 = self._read_adc_channel_avg(0)
             raw1 = self._read_adc_channel_avg(1)
-            raw2 = self._read_adc_channel_avg(2)
-            raw3 = self._read_adc_channel_avg(3)  # diagnostic only
 
             battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
             saltwater_voltage = raw1 * self.lsb_value
-            sail_current = raw2 * self.lsb_value
 
-            # Store latest values for service
             self._latest_battery_voltage = battery_voltage
             self._latest_saltwater_voltage = saltwater_voltage
-            self._latest_sail_current = sail_current
             
         except Exception as e:
-            # CRITICAL: I2C failure should NOT trigger battery halt!
-            # Use throttled logging for I2C errors
             current_time = time.monotonic()
             if current_time - self._last_i2c_error_log_time >= self._i2c_error_log_interval:
                 self.get_logger().error(f"I2C sensor read failed: {e}")
-                # Log to dmesg as well
                 import subprocess
                 try:
                     subprocess.run(['echo', f'ARGO I2C ERROR: Battery sensor read failed - {str(e)[:100]}'], 
                                  stdout=open('/dev/kmsg', 'w'), stderr=subprocess.DEVNULL, timeout=1)
                 except Exception:
-                    pass  # Ignore dmesg logging failures
+                    pass
                 self._last_i2c_error_log_time = current_time
             
-            # Use last known values instead of 0 (which would trigger false critical battery)
-            # Only update if we have previous values
             if self._latest_battery_voltage > 0:
-                if current_time - self._last_i2c_error_log_time < self._i2c_error_log_interval:
-                    # Only log this once per interval
-                    pass
-                else:
+                if not (current_time - self._last_i2c_error_log_time < self._i2c_error_log_interval):
                     self.get_logger().warn(f"Using last known battery voltage: {self._latest_battery_voltage:.3f}V")
             else:
-                # If no previous values, use a safe default above critical threshold
-                if current_time - self._last_i2c_error_log_time < self._i2c_error_log_interval:
-                    # Only log this once per interval
-                    pass
-                else:
+                if not (current_time - self._last_i2c_error_log_time < self._i2c_error_log_interval):
                     self.get_logger().error("No previous battery readings available - using safe default 8.0V")
-                    self._latest_battery_voltage = 8.0  # Safe default above 6.5V critical threshold
-                    self._latest_saltwater_voltage = 0.0
-                    self._latest_sail_current = 0.0
-            
-            # Don't process further sensor data this cycle
-            return
-
-        # Calculate battery remaining percentage (per-cell formula)
-        battery_remaining_pct = None
-        try:
-            cells = max(1, int(self.batt_series_cells))
-            v_cell = battery_voltage / \
-                float(cells) if cells > 0 else battery_voltage
-            # soc% = S - S / (1 + (v / V0)^A)^B
-            base = 1.0 + (max(0.0, v_cell) /
-                          max(1e-9, self.soc_V0)) ** self.soc_A
-            soc = self.soc_S - (self.soc_S / (base ** self.soc_B))
-            # Clamp 0..100
-            if soc < 0.0:
-                soc = 0.0
-            if soc > 100.0:
-                soc = 100.0
-            battery_remaining_pct = float(soc)
-        except Exception:
-            pass
-
-        # Store battery remaining percentage for service
-        self._latest_battery_remaining_pct = battery_remaining_pct
+                    self._latest_battery_voltage = 8.0
+            battery_voltage = self._latest_battery_voltage
+            saltwater_voltage = self._latest_saltwater_voltage if self._latest_saltwater_voltage is not None else 0.0
 
         # SHT45
         temperature, humidity = self._read_sht45()
-
-        # Store temperature and humidity for service
         self._latest_temperature = temperature
         self._latest_humidity = humidity
 
-        # Read GPIO status from MP2672GD charger
-        charging_status, ac_power_present = self._read_gpio_status()
+        # Calculate battery remaining percentage
+        battery_remaining_pct = None
+        try:
+            cells = max(1, int(self.batt_series_cells))
+            v_cell = battery_voltage / float(cells) if cells > 0 else battery_voltage
+            base = 1.0 + (max(0.0, v_cell) / max(1e-9, self.soc_V0)) ** self.soc_A
+            soc = self.soc_S - (self.soc_S / (base ** self.soc_B))
+            battery_remaining_pct = float(max(0.0, min(100.0, soc)))
+        except Exception:
+            pass
+        self._latest_battery_remaining_pct = battery_remaining_pct
 
-        # Store GPIO status for service
+        # Read GPIO status
+        charging_status, ac_power_present = self._read_gpio_status()
         self._latest_charging_status = charging_status
         self._latest_ac_power_present = ac_power_present
 
-        # Determine if we should publish values
-        should_publish = False
-
-        # Debug mode: always publish every cycle
-        if self.debug_mode:
-            should_publish = True
-            if time_since_last_log >= 5.0:
-                # Build sensor state message
-                battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
-                temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
-                
-                # Build charging status message
-                charging_str = ""
-                if charging_status is not None and ac_power_present is not None:
-                    charging_icon = "🔌" if charging_status else "🔋"
-                    ac_icon = "⚡" if ac_power_present else "🔌"
-                    charging_str = f", Charging={charging_icon}{charging_status}, AC={ac_icon}{ac_power_present}"
-                elif charging_status is not None:
-                    charging_icon = "🔌" if charging_status else "🔋"
-                    charging_str = f", Charging={charging_icon}{charging_status}"
-                elif ac_power_present is not None:
-                    ac_icon = "⚡" if ac_power_present else "🔌"
-                    charging_str = f", AC={ac_icon}{ac_power_present}"
-
-                self.get_logger().info(
-                    f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
-                    f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
-                    f"{temp_humid_str}{charging_str}"
-                )
-                self._last_log_time = current_time
-        # First 30 seconds: publish every cycle (1Hz) and log every 5s
-        elif time_since_startup <= 30.0:
-            should_publish = True
-            if time_since_last_log >= 5.0:
-                # Build sensor state message
-                battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
-                temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
-                
-                # Build charging status message
-                charging_str = ""
-                if charging_status is not None and ac_power_present is not None:
-                    charging_icon = "🔌" if charging_status else "🔋"
-                    ac_icon = "⚡" if ac_power_present else "🔌"
-                    charging_str = f", Charging={charging_icon}{charging_status}, AC={ac_icon}{ac_power_present}"
-                elif charging_status is not None:
-                    charging_icon = "🔌" if charging_status else "🔋"
-                    charging_str = f", Charging={charging_icon}{charging_status}"
-                elif ac_power_present is not None:
-                    ac_icon = "⚡" if ac_power_present else "🔌"
-                    charging_str = f", AC={ac_icon}{ac_power_present}"
-
-                self.get_logger().info(
-                    f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
-                    f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
-                    f"{temp_humid_str}{charging_str}"
-                )
-                self._last_log_time = current_time
-        else:
-            # After 30s: publish only if significant change (>0.1%) or 60s elapsed
-            significant_change = (
-                self._has_significant_change(battery_voltage, self._prev_battery_voltage) or
-                self._has_significant_change(saltwater_voltage, self._prev_saltwater_voltage) or
-                self._has_significant_change(sail_current, self._prev_sail_current) or
-                self._has_significant_change(temperature, self._prev_temperature) or
-                self._has_significant_change(humidity, self._prev_humidity) or
-                self._has_significant_change(
-                    battery_remaining_pct, self._prev_battery_remaining_pct)
-            )
-
-            if significant_change or time_since_last_publish >= 60.0:
-                should_publish = True
-
-        # Publish values if conditions are met and ROS context is valid
-        if should_publish and rclpy.ok():
+        # Publish all battery safety sensors
+        if rclpy.ok():
             try:
                 self.pub_battery_voltage.publish(Float32(data=battery_voltage))
-                self.pub_saltwater_voltage.publish(
-                    Float32(data=saltwater_voltage))
-                self.pub_sail_current.publish(Float32(data=sail_current))
-
+                self.pub_saltwater_voltage.publish(Float32(data=saltwater_voltage))
                 if battery_remaining_pct is not None:
-                    self.pub_battery_remaining_pct.publish(
-                        Float32(data=battery_remaining_pct))
-
-                # Publish health status as healthy
-                self._publish_health_status(True)
-            except Exception as e:
-                # Silently ignore publish errors during shutdown
-                pass
-
-            try:
+                    self.pub_battery_remaining_pct.publish(Float32(data=battery_remaining_pct))
                 if temperature is not None:
                     self.pub_temperature.publish(Float32(data=temperature))
                 if humidity is not None:
                     self.pub_humidity.publish(Float32(data=humidity))
-            except Exception as e:
-                # Silently ignore publish errors during shutdown
+                self._publish_health_status(True)
+            except Exception:
                 pass
 
-            # Publish GPIO status (always publish on change or startup)
+        # Publish GPIO status on change
+        if rclpy.ok():
             try:
-                # Publish charging status if changed or first time
                 if charging_status is not None and charging_status != self._prev_charging_status:
                     self.pub_charging_status.publish(Bool(data=charging_status))
-                    if self._prev_charging_status is not None:  # Don't log on first startup
+                    if self._prev_charging_status is not None:
                         self.get_logger().info(f"Charging status changed: {charging_status}")
-                
-                # Publish AC power status if changed or first time
                 if ac_power_present is not None and ac_power_present != self._prev_ac_power_present:
                     self.pub_ac_power_present.publish(Bool(data=ac_power_present))
-                    if self._prev_ac_power_present is not None:  # Don't log on first startup
+                    if self._prev_ac_power_present is not None:
                         self.get_logger().info(f"AC power status changed: {ac_power_present}")
-            except Exception as e:
-                # Silently ignore publish errors during shutdown
+            except Exception:
                 pass
 
-            # Update previous values and timestamp
-            self._prev_battery_voltage = battery_voltage
-            self._prev_saltwater_voltage = saltwater_voltage
-            self._prev_sail_current = sail_current
-            self._prev_temperature = temperature
-            self._prev_humidity = humidity
-            self._prev_battery_remaining_pct = battery_remaining_pct
-            self._prev_charging_status = charging_status
-            self._prev_ac_power_present = ac_power_present
-            self._last_publish_time = current_time
+        # Update previous values
+        self._prev_battery_voltage = battery_voltage
+        self._prev_saltwater_voltage = saltwater_voltage
+        self._prev_temperature = temperature
+        self._prev_humidity = humidity
+        self._prev_battery_remaining_pct = battery_remaining_pct
+        self._prev_charging_status = charging_status
+        self._prev_ac_power_present = ac_power_present
 
-        # Alerts (always published regardless of sensor data publishing logic)
-        try:
-            # Battery low with 50 mV hysteresis
-            lower = self.batt_low_threshold_v
-            upper = lower + self.batt_low_hysteresis_v
-            if self._batt_low_prev:
-                batt_low = not (battery_voltage >= upper)
-            else:
-                batt_low = (battery_voltage <= lower)
-            salt_alert = saltwater_voltage >= self.saltwater_alert_threshold_v
-            humid_alert = (humidity is not None) and (
-                humidity >= self.humidity_alert_threshold_pct)
+        self._process_alerts(battery_voltage, saltwater_voltage, humidity)
+        
+        self._log_sensor_states(battery_voltage, battery_remaining_pct, saltwater_voltage, self._latest_sail_current, temperature, humidity, charging_status, ac_power_present)
 
-            # Always publish alerts if ROS context is valid (not subject to optimization)
-            if rclpy.ok():
-                try:
-                    self.pub_battery_low_alert.publish(
-                        Bool(data=bool(batt_low)))
-                    self.pub_saltwater_alert.publish(
-                        Bool(data=bool(salt_alert)))
-                    self.pub_humidity_alert.publish(
-                        Bool(data=bool(humid_alert)))
-                except Exception as e:
-                    # Silently ignore publish errors during shutdown
-                    pass
-            # Edge-triggered warnings
-            if batt_low and not self._batt_low_prev:
-                self.get_logger().warning(
-                    f"Battery low alert: {battery_voltage:.2f} V <= threshold {lower:.2f} V"
-                )
-            if (not batt_low) and self._batt_low_prev and (battery_voltage >= upper):
-                self.get_logger().info(
-                    f"Battery voltage OK: {battery_voltage:.2f} V >= release {upper:.2f} V"
-                )
-            if salt_alert and not self._salt_alert_prev:
-                self.get_logger().warning(
-                    f"Saltwater alert: {saltwater_voltage:.3f} V >= threshold {self.saltwater_alert_threshold_v:.3f} V"
-                )
-            if humid_alert and not self._humid_alert_prev:
-                self.get_logger().warning(
-                    f"Humidity alert: {humidity:.1f}% >= threshold {self.humidity_alert_threshold_pct:.1f}%"
-                )
-            # Update previous states
-            self._batt_low_prev = bool(batt_low)
-            self._salt_alert_prev = bool(salt_alert)
-            self._humid_alert_prev = bool(humid_alert)
+        self._update_bars(battery_voltage, saltwater_voltage, self._latest_sail_current, temperature, humidity)
 
-            # Store latest alert status for service
-            self._latest_battery_low_alert = bool(batt_low)
-            self._latest_saltwater_alert = bool(salt_alert)
-            self._latest_humidity_alert = bool(humid_alert)
-        except Exception:
-            pass
-
-        # Update ASCII bars if enabled
-        self._update_bars(battery_voltage, saltwater_voltage,
-                          sail_current, temperature, humidity)
-
-        # Log to CSV every csv_log_interval seconds
         if current_time - self._last_csv_log_time >= self.csv_log_interval:
             self._log_to_csv(
                 battery_voltage, battery_remaining_pct, saltwater_voltage,
-                sail_current, temperature, humidity,
+                self._latest_sail_current, temperature, humidity,
                 self._latest_battery_low_alert, self._latest_saltwater_alert,
                 self._latest_humidity_alert, self.health_status,
                 charging_status, ac_power_present
             )
             self._last_csv_log_time = current_time
 
+    def _process_alerts(self, battery_voltage, saltwater_voltage, humidity):
+        """Process and publish alert states"""
+        try:
+            lower = self.batt_low_threshold_v
+            upper = lower + self.batt_low_hysteresis_v
+            if self._batt_low_prev:
+                batt_low = not (battery_voltage >= upper)
+            else:
+                batt_low = (battery_voltage <= lower)
+            
+            salt_alert = saltwater_voltage >= self.saltwater_alert_threshold_v
+            humid_alert = (humidity is not None) and (humidity >= self.humidity_alert_threshold_pct)
+
+            if rclpy.ok():
+                try:
+                    self.pub_battery_low_alert.publish(Bool(data=bool(batt_low)))
+                    self.pub_saltwater_alert.publish(Bool(data=bool(salt_alert)))
+                    self.pub_humidity_alert.publish(Bool(data=bool(humid_alert)))
+                except Exception:
+                    pass
+
+            if batt_low and not self._batt_low_prev:
+                self.get_logger().warning(f"Battery low alert: {battery_voltage:.2f} V <= threshold {lower:.2f} V")
+            if (not batt_low) and self._batt_low_prev and (battery_voltage >= upper):
+                self.get_logger().info(f"Battery voltage OK: {battery_voltage:.2f} V >= release {upper:.2f} V")
+            if salt_alert and not self._salt_alert_prev:
+                self.get_logger().warning(f"Saltwater alert: {saltwater_voltage:.3f} V >= threshold {self.saltwater_alert_threshold_v:.3f} V")
+            if humid_alert and not self._humid_alert_prev:
+                self.get_logger().warning(f"Humidity alert: {humidity:.1f}% >= threshold {self.humidity_alert_threshold_pct:.1f}%")
+
+            self._batt_low_prev = bool(batt_low)
+            self._salt_alert_prev = bool(salt_alert)
+            self._humid_alert_prev = bool(humid_alert)
+
+            self._latest_battery_low_alert = bool(batt_low)
+            self._latest_saltwater_alert = bool(salt_alert)
+            self._latest_humidity_alert = bool(humid_alert)
+        except Exception:
+            pass
+
+    def _log_sensor_states(self, battery_voltage, battery_remaining_pct, saltwater_voltage,
+                          sail_current, temperature, humidity, charging_status, ac_power_present):
+        """Log sensor states for debugging"""
+        current_time = time.monotonic()
+        time_since_last_log = current_time - self._last_log_time
+        
+        if time_since_last_log >= 30.0:
+            battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
+            temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
+            
+            charging_str = ""
+            if charging_status is not None and ac_power_present is not None:
+                charging_icon = "🔌" if charging_status else "🔋"
+                ac_icon = "⚡" if ac_power_present else "🔌"
+                charging_str = f", Charging={charging_icon}{charging_status}, AC={ac_icon}{ac_power_present}"
+            elif charging_status is not None:
+                charging_icon = "🔌" if charging_status else "🔋"
+                charging_str = f", Charging={charging_icon}{charging_status}"
+            elif ac_power_present is not None:
+                ac_icon = "⚡" if ac_power_present else "🔌"
+                charging_str = f", AC={ac_icon}{ac_power_present}"
+
+            self.get_logger().info(
+                f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
+                f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
+                f"{temp_humid_str}{charging_str}"
+            )
+            self._last_log_time = current_time
 
 def main(args=None):
     # Parse command line arguments

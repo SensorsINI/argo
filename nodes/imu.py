@@ -45,8 +45,9 @@ Command Line Options:
 --calib_compass      Run magnetometer calibration mode (interactive)
                      - Rotate device through all orientations
                      - Press Ctrl+C to finish and save calibration
-                     - Saves calibration to invensense-20948-compass-calibration.json
-                     - Automatically saves timestamped samples to /tmp for plotting
+                     - Saves calibration to nodes/invensense-20948-compass-calibration.json
+                     - Backs up old calibration to nodes/imu_calib_backups/
+                     - Saves timestamped samples to /tmp for plotting
                      - Generates calibration plot PNG in /tmp
 --plot_calib         Plot the most recent calibration data from /tmp
                      - Loads the latest calibration samples
@@ -335,6 +336,11 @@ class ImuNode(Node):
         elif not self.debug:
             self.get_logger().info("Run with --debug to see sensor values being published.")
 
+        # Define calibration file paths (in nodes/ directory)
+        self._script_dir = os.path.dirname(os.path.abspath(__file__))
+        self._calib_file = os.path.join(self._script_dir, 'invensense-20948-compass-calibration.json')
+        self._backup_dir = os.path.join(self._script_dir, 'imu_calib_backups')
+
         # I2C setup
         # OrangePi uses bus 0 (confirmed by RTIMULib defaults)
         self.i2c_bus_num = 0
@@ -364,10 +370,10 @@ class ImuNode(Node):
         # Load compass calibration if available
         self._compass_cal = None
         try:
-            with open('invensense-20948-compass-calibration.json', 'r') as f:
+            with open(self._calib_file, 'r') as f:
                 self._compass_cal = json.load(f)
                 self.get_logger().info(
-                    'Loaded compass calibration from invensense-20948-compass-calibration.json')
+                    f'Loaded compass calibration from nodes/{os.path.basename(self._calib_file)}')
                 # Print calibration values for verification
                 if isinstance(self._compass_cal, dict):
                     if 'bias_uT' in self._compass_cal:
@@ -1152,8 +1158,9 @@ def main(args=None):
                 file_date = datetime.fromtimestamp(
                     file_mtime).strftime('%Y%m%d_%H%M%S')
 
-                # Create backup directory if it doesn't exist
-                backup_dir = 'imu_calib_backups'
+                # Create backup directory in nodes/ if it doesn't exist
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                backup_dir = os.path.join(script_dir, 'imu_calib_backups')
                 os.makedirs(backup_dir, exist_ok=True)
 
                 # Create backup filename with datestamp
@@ -1188,14 +1195,16 @@ def main(args=None):
             except Exception as e:
                 print(f"Warning: Failed to generate plot: {e}")
 
-            if _prompt_yes_no("Save calibration to invensense-20948-compass-calibration.json?", default_yes=True):
+            # Define calibration file path in nodes/ directory
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            calib_file = os.path.join(script_dir, 'invensense-20948-compass-calibration.json')
+            
+            if _prompt_yes_no(f"Save calibration to nodes/{os.path.basename(calib_file)}?", default_yes=True):
                 # Backup existing calibration before saving new one
-                _backup_existing_calibration(
-                    'invensense-20948-compass-calibration.json')
-                with open('invensense-20948-compass-calibration.json', 'w') as f:
+                _backup_existing_calibration(calib_file)
+                with open(calib_file, 'w') as f:
                     json.dump(calib, f, indent=2)
-                print(
-                    "Saved compass calibration to invensense-20948-compass-calibration.json")
+                print(f"Saved compass calibration to nodes/{os.path.basename(calib_file)}")
             else:
                 print("Calibration discarded; file not saved.")
         except Exception as e:

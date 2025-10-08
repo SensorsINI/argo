@@ -97,7 +97,7 @@ nodes/power-test-pins.py
 nodes/ain3_decay_20250905_103931.png
 
 # IMU calibration backups
-imu_calib_backups/
+nodes/imu_calib_backups/
 
 # ROS2 build outputs
 build/

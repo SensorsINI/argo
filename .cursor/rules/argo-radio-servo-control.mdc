@@ -1,5 +1,5 @@
 ---
-alwaysApply: true
+alwaysApply: false
 description: "Argo radio and servo control system architecture and safety patterns"
 ---
 
