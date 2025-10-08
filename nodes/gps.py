@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # ROS2 version of gps.py
 
+# Import the shared pause service
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from toggle_pause_service import TogglePauseService
 import rclpy
 from rclpy.node import Node
@@ -17,10 +21,6 @@ import math
 from functools import reduce
 import pynmea2
 
-# Import the shared pause service
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
 
 class GpsNode(Node):

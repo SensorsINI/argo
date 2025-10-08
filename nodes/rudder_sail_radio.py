@@ -85,6 +85,11 @@ License: MIT
 Version: 3.2 - Enhanced control logging, fail-safe exit handling, and human control timeout constant
 """
 
+# Import the shared pause service
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+
 from toggle_pause_service import TogglePauseService
 import rclpy
 from rclpy.node import Node
@@ -102,11 +107,6 @@ import signal
 import tty
 import termios
 import select
-
-# Import the shared pause service
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
 # --- Hardware Configuration ---
 SYS_BASE_PATH = Path("/sys/kernel/argo_radio_servo")

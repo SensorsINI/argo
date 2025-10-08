@@ -20,6 +20,10 @@
 # - temperature_high_threshold_c (default 70.0 C), temperature_critical_threshold_c (default 85.0 C)
 # - temperature_hysteresis_c (default 2.0 C)
 
+import sys
+import os
+# Import the shared pause service
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from toggle_pause_service import TogglePauseService
 import rclpy
 from rclpy.node import Node
@@ -32,10 +36,6 @@ import os
 import glob
 from rclpy.executors import ExternalShutdownException
 
-# Import the shared pause service
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
 # constants for high and critical temperatures
 HIGH_TEMPERATURE_THRESHOLD_C = 85.0

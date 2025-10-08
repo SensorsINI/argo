@@ -73,6 +73,11 @@
 #   data: true when node is healthy, false when unhealthy or shutting down
 #   Published only on state changes, startup, and shutdown
 
+# Import the shared pause service
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+
 from collections import deque
 import math
 from rclpy.logging import LoggingSeverity
@@ -85,11 +90,6 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
 from std_msgs.msg import Bool
-
-# Import the shared pause service
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
 # I2C sensor addresses
 I2C_CTR = 0x21  # Center sensor (0° - front/back)

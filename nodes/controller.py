@@ -2,6 +2,11 @@
 # High-level autonomous controller for Argo sailboat
 # Subscribes to sensor data and publishes control commands to rudder_sail_radio.py
 
+import sys
+import os
+
+# Import the shared pause service
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from toggle_pause_service import TogglePauseService
 import psutil
 import threading
@@ -22,10 +27,6 @@ from std_msgs.msg import Bool, Float64, Float32
 from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
 
-# Import the shared pause service
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
 
 def signed_angle_difference_degrees(angle1_deg, angle2_deg):

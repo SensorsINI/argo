@@ -46,6 +46,10 @@ Usage Examples:
   python3 imu.py --calib_compass    # Calibrate magnetometer
 """
 
+# Import the shared pause service
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from datetime import datetime
 import json
 import argparse
@@ -60,10 +64,6 @@ import struct
 import time
 import math
 
-# Import the shared pause service
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
 
 def _to_int16(msb, lsb):
