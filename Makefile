@@ -172,19 +172,25 @@ install-argo-cli:
 
 install-python-deps:
 	@echo "Installing Python runtime dependencies..."
-	@echo "Installing packages from requirements-runtime.txt..."
-	pip3 install -r requirements-runtime.txt
+	@echo "Installing packages from requirements.txt..."
+	pip3 install -r requirements.txt
 	@echo "✅ Python dependencies installed successfully!"
 	@echo ""
-	@echo "Installed packages:"
+	@echo "Core packages installed:"
 	@echo "  - rclpy: ROS2 Python client library"
-	@echo "  - std-msgs, geometry-msgs: ROS2 message types"
+	@echo "  - std-msgs, geometry-msgs, diagnostic-msgs: ROS2 message types"
 	@echo "  - smbus2: I2C communication for sensors"
 	@echo "  - pyserial: Serial communication for GPS"
 	@echo "  - pynmea2: NMEA sentence parsing for GPS NavSatFix messages"
+	@echo "  - gpiod: Modern GPIO control for power management"
 	@echo "  - numpy: Numerical computations"
+	@echo "  - psutil: System monitoring"
 	@echo "  - PyYAML: Configuration file parsing"
-	@echo "  - matplotlib: Optional package (ADC testing plots)"
+	@echo ""
+	@echo "Optional packages (may fail gracefully if unavailable):"
+	@echo "  - matplotlib: Plotting for testing and analysis"
+	@echo "  - pandas: Data analysis for CSV files"
+	@echo "  - diagnostic-updater: ROS2 diagnostic system"
 
 install-hardware:
 	@echo "Installing PWM capture module and hardware configuration..."

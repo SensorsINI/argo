@@ -1,12 +1,66 @@
-# for host side, to install packages needed to interpret recorded bag files
-rospy # python 3.8 and older; https://github.com/rospypi/simple for windows without ROS, just to have packages to interpret messages
-pigpio
-numpy
-libnmea_navsat_driver
-functools
-smbus
-pathlib
+# Argo Autonomous Sailboat - Python Dependencies
+# ================================================
+# This file contains all Python package dependencies for the Argo system.
+# Some packages are optional and will be gracefully handled if not available.
 
-# Orange Pi hardware interface libraries (for onboard use)
-spidev  # SPI communication for LoRa SX1276/SX1278 module (nodes/lora.py)
-OPi.GPIO  # GPIO control for LoRa control pins (CS/RST/IRQ) and other GPIO operations (nodes/lora.py)
+# ==================== CORE ROS2 DEPENDENCIES ====================
+# Required for ROS2 nodes to function on Orange Pi Zero 2W
+rclpy                    # ROS2 Python client library (core dependency)
+std-msgs                 # ROS2 standard message types
+geometry-msgs            # ROS2 geometry message types (Vector3, Point, etc.)
+diagnostic-msgs          # ROS2 diagnostic message types
+sensor-msgs              # ROS2 sensor message types (NavSatFix for GPS)
+std-srvs                 # ROS2 standard service types (Trigger, Empty)
+visualization-msgs       # ROS2 visualization message types (Marker, MarkerArray)
+
+# ==================== HARDWARE COMMUNICATION ====================
+# I2C, Serial, GPIO, and other hardware interfaces
+smbus2                   # I2C communication for sensors (MAX11612, SHT45, ICM-20948)
+pyserial                 # Serial communication for GPS (u-blox NEO-M9N)
+pynmea2                  # NMEA sentence parsing for GPS NavSatFix messages
+gpiod                    # Modern GPIO control (libgpiod) for power management
+spidev                   # SPI communication for LoRa SX1276/SX1278 module
+OPi.GPIO                 # Orange Pi GPIO library (fallback/legacy support)
+
+# ==================== SCIENTIFIC COMPUTING ====================
+# Numerical computations and data processing
+numpy                    # Numerical computations for sensor data processing
+
+# ==================== CONFIGURATION & UTILITIES ====================
+# Configuration file parsing and path handling
+PyYAML                   # YAML configuration file parsing (control.py)
+
+# ==================== SYSTEM MONITORING ====================
+# Process and system resource monitoring
+psutil                   # System and process monitoring (lifecycle manager, controller)
+
+# ==================== OPTIONAL PACKAGES ====================
+# These packages are optional and gracefully handled if not available
+
+# Data visualization (for testing and analysis)
+matplotlib               # Plotting for ADC testing (battery_water.py --test-adc)
+pandas                   # Data analysis for CSV files and plotting scripts
+
+# ROS2 diagnostic system (optional, for advanced health monitoring)
+diagnostic-updater       # ROS2 diagnostic system for node health monitoring
+
+# GUI support (optional, for status GUI)
+# tkinter is usually built-in with Python, no pip install needed
+
+# ==================== DEVELOPMENT & ANALYSIS TOOLS ====================
+# Only needed for development, bag file analysis, and testing on host machines
+# (Not required for runtime on Orange Pi)
+
+# ROS1 bag file interpretation (host-side only)
+# rospy                  # ROS1 Python library (Python 3.8 and older)
+# bagpy                  # ROS bag file parser
+# pypref                 # Preference files
+# easygui                # Simple GUI dialogs
+
+# Legacy hardware libraries (for reference, prefer gpiod/smbus2)
+# pigpio                 # Legacy GPIO library (prefer gpiod)
+# smbus                  # Old I2C library (prefer smbus2)
+# libnmea_navsat_driver  # ROS1 NMEA driver (not needed for ROS2)
+
+# Additional analysis tools
+# gmplot                 # Google Maps plotting

@@ -237,7 +237,7 @@ cd argo
 ### 4. Install Python Dependencies
 ```bash
 # Install Python runtime dependencies
-make install-python-deps  # installs from requirements-runtime.txt
+make install-python-deps  # installs from requirements.txt
 
 # Install ROS2 dependencies (if not already installed)
 sudo apt install python3-rclpy python3-std-msgs python3-geometry-msgs

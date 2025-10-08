@@ -85,7 +85,7 @@ ssh $REMOTE_USER@$REMOTE_HOST "
     ls -la $REMOTE_ARGO_DIR/ 2>/dev/null || echo 'Argo directory not found'
     echo ''
     echo 'Requirements file:'
-    cat $REMOTE_ARGO_DIR/requirements-runtime.txt 2>/dev/null || echo 'No requirements file'
+    cat $REMOTE_ARGO_DIR/requirements.txt 2>/dev/null || echo 'No requirements file'
 "
 echo ""
 
