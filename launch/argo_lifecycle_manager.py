@@ -92,8 +92,8 @@ class ArgoLifecycleManager:
         # Initialize node manager for discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
 
-        # Discover expected nodes dynamically
-        discovered_nodes = self.node_manager.discover_nodes()
+        # Discover expected nodes dynamically (exclude simulation-only nodes for normal operation)
+        discovered_nodes = self.node_manager.discover_nodes(exclude_simulation_only=True)
 
         # Nodes to exclude (running as independent services)
         # - lora: LoRa hardware not installed yet
@@ -122,7 +122,7 @@ class ArgoLifecycleManager:
         self.all_expected_nodes = self.expected_nodes + self.special_nodes
 
         # Define critical nodes (essential for boat operation)
-        self.critical_nodes = ['pwm.py', 'control.py']
+        self.critical_nodes = ['pwm.py', 'controller.py']
 
         # Define nodes that should NOT be paused (critical for safety/monitoring)
         self.no_pause_nodes = ['battery_water.py', 'temp_monitor.py']
@@ -1664,7 +1664,7 @@ PAUSE TOGGLING:
     
   Pauseable Nodes:
     - pwm.py: Servo control
-    - control.py: Autonomous navigation
+    - controller.py: Autonomous navigation
     - gps.py: GPS navigation
     - imu.py: IMU/compass data
     - anem.py: Wind sensor
@@ -1679,7 +1679,7 @@ NODE MANAGEMENT:
   
   Critical Nodes (Essential for Operation):
     - pwm.py: Servo control for rudder and sail
-    - control.py: Autonomous navigation logic
+    - controller.py: Autonomous navigation logic
   
   Special Nodes:
     - foxglove_bridge: ROS2 package launched via 'ros2 run'
