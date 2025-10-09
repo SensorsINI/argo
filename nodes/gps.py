@@ -173,6 +173,81 @@ class GpsNode(Node):
         # Publish initial health status as healthy
         self._publish_health_status(True)
 
+        # Track pause state to manage power save transitions (PSMOO)
+        self._prev_paused = False
+
+    # --- UBX helpers for power save control (PSMOO via CFG-RXM) ---
+    def _ubx_checksum(self, payload: bytes) -> bytes:
+        ck_a = 0
+        ck_b = 0
+        for b in payload:
+            ck_a = (ck_a + b) & 0xFF
+            ck_b = (ck_b + ck_a) & 0xFF
+        return bytes([ck_a, ck_b])
+
+    def _send_ubx(self, ubx_class: int, ubx_id: int, payload: bytes, expect_ack: bool = True, timeout: float = 0.2) -> bool:
+        """Send a UBX message over the existing serial port. Optionally wait for ACK.
+
+        UBX frame: 0xB5 0x62 | class | id | length(LSB,MSB) | payload | CK_A | CK_B
+        """
+        if not (self.serial_port and self.serial_port.is_open):
+            return False
+        length = len(payload)
+        header = bytes([0xB5, 0x62, ubx_class & 0xFF, ubx_id & 0xFF, length & 0xFF, (length >> 8) & 0xFF])
+        ck = self._ubx_checksum(bytes([ubx_class & 0xFF, ubx_id & 0xFF, length & 0xFF, (length >> 8) & 0xFF]) + payload)
+        frame = header + payload + ck
+        try:
+            self.serial_port.write(frame)
+            if not expect_ack:
+                return True
+            # Simple ACK wait loop (reads a small number of bytes with short timeout)
+            original_timeout = self.serial_port.timeout
+            self.serial_port.timeout = timeout
+            resp = self.serial_port.read(32)
+            self.serial_port.timeout = original_timeout
+            # Look for UBX-ACK-ACK (class 0x05, id 0x01) matching our class/id
+            # ACK payload: clsID, msgID
+            for i in range(max(0, len(resp) - 10)):
+                if i + 10 <= len(resp) and resp[i:i+2] == b"\xB5\x62" and resp[i+2] == 0x05:
+                    if resp[i+3] in (0x01, 0x00):  # ACK-ACK or ACK-NAK
+                        # length should be 2
+                        if i+6 < len(resp) and resp[i+4] == 0x02 and resp[i+5] == 0x00:
+                            if i+8 < len(resp) and resp[i+6] == (ubx_class & 0xFF) and resp[i+7] == (ubx_id & 0xFF):
+                                return resp[i+3] == 0x01  # True if ACK-ACK
+            return False
+        except Exception as e:
+            self.get_logger().warn(f"UBX send failed: class=0x{ubx_class:02X} id=0x{ubx_id:02X}: {e}")
+            return False
+
+    def _cfg_rxm(self, lp_mode: int) -> bool:
+        """Send UBX-CFG-RXM to set low power (PSM) mode.
+
+        Payload (length=2): reserved1=0x00, lpMode={0=continuous,1=power save}
+        """
+        payload = bytes([0x00, 0x01 if lp_mode else 0x00])
+        ok = self._send_ubx(0x06, 0x11, payload, expect_ack=True)
+        if not ok:
+            self.get_logger().warn(f"UBX-CFG-RXM lpMode={lp_mode} not acknowledged")
+        else:
+            self.get_logger().info(f"Set GPS power mode via CFG-RXM lpMode={lp_mode}")
+        return ok
+
+    def _enter_power_save_mode(self) -> None:
+        """Enable GPS power save (PSMOO) on pause."""
+        try:
+            self._cfg_rxm(1)
+        except Exception as e:
+            self.get_logger().warn(f"Failed to enter GPS power save mode: {e}")
+
+    def _exit_pause_mode(self) -> None:
+        """Restore continuous tracking and NMEA output on unpause."""
+        try:
+            self._cfg_rxm(0)
+            # Re-ensure output configuration
+            self.enable_nmea_sentences()
+        except Exception as e:
+            self.get_logger().warn(f"Failed to restore GPS continuous mode: {e}")
+
     def _publish_health_status(self, is_healthy: bool):
         """Publish health status and update internal state"""
         if self.health_status != is_healthy:
@@ -641,9 +716,18 @@ class GpsNode(Node):
 
     def read_and_publish(self):
         """Reads data from the serial port and publishes it."""
-        # Check if node is paused
-        if self.pause_service.is_paused():
-            return  # Skip processing when paused
+        # Handle pause/unpause transitions
+        paused = self.pause_service.is_paused()
+        if paused != getattr(self, '_prev_paused', False):
+            if paused:
+                self._enter_power_save_mode()
+            else:
+                self._exit_pause_mode()
+            self._prev_paused = paused
+
+        # Skip processing while paused
+        if paused:
+            return
 
         # Check for GPS communication timeout
         current_time = time.time()
