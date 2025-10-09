@@ -2466,6 +2466,57 @@ class PowerController:
             logger.info("Proceeding with halt due to dialog error (safe default)")
             return False  # False = proceed with halt
 
+    def _pause_argo_system_for_power_conservation(self):
+        """Pause all sensor nodes to put hardware in low-power shutdown state
+        
+        This allows sensors (IMU, anemometer, LoRa) to enter hardware shutdown
+        mode before system halt to conserve remaining battery power.
+        
+        Critical nodes (battery_water, temp_monitor) are never paused.
+        """
+        try:
+            # Check if Argo service is running
+            if not self.argo_service_running:
+                logger.info("Argo service not running - skipping pause for power conservation")
+                return False
+            
+            logger.info("Pausing Argo system for power conservation...")
+            logger.info("Sensors will enter hardware shutdown state")
+            
+            # Call the lifecycle manager's toggle_pause service
+            cmd = [
+                'bash', '-c',
+                'source /opt/ros/humble/setup.bash && ros2 service call /toggle_pause std_srvs/srv/Trigger'
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10.0
+            )
+            
+            if result.returncode == 0:
+                # Check if pause was successful
+                if "success: True" in result.stdout or "success=True" in result.stdout:
+                    logger.info("✅ Argo system paused successfully for power conservation")
+                    logger.info("Sensors entering hardware shutdown state")
+                    return True
+                else:
+                    logger.warning("⚠️ Pause service call completed but may not have succeeded")
+                    logger.warning(f"Response: {result.stdout[:200]}")
+                    return False
+            else:
+                logger.error(f"❌ Failed to pause Argo system: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Pause service call timed out after 10 seconds")
+            return False
+        except Exception as e:
+            logger.error(f"Error pausing Argo system for power conservation: {e}")
+            return False
+
     def initiate_critical_battery_halt(self, battery_voltage):
         """Initiate critical battery halt sequence with timeout-based confirmation
         
@@ -2534,9 +2585,19 @@ class PowerController:
         # Stop battery monitoring to prevent repeated alerts
         self.battery_monitoring_active = False
 
+        # CRITICAL POWER CONSERVATION: Pause Argo system to put sensors in shutdown state
+        logger.critical("Pausing Argo system to conserve battery power...")
+        pause_success = self._pause_argo_system_for_power_conservation()
+        
+        if pause_success:
+            logger.info("Sensors paused - waiting 2 seconds for hardware shutdown...")
+            time.sleep(2)  # Give sensors time to enter hardware shutdown state
+        else:
+            logger.warning("Could not pause sensors - proceeding with halt anyway")
+
         # Brief delay to allow final notifications
-        logger.critical("Waiting 5 seconds for notifications to be delivered...")
-        time.sleep(5)
+        logger.critical("Waiting 3 seconds for final notifications...")
+        time.sleep(3)
         
         # Execute halt command (not shutdown - preserves power relay)
         if self.test_mode:
