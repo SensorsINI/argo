@@ -74,7 +74,6 @@
 # VERSION: 1.0
 # DATE: September 2024
 
-import gpiod
 import time
 import signal
 import sys
@@ -88,6 +87,14 @@ from datetime import datetime
 import select
 import tty
 import termios
+
+# Conditional GPIO import - required for production, optional for test mode
+try:
+    import gpiod
+    _HAS_GPIOD = True
+except ImportError:
+    gpiod = None
+    _HAS_GPIOD = False
 
 # ROS2 imports
 import rclpy
@@ -208,6 +215,18 @@ class PowerController:
         self.shutdown_initiated = False
         self.test_mode = test_mode
         self.gpio_available = False  # Will be set to True if GPIO initialization succeeds
+        
+        # CRITICAL: Verify gpiod is available in production mode
+        if not test_mode and not _HAS_GPIOD:
+            logger.critical("FATAL: gpiod library not available - required for production mode!")
+            logger.critical("This system CANNOT run safely without GPIO control.")
+            logger.critical("Install gpiod: sudo apt-get install python3-libgpiod")
+            logger.critical("If testing remotely, use --test-mode flag")
+            raise RuntimeError("gpiod library not available - cannot run in production mode without GPIO control")
+        
+        if test_mode and not _HAS_GPIOD:
+            logger.warning("TEST MODE: gpiod library not available - GPIO functionality will be simulated")
+            logger.warning("This is OK for remote testing, but NOT for production deployment!")
 
         # Button state tracking
         self.initial_button_state = None
@@ -276,6 +295,10 @@ class PowerController:
 
         # Initialize desktop user detection and caching
         self._detect_and_cache_desktop_user()
+
+        # Simple state tracking - initialize these early for test mode compatibility
+        self.recording_active = False
+        self.recording_service_available = False
 
         # Initialize GPIO first to read initial button state
         self.init_gpio()
@@ -405,6 +428,21 @@ class PowerController:
 
     def init_gpio(self):
         """Initialize GPIO pins"""
+        # Skip GPIO initialization if gpiod is not available in test mode
+        if not _HAS_GPIOD:
+            if self.test_mode:
+                logger.info("Skipping GPIO initialization - gpiod not available (test mode)")
+                self.gpio_available = False
+                # Set dummy values for test mode
+                self.chip = None
+                self.power_button_line = None
+                self.green_led_line = None
+                self.blue_led_line = None
+                return
+            else:
+                # Should never reach here due to check in __init__
+                raise RuntimeError("gpiod not available in production mode!")
+        
         try:
             logger.info(f"Attempting to open GPIO chip: {self.GPIO_CHIP}")
             self.chip = gpiod.Chip(self.GPIO_CHIP)
@@ -457,11 +495,6 @@ class PowerController:
                 raise
 
         # No ROS2 setup needed - using subprocess calls only
-
-        # Simple state tracking - initialize these early for test mode compatibility
-        self.recording_active = False
-        self.argo_service_running = False
-        self.recording_service_available = False
 
     def start_recording(self):
         """Start recording via ROS2 service using subprocess call"""
@@ -2079,6 +2112,17 @@ class PowerController:
         """Monitor battery voltage every 30 seconds for critical low voltage"""
         logger.info("Starting critical battery monitoring thread")
         self.battery_monitoring_active = True
+        
+        # Track consecutive failures for safety
+        consecutive_service_failures = 0
+        consecutive_invalid_readings = 0
+        MAX_CONSECUTIVE_FAILURES = 3  # 90 seconds of failures = assume critical
+        
+        # Startup grace period - don't count failures until battery service has been seen at least once
+        # This prevents false critical alerts if battery_water.service starts after power_control.service
+        battery_service_ever_available = False
+        startup_time = time.time()
+        STARTUP_GRACE_PERIOD_S = 60.0  # 60 seconds to wait for battery_water.service startup
 
         while self.running and self.battery_monitoring_active:
             try:
@@ -2088,23 +2132,57 @@ class PowerController:
                 # Call battery service to get voltage
                 battery_data = self._call_battery_service()
                 if battery_data:
+                    # Service call succeeded
+                    consecutive_service_failures = 0
+                    
+                    # Mark that we've seen the battery service available at least once
+                    if not battery_service_ever_available:
+                        battery_service_ever_available = True
+                        logger.info("Battery service is now available - critical battery monitoring active")
+                    
                     battery_voltage = battery_data.get('battery_voltage', 0)
+                    charging_status = battery_data.get('charging_status', None)
+                    ac_power_present = battery_data.get('ac_power_present', None)
                     
                     # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
-                    # Never halt on obviously invalid readings (0V, negative, or extremely low)
+                    # Track invalid readings - multiple consecutive invalids = critical
                     if battery_voltage <= 0 or battery_voltage < 3.0:
-                        logger.error(f"Invalid battery voltage reading: {battery_voltage:.3f}V - ignoring (likely I2C failure)")
-                        # Don't process this reading - it's clearly invalid
+                        consecutive_invalid_readings += 1
+                        logger.error(
+                            f"Invalid battery voltage reading: {battery_voltage:.3f}V "
+                            f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely I2C failure")
+                        
+                        # After multiple consecutive invalid readings, assume worst case
+                        if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
+                            logger.critical(
+                                f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings - "
+                                f"assuming CRITICAL BATTERY!")
+                            self.critical_battery_detected = True
+                            self.initiate_critical_battery_halt(battery_voltage)
                         continue
                     
+                    # Valid reading - reset invalid counter
+                    consecutive_invalid_readings = 0
+                    
+                    # Log battery status with charging information
+                    charging_str = ""
+                    if charging_status is not None or ac_power_present is not None:
+                        charging_parts = []
+                        if ac_power_present is not None:
+                            charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
+                        if charging_status is not None:
+                            charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
+                        charging_str = f", {', '.join(charging_parts)}"
+                    
                     logger.info(
-                        f"Battery voltage check: {battery_voltage:.3f}V (low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V)")
+                        f"Battery voltage check: {battery_voltage:.3f}V "
+                        f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
 
                     # Check for critical battery first (highest priority)
                     if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
                         if not self.critical_battery_detected:
                             logger.critical(
-                                f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V")
+                                f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
                             self.critical_battery_detected = True
                             # Stop SOS pattern if running (critical takes priority)
                             if self.sos_led_active:
@@ -2147,10 +2225,37 @@ class PowerController:
                             self.critical_battery_detected = False
                             self._clear_critical_battery_flag()
                 else:
-                    # Service unavailable - log at info level to see what's happening
-                    # This is expected when argo-launch.service is stopped
-                    logger.info(
-                        "Could not retrieve battery data - battery_water service may not be running")
+                    # Service unavailable - handle based on startup state
+                    time_since_startup = time.time() - startup_time
+                    
+                    if not battery_service_ever_available and time_since_startup < STARTUP_GRACE_PERIOD_S:
+                        # During startup grace period and service never seen - don't count failures yet
+                        logger.info(
+                            f"Battery service not available yet - waiting for battery_water.service startup "
+                            f"(grace period: {time_since_startup:.0f}s / {STARTUP_GRACE_PERIOD_S:.0f}s)")
+                    elif not battery_service_ever_available and time_since_startup >= STARTUP_GRACE_PERIOD_S:
+                        # Grace period expired but service never became available - critical error
+                        logger.critical(
+                            f"CRITICAL: Battery service never became available after {STARTUP_GRACE_PERIOD_S}s grace period!")
+                        logger.critical(
+                            "Check if battery_water.service is installed and enabled:")
+                        logger.critical("  sudo systemctl status battery_water.service")
+                        self.critical_battery_detected = True
+                        self.initiate_critical_battery_halt(0.0)
+                    else:
+                        # Service was available before but now failing - count consecutive failures
+                        consecutive_service_failures += 1
+                        logger.error(
+                            f"Battery service failure - service was available but now unreachable "
+                            f"(count: {consecutive_service_failures}/{MAX_CONSECUTIVE_FAILURES})")
+                        
+                        # After multiple consecutive service failures, assume critical battery
+                        if consecutive_service_failures >= MAX_CONSECUTIVE_FAILURES:
+                            logger.critical(
+                                f"CRITICAL: Battery service failed {consecutive_service_failures} times consecutively - "
+                                f"assuming CRITICAL BATTERY for safety!")
+                            self.critical_battery_detected = True
+                            self.initiate_critical_battery_halt(0.0)
 
                 self.last_battery_check_time = time.time()
 
@@ -2255,37 +2360,52 @@ class PowerController:
             return None
 
     def show_critical_battery_confirmation_dialog(self, battery_voltage):
-        """Show desktop confirmation dialog for critical battery shutdown"""
+        """Show desktop confirmation dialog for critical battery shutdown
+        
+        Returns:
+            True: User actively CANCELLED the halt (clicked Cancel button)
+            False: Proceed with halt (user clicked OK, or timeout occurred, or dialog failed)
+        
+        CRITICAL: Timeout or dialog failure = return False (proceed with halt for safety)
+        """
         try:
             # Try to show a zenity dialog first (most reliable on desktop)
             dialog_cmd = [
                 'zenity',
                 '--question',
                 '--title=CRITICAL BATTERY SHUTDOWN',
-                f'--text=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\nClick "Cancel" to abort shutdown.\nClick "OK" to proceed with immediate shutdown.',
+                f'--text=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\n⚠️ TIMEOUT = AUTOMATIC HALT (safe default)\n\nClick "Cancel" ONLY if you can plug in charger NOW.\nClick "Shutdown Now" to halt immediately.\nNo action = automatic halt after 30 seconds.',
                 '--ok-label=Shutdown Now',
-                '--cancel-label=Cancel Shutdown',
+                '--cancel-label=Cancel (I will plug in charger)',
                 '--timeout=30',
-                '--width=500',
-                '--height=300'
+                '--width=600',
+                '--height=350'
             ]
             
             logger.info("Showing critical battery confirmation dialog...")
             result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
             
             if result.returncode == 0:
+                # User clicked "Shutdown Now" - proceed with halt
                 logger.info("User confirmed critical battery shutdown")
-                return True
+                return False  # False = proceed with halt
             elif result.returncode == 1:
-                logger.info("User cancelled critical battery shutdown")
-                return False
+                # User clicked "Cancel Shutdown" - user intervention
+                logger.warning("User actively CANCELLED critical battery shutdown")
+                return True  # True = user cancelled, don't halt
+            elif result.returncode == 5:
+                # Dialog timeout (zenity returns 5 for timeout) - proceed with halt (SAFE DEFAULT)
+                logger.info("Critical battery dialog timed out - proceeding with halt (safe default)")
+                return False  # False = proceed with halt
             else:
-                logger.warning(f"Dialog returned unexpected code: {result.returncode}")
-                return True  # Default to shutdown if dialog fails
+                # Unexpected return code - default to shutdown for safety
+                logger.warning(f"Dialog returned unexpected code: {result.returncode} - defaulting to halt for safety")
+                return False  # False = proceed with halt
                 
         except subprocess.TimeoutExpired:
-            logger.info("Critical battery dialog timed out - proceeding with shutdown")
-            return True
+            # Subprocess timeout - proceed with halt (safe default)
+            logger.info("Critical battery dialog timed out - proceeding with halt (safe default)")
+            return False  # False = proceed with halt
         except FileNotFoundError:
             logger.warning("zenity not found - trying kdialog...")
             try:
@@ -2293,50 +2413,75 @@ class PowerController:
                 dialog_cmd = [
                     'kdialog',
                     '--title=CRITICAL BATTERY SHUTDOWN',
-                    '--yesno=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\nClick "No" to abort shutdown.\nClick "Yes" to proceed with immediate shutdown.',
+                    f'--yesno=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\nTIMEOUT = AUTOMATIC HALT (safe default)\n\nClick "No" ONLY if you can plug in charger NOW.\nClick "Yes" to halt immediately.\nNo action = automatic halt after 30 seconds.',
                     '--yes-label=Shutdown Now',
-                    '--no-label=Cancel Shutdown'
+                    '--no-label=Cancel (I will plug in charger)'
                 ]
                 
                 result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
                 
                 if result.returncode == 0:
+                    # User clicked "Yes" / "Shutdown Now"
                     logger.info("User confirmed critical battery shutdown (kdialog)")
-                    return True
+                    return False  # False = proceed with halt
                 else:
-                    logger.info("User cancelled critical battery shutdown (kdialog)")
-                    return False
+                    # User clicked "No" / "Cancel" or timeout
+                    if result.returncode == 1:
+                        logger.warning("User actively CANCELLED critical battery shutdown (kdialog)")
+                        return True  # True = user cancelled
+                    else:
+                        # Timeout or error - default to halt for safety
+                        logger.info("kdialog timeout or error - proceeding with halt (safe default)")
+                        return False  # False = proceed with halt
                     
             except (FileNotFoundError, subprocess.TimeoutExpired):
-                logger.warning("kdialog also not available or timed out - trying simple yad...")
+                logger.warning("kdialog also not available or timed out - trying yad...")
                 try:
                     # Fallback to yad (Yet Another Dialog)
                     dialog_cmd = [
                         'yad',
                         '--title=CRITICAL BATTERY SHUTDOWN',
-                        '--text=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.',
+                        f'--text=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\nTIMEOUT = AUTOMATIC HALT (safe default)\n\nClick "Cancel" ONLY if you can plug in charger NOW.\nNo action = automatic halt after 30 seconds.',
                         '--button=Shutdown Now:0',
-                        '--button=Cancel Shutdown:1',
+                        '--button=Cancel (I will plug in charger):1',
                         '--timeout=30',
-                        '--width=500',
-                        '--height=300'
+                        '--width=600',
+                        '--height=350'
                     ]
                     
                     result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
-                    return result.returncode == 0
+                    if result.returncode == 0:
+                        return False  # Proceed with halt
+                    elif result.returncode == 1:
+                        logger.warning("User actively CANCELLED via yad")
+                        return True  # User cancelled
+                    else:
+                        return False  # Timeout or error = proceed with halt
                     
                 except (FileNotFoundError, subprocess.TimeoutExpired):
-                    logger.warning("No dialog tools available - proceeding with shutdown after pause")
-                    return True
+                    logger.warning("No dialog tools available - proceeding with halt (safe default)")
+                    return False  # False = proceed with halt
         except Exception as e:
             logger.error(f"Error showing critical battery dialog: {e}")
-            logger.info("Proceeding with shutdown after pause due to dialog error")
-            return True
+            logger.info("Proceeding with halt due to dialog error (safe default)")
+            return False  # False = proceed with halt
 
     def initiate_critical_battery_halt(self, battery_voltage):
-        """Initiate critical battery halt sequence with confirmation dialog"""
+        """Initiate critical battery halt sequence with timeout-based confirmation
+        
+        Shows a confirmation dialog with 30-second timeout:
+        - If user clicks "Cancel": Halt is cancelled (allows intervention)
+        - If user clicks "Shutdown Now": Immediate halt
+        - If timeout (30s, no user action): Automatic halt proceeds (SAFE DEFAULT)
+        
+        This provides:
+        - Autonomous safety: Timeout = halt proceeds (not cancelled)
+        - Developer control: Active cancellation stops halt if user intervenes
+        """
         logger.critical(
             f"CRITICAL BATTERY HALT: {battery_voltage:.3f}V - System will halt to preserve power")
+        logger.critical(
+            "Showing confirmation dialog - timeout (no action) will proceed with halt")
 
         # Set critical battery flag for shutdown hook
         self._set_critical_battery_flag()
@@ -2344,51 +2489,65 @@ class PowerController:
         # Send critical notification
         self.send_desktop_notification(
             "CRITICAL BATTERY",
-            f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will halt in 30 seconds to preserve power for manual sailing",
+            f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will halt in 30 seconds unless cancelled\nTimeout = automatic halt (safe default)",
             "critical",
-            30000  # 30 second timeout for notification
+            30000  # 30 second timeout
         )
 
         # Broadcast wall message
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"CRITICAL BATTERY: {battery_voltage:.3f}V at {timestamp}\nSystem will halt in 30 seconds to preserve power for manual sailing via radio control"
+            message = f"CRITICAL BATTERY: {battery_voltage:.3f}V at {timestamp}\nSystem will halt in 30 seconds unless actively cancelled\nTimeout = automatic halt for safety"
             subprocess.run(['wall', message], check=True,
                            timeout=WALL_MESSAGE_TIMEOUT_S)
             logger.info("Critical battery wall message broadcasted")
         except Exception as e:
             logger.error(f"Failed to broadcast critical battery message: {e}")
 
-        # Show confirmation dialog and wait for user response
-        logger.info("Showing critical battery confirmation dialog...")
-        should_shutdown = self.show_critical_battery_confirmation_dialog(battery_voltage)
+        # Show confirmation dialog with safe defaults
+        # CRITICAL: Timeout or "Shutdown Now" = proceed with halt
+        # Only "Cancel" button stops the halt
+        logger.info("Showing critical battery confirmation dialog (timeout = halt proceeds)...")
+        user_cancelled = self.show_critical_battery_confirmation_dialog(battery_voltage)
         
-        if not should_shutdown:
-            logger.info("Critical battery shutdown cancelled by user")
+        if user_cancelled:
+            # User ACTIVELY cancelled the halt
+            logger.warning("Critical battery halt CANCELLED by user intervention")
+            logger.warning("User has taken responsibility - they must plug in charger or take action!")
             # Clear the critical battery flag since we're not shutting down
             self._clear_critical_battery_flag()
             # Send cancellation notification
             self.send_desktop_notification(
-                "SHUTDOWN CANCELLED",
-                "Critical battery shutdown was cancelled by user",
-                "normal",
-                5000
+                "HALT CANCELLED BY USER",
+                f"Critical battery halt was cancelled by user\nBattery: {battery_voltage:.3f}V - PLUG IN CHARGER NOW!",
+                "critical",
+                0  # Stays visible
             )
             return  # Exit without shutting down
 
+        # If we reach here, either:
+        # 1. User clicked "Shutdown Now" (proceed immediately)
+        # 2. Dialog timed out (proceed automatically - SAFE DEFAULT)
+        logger.critical("Proceeding with critical battery halt")
+        logger.critical("Either user confirmed OR timeout occurred (automatic halt for safety)")
+        
         # Stop battery monitoring to prevent repeated alerts
         self.battery_monitoring_active = False
 
+        # Brief delay to allow final notifications
+        logger.critical("Waiting 5 seconds for notifications to be delivered...")
+        time.sleep(5)
+        
         # Execute halt command (not shutdown - preserves power relay)
         if self.test_mode:
             logger.info(
                 "TEST MODE: Would execute 'sudo halt' command for critical battery")
-            logger.info("TEST MODE: Critical battery halt sequence completed")
+            logger.info("TEST MODE: Critical battery halt sequence completed - system would halt NOW")
         else:
             logger.critical(
-                "Executing halt command for critical battery preservation")
+                "Executing halt command NOW for critical battery preservation")
             subprocess.run(['sudo', 'halt'], check=True)
-            logger.critical("Halt command executed - system should halt now")
+            logger.critical("Halt command executed - system should halt immediately")
 
     def _set_critical_battery_flag(self):
         """Set critical battery flag file for shutdown hook"""
@@ -2802,8 +2961,10 @@ def main():
         sys.exit(0)
 
     # Check if user is in the gpio group (required for GPIO access)
-    # Skip this check if running as root (systemd service)
-    if os.geteuid() != 0:
+    # Skip this check if:
+    #  - Running as root (systemd service)
+    #  - Running in test mode without gpiod (remote testing)
+    if os.geteuid() != 0 and not (args.test_mode and not _HAS_GPIOD):
         import grp
         try:
             gpio_group = grp.getgrnam('gpio')
@@ -2817,8 +2978,10 @@ def main():
             print("Error: GPIO group not found")
             print("Please ensure the 'gpio' group exists and you are a member")
             sys.exit(1)
-    else:
+    elif os.geteuid() == 0:
         print("Running as root - skipping GPIO group check")
+    elif args.test_mode and not _HAS_GPIOD:
+        print("TEST MODE: Skipping GPIO group check (gpiod not available - safe for remote testing)")
 
     # Validate threshold
     if args.threshold <= 0:

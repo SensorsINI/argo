@@ -1,8 +1,8 @@
 [Unit]
 Description=Argo Power Control System
 Documentation=file://%h/argo/launch/ARGO_POWER_CONTROL_README.md
-After=basic.target sysinit.target argo_poweron.service
-Wants=basic.target
+After=basic.target sysinit.target argo_poweron.service battery_water.service
+Wants=basic.target battery_water.service
 DefaultDependencies=no
 Before=shutdown.target
 
