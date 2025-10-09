@@ -16,8 +16,9 @@ https://www.sparkfun.com/sparkfun-9dof-imu-breakout-icm-20948-qwiic.html
 Axes/Coordinate Frame: (see https://cdn.sparkfun.com/assets/learn_tutorials/8/9/3/DS-000189-ICM-20948-v1.3.pdf section 15, figs 12-13)
 For the ICM-20948, the coordinate frame is defined as follows for the accelerometer:
 - +x: rightwards, starboard
-- y: forwards, towards bow
-- +z: up along mast, approx magnetic north
+- +y: forwards, towards bow
+- +z: down (gravity vector), measured as negative reaction force from sensor
+  Note: z-axis is flipped from hardware convention to represent gravity vector direction
 
 For the magnetometer, the coordinate frame is defined as follows:
 - +x: rightwards, starboard
@@ -26,7 +27,8 @@ For the magnetometer, the coordinate frame is defined as follows:
 For the gyroscope, the coordinate frame is defined as follows:
 
 Published Topics:
-- /accel (geometry_msgs/Vector3): Raw accelerometer data in g (gravity units)
+- /accel (geometry_msgs/Vector3): Accelerometer data in g (gravity units)
+  Note: z-axis represents gravity vector direction (≈-1g when level, pointing down)
 - /gyro (geometry_msgs/Vector3): Raw gyroscope data in deg/s (degrees per second)  
 - /magnetometer (geometry_msgs/Vector3): Raw magnetometer data in uT (microtesla)
 - /compass (std_msgs/Float64): Tilt-compensated compass heading in degrees (0-360, 0=North, 90=East)
@@ -57,7 +59,7 @@ Usage Examples:
   python3 imu.py --plot_calib       # Review latest calibration data
 """
 # Standard library imports
-from rclpy.logging import LoggingSeverity
+from toggle_pause_service import TogglePauseService
 import math
 import time
 import struct
@@ -78,11 +80,8 @@ import rclpy
 
 # Add custom import path BEFORE importing from it
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
 
 # Local imports from custom paths (after sys.path is modified)
-
-# Debug visualization configuration
 
 
 def get_terminal_size():
@@ -317,7 +316,7 @@ class ImuNode(Node):
             self, f'{self.get_name()}/toggle_pause')
 
         self.debug = debug
-        
+
         self.get_logger().info('Initializing IMU node...')
 
         if not self.debug:
@@ -325,7 +324,8 @@ class ImuNode(Node):
 
         # Define calibration file paths (in nodes/ directory)
         self._script_dir = os.path.dirname(os.path.abspath(__file__))
-        self._calib_file = os.path.join(self._script_dir, 'invensense-20948-compass-calibration.json')
+        self._calib_file = os.path.join(
+            self._script_dir, 'invensense-20948-compass-calibration.json')
         self._backup_dir = os.path.join(self._script_dir, 'imu_calib_backups')
 
         # I2C setup
@@ -392,11 +392,13 @@ class ImuNode(Node):
         self.node_healthy = True
         self._last_io_error_log_time = 0.0
         self._consecutive_io_errors = 0
-        self._total_errors_this_session = 0  # Total errors since becoming unhealthy (for display)
+        # Total errors since becoming unhealthy (for display)
+        self._total_errors_this_session = 0
         self._last_successful_read_time = time.time()
         self._last_recovery_attempt_time = 0.0
         self._recovery_attempt_count = 0
-        self._last_unreachable_log_time = 0.0  # For throttled unreachable sensor logging
+        # For throttled unreachable sensor logging
+        self._last_unreachable_log_time = 0.0
 
         # Magnetometer lowpass filter parameters
         self.mag_lowpass_cutoff_hz = 1.0  # Cutoff frequency in Hz
@@ -447,7 +449,7 @@ class ImuNode(Node):
         current_time = time.time()
         self._consecutive_io_errors += 1
         self._total_errors_this_session += 1  # Track total for display
-        
+
         # Log error with throttling (max once per 5 seconds)
         # Suppress logging when ASCII visualization is active
         if current_time - self._last_io_error_log_time >= 5.0:
@@ -460,14 +462,14 @@ class ImuNode(Node):
         if self.node_healthy:
             self.node_healthy = False
             self._publish_health_status(False)
-            
+
             # Keep ASCII visualization active to show recovery status
             # Don't tear it down - we'll display recovery information instead
-            
+
             if not self._vis_ascii:
                 self.get_logger().warn(
                     "Node health set to UNHEALTHY due to I2C errors. Switching to 1Hz retry mode.")
-            
+
             # Switch to low-frequency retry mode
             self._switch_to_retry_mode()
 
@@ -476,7 +478,7 @@ class ImuNode(Node):
         if hasattr(self, 'timer'):
             self.timer.destroy()
         self.timer = self.create_timer(1.0, self.timer_callback)
-        
+
         if not self._vis_ascii:
             self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
 
@@ -488,13 +490,13 @@ class ImuNode(Node):
         if hasattr(self, 'timer'):
             self.timer.destroy()
         self.timer = self.create_timer(0.1, self.timer_callback)  # 10 Hz
-        
+
         if not self._vis_ascii:
             self.get_logger().info("Switched back to normal 10Hz mode - I2C communication recovered")
 
     def _initialize_sensors(self, verbose=True):
         """Initialize IMU sensors (ICM-20948 and AK09916 magnetometer)
-        
+
         Args:
             verbose: If False, suppress logging (for throttled retry attempts)
         """
@@ -517,12 +519,13 @@ class ImuNode(Node):
 
         except Exception as e:
             if verbose:
-                self.get_logger().error(f"IMU sensor initialization failed: {e}")
+                self.get_logger().error(
+                    f"IMU sensor initialization failed: {e}")
             return False
 
     def _reinitialize_sensors(self, verbose=True):
         """Re-initialize IMU sensors after I2C recovery
-        
+
         Args:
             verbose: If False, suppress logging (for throttled retry attempts)
         """
@@ -556,26 +559,29 @@ class ImuNode(Node):
             # In _vis_ascii mode, always be verbose
             # In normal mode, only log when we just logged the "unreachable" message
             time_since_unreachable_log = current_time - self._last_unreachable_log_time
-            verbose_logging = (self._vis_ascii or time_since_unreachable_log < 2.0)  # Within 2s of last unreachable log
+            # Within 2s of last unreachable log
+            verbose_logging = (
+                self._vis_ascii or time_since_unreachable_log < 2.0)
 
             # Re-initialize sensors after I2C recovery
             if verbose_logging and not self._vis_ascii:
                 self.get_logger().info(
                     f"Attempting IMU sensor re-initialization (attempt {self._recovery_attempt_count})...")
-            
+
             if self._reinitialize_sensors(verbose=verbose_logging):
                 self.node_healthy = True
                 self._publish_health_status(True)
-                
+
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0  # Reset counter on success
-                self._total_errors_this_session = 0  # Reset error count for next potential failure
+                # Reset error count for next potential failure
+                self._total_errors_this_session = 0
                 # Reset magnetometer filter on recovery
                 self.mag_filter_initialized = False
                 # Reset unreachable log timer for next potential failure
                 self._last_unreachable_log_time = 0.0
                 # ASCII visualization will automatically resume showing sensor data
-                
+
                 if not self._vis_ascii:
                     self.get_logger().info(
                         f"IMU sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
@@ -702,6 +708,68 @@ class ImuNode(Node):
         # Convert grid to strings
         return [''.join(row) for row in grid]
 
+    def _apply_compass_calibration(self, mx, my, mz):
+        """Apply compass calibration if available."""
+        if isinstance(self._compass_cal, dict) and self._compass_cal.get('method') in ('minmax', 'diag'):
+            try:
+                bx, by, bz = self._compass_cal['bias_uT']
+                sx, sy, sz = self._compass_cal['scale_diag']
+                mx_cal = (mx - bx) * sx
+                my_cal = (my - by) * sy
+                mz_cal = (mz - bz) * sz
+                return mx_cal, my_cal, mz_cal
+            except Exception:
+                pass
+        return mx, my, mz
+
+    def _calculate_tilt_compensated_heading(self, mx, my, mz, ax, ay, az):
+        """Compute tilt-compensated compass heading."""
+        # Transform magnetometer readings to accelerometer coordinate frame
+        # Accel frame: +x=starboard, +y=bow, +z=down (gravity vector)
+        # Mag frame: +x=starboard, +y=stern, +z=down
+        # Transform: mag_in_accel = (mx, -my, mz)
+        mag_x_accel = mx
+        mag_y_accel = -my  # stern -> bow
+        mag_z_accel = mz  # both point down, same direction
+
+        # Normalize gravity vector from accelerometer
+        g_norm = math.sqrt(ax**2 + ay**2 + az**2)
+        if g_norm < 0.1:  # Sanity check - avoid division by zero
+            g_norm = 1.0
+
+        # Normalized gravity vector (should point down when level, gz ≈ -1)
+        gx = ax / g_norm
+        gy = ay / g_norm
+        gz = az / g_norm
+
+        # Standard tilt compensation using pitch and roll
+        # Calculate pitch and roll from accelerometer (gravity vector convention)
+        # pitch = atan2(ay, sqrt(ax^2 + az^2))  (rotation about x-axis, starboard)
+        # roll = atan2(-ax, az)  (rotation about y-axis, bow)
+        # Note: az is negative when level, so formulas account for this
+        pitch = math.atan2(gy, math.sqrt(gx**2 + gz**2))
+        roll = math.atan2(-gx, gz)
+
+        # Apply tilt compensation to magnetometer
+        # Rotate magnetic field to compensate for pitch and roll
+        # This gives us the magnetic field as if the sensor were level
+        mag_x_comp = mag_x_accel * \
+            math.cos(pitch) + mag_z_accel * math.sin(pitch)
+        mag_y_comp = (mag_x_accel * math.sin(roll) * math.sin(pitch) +
+                      mag_y_accel * math.cos(roll) -
+                      mag_z_accel * math.sin(roll) * math.cos(pitch))
+
+        # Calculate heading from compensated magnetometer values
+        # In accel frame: x=starboard (east), y=bow (north)
+        # Heading = atan2(east, north) = atan2(-x_comp, y_comp)
+        # We use -x because east is negative starboard in compass convention
+        heading_rad = math.atan2(-mag_x_comp, mag_y_comp)
+        heading_deg = math.degrees(heading_rad)
+        if heading_deg < 0:
+            heading_deg += 360.0
+
+        return heading_deg
+
     def timer_callback(self):
         # Check if node is paused
         if self.pause_service.is_paused():
@@ -712,7 +780,7 @@ class ImuNode(Node):
         # Check for recovery from I2C errors (do this even if no valid samples)
         if not self.node_healthy:
             self._check_io_recovery()
-            
+
             # Log unreachable sensor status for normal operation (throttled to once per 60s)
             if not self._vis_ascii:
                 time_since_last_log = current_time - self._last_unreachable_log_time
@@ -724,22 +792,23 @@ class ImuNode(Node):
                         f"(recovery attempts: {self._recovery_attempt_count}, "
                         f"total errors: {self._total_errors_this_session})")
                     self._last_unreachable_log_time = current_time
-            
+
             # Display recovery status in ASCII visualization
             if self._vis_ascii:
                 try:
                     time_since_healthy = current_time - self._last_successful_read_time
-                    
+
                     sys.stdout.write('\x1b[2J')    # clear
                     sys.stdout.write('\x1b[H')     # home
                     sys.stdout.flush()
-                    
+
                     # Build recovery status display
                     term_width, term_height = get_terminal_size()
-                    
+
                     lines = [
                         "=" * term_width,
-                        "=== IMU SENSOR RECOVERY IN PROGRESS ===".center(term_width),
+                        "=== IMU SENSOR RECOVERY IN PROGRESS ===".center(
+                            term_width),
                         "=" * term_width,
                         "",
                         f"Status: ATTEMPTING RECOVERY (1Hz retry mode)",
@@ -753,22 +822,24 @@ class ImuNode(Node):
                         "",
                         "Ctrl-C to exit"
                     ]
-                    
+
                     for ln in lines:
                         sys.stdout.write(ln + '\n')
                     sys.stdout.flush()
                 except Exception:
                     pass
             return  # Skip normal sensor processing when unhealthy
-        
+
         try:
             ax_cnt, ay_cnt, az_cnt = self.icm.read_accel()
             gx_cnt, gy_cnt, gz_cnt = self.icm.read_gyro()
 
             # Convert to physical units
+            # Note: Flipping z-axis to represent gravity vector (down) rather than reaction force (up)
             ax_g = ax_cnt / 16384.0
             ay_g = ay_cnt / 16384.0
-            az_g = az_cnt / 16384.0
+            # Flip z to match gravity vector convention
+            az_g = -(az_cnt / 16384.0)
 
             gx_dps = gx_cnt / 131.072
             gy_dps = gy_cnt / 131.072
@@ -776,11 +847,11 @@ class ImuNode(Node):
 
             # Read magnetometer data
             mx_uT, my_uT, mz_uT = self.icm.read_magnetometer()
-            
+
             # Validate sensor data - check if all sensors return zeros (sensor not initialized properly)
             if (abs(ax_g) < 0.01 and abs(ay_g) < 0.01 and abs(az_g) < 0.01 and
                 abs(gx_dps) < 0.1 and abs(gy_dps) < 0.1 and abs(gz_dps) < 0.1 and
-                abs(mx_uT) < 0.1 and abs(my_uT) < 0.1 and abs(mz_uT) < 0.1):
+                    abs(mx_uT) < 0.1 and abs(my_uT) < 0.1 and abs(mz_uT) < 0.1):
                 # All sensors returning zeros - likely sensor not initialized
                 if not self.node_healthy:
                     # Skip this reading and wait for proper initialization
@@ -810,37 +881,38 @@ class ImuNode(Node):
 
             # Update successful read time for recovery detection
             self._last_successful_read_time = current_time
-            
+
             self._consecutive_io_errors = 0  # Reset error counter on success
-            
+
             # If we were unhealthy but now have successful reads, recover to normal mode
             if not self.node_healthy:
                 # Re-initialize sensors to ensure proper configuration after reconnection
                 if not self._reinitialize_sensors():
                     # Don't mark as healthy if re-init fails
                     return
-                
+
                 self.node_healthy = True
                 self._publish_health_status(True)
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0
-                self._total_errors_this_session = 0  # Reset error count for next potential failure
+                # Reset error count for next potential failure
+                self._total_errors_this_session = 0
                 # Reset magnetometer filter on recovery
                 self.mag_filter_initialized = False
                 # Reset unreachable log timer for next potential failure
                 self._last_unreachable_log_time = 0.0
                 # ASCII visualization will automatically resume showing sensor data
 
+            # Centralized calibration and heading calculation
+            mx_raw, my_raw, mz_raw = mx_uT, my_uT, mz_uT
+            mx_cal, my_cal, mz_cal = self._apply_compass_calibration(
+                mx_raw, my_raw, mz_raw)
+            heading_deg = self._calculate_tilt_compensated_heading(
+                mx_cal, my_cal, mz_cal, ax_g, ay_g, az_g)
+
             if self._vis_ascii:
                 try:
-                    # Compute heading for debug display (same as main calculation)
-                    # Note: This uses RAW (uncalibrated) magnetometer values for display
-                    # The published heading uses calibrated values
-                    heading_rad = math.atan2(my_uT, mx_uT)
-                    heading_deg = math.degrees(heading_rad)
-                    if heading_deg < 0:
-                        heading_deg += 360.0
-
+                    # Values are pre-calculated, just render them
                     sys.stdout.write('\x1b[2J')    # clear
                     sys.stdout.write('\x1b[H')     # home
                     sys.stdout.flush()
@@ -873,13 +945,21 @@ class ImuNode(Node):
                         f"Gz {gz_dps:+7.1f} dps " +
                         self._signed_bar(gz_dps, g_lim, bar_width),
                         "",
-                        "Magnetometer:",
-                        f"Mx {mx_uT:+7.1f} uT  " +
-                        self._signed_bar(mx_uT, m_lim, bar_width),
-                        f"My {my_uT:+7.1f} uT  " +
-                        self._signed_bar(my_uT, m_lim, bar_width),
-                        f"Mz {mz_uT:+7.1f} uT  " +
-                        self._signed_bar(mz_uT, m_lim, bar_width),
+                        "Magnetometer (Raw):",
+                        f"Mx {mx_raw:+7.1f} uT  " +
+                        self._signed_bar(mx_raw, m_lim, bar_width),
+                        f"My {my_raw:+7.1f} uT  " +
+                        self._signed_bar(my_raw, m_lim, bar_width),
+                        f"Mz {mz_raw:+7.1f} uT  " +
+                        self._signed_bar(mz_raw, m_lim, bar_width),
+                        "",
+                        "Magnetometer (Calibrated):",
+                        f"Mx {mx_cal:+7.1f} uT  " +
+                        self._signed_bar(mx_cal, m_lim, bar_width),
+                        f"My {my_cal:+7.1f} uT  " +
+                        self._signed_bar(my_cal, m_lim, bar_width),
+                        f"Mz {mz_cal:+7.1f} uT  " +
+                        self._signed_bar(mz_cal, m_lim, bar_width),
                         "",
                         f"=== Compass Heading: {heading_deg:6.1f}° (0°=N, 90°=E, 180°=S, 270°=W) ===",
                         ""
@@ -907,64 +987,11 @@ class ImuNode(Node):
                 except Exception:
                     pass
 
-            # Apply compass calibration if present (min-max/diagonal soft-iron)
-            if isinstance(self._compass_cal, dict) and self._compass_cal.get('method') in ('minmax', 'diag'):
-                try:
-                    bx, by, bz = self._compass_cal['bias_uT']
-                    sx, sy, sz = self._compass_cal['scale_diag']
-                    mx_uT = (mx_uT - bx) * sx
-                    my_uT = (my_uT - by) * sy
-                    mz_uT = (mz_uT - bz) * sz
-                except Exception:
-                    pass
-
-            # Compute tilt-compensated compass heading
-            # Transform magnetometer readings to accelerometer coordinate frame
-            # Accel frame: +x=starboard, +y=bow, +z=up
-            # Mag frame: +x=starboard, +y=stern, +z=down
-            # Transform: mag_in_accel = (mx, -my, -mz)
-            mag_x_accel = mx_uT
-            mag_y_accel = -my_uT  # stern -> bow
-            mag_z_accel = -mz_uT  # down -> up
-
-            # Normalize gravity vector from accelerometer
-            g_norm = math.sqrt(ax_g**2 + ay_g**2 + az_g**2)
-            if g_norm < 0.1:  # Sanity check - avoid division by zero
-                g_norm = 1.0
-            
-            # Normalized gravity vector (should point up when level)
-            gx = ax_g / g_norm
-            gy = ay_g / g_norm
-            gz = az_g / g_norm
-
-            # Standard tilt compensation using pitch and roll
-            # Calculate pitch and roll from accelerometer
-            # pitch = atan2(ay, sqrt(ax^2 + az^2))  (rotation about x-axis, starboard)
-            # roll = atan2(-ax, az)  (rotation about y-axis, bow)
-            pitch = math.atan2(gy, math.sqrt(gx**2 + gz**2))
-            roll = math.atan2(-gx, gz)
-            
-            # Apply tilt compensation to magnetometer
-            # Rotate magnetic field to compensate for pitch and roll
-            # This gives us the magnetic field as if the sensor were level
-            mag_x_comp = mag_x_accel * math.cos(pitch) + mag_z_accel * math.sin(pitch)
-            mag_y_comp = (mag_x_accel * math.sin(roll) * math.sin(pitch) + 
-                          mag_y_accel * math.cos(roll) - 
-                          mag_z_accel * math.sin(roll) * math.cos(pitch))
-            
-            # Calculate heading from compensated magnetometer values
-            # In accel frame: x=starboard (east), y=bow (north)
-            # Heading = atan2(east, north) = atan2(-x_comp, y_comp)
-            # We use -x because east is negative starboard in compass convention
-            heading_rad = math.atan2(-mag_x_comp, mag_y_comp)
-            heading_deg = math.degrees(heading_rad)
-            if heading_deg < 0:
-                heading_deg += 360.0
-
             # Publish in physical units
             self.pub_accel.publish(Vector3(x=ax_g, y=ay_g, z=az_g))
             self.pub_gyro.publish(Vector3(x=gx_dps, y=gy_dps, z=gz_dps))
-            self.pub_magnetometer.publish(Vector3(x=mx_uT, y=my_uT, z=mz_uT))
+            self.pub_magnetometer.publish(
+                Vector3(x=mx_cal, y=my_cal, z=mz_cal))
             self.pub_compass.publish(Float64(data=heading_deg))
 
         except Exception as e:
@@ -980,7 +1007,7 @@ class ImuNode(Node):
 
         # Teardown ASCII view
         self._teardown_ascii_vis()
-        
+
         # Attempt to close I2C bus if supported
         try:
             if hasattr(self, 'bus') and hasattr(self.bus, 'close'):
@@ -1270,14 +1297,16 @@ def main(args=None):
 
             # Define calibration file path in nodes/ directory
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            calib_file = os.path.join(script_dir, 'invensense-20948-compass-calibration.json')
-            
+            calib_file = os.path.join(
+                script_dir, 'invensense-20948-compass-calibration.json')
+
             if _prompt_yes_no(f"Save calibration to nodes/{os.path.basename(calib_file)}?", default_yes=True):
                 # Backup existing calibration before saving new one
                 _backup_existing_calibration(calib_file)
                 with open(calib_file, 'w') as f:
                     json.dump(calib, f, indent=2)
-                print(f"Saved compass calibration to nodes/{os.path.basename(calib_file)}")
+                print(
+                    f"Saved compass calibration to nodes/{os.path.basename(calib_file)}")
             else:
                 print("Calibration discarded; file not saved.")
         except Exception as e:
