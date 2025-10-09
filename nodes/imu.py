@@ -29,19 +29,15 @@ Published Topics:
 - /accel (geometry_msgs/Vector3): Raw accelerometer data in g (gravity units)
 - /gyro (geometry_msgs/Vector3): Raw gyroscope data in deg/s (degrees per second)  
 - /magnetometer (geometry_msgs/Vector3): Raw magnetometer data in uT (microtesla)
-- /compass (std_msgs/Float64): Compass heading in degrees (0-360, 0=North, 90=East)
+- /compass (std_msgs/Float64): Tilt-compensated compass heading in degrees (0-360, 0=North, 90=East)
 - /imu_health (std_msgs/Bool): Node health status (true=healthy, false=failed)
 
-Note: This node publishes raw sensor values only. No sensor fusion or pose 
-estimation is performed (unlike RTIMULib-based implementations).
+Note: Compass heading is tilt-compensated using the gravity vector from the accelerometer.
+The magnetic field is projected onto the horizontal plane (perpendicular to gravity) before
+computing the heading. This provides accurate heading even when the boat is tilted.
 
 Command Line Options:
 --debug              Enable debug logging to show sensor values being published
---debug_recovery     Enable detailed I2C recovery debugging (runs for 60s then exits)
-                     - Shows recovery state transitions
-                     - Logs error counts and recovery attempts
-                     - Displays mode switches (normal/retry)
-                     - Auto-exits after 60 seconds for testing
 --calib_compass      Run magnetometer calibration mode (interactive)
                      - Rotate device through all orientations
                      - Press Ctrl+C to finish and save calibration
@@ -57,7 +53,6 @@ Command Line Options:
 Usage Examples:
   python3 imu.py                    # Normal operation
   python3 imu.py --debug            # With debug output
-  python3 imu.py --debug_recovery   # Test I2C recovery (60s timeout)
   python3 imu.py --calib_compass    # Calibrate magnetometer
   python3 imu.py --plot_calib       # Review latest calibration data
 """
@@ -314,7 +309,7 @@ class ICM20948:
 
 
 class ImuNode(Node):
-    def __init__(self, debug=False, debug_recovery=False):
+    def __init__(self, debug=False):
         super().__init__('imu_node')
 
         # Initialize pause service with namespaced name
@@ -322,18 +317,10 @@ class ImuNode(Node):
             self, f'{self.get_name()}/toggle_pause')
 
         self.debug = debug
-        self.debug_recovery = debug_recovery
+        
         self.get_logger().info('Initializing IMU node...')
 
-        if self.debug_recovery:
-            self.get_logger().info("=== I2C RECOVERY DEBUG MODE ENABLED ===")
-            self.get_logger().info("Node will run for 60 seconds then exit")
-            self.get_logger().info("Cause I2C failures to test recovery")
-            # Set timeout for debug mode
-            self._start_time = time.time()
-            self._timeout_seconds = 60.0
-            self._current_mode = "NORMAL (10Hz)"
-        elif not self.debug:
+        if not self.debug:
             self.get_logger().info("Run with --debug to see sensor values being published.")
 
         # Define calibration file paths (in nodes/ directory)
@@ -405,9 +392,11 @@ class ImuNode(Node):
         self.node_healthy = True
         self._last_io_error_log_time = 0.0
         self._consecutive_io_errors = 0
+        self._total_errors_this_session = 0  # Total errors since becoming unhealthy (for display)
         self._last_successful_read_time = time.time()
         self._last_recovery_attempt_time = 0.0
         self._recovery_attempt_count = 0
+        self._last_unreachable_log_time = 0.0  # For throttled unreachable sensor logging
 
         # Magnetometer lowpass filter parameters
         self.mag_lowpass_cutoff_hz = 1.0  # Cutoff frequency in Hz
@@ -445,37 +434,39 @@ class ImuNode(Node):
             health_msg.data = is_healthy
             self.pub_health.publish(health_msg)
 
-            if is_healthy:
-                self.get_logger().info("IMU health status: HEALTHY")
-            else:
-                self.get_logger().warn("IMU health status: FAILED")
+            # Suppress health status logging when ASCII visualization is active
+            # to avoid disrupting the display
+            if not self._vis_ascii:
+                if is_healthy:
+                    self.get_logger().info("IMU health status: HEALTHY")
+                else:
+                    self.get_logger().warn("IMU health status: FAILED")
 
     def _handle_io_error(self, error):
         """Handle I2C IOError with health tracking and throttled logging"""
         current_time = time.time()
         self._consecutive_io_errors += 1
-
-        # Log error with throttling (max once per 5 seconds)
-        if current_time - self._last_io_error_log_time >= 5.0:
-            self.get_logger().warn(
-                f"Transient I2C read error (attempt {self._consecutive_io_errors}): {error}")
-            self._last_io_error_log_time = current_time
+        self._total_errors_this_session += 1  # Track total for display
         
-        # Debug recovery mode: always log errors immediately
-        if self.debug_recovery:
-            self.get_logger().info(
-                f"[RECOVERY DEBUG] I2C error #{self._consecutive_io_errors}: {error}")
+        # Log error with throttling (max once per 5 seconds)
+        # Suppress logging when ASCII visualization is active
+        if current_time - self._last_io_error_log_time >= 5.0:
+            if not self._vis_ascii:
+                self.get_logger().warn(
+                    f"Transient I2C read error (attempt {self._consecutive_io_errors}): {error}")
+            self._last_io_error_log_time = current_time
 
         # Mark node as unhealthy after first IO error
         if self.node_healthy:
             self.node_healthy = False
             self._publish_health_status(False)
-            self.get_logger().warn(
-                "Node health set to UNHEALTHY due to I2C errors. Switching to 1Hz retry mode.")
             
-            if self.debug_recovery:
-                self.get_logger().info(
-                    f"[RECOVERY DEBUG] Health transition: HEALTHY → UNHEALTHY (error count: {self._consecutive_io_errors})")
+            # Keep ASCII visualization active to show recovery status
+            # Don't tear it down - we'll display recovery information instead
+            
+            if not self._vis_ascii:
+                self.get_logger().warn(
+                    "Node health set to UNHEALTHY due to I2C errors. Switching to 1Hz retry mode.")
             
             # Switch to low-frequency retry mode
             self._switch_to_retry_mode()
@@ -485,12 +476,9 @@ class ImuNode(Node):
         if hasattr(self, 'timer'):
             self.timer.destroy()
         self.timer = self.create_timer(1.0, self.timer_callback)
-        self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
         
-        if self.debug_recovery:
-            self._current_mode = "RETRY (1Hz)"
-            self.get_logger().info(
-                f"[RECOVERY DEBUG] Mode switch: NORMAL → RETRY (1Hz polling)")
+        if not self._vis_ascii:
+            self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
 
         # Reset consecutive error counter for recovery tracking
         self._consecutive_io_errors = 0
@@ -500,15 +488,16 @@ class ImuNode(Node):
         if hasattr(self, 'timer'):
             self.timer.destroy()
         self.timer = self.create_timer(0.1, self.timer_callback)  # 10 Hz
-        self.get_logger().info("Switched back to normal 10Hz mode - I2C communication recovered")
         
-        if self.debug_recovery:
-            self._current_mode = "NORMAL (10Hz)"
-            self.get_logger().info(
-                f"[RECOVERY DEBUG] Mode switch: RETRY → NORMAL (10Hz polling)")
+        if not self._vis_ascii:
+            self.get_logger().info("Switched back to normal 10Hz mode - I2C communication recovered")
 
-    def _initialize_sensors(self):
-        """Initialize IMU sensors (ICM-20948 and AK09916 magnetometer)"""
+    def _initialize_sensors(self, verbose=True):
+        """Initialize IMU sensors (ICM-20948 and AK09916 magnetometer)
+        
+        Args:
+            verbose: If False, suppress logging (for throttled retry attempts)
+        """
         try:
             # Initialize the ICM-20948
             self.icm.initialize()
@@ -522,22 +511,31 @@ class ImuNode(Node):
             self.bus.write_byte_data(AK_ADDR, 0x31, 0x08)
             time.sleep(0.01)
 
-            self.get_logger().info("ICM-20948 init complete (raw mode)")
+            if verbose:
+                self.get_logger().info("ICM-20948 init complete (raw mode)")
             return True
 
         except Exception as e:
-            self.get_logger().error(f"IMU sensor initialization failed: {e}")
+            if verbose:
+                self.get_logger().error(f"IMU sensor initialization failed: {e}")
             return False
 
-    def _reinitialize_sensors(self):
-        """Re-initialize IMU sensors after I2C recovery"""
-        self.get_logger().info("Re-initializing IMU sensors...")
+    def _reinitialize_sensors(self, verbose=True):
+        """Re-initialize IMU sensors after I2C recovery
+        
+        Args:
+            verbose: If False, suppress logging (for throttled retry attempts)
+        """
+        if verbose and not self._vis_ascii:
+            self.get_logger().info("Re-initializing IMU sensors...")
 
-        if self._initialize_sensors():
-            self.get_logger().info("IMU sensor re-initialization successful")
+        if self._initialize_sensors(verbose=verbose):
+            if verbose and not self._vis_ascii:
+                self.get_logger().info("IMU sensor re-initialization successful")
             return True
         else:
-            self.get_logger().error("IMU sensor re-initialization failed")
+            if verbose and not self._vis_ascii:
+                self.get_logger().error("IMU sensor re-initialization failed")
             return False
 
     def _check_io_recovery(self):
@@ -554,51 +552,53 @@ class ImuNode(Node):
             self._recovery_attempt_count += 1
             self._last_recovery_attempt_time = current_time
 
+            # Determine if we should log verbosely (only on 60s intervals in normal mode)
+            # In _vis_ascii mode, always be verbose
+            # In normal mode, only log when we just logged the "unreachable" message
+            time_since_unreachable_log = current_time - self._last_unreachable_log_time
+            verbose_logging = (self._vis_ascii or time_since_unreachable_log < 2.0)  # Within 2s of last unreachable log
+
             # Re-initialize sensors after I2C recovery
-            if self.debug_recovery:
+            if verbose_logging and not self._vis_ascii:
                 self.get_logger().info(
-                    f"[RECOVERY DEBUG] Starting recovery attempt #{self._recovery_attempt_count} "
-                    f"(time since last success: {time_since_last_success:.1f}s)")
+                    f"Attempting IMU sensor re-initialization (attempt {self._recovery_attempt_count})...")
             
-            self.get_logger().info(
-                f"Attempting IMU sensor re-initialization (attempt {self._recovery_attempt_count})...")
-            
-            if self._reinitialize_sensors():
+            if self._reinitialize_sensors(verbose=verbose_logging):
                 self.node_healthy = True
                 self._publish_health_status(True)
                 
-                if self.debug_recovery:
-                    self.get_logger().info(
-                        f"[RECOVERY DEBUG] Recovery SUCCESS! Health: UNHEALTHY → HEALTHY")
-                    self.get_logger().info(
-                        f"[RECOVERY DEBUG] Total errors handled: {self._consecutive_io_errors}")
-                
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0  # Reset counter on success
+                self._total_errors_this_session = 0  # Reset error count for next potential failure
                 # Reset magnetometer filter on recovery
                 self.mag_filter_initialized = False
-                self.get_logger().info(
-                    f"IMU sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
-            else:
-                if self.debug_recovery:
-                    self.get_logger().info(
-                        f"[RECOVERY DEBUG] Recovery attempt #{self._recovery_attempt_count} FAILED, "
-                        f"will retry in 3s")
+                # Reset unreachable log timer for next potential failure
+                self._last_unreachable_log_time = 0.0
+                # ASCII visualization will automatically resume showing sensor data
                 
-                self.get_logger().error(
-                    f"IMU sensor re-initialization failed (attempt {self._recovery_attempt_count}), staying in retry mode")
+                if not self._vis_ascii:
+                    self.get_logger().info(
+                        f"IMU sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
+            else:
+                if verbose_logging and not self._vis_ascii:
+                    self.get_logger().error(
+                        f"IMU sensor re-initialization failed (attempt {self._recovery_attempt_count}), staying in retry mode")
                 # Stay in retry mode and try again later
 
     def _init_ascii_vis(self):
         if self._vis_initialized:
             return
         try:
+            # Force terminal reset on initialization
+            sys.stdout.write('\x1b[0m')    # reset attributes
             sys.stdout.write('\x1b[?25l')  # hide cursor
-            sys.stdout.write('\x1b[2J')    # clear
-            sys.stdout.write('\x1b[H')     # home
+            sys.stdout.write('\x1b[2J')    # clear screen
+            sys.stdout.write('\x1b[H')     # home cursor
             sys.stdout.flush()
             self._vis_initialized = True
-        except Exception:
+        except Exception as e:
+            # If visualization initialization fails, disable it
+            self._vis_ascii = False
             self._vis_initialized = False
 
     def _teardown_ascii_vis(self):
@@ -707,27 +707,60 @@ class ImuNode(Node):
         if self.pause_service.is_paused():
             return  # Skip processing when paused
 
-        # Check timeout in debug recovery mode
-        if self.debug_recovery:
-            elapsed = time.time() - self._start_time
-            if elapsed >= self._timeout_seconds:
-                self.get_logger().info("=== RECOVERY DEBUG MODE COMPLETE (60s timeout) ===")
-                self.get_logger().info(
-                    f"Final state: Health={self.node_healthy}, Mode={self._current_mode}, "
-                    f"Errors={self._consecutive_io_errors}, Recovery attempts={self._recovery_attempt_count}")
-                raise KeyboardInterrupt  # Clean exit
-            
-            # Log status every 10 seconds
-            if int(elapsed) % 10 == 0 and elapsed > 0:
-                remaining = self._timeout_seconds - elapsed
-                self.get_logger().info(
-                    f"[RECOVERY DEBUG] Status: Health={'HEALTHY' if self.node_healthy else 'UNHEALTHY'}, "
-                    f"Mode={self._current_mode}, Errors={self._consecutive_io_errors}, "
-                    f"Recovery attempts={self._recovery_attempt_count}, Remaining={remaining:.0f}s")
+        current_time = time.time()
 
         # Check for recovery from I2C errors (do this even if no valid samples)
         if not self.node_healthy:
             self._check_io_recovery()
+            
+            # Log unreachable sensor status for normal operation (throttled to once per 60s)
+            if not self._vis_ascii:
+                time_since_last_log = current_time - self._last_unreachable_log_time
+                # Log immediately on first occurrence, then throttle to 60s intervals
+                if time_since_last_log >= 60.0 or self._last_unreachable_log_time == 0.0:
+                    time_since_healthy = current_time - self._last_successful_read_time
+                    self.get_logger().error(
+                        f"IMU sensor unreachable for {time_since_healthy:.1f}s "
+                        f"(recovery attempts: {self._recovery_attempt_count}, "
+                        f"total errors: {self._total_errors_this_session})")
+                    self._last_unreachable_log_time = current_time
+            
+            # Display recovery status in ASCII visualization
+            if self._vis_ascii:
+                try:
+                    time_since_healthy = current_time - self._last_successful_read_time
+                    
+                    sys.stdout.write('\x1b[2J')    # clear
+                    sys.stdout.write('\x1b[H')     # home
+                    sys.stdout.flush()
+                    
+                    # Build recovery status display
+                    term_width, term_height = get_terminal_size()
+                    
+                    lines = [
+                        "=" * term_width,
+                        "=== IMU SENSOR RECOVERY IN PROGRESS ===".center(term_width),
+                        "=" * term_width,
+                        "",
+                        f"Status: ATTEMPTING RECOVERY (1Hz retry mode)",
+                        f"Time since last valid read: {time_since_healthy:.1f}s",
+                        f"Recovery attempts: {self._recovery_attempt_count}",
+                        f"Total I2C errors: {self._total_errors_this_session}",
+                        "",
+                        "Waiting for sensor to reconnect...",
+                        "",
+                        "=" * term_width,
+                        "",
+                        "Ctrl-C to exit"
+                    ]
+                    
+                    for ln in lines:
+                        sys.stdout.write(ln + '\n')
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            return  # Skip normal sensor processing when unhealthy
+        
         try:
             ax_cnt, ay_cnt, az_cnt = self.icm.read_accel()
             gx_cnt, gy_cnt, gz_cnt = self.icm.read_gyro()
@@ -743,6 +776,15 @@ class ImuNode(Node):
 
             # Read magnetometer data
             mx_uT, my_uT, mz_uT = self.icm.read_magnetometer()
+            
+            # Validate sensor data - check if all sensors return zeros (sensor not initialized properly)
+            if (abs(ax_g) < 0.01 and abs(ay_g) < 0.01 and abs(az_g) < 0.01 and
+                abs(gx_dps) < 0.1 and abs(gy_dps) < 0.1 and abs(gz_dps) < 0.1 and
+                abs(mx_uT) < 0.1 and abs(my_uT) < 0.1 and abs(mz_uT) < 0.1):
+                # All sensors returning zeros - likely sensor not initialized
+                if not self.node_healthy:
+                    # Skip this reading and wait for proper initialization
+                    return
 
             # Apply first-order IIR lowpass filter to magnetometer readings
             # Filter: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
@@ -767,27 +809,27 @@ class ImuNode(Node):
             mz_uT = self.mag_filtered_z
 
             # Update successful read time for recovery detection
-            self._last_successful_read_time = time.time()
-            
-            # Debug recovery mode: log successful reads after errors
-            if self.debug_recovery and self._consecutive_io_errors > 0:
-                self.get_logger().info(
-                    f"[RECOVERY DEBUG] Successful read after {self._consecutive_io_errors} errors")
+            self._last_successful_read_time = current_time
             
             self._consecutive_io_errors = 0  # Reset error counter on success
             
             # If we were unhealthy but now have successful reads, recover to normal mode
             if not self.node_healthy:
+                # Re-initialize sensors to ensure proper configuration after reconnection
+                if not self._reinitialize_sensors():
+                    # Don't mark as healthy if re-init fails
+                    return
+                
                 self.node_healthy = True
                 self._publish_health_status(True)
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0
+                self._total_errors_this_session = 0  # Reset error count for next potential failure
                 # Reset magnetometer filter on recovery
                 self.mag_filter_initialized = False
-                if self.debug_recovery:
-                    self.get_logger().info(
-                        f"[RECOVERY DEBUG] Automatic recovery: successful reads restored, "
-                        f"switching back to NORMAL mode")
+                # Reset unreachable log timer for next potential failure
+                self._last_unreachable_log_time = 0.0
+                # ASCII visualization will automatically resume showing sensor data
 
             if self._vis_ascii:
                 try:
@@ -876,13 +918,45 @@ class ImuNode(Node):
                 except Exception:
                     pass
 
-            # Compute compass heading from magnetometer data
-            # Magnetometer coordinate frame: x=starboard, y=stern (backward), z=down
-            # Compass heading: 0°=North (bow), 90°=East (starboard), 180°=South (stern), 270°=West (port)
-            # Standard compass formula: heading = atan2(-mx, my) for coordinate frame where
-            # y points forward (bow) and x points right (starboard)
-            # But our y points stern (backward), so we use: atan2(my, mx)
-            heading_rad = math.atan2(my_uT, mx_uT)
+            # Compute tilt-compensated compass heading
+            # Transform magnetometer readings to accelerometer coordinate frame
+            # Accel frame: +x=starboard, +y=bow, +z=up
+            # Mag frame: +x=starboard, +y=stern, +z=down
+            # Transform: mag_in_accel = (mx, -my, -mz)
+            mag_x_accel = mx_uT
+            mag_y_accel = -my_uT  # stern -> bow
+            mag_z_accel = -mz_uT  # down -> up
+
+            # Normalize gravity vector from accelerometer
+            g_norm = math.sqrt(ax_g**2 + ay_g**2 + az_g**2)
+            if g_norm < 0.1:  # Sanity check - avoid division by zero
+                g_norm = 1.0
+            
+            # Normalized gravity vector (should point up when level)
+            gx = ax_g / g_norm
+            gy = ay_g / g_norm
+            gz = az_g / g_norm
+
+            # Standard tilt compensation using pitch and roll
+            # Calculate pitch and roll from accelerometer
+            # pitch = atan2(ay, sqrt(ax^2 + az^2))  (rotation about x-axis, starboard)
+            # roll = atan2(-ax, az)  (rotation about y-axis, bow)
+            pitch = math.atan2(gy, math.sqrt(gx**2 + gz**2))
+            roll = math.atan2(-gx, gz)
+            
+            # Apply tilt compensation to magnetometer
+            # Rotate magnetic field to compensate for pitch and roll
+            # This gives us the magnetic field as if the sensor were level
+            mag_x_comp = mag_x_accel * math.cos(pitch) + mag_z_accel * math.sin(pitch)
+            mag_y_comp = (mag_x_accel * math.sin(roll) * math.sin(pitch) + 
+                          mag_y_accel * math.cos(roll) - 
+                          mag_z_accel * math.sin(roll) * math.cos(pitch))
+            
+            # Calculate heading from compensated magnetometer values
+            # In accel frame: x=starboard (east), y=bow (north)
+            # Heading = atan2(east, north) = atan2(-x_comp, y_comp)
+            # We use -x because east is negative starboard in compass convention
+            heading_rad = math.atan2(-mag_x_comp, mag_y_comp)
             heading_deg = math.degrees(heading_rad)
             if heading_deg < 0:
                 heading_deg += 360.0
@@ -906,6 +980,7 @@ class ImuNode(Node):
 
         # Teardown ASCII view
         self._teardown_ascii_vis()
+        
         # Attempt to close I2C bus if supported
         try:
             if hasattr(self, 'bus') and hasattr(self.bus, 'close'):
@@ -920,8 +995,6 @@ def main(args=None):
     parser = argparse.ArgumentParser(description='IMU Sensor Node')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging for sensor values')
-    parser.add_argument('--debug_recovery', action='store_true',
-                        help='Enable I2C recovery debugging (runs for 60s then exits)')
     parser.add_argument('--calib_compass', action='store_true',
                         help='Collect magnetometer samples and save calibration')
     parser.add_argument('--plot_calib', action='store_true',
@@ -1219,7 +1292,7 @@ def main(args=None):
 
     imu_node = None
     try:
-        imu_node = ImuNode(debug=parsed_args.debug, debug_recovery=parsed_args.debug_recovery)
+        imu_node = ImuNode(debug=parsed_args.debug)
         rclpy.spin(imu_node)
     except (KeyboardInterrupt, ExternalShutdownException):
         # This handles Ctrl+C or external shutdown requests gracefully.
