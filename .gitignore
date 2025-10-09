@@ -96,6 +96,9 @@ nodes/power-test-pins.py
 **/argo_power_control.log
 nodes/ain3_decay_20250905_103931.png
 
+# KiCad local caches
+**/fp-info-cache
+
 # IMU calibration backups
 nodes/imu_calib_backups/
 
