@@ -146,3 +146,4 @@ class TogglePauseService:
             'service_name': self.service.srv_name,
             'health_topic': self.health_pub.topic_name
         }
+

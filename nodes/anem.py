@@ -308,6 +308,8 @@ class AnemNode(Node):
         # Initialize pause service with namespaced name
         self.pause_service = TogglePauseService(
             self, f'{self.get_name()}/toggle_pause')
+        # Track pause state to manage sensor sleep/wake transitions
+        self._prev_paused = False
 
         self.get_logger().info('Initializing Anemometer node...')
 
@@ -723,9 +725,19 @@ class AnemNode(Node):
 
     def publish_callback(self):
         """ROS2 timer callback - reads multiple sensor samples and publishes averaged data at PUBLISHING_RATE"""
-        # Check if node is paused
-        if self.pause_service.is_paused():
-            return  # Skip processing when paused
+        # Handle pause/unpause transitions for sensor power management
+        paused = self.pause_service.is_paused()
+        if paused != self._prev_paused:
+            if paused:
+                self._enter_sleep_mode()
+            else:
+                # On unpause, fully re-initialize continuous measurement
+                self._exit_pause_mode()
+            self._prev_paused = paused
+
+        # Skip processing while paused
+        if paused:
+            return
 
         try:
             # Read multiple samples and accumulate for averaging
@@ -801,6 +813,45 @@ class AnemNode(Node):
         except Exception as e:
             self.get_logger().error(f"Error in publish callback: {e}")
             self._publish_health_status(False)
+
+    def _enter_sleep_mode(self):
+        """Put all SDP3x sensors into sleep mode (command 0x3677).
+
+        Per datasheet section 6.3.5/6.3.6: enter sleep from idle mode. We
+        first stop continuous measurement (0x3FF9), then send sleep (0x3677).
+        """
+        try:
+            # Stop continuous measurement on all sensors
+            for a in self.i2cAddr:
+                try:
+                    self.bus.write_i2c_block_data(a, 0x3F, [0xF9])  # 0x3FF9
+                except IOError:
+                    pass  # Ignore if already idle
+            time.sleep(0.01)
+
+            # Enter sleep mode on all sensors
+            for a in self.i2cAddr:
+                try:
+                    self.bus.write_i2c_block_data(a, 0x36, [0x77])  # 0x3677
+                except IOError as e:
+                    self.get_logger().warn(f"Sleep command failed for sensor {hex(a)}: {e}")
+
+            self.get_logger().info("SDP3x sensors placed into SLEEP mode (0x3677)")
+        except Exception as e:
+            self.get_logger().error(f"Failed to enter sleep mode: {e}")
+
+    def _exit_pause_mode(self):
+        """Wake sensors and (re)start continuous measurement (0x3615)."""
+        try:
+            # Any valid write wakes the sensor; setup_sensors configures 0x3615
+            if self.setup_sensors():
+                self.node_healthy = True
+                self._publish_health_status(True)
+                self.get_logger().info("SDP3x sensors reinitialized after pause (continuous measurement)")
+            else:
+                self.get_logger().error("Failed to reinitialize SDP3x sensors after pause")
+        except Exception as e:
+            self.get_logger().error(f"Error exiting pause mode: {e}")
 
     def destroy_node(self):
         # This is the recommended way to perform cleanup in ROS2.
