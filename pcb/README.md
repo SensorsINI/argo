@@ -2,6 +2,10 @@
 
 This directory contains all the printed circuit board (PCB) design files, libraries, and documentation for the Argo autonomous sailboat project.
 
+The design was done with KiCad version 9 stable.  
+**It is important to use the stable version, not the development release, since KiCad will not open files from later versions!**  
+- [Download KiCad stable here](https://www.kicad.org/download/)
+
 ## Directory Structure
 
 ### `argo-v9-stable/`
@@ -92,19 +96,17 @@ Gerber files and drill data are located in:
 
 ### Assembly Notes
 - All components are hand-solderable
-- Use lead-free solder for environmental compliance
-- Follow ESD precautions when handling sensitive components
-- Refer to component datasheets for specific soldering requirements
+
 
 ## Development Tools
 
 ### KiCad Version
-- **Recommended**: KiCad 6.0 or later
+- **Recommended**: KiCad 9.0 or later
 - **Footprint Library**: Custom "Argo footprint Library" with hand-solderable components
 - **Symbol Library**: SamacSys_Parts.lib for standard components
 
 ### 3D Models
-- **Mechanical Integration**: 3D models available for enclosure design
+- **Mechanical Integration**: A few 3D models available for enclosure design
 - **Component Models**: STEP files for major components
 - **Assembly Verification**: Use KiCad 3D viewer for clearance checking
 
