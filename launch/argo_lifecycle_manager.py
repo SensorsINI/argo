@@ -27,6 +27,7 @@ import argparse
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import json
+import select
 
 # Import centralized node utilities
 from argo_node_utils import ArgoNodeManager
@@ -1140,6 +1141,16 @@ class ArgoLifecycleManager:
 
         # System info
         try:
+            # Allow user to skip detailed system info (abort during slow CPU check)
+            print("  [Press Enter within 1s to skip system info...]", end='', flush=True)
+            if select.select([sys.stdin], [], [], 0.5)[0]:  # 0.5s timeout
+                sys.stdin.readline()  # Consume the Enter key
+                print("\r" + " " * 60 + "\r", end='', flush=True)  # Clear the line
+                print("⏩ Skipped detailed system info")
+                print("=" * 60)
+                return
+            print("\r" + " " * 60 + "\r", end='', flush=True)  # Clear the line
+            
             # CPU percentage (this waits 1 second by design)
             cpu_percent = psutil.cpu_percent(interval=1)
 
