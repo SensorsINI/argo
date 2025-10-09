@@ -199,6 +199,9 @@ class ICM20948:
         self._reg_bank = None
 
     # Low-level I2C helpers
+    def read_byte(self, reg):
+        return self.bus.read_byte_data(self.addr, reg)
+
     def write_byte(self, reg, val):
         self.bus.write_byte_data(self.addr, reg, val & 0xFF)
 
@@ -209,6 +212,26 @@ class ICM20948:
         if self._reg_bank != bank:
             self.write_byte(0x7F, bank)
             self._reg_bank = bank
+
+    def set_sleep_mode(self, enable: bool) -> None:
+        """Enable/disable sleep mode via PWR_MGMT_1[6] (SLEEP bit).
+
+        When set, the chip enters sleep (all analog powered off). Clearing the
+        bit wakes the chip. See ICM-20948 datasheet, PWR_MGMT_1 register.
+        """
+        # PWR_MGMT_1 is in bank 0 at address 0x06
+        self.select_bank(0x00)
+        try:
+            val = self.read_byte(0x06)
+        except Exception:
+            # Fallback: assume default if read fails
+            val = 0x01  # auto clock, sleep off default used in initialize()
+        if enable:
+            val |= 0x40  # set SLEEP bit (bit 6)
+        else:
+            val &= ~0x40  # clear SLEEP bit
+        self.write_byte(0x06, val)
+        time.sleep(0.01)
 
     # Minimal bring-up
     def initialize(self):
@@ -320,6 +343,8 @@ class ImuNode(Node):
         # Initialize pause service with namespaced name
         self.pause_service = TogglePauseService(
             self, f'{self.get_name()}/toggle_pause')
+        # Track pause state for sleep/wake transitions
+        self._prev_paused = False
 
         self.debug = debug
         self.debug_recovery = debug_recovery
@@ -703,9 +728,19 @@ class ImuNode(Node):
         return [''.join(row) for row in grid]
 
     def timer_callback(self):
-        # Check if node is paused
-        if self.pause_service.is_paused():
-            return  # Skip processing when paused
+        # Handle pause/unpause transitions for IMU sleep management
+        paused = self.pause_service.is_paused()
+        if paused != self._prev_paused:
+            if paused:
+                self._enter_sleep_mode()
+            else:
+                # On unpause, fully reinitialize sensors (includes waking IMU)
+                self._exit_pause_mode()
+            self._prev_paused = paused
+
+        # Skip processing while paused
+        if paused:
+            return
 
         # Check timeout in debug recovery mode
         if self.debug_recovery:
@@ -895,6 +930,24 @@ class ImuNode(Node):
 
         except Exception as e:
             self._handle_io_error(e)
+
+    def _enter_sleep_mode(self) -> None:
+        """Place IMU into sleep mode when node is paused."""
+        try:
+            self.icm.set_sleep_mode(True)
+            self.get_logger().info("IMU placed into SLEEP mode (PWR_MGMT_1[6]=1)")
+        except Exception as e:
+            self.get_logger().warn(f"Failed to set IMU sleep mode: {e}")
+
+    def _exit_pause_mode(self) -> None:
+        """Reinitialize sensors on unpause (wakes IMU and restores config)."""
+        try:
+            # Use existing recovery path for consistent setup
+            if self._reinitialize_sensors():
+                # Reset filter state after reinit
+                self.mag_filter_initialized = False
+        except Exception as e:
+            self.get_logger().error(f"Failed to reinitialize IMU after unpause: {e}")
 
     def _quiet_shutdown(self) -> None:
         # Publish health status as failed on shutdown (only if ROS context is still valid)
