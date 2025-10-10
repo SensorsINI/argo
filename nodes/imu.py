@@ -313,10 +313,11 @@ def apply_ellipsoid_calibration(points, center, radii, rotation):
     r_avg = np.mean(radii)
     scale = r_avg / radii
     
-    # Apply inverse rotation and scaling
-    # The @ symbol is the matrix multiplication operator in Python (PEP 465, since Python 3.5).
-    # This line transforms the centered points by applying the rotation matrix and scaling:
-    calibrated = centered @ rotation @ np.diag(scale)
+    # Apply rotation (transpose) and scaling to transform ellipsoid to sphere
+    # rotation matrix from eigh has eigenvectors as COLUMNS
+    # To rotate points into principal axes frame, we need rotation.T
+    # This aligns the ellipsoid axes with coordinate axes, then scaling makes it a sphere
+    calibrated = centered @ rotation.T @ np.diag(scale)
     
     return calibrated
 
@@ -365,9 +366,9 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interacti
     # Check if we have rotation matrix (ellipsoid fit)
     if 'rotation' in calib:
         rotation = np.array(calib['rotation'])
+        radii = np.array(calib.get('radii', [1, 1, 1]))
         # Full ellipsoid calibration
-        calibrated = apply_ellipsoid_calibration(points, bias, 
-                                                 np.ones(3) / scale, rotation)
+        calibrated = apply_ellipsoid_calibration(points, bias, radii, rotation)
     else:
         # Simple min-max calibration
         calibrated = (points - bias) * scale
