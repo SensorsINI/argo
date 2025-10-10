@@ -44,6 +44,7 @@ Command Line Options:
 --calib_compass      Run magnetometer calibration mode (interactive)
                      - Rotate device through all orientations
                      - Press Ctrl+C to finish and save calibration
+                     - Robust against transient I2C errors with automatic recovery
                      - Choose between min-max or ellipsoid fitting methods
                      - Saves calibration to nodes/invensense-20948-compass-calibration.json
                      - Backs up old calibration to nodes/imu_calib_backups/
@@ -1409,6 +1410,16 @@ def main(args=None):
             # Tracking minima and maxima
             minx = miny = minz = float('inf')
             maxx = maxy = maxz = float('-inf')
+            
+            # I2C error tracking for robust operation
+            consecutive_errors = 0
+            total_errors = 0
+            last_error_time = 0.0
+            last_successful_read = time.time()
+            last_recovery_attempt = 0.0
+            recovery_attempts = 0
+            sensor_healthy = True
+            
             # Terminal setup
             try:
                 sys.stdout.write('\x1b[?25l')  # hide cursor
@@ -1434,9 +1445,18 @@ def main(args=None):
                     bar = '#' * fill + '-' * (bar_width - fill)
                     lines.append(
                         f"Mag {name} [{mn:+6.1f} .. {mx:+6.1f}] |{bar}| span={span:5.1f} uT")
+                
+                # Add status line with error info
+                status_line = f"Samples: {len(samples)}"
+                if not sensor_healthy:
+                    time_since_healthy = time.time() - last_successful_read
+                    status_line += f" | SENSOR ERROR (recovery attempts: {recovery_attempts}, errors: {total_errors}, time: {time_since_healthy:.1f}s)"
+                elif total_errors > 0:
+                    status_line += f" | Recovered (total errors: {total_errors})"
+                
                 try:
                     sys.stdout.write('\x1b[H')  # home
-                    for ln in [f"Samples: {len(samples)}", *lines, "Ctrl-C to finish..."]:
+                    for ln in [status_line, *lines, "Ctrl-C to finish..."]:
                         sys.stdout.write(ln + '\n')
                     sys.stdout.flush()
                 except Exception:
@@ -1444,6 +1464,27 @@ def main(args=None):
 
             try:
                 while True:
+                    current_time = time.time()
+                    
+                    # Check if we need to attempt sensor recovery
+                    if not sensor_healthy:
+                        time_since_last_recovery = current_time - last_recovery_attempt
+                        if time_since_last_recovery > 3.0:  # Try recovery every 3 seconds
+                            recovery_attempts += 1
+                            last_recovery_attempt = current_time
+                            try:
+                                # Reinitialize IMU and magnetometer
+                                icm.initialize()
+                                bus.write_byte_data(AK_ADDR, 0x32, 0x01)
+                                time.sleep(0.05)
+                                bus.write_byte_data(AK_ADDR, 0x31, 0x08)
+                                time.sleep(0.01)
+                                # Don't immediately mark as healthy - wait for successful read
+                            except Exception as e:
+                                # Recovery failed, will try again later
+                                if visual_ok:
+                                    render_bars()
+                    
                     try:
                         st1 = bus.read_byte_data(0x0C, 0x10)
                         if st1 & 0x01:
@@ -1454,7 +1495,14 @@ def main(args=None):
                             mx_uT = mx_cnt * 0.15
                             my_uT = my_cnt * 0.15
                             mz_uT = mz_cnt * 0.15
-                            sample_time = time.time() - start_time
+                            
+                            # Successful read - reset error tracking
+                            if not sensor_healthy:
+                                sensor_healthy = True
+                                consecutive_errors = 0
+                            
+                            last_successful_read = current_time
+                            sample_time = current_time - start_time
                             samples.append((mx_uT, my_uT, mz_uT))
                             timestamped_samples.append(
                                 (sample_time, mx_uT, my_uT, mz_uT))
@@ -1472,8 +1520,20 @@ def main(args=None):
                                 maxz = mz_uT
                             if visual_ok:
                                 render_bars()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Handle I2C errors
+                        consecutive_errors += 1
+                        total_errors += 1
+                        last_error_time = current_time
+                        
+                        # Mark as unhealthy after first error
+                        if sensor_healthy:
+                            sensor_healthy = False
+                        
+                        # Update display to show error
+                        if visual_ok:
+                            render_bars()
+                    
                     time.sleep(0.02)
             except KeyboardInterrupt:
                 pass
@@ -1487,6 +1547,15 @@ def main(args=None):
                         sys.stdout.flush()
                     except Exception:
                         pass
+            
+            # Print I2C error statistics if any errors occurred
+            if total_errors > 0:
+                print(f"\nI2C Error Statistics:")
+                print(f"  Total errors: {total_errors}")
+                print(f"  Recovery attempts: {recovery_attempts}")
+                print(f"  Final sensor status: {'HEALTHY' if sensor_healthy else 'UNHEALTHY'}")
+                if not sensor_healthy:
+                    print(f"  WARNING: Sensor still unhealthy - calibration may be incomplete")
 
             if len(samples) < 100:
                 print(
