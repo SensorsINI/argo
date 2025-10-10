@@ -1523,7 +1523,7 @@ def main(args=None):
                         help='Plot the most recent calibration data from /tmp')
     parsed_args = parser.parse_args(args=args)
 
-    # If plot calibration is requested, load samples, compute calibration, and offer to save
+    # If plot calibration is requested, load and plot existing calibration (optionally recompute)
     # This mode doesn't require ROS2
     if parsed_args.plot_calib:
         import glob
@@ -1550,16 +1550,43 @@ def main(args=None):
             # Extract just the (mx, my, mz) values for calibration
             samples = [[mx, my, mz] for _, mx, my, mz in timestamped_samples]
 
-            # Check sample count
-            if len(samples) < 100:
-                print(f"Warning: only {len(samples)} samples - calibration may be poor (recommend 100+)")
-
-            # Compute calibration from samples
-            calib = compute_calibration_from_samples(samples)
+            # Check if there's existing calibration
+            calib = data.get('calibration')
+            should_save = False  # Track if we need to offer to save
             
-            if calib is None:
-                print("Error: Calibration computation failed")
-                return
+            if calib:
+                # Show existing calibration
+                print(f"\nExisting calibration found:")
+                method = calib.get('method', 'unknown')
+                bias = calib.get('bias_uT', [0, 0, 0])
+                scale = calib.get('scale_diag', [1, 1, 1])
+                print(f"  Method: {method}")
+                print(f"  Bias (µT): [{bias[0]:.2f}, {bias[1]:.2f}, {bias[2]:.2f}]")
+                print(f"  Scale: [{scale[0]:.4f}, {scale[1]:.4f}, {scale[2]:.4f}]")
+                if 'radii' in calib:
+                    radii = calib['radii']
+                    print(f"  Radii (µT): [{radii[0]:.2f}, {radii[1]:.2f}, {radii[2]:.2f}]")
+                print(f"  Samples: {len(samples)}")
+                
+                # Ask if user wants to recompute
+                if _prompt_yes_no("\nRecompute calibration with different method?", default_yes=False):
+                    calib = compute_calibration_from_samples(samples)
+                    if calib is None:
+                        print("Error: Calibration computation failed, using existing calibration")
+                        calib = data.get('calibration')
+                    else:
+                        should_save = True  # New calibration computed
+            else:
+                # No existing calibration, compute it
+                print(f"\nNo existing calibration found (samples: {len(samples)})")
+                if len(samples) < 100:
+                    print(f"Warning: only {len(samples)} samples - calibration may be poor (recommend 100+)")
+                
+                calib = compute_calibration_from_samples(samples)
+                if calib is None:
+                    print("Error: Calibration computation failed")
+                    return
+                should_save = True  # New calibration computed
 
             # Generate and display plots
             try:
@@ -1583,22 +1610,23 @@ def main(args=None):
                 print(f"Error generating plot: {e}")
                 import traceback
                 traceback.print_exc()
-                
-            # Update the samples file with new calibration
-            data['calibration'] = calib
-            with open(latest_file, 'w') as f:
-                json.dump(data, f, indent=2)
-            print(f"\nUpdated {latest_file} with new calibration")
             
-            # Offer to save calibration to main calibration file
-            calib_file = os.path.join(script_dir, 'invensense-20948-compass-calibration.json')
-            if _prompt_yes_no(f"\nSave this calibration to nodes/{os.path.basename(calib_file)}?", default_yes=True):
-                _backup_existing_calibration(calib_file)
-                with open(calib_file, 'w') as f:
-                    json.dump(calib, f, indent=2)
-                print(f"Saved compass calibration to nodes/{os.path.basename(calib_file)}")
-            else:
-                print("Calibration not saved to main calibration file")
+            # Update samples file if calibration was recomputed
+            if should_save:
+                data['calibration'] = calib
+                with open(latest_file, 'w') as f:
+                    json.dump(data, f, indent=2)
+                print(f"\nUpdated {latest_file} with new calibration")
+                
+                # Offer to save calibration to main calibration file
+                calib_file = os.path.join(script_dir, 'invensense-20948-compass-calibration.json')
+                if _prompt_yes_no(f"\nSave this calibration to nodes/{os.path.basename(calib_file)}?", default_yes=True):
+                    _backup_existing_calibration(calib_file)
+                    with open(calib_file, 'w') as f:
+                        json.dump(calib, f, indent=2)
+                    print(f"Saved compass calibration to nodes/{os.path.basename(calib_file)}")
+                else:
+                    print("Calibration not saved to main calibration file")
                 
         except Exception as e:
             print(f"Error loading calibration data: {e}")
