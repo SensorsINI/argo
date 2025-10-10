@@ -313,11 +313,12 @@ def apply_ellipsoid_calibration(points, center, radii, rotation):
     r_avg = np.mean(radii)
     scale = r_avg / radii
     
-    # Apply rotation (transpose) and scaling to transform ellipsoid to sphere
+    # Apply rotation and scaling to transform ellipsoid to sphere
     # rotation matrix from eigh has eigenvectors as COLUMNS
-    # To rotate points into principal axes frame, we need rotation.T
+    # Each column i is the direction of principal axis i
+    # Multiplying by rotation projects centered points onto the principal axes
     # This aligns the ellipsoid axes with coordinate axes, then scaling makes it a sphere
-    calibrated = centered @ rotation.T @ np.diag(scale)
+    calibrated = centered @ rotation @ np.diag(scale)
     
     return calibrated
 
