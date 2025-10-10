@@ -1016,11 +1016,11 @@ class ImuNode(Node):
                 point = np.array([mx, my, mz])
                 bias_arr = np.array(bias)
                 rotation = np.array(self._compass_cal['rotation'])
+                radii = np.array(self._compass_cal.get('radii', [1, 1, 1]))
                 
                 # Apply ellipsoid calibration
                 calibrated = apply_ellipsoid_calibration(
-                    point.reshape(1, 3), bias_arr, 
-                    np.ones(3) / np.array(scale), rotation)
+                    point.reshape(1, 3), bias_arr, radii, rotation)
                 
                 return calibrated[0, 0], calibrated[0, 1], calibrated[0, 2]
                 
