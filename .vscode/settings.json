@@ -1,3 +1,11 @@
 {
-    "makefile.configureOnOpen": false
-}
+    "editor.formatOnSave": false,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "never",
+      "source.fixAll": "never",
+      "source.fixAll.ruff": "never"
+    },
+    "python.formatting.provider": "none",
+    "isort.sortImportsOnSave": false,
+    "ruff.fixOnSave": false
+  }
