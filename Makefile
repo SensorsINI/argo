@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd
 
 help:
 	@echo "Argo Robot Services Management"
@@ -38,6 +38,11 @@ help:
 	@echo ""
 	@echo "System Fixes:"
 	@echo "  fix-orangepi-ramlog  - Fix orangepi-ramlog to preserve persistent logs"
+	@echo ""
+	@echo "MOTD Customization:"
+	@echo "  install-motd    - Install Argo shutdown status MOTD script"
+	@echo "  uninstall-motd  - Uninstall Argo MOTD script"
+	@echo "  test-motd       - Test MOTD script output (safe, no installation)"
 	@echo ""
 	@echo "Power Control System (in power_control/ directory):"
 	@echo "  make -C power_control install  - Install power control system"
@@ -358,4 +363,60 @@ submodule-status:
 	@echo "  make submodule-init    - Initialize submodule (first time setup)"
 	@echo "  make submodule-update  - Update to latest version"
 	@echo "  make submodule-status  - Show this status information"
+
+# ==================== MOTD CUSTOMIZATION ====================
+
+MOTD_SCRIPT = scripts/15-argo-shutdown-status
+MOTD_TARGET = /etc/update-motd.d/15-argo-shutdown-status
+
+install-motd:
+	@echo "Installing Argo shutdown status MOTD script..."
+	@if [ ! -f $(MOTD_SCRIPT) ]; then \
+		echo "❌ Error: $(MOTD_SCRIPT) not found!"; \
+		echo "   Make sure you're running this from the Argo project root directory."; \
+		exit 1; \
+	fi
+	@echo "Copying MOTD script to /etc/update-motd.d/..."
+	sudo cp $(MOTD_SCRIPT) $(MOTD_TARGET)
+	sudo chmod +x $(MOTD_TARGET)
+	@echo "✅ Argo MOTD script installed successfully!"
+	@echo ""
+	@echo "The MOTD will now show:"
+	@echo "  - Critical battery shutdown alerts"
+	@echo "  - Low battery warnings from previous session"
+	@echo "  - Normal power button shutdown events"
+	@echo "  - Current battery status (if concerning)"
+	@echo ""
+	@echo "📋 Test the MOTD output:"
+	@echo "   make test-motd"
+	@echo ""
+	@echo "🔄 To see it on next login:"
+	@echo "   ssh argo (from another terminal)"
+	@echo ""
+	@echo "💡 MOTD is displayed automatically on SSH login"
+
+uninstall-motd:
+	@echo "Uninstalling Argo shutdown status MOTD script..."
+	@if [ -f $(MOTD_TARGET) ]; then \
+		sudo rm -f $(MOTD_TARGET); \
+		echo "✅ Argo MOTD script removed from /etc/update-motd.d/"; \
+	else \
+		echo "ℹ️  Argo MOTD script was not installed"; \
+	fi
+	@echo ""
+	@echo "MOTD has been restored to default Orange Pi configuration"
+
+test-motd:
+	@echo "Testing Argo MOTD script output..."
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@if [ -f $(MOTD_SCRIPT) ]; then \
+		bash $(MOTD_SCRIPT); \
+	else \
+		echo "❌ Error: $(MOTD_SCRIPT) not found!"; \
+		exit 1; \
+	fi
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo ""
+	@echo "💡 This is what will be displayed on SSH login"
+	@echo "   To install: make install-motd"
 

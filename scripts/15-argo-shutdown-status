@@ -1,0 +1,181 @@
+#!/bin/bash
+#
+# Argo Shutdown Status MOTD Script
+# Checks for last shutdown/halt event and displays critical battery alerts
+#
+# This script is part of the Argo sailboat control system
+# Installation: make install-motd (in Argo root directory)
+
+THIS_SCRIPT="argo-shutdown-status"
+MOTD_DISABLE=""
+
+[[ -f /etc/default/orangepi-motd ]] && . /etc/default/orangepi-motd
+
+for f in $MOTD_DISABLE; do
+	[[ $f == $THIS_SCRIPT ]] && exit 0
+done
+
+# Color codes
+RED='\e[0;91m'
+YELLOW='\e[0;93m'
+GREEN='\e[0;92m'
+CYAN='\e[0;96m'
+RESET='\x1B[0m'
+
+# Check for critical battery flag file
+CRITICAL_BATTERY_FLAG="/tmp/argo_critical_battery"
+
+# Function to parse journalctl output for shutdown events
+check_shutdown_event() {
+	# Look for the most recent shutdown/halt event in journalctl
+	# Search for power control shutdown or systemd shutdown messages
+	local shutdown_info=$(journalctl -u argo-power-control.service -u systemd-shutdown --since "7 days ago" --no-pager -r | head -100)
+	
+	# Check for critical battery shutdown
+	if echo "$shutdown_info" | grep -q "CRITICAL BATTERY"; then
+		local battery_voltage=$(echo "$shutdown_info" | grep -oP "CRITICAL BATTERY.*?(\d+\.\d+)V" | head -1 | grep -oP "\d+\.\d+")
+		local timestamp=$(echo "$shutdown_info" | grep "CRITICAL BATTERY" | head -1 | awk '{print $1, $2, $3}')
+		
+		echo -e "${RED}⚠ CRITICAL BATTERY SHUTDOWN DETECTED${RESET}"
+		[[ -n "$battery_voltage" ]] && echo -e "  Battery voltage: ${RED}${battery_voltage}V${RESET}"
+		[[ -n "$timestamp" ]] && echo -e "  Event time: ${YELLOW}${timestamp}${RESET}"
+		echo -e "  ${YELLOW}Action required: Check battery health and charging system${RESET}"
+		echo ""
+		return 0
+	fi
+	
+	# Check for low battery warning (SOS pattern)
+	if echo "$shutdown_info" | grep -q "LOW BATTERY DETECTED"; then
+		local battery_voltage=$(echo "$shutdown_info" | grep -oP "LOW BATTERY DETECTED.*?(\d+\.\d+)V" | head -1 | grep -oP "\d+\.\d+")
+		local timestamp=$(echo "$shutdown_info" | grep "LOW BATTERY DETECTED" | head -1 | awk '{print $1, $2, $3}')
+		
+		echo -e "${YELLOW}⚠ LOW BATTERY WARNING (previous session)${RESET}"
+		[[ -n "$battery_voltage" ]] && echo -e "  Battery voltage: ${YELLOW}${battery_voltage}V${RESET}"
+		[[ -n "$timestamp" ]] && echo -e "  Event time: ${YELLOW}${timestamp}${RESET}"
+		echo ""
+		return 0
+	fi
+	
+	# Check for normal power button shutdown
+	if echo "$shutdown_info" | grep -q "SYSTEM SHUTDOWN INITIATED by power button"; then
+		local timestamp=$(echo "$shutdown_info" | grep "SYSTEM SHUTDOWN INITIATED" | head -1 | awk '{print $1, $2, $3}')
+		
+		echo -e "${GREEN}✓ Normal shutdown via power button${RESET}"
+		[[ -n "$timestamp" ]] && echo -e "  Event time: ${CYAN}${timestamp}${RESET}"
+		echo ""
+		return 0
+	fi
+	
+	# Check for systemd shutdown (unexpected)
+	if echo "$shutdown_info" | grep -q "Shutting down\|System is powering down"; then
+		local timestamp=$(journalctl -u systemd-shutdown --since "7 days ago" --no-pager -r | grep -E "Shutting down|System is powering down" | head -1 | awk '{print $1, $2, $3}')
+		
+		echo -e "${YELLOW}ℹ Previous shutdown detected${RESET}"
+		[[ -n "$timestamp" ]] && echo -e "  Event time: ${CYAN}${timestamp}${RESET}"
+		echo ""
+		return 0
+	fi
+	
+	# No shutdown event found in recent logs
+	return 1
+}
+
+# Function to check battery CSV logs for critical depletion
+check_battery_csv_history() {
+	# Check the recent battery CSV files (last 3 days) for critical voltage events
+	local csv_dir="/var/log.hdd/persistent"
+	if [[ -d "$csv_dir" ]]; then
+		# Check last 3 battery CSV files for critical depletion events
+		local csv_files=$(ls -t "$csv_dir"/battery-monitor-*.csv 2>/dev/null | head -3)
+		
+		for csv_file in $csv_files; do
+			# Check for dangerously low voltage (< 6.0V is critical, normal is 7.4-8.4V)
+			# Skip header row and get numeric values only
+			local min_voltage=$(tail -100 "$csv_file" | awk -F',' '{print $2}' | grep -E '^[0-9]+\.[0-9]+$' | sort -n | head -1)
+			
+			if [[ -n "$min_voltage" ]] && (( $(echo "$min_voltage < 6.0" | bc -l 2>/dev/null) )); then
+				echo -e "${RED}⚠ CRITICAL BATTERY DEPLETION DETECTED IN LOGS${RESET}"
+				echo -e "  ${RED}Minimum voltage: ${min_voltage}V (normal: 7.4-8.4V)${RESET}"
+				echo -e "  ${RED}Battery was severely depleted - this can damage the battery!${RESET}"
+				echo -e "  ${YELLOW}Log file: ${csv_file##*/}${RESET}"
+				echo -e "  ${YELLOW}⚠ Power control service may not have been running!${RESET}"
+				echo ""
+				return 0
+			elif [[ -n "$min_voltage" ]] && (( $(echo "$min_voltage < 7.2" | bc -l 2>/dev/null) )); then
+				echo -e "${YELLOW}⚠ Low battery detected in logs${RESET}"
+				echo -e "  ${YELLOW}Minimum voltage: ${min_voltage}V${RESET}"
+				echo -e "  Log file: ${csv_file##*/}"
+				echo ""
+				return 0
+			fi
+		done
+	fi
+	return 1
+}
+
+# Function to check current battery status
+check_current_battery() {
+	# Try to get current battery voltage from ROS2 service (if argo-launch is running)
+	if systemctl is-active --quiet argo-launch.service 2>/dev/null; then
+		# Try to call battery status service with timeout
+		local battery_data=$(timeout 5 bash -c 'source /opt/ros/humble/setup.bash 2>/dev/null && ros2 service call /battery_status std_srvs/srv/Trigger 2>/dev/null' 2>/dev/null)
+		
+		if [[ -n "$battery_data" ]]; then
+			# Extract battery voltage from JSON response
+			local battery_voltage=$(echo "$battery_data" | grep -oP '"battery_voltage":\s*\d+\.\d+' | grep -oP '\d+\.\d+')
+			
+			if [[ -n "$battery_voltage" ]]; then
+				# Check voltage levels and display with appropriate color
+				if (( $(echo "$battery_voltage < 7.2" | bc -l) )); then
+					echo -e "${RED}⚠ Current battery: ${battery_voltage}V (CRITICAL - below 7.2V)${RESET}"
+					echo -e "  ${RED}Charge battery immediately!${RESET}"
+					echo ""
+				elif (( $(echo "$battery_voltage < 7.6" | bc -l) )); then
+					echo -e "${YELLOW}⚠ Current battery: ${battery_voltage}V (LOW - below 7.6V)${RESET}"
+					echo -e "  ${YELLOW}Consider charging soon${RESET}"
+					echo ""
+				elif (( $(echo "$battery_voltage < 8.0" | bc -l) )); then
+					echo -e "${CYAN}ℹ Current battery: ${battery_voltage}V (moderate)${RESET}"
+					echo ""
+				else
+					# Good voltage, only show if requested
+					: # Don't display good battery status to keep MOTD clean
+				fi
+			fi
+		fi
+	fi
+}
+
+# Main execution
+main() {
+	# Check if critical battery flag file exists (set during critical shutdown)
+	if [[ -f "$CRITICAL_BATTERY_FLAG" ]]; then
+		echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+		echo -e "${RED}⚠ CRITICAL BATTERY FLAG DETECTED${RESET}"
+		echo -e "  ${YELLOW}System was halted due to critical battery voltage${RESET}"
+		echo -e "  ${YELLOW}Flag file: $CRITICAL_BATTERY_FLAG${RESET}"
+		cat "$CRITICAL_BATTERY_FLAG" 2>/dev/null | sed 's/^/  /'
+		echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+		echo ""
+	fi
+	
+	# Check battery CSV history for critical depletion
+	check_battery_csv_history
+	
+	# Check shutdown event in logs
+	if ! check_shutdown_event; then
+		# If no shutdown event found, check if this is first boot
+		local uptime_seconds=$(awk '{print int($1)}' /proc/uptime)
+		if (( uptime_seconds < 300 )); then
+			# System just booted (< 5 minutes uptime)
+			: # Don't show anything if no shutdown event found on fresh boot
+		fi
+	fi
+	
+	# Check current battery status (only shows if concerning)
+	check_current_battery
+}
+
+# Run main function
+main
+

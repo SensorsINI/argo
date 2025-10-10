@@ -30,3 +30,6 @@ alias cleanbags='find /home/orangepi/argo/bags -type f -mtime +3 -exec rm -f {} 
 # handy shutdown and reboot aliases with confirmation
 alias sd='read -p "Shutdown now? (y/N): " -n 1 -r; echo; if [[ $REPLY =~ ^[Yy]$ ]]; then sudo shutdown now; fi'
 alias rb='read -p "Reboot now? (y/N): " -n 1 -r; echo; if [[ $REPLY =~ ^[Yy]$ ]]; then sudo reboot; fi'
+
+# X11 forwarding setup for VSCode Remote-SSH
+alias ax11='source /home/orangepi/auto_detect_x11.sh'  # Auto-detect and setup X11 forwarding

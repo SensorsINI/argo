@@ -7,5 +7,6 @@
     },
     "python.formatting.provider": "none",
     "isort.sortImportsOnSave": false,
-    "ruff.fixOnSave": false
+    "ruff.fixOnSave": false,
+    "makefile.configureOnOpen": false
   }

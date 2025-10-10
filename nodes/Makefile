@@ -47,12 +47,24 @@ install:
 	@sudo chmod 644 $(SYSTEMD_SYSTEM_DIR)/$(SERVICE_FILE)
 	@echo "🔄 Reloading systemd daemon..."
 	@sudo systemctl daemon-reload
+	@echo "🚀 Enabling and starting service..."
+	@sudo systemctl enable battery_water.service
+	@sudo systemctl start battery_water.service
+	@sleep 2
+	@echo ""
 	@echo "✅ Battery water service installed successfully"
 	@echo ""
-	@echo "Next steps:"
-	@echo "  1. Enable service: sudo make enable"
-	@echo "  2. Start service:  sudo make start"
-	@echo "  3. Check status:   make status"
+	@if systemctl is-active --quiet battery_water.service; then \
+		echo "🟢 Service is RUNNING"; \
+		echo "✅ Auto-start ENABLED"; \
+	else \
+		echo "❌ Service failed to start!"; \
+		echo "Check logs: sudo journalctl -u battery_water.service -n 20"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "Quick status check:"
+	@$(MAKE) status
 
 uninstall:
 	@echo "Uninstalling battery_water service..."

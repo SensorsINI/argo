@@ -234,3 +234,4 @@ calibrated = (np.column_stack([mx, my, mz]) - bias) * scale
 - May have nearby magnetic interference
 - Try recalibrating in different location
 
+
