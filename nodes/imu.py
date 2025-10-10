@@ -281,8 +281,14 @@ def fit_ellipsoid_numpy(points):
         d_center = d + p*center[0] + q*center[1] + r*center[2]
         
         # Eigenvalue decomposition for radii and rotation
-        eigvals, eigvecs = np.linalg.eigh(A / -d_center)
-        radii = 1.0 / np.sqrt(np.abs(eigvals))
+        # Ensure the matrix is positive definite by using abs(d_center)
+        eigvals, eigvecs = np.linalg.eigh(A / np.abs(d_center))
+        radii = 1.0 / np.sqrt(eigvals)
+        
+        # Ensure right-handed coordinate system (det = +1)
+        # eigh doesn't guarantee this, so we fix it if needed
+        if np.linalg.det(eigvecs) < 0:
+            eigvecs[:, 0] *= -1  # Flip first eigenvector
         
         return center, radii, eigvecs
         
