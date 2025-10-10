@@ -2145,20 +2145,25 @@ class PowerController:
                     ac_power_present = battery_data.get('ac_power_present', None)
                     
                     # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
-                    # Track invalid readings - multiple consecutive invalids = critical
-                    if battery_voltage <= 0 or battery_voltage < 3.0:
+                    # Invalid readings (0V, very low, or impossibly high) indicate sensor/communication errors
+                    # NEVER halt on invalid readings - only on valid low voltage readings
+                    if battery_voltage <= 0 or battery_voltage < 3.0 or battery_voltage > 30.0:
                         consecutive_invalid_readings += 1
                         logger.error(
                             f"Invalid battery voltage reading: {battery_voltage:.3f}V "
-                            f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely I2C failure")
+                            f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely sensor/I2C error")
+                        logger.error(
+                            f"⚠️  System will NOT halt on invalid readings - only on valid low voltage!")
                         
-                        # After multiple consecutive invalid readings, assume worst case
+                        # Do NOT halt on invalid readings - they indicate hardware/communication problems, not battery issues
+                        # Just log the error and continue monitoring
                         if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
                             logger.critical(
-                                f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings - "
-                                f"assuming CRITICAL BATTERY!")
-                            self.critical_battery_detected = True
-                            self.initiate_critical_battery_halt(battery_voltage)
+                                f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings!")
+                            logger.critical(
+                                f"This indicates a sensor/communication problem, NOT a battery problem!")
+                            logger.critical(
+                                f"System will continue running - check battery_water.service status")
                         continue
                     
                     # Valid reading - reset invalid counter
@@ -2234,14 +2239,17 @@ class PowerController:
                             f"Battery service not available yet - waiting for battery_water.service startup "
                             f"(grace period: {time_since_startup:.0f}s / {STARTUP_GRACE_PERIOD_S:.0f}s)")
                     elif not battery_service_ever_available and time_since_startup >= STARTUP_GRACE_PERIOD_S:
-                        # Grace period expired but service never became available - critical error
+                        # Grace period expired but service never became available - log error but DO NOT HALT
                         logger.critical(
                             f"CRITICAL: Battery service never became available after {STARTUP_GRACE_PERIOD_S}s grace period!")
                         logger.critical(
+                            "Battery monitoring is DISABLED - system will continue WITHOUT battery protection!")
+                        logger.critical(
                             "Check if battery_water.service is installed and enabled:")
                         logger.critical("  sudo systemctl status battery_water.service")
-                        self.critical_battery_detected = True
-                        self.initiate_critical_battery_halt(0.0)
+                        logger.critical(
+                            "System will NOT halt - service unavailability is not a battery problem!")
+                        # DO NOT HALT - missing service is a configuration problem, not a battery emergency
                     else:
                         # Service was available before but now failing - count consecutive failures
                         consecutive_service_failures += 1
@@ -2249,13 +2257,17 @@ class PowerController:
                             f"Battery service failure - service was available but now unreachable "
                             f"(count: {consecutive_service_failures}/{MAX_CONSECUTIVE_FAILURES})")
                         
-                        # After multiple consecutive service failures, assume critical battery
+                        # After multiple consecutive service failures, log critical error but DO NOT HALT
                         if consecutive_service_failures >= MAX_CONSECUTIVE_FAILURES:
                             logger.critical(
-                                f"CRITICAL: Battery service failed {consecutive_service_failures} times consecutively - "
-                                f"assuming CRITICAL BATTERY for safety!")
-                            self.critical_battery_detected = True
-                            self.initiate_critical_battery_halt(0.0)
+                                f"CRITICAL: Battery service failed {consecutive_service_failures} times consecutively!")
+                            logger.critical(
+                                "Battery monitoring is NOT working - system continues WITHOUT battery protection!")
+                            logger.critical(
+                                "Service failures indicate a monitoring problem, NOT a battery emergency!")
+                            logger.critical(
+                                "Check battery_water.service: sudo systemctl status battery_water.service")
+                            # DO NOT HALT - service failures are monitoring problems, not battery emergencies
 
                 self.last_battery_check_time = time.time()
 
