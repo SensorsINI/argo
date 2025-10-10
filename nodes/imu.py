@@ -453,6 +453,154 @@ def _to_int16(msb, lsb):
     return struct.unpack('>h', bytes([msb, lsb]))[0]
 
 
+def _prompt_yes_no(message: str, default_yes: bool = True) -> bool:
+    """Prompt user for yes/no response."""
+    opts = "Y/n" if default_yes else "y/N"
+    try:
+        resp = input(f"{message} [{opts}]: ").strip().lower()
+    except Exception:
+        resp = ''
+    if resp == '':
+        return default_yes
+    if resp in ('y', 'yes'):
+        return True
+    if resp in ('n', 'no'):
+        return False
+    return default_yes
+
+
+def _backup_existing_calibration(calib_filename: str) -> None:
+    """Backup existing calibration file with datestamp from file creation date."""
+    if not os.path.exists(calib_filename):
+        return  # No existing file to backup
+
+    # Get file modification time (creation date)
+    file_mtime = os.path.getmtime(calib_filename)
+    file_date = datetime.fromtimestamp(file_mtime).strftime('%Y%m%d_%H%M%S')
+
+    # Create backup directory in nodes/ if it doesn't exist
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    backup_dir = os.path.join(script_dir, 'imu_calib_backups')
+    os.makedirs(backup_dir, exist_ok=True)
+
+    # Create backup filename with datestamp
+    base_name = os.path.splitext(os.path.basename(calib_filename))[0]
+    backup_filename = os.path.join(backup_dir, f"{base_name}_{file_date}.json")
+
+    # Copy to backup
+    shutil.copy2(calib_filename, backup_filename)
+    print(f"Backed up previous calibration to: {backup_filename}")
+
+
+def compute_calibration_from_samples(samples):
+    """Compute calibration from magnetometer samples.
+    
+    Args:
+        samples: List of (mx, my, mz) tuples
+        
+    Returns:
+        Dictionary with calibration parameters, or None if computation failed
+    """
+    # Ask user which calibration method to use
+    print("\nCalibration method:")
+    print("  1) Min-max (simple, diagonal soft-iron approximation)")
+    print("  2) Ellipsoid fit (advanced, full 3D rotation correction)")
+    
+    try:
+        method_choice = input("Choose method (1 or 2) [2]: ").strip()
+        use_ellipsoid = (method_choice == '' or method_choice == '2')
+    except Exception:
+        use_ellipsoid = True  # Default to ellipsoid
+    
+    xs = [s[0] for s in samples]
+    ys = [s[1] for s in samples]
+    zs = [s[2] for s in samples]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    minz, maxz = min(zs), max(zs)
+    
+    if use_ellipsoid:
+        # Ellipsoid fitting
+        print("\nComputing ellipsoid fit...")
+        try:
+            import numpy as np
+            points = np.array(samples)
+            result = fit_ellipsoid_numpy(points)
+            
+            if result is None:
+                print("Ellipsoid fit failed, falling back to min-max method")
+                use_ellipsoid = False
+            else:
+                center, radii, rotation = result
+                
+                # Convert rotation matrix to list for JSON serialization
+                rotation_list = rotation.tolist()
+                
+                # Compute scale factors from radii
+                r_avg = np.mean(radii)
+                scale = r_avg / radii
+                
+                calib = {
+                    'method': 'ellipsoid',
+                    'bias_uT': center.tolist(),
+                    'scale_diag': scale.tolist(),
+                    'rotation': rotation_list,
+                    'radii': radii.tolist(),
+                    'num_samples': len(samples),
+                    'ranges_uT': {'x': [minx, maxx], 'y': [miny, maxy], 'z': [minz, maxz]},
+                    'timestamp': datetime.utcnow().isoformat() + 'Z'
+                }
+                
+                print("\nComputed compass calibration (ellipsoid fit):")
+                print(f"  bias_uT     = [{center[0]:+.2f}, {center[1]:+.2f}, {center[2]:+.2f}]")
+                print(f"  scale_diag  = [{scale[0]:.4f}, {scale[1]:.4f}, {scale[2]:.4f}]")
+                print(f"  radii       = [{radii[0]:.2f}, {radii[1]:.2f}, {radii[2]:.2f}] µT")
+                print(f"  rotation matrix:")
+                for i in range(3):
+                    print(f"    [{rotation[i,0]:+.4f}, {rotation[i,1]:+.4f}, {rotation[i,2]:+.4f}]")
+                print(f"  ranges_uT   = X[{minx:+.1f}..{maxx:+.1f}] Y[{miny:+.1f}..{maxy:+.1f}] Z[{minz:+.1f}..{maxz:+.1f}] (n={len(samples)})")
+                return calib
+                
+        except ImportError:
+            print("Error: numpy required for ellipsoid fit, falling back to min-max")
+            use_ellipsoid = False
+        except Exception as e:
+            print(f"Error: Ellipsoid fit failed - {e}, falling back to min-max")
+            import traceback
+            traceback.print_exc()
+            use_ellipsoid = False
+    
+    if not use_ellipsoid:
+        # Min-max calibration (diagonal soft-iron approximation)
+        bx = (maxx + minx) / 2.0
+        by = (maxy + miny) / 2.0
+        bz = (maxz + minz) / 2.0
+        rx = (maxx - minx) / 2.0
+        ry = (maxy - miny) / 2.0
+        rz = (maxz - minz) / 2.0
+        r_avg = (rx + ry + rz) / 3.0 if (rx + ry + rz) > 0 else 1.0
+        sx = r_avg / rx if rx != 0 else 1.0
+        sy = r_avg / ry if ry != 0 else 1.0
+        sz = r_avg / rz if rz != 0 else 1.0
+
+        calib = {
+            'method': 'minmax',
+            'bias_uT': [bx, by, bz],
+            'scale_diag': [sx, sy, sz],
+            'num_samples': len(samples),
+            'ranges_uT': {'x': [minx, maxx], 'y': [miny, maxy], 'z': [minz, maxz]},
+            'timestamp': datetime.utcnow().isoformat() + 'Z'
+        }
+        
+        print("\nComputed compass calibration (min-max diag fit):")
+        print(f"  bias_uT     = [{bx:+.2f}, {by:+.2f}, {bz:+.2f}]")
+        print(f"  scale_diag  = [{sx:.4f}, {sy:.4f}, {sz:.4f}]")
+        print(f"  ranges_uT   = X[{minx:+.1f}..{maxx:+.1f}] Y[{miny:+.1f}..{maxy:+.1f}] Z[{minz:+.1f}..{maxz:+.1f}] (n={len(samples)})")
+        return calib
+    
+    return None
+
+
 class ICM20948:
     def __init__(self, bus, address=0x69):
         self.bus = bus
@@ -1375,7 +1523,7 @@ def main(args=None):
                         help='Plot the most recent calibration data from /tmp')
     parsed_args = parser.parse_args(args=args)
 
-    # If plot calibration is requested, plot the latest calibration data
+    # If plot calibration is requested, load samples, compute calibration, and offer to save
     # This mode doesn't require ROS2
     if parsed_args.plot_calib:
         import glob
@@ -1396,56 +1544,37 @@ def main(args=None):
             with open(latest_file, 'r') as f:
                 data = json.load(f)
 
-            samples = data['samples']
-            calib = data.get('calibration', {})
+            timestamped_samples = data['samples']
             timestamp = data.get('timestamp', 'unknown')
+            
+            # Extract just the (mx, my, mz) values for calibration
+            samples = [[mx, my, mz] for _, mx, my, mz in timestamped_samples]
 
-            times = [s[0] for s in samples]
-            mx_vals = [s[1] for s in samples]
-            my_vals = [s[2] for s in samples]
-            mz_vals = [s[3] for s in samples]
+            # Check sample count
+            if len(samples) < 100:
+                print(f"Warning: only {len(samples)} samples - calibration may be poor (recommend 100+)")
 
-            minx, maxx = min(mx_vals), max(mx_vals)
-            miny, maxy = min(my_vals), max(my_vals)
-            minz, maxz = min(mz_vals), max(mz_vals)
+            # Compute calibration from samples
+            calib = compute_calibration_from_samples(samples)
+            
+            if calib is None:
+                print("Error: Calibration computation failed")
+                return
 
             # Generate and display plots
             try:
                 # Standard time-series plot
                 plot_file = plot_magnetometer_calibration(
-                    samples, calib, timestamp)
+                    timestamped_samples, calib, timestamp)
                 display_plot(plot_file)
                 
                 # 3D visualization plot (interactive if DISPLAY available)
-                samples_3d = [[mx, my, mz] for _, mx, my, mz in samples]
                 has_display = bool(os.environ.get('DISPLAY'))
                 plot_3d_file = plot_magnetometer_3d(
-                    samples_3d, calib, timestamp, output_dir='/tmp', interactive=has_display)
+                    samples, calib, timestamp, output_dir='/tmp', interactive=has_display)
                 if plot_3d_file:
                     # Skip xdg-open if we already showed it interactively
                     display_plot(plot_3d_file, skip_open=has_display)
-
-                # Print calibration info
-                print(f"\nCalibration info:")
-                print(f"  Samples: {len(samples)}")
-                if calib:
-                    method = calib.get('method', 'unknown')
-                    bias = calib.get('bias_uT', [0, 0, 0])
-                    scale = calib.get('scale_diag', [1, 1, 1])
-                    print(f"  Method: {method}")
-                    print(
-                        f"  Bias (µT): [{bias[0]:.2f}, {bias[1]:.2f}, {bias[2]:.2f}]")
-                    print(
-                        f"  Scale: [{scale[0]:.4f}, {scale[1]:.4f}, {scale[2]:.4f}]")
-                    if 'radii' in calib:
-                        radii = calib['radii']
-                        print(f"  Radii (µT): [{radii[0]:.2f}, {radii[1]:.2f}, {radii[2]:.2f}]")
-                print(
-                    f"  X range: [{minx:.1f}, {maxx:.1f}] µT (span: {maxx-minx:.1f})")
-                print(
-                    f"  Y range: [{miny:.1f}, {maxy:.1f}] µT (span: {maxy-miny:.1f})")
-                print(
-                    f"  Z range: [{minz:.1f}, {maxz:.1f}] µT (span: {maxz-minz:.1f})")
 
             except ImportError:
                 print("Error: matplotlib is required for plotting")
@@ -1454,8 +1583,27 @@ def main(args=None):
                 print(f"Error generating plot: {e}")
                 import traceback
                 traceback.print_exc()
+                
+            # Update the samples file with new calibration
+            data['calibration'] = calib
+            with open(latest_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            print(f"\nUpdated {latest_file} with new calibration")
+            
+            # Offer to save calibration to main calibration file
+            calib_file = os.path.join(script_dir, 'invensense-20948-compass-calibration.json')
+            if _prompt_yes_no(f"\nSave this calibration to nodes/{os.path.basename(calib_file)}?", default_yes=True):
+                _backup_existing_calibration(calib_file)
+                with open(calib_file, 'w') as f:
+                    json.dump(calib, f, indent=2)
+                print(f"Saved compass calibration to nodes/{os.path.basename(calib_file)}")
+            else:
+                print("Calibration not saved to main calibration file")
+                
         except Exception as e:
             print(f"Error loading calibration data: {e}")
+            import traceback
+            traceback.print_exc()
 
         return
 
@@ -1632,161 +1780,25 @@ def main(args=None):
                     print(f"  WARNING: Sensor still unhealthy - calibration may be incomplete")
 
             if len(samples) < 100:
-                print(
-                    f"Warning: only {len(samples)} samples collected; calibration may be poor.")
+                print(f"Warning: only {len(samples)} samples - calibration may be poor (recommend 100+)")
 
-            # Ask user which calibration method to use
-            print("\nCalibration method:")
-            print("  1) Min-max (simple, diagonal soft-iron approximation)")
-            print("  2) Ellipsoid fit (advanced, full 3D rotation correction)")
-            
-            def _prompt_yes_no(message: str, default_yes: bool = True) -> bool:
-                opts = "Y/n" if default_yes else "y/N"
-                try:
-                    resp = input(f"{message} [{opts}]: ").strip().lower()
-                except Exception:
-                    resp = ''
-                if resp == '':
-                    return default_yes
-                if resp in ('y', 'yes'):
-                    return True
-                if resp in ('n', 'no'):
-                    return False
-                return default_yes
-
-            try:
-                method_choice = input("Choose method (1 or 2) [1]: ").strip()
-                use_ellipsoid = (method_choice == '2')
-            except Exception:
-                use_ellipsoid = False
-            
-            if use_ellipsoid:
-                # Ellipsoid fitting
-                print("\nComputing ellipsoid fit...")
-                try:
-                    import numpy as np
-                    points = np.array(samples)
-                    result = fit_ellipsoid_numpy(points)
-                    
-                    if result is None:
-                        print("Ellipsoid fit failed, falling back to min-max method")
-                        use_ellipsoid = False
-                    else:
-                        center, radii, rotation = result
-                        
-                        # Convert rotation matrix to list for JSON serialization
-                        rotation_list = rotation.tolist()
-                        
-                        # Compute scale factors from radii
-                        r_avg = np.mean(radii)
-                        scale = r_avg / radii
-                        
-                        xs = [s[0] for s in samples]
-                        ys = [s[1] for s in samples]
-                        zs = [s[2] for s in samples]
-                        minx, maxx = min(xs), max(xs)
-                        miny, maxy = min(ys), max(ys)
-                        minz, maxz = min(zs), max(zs)
-                        
-                        calib = {
-                            'method': 'ellipsoid',
-                            'bias_uT': center.tolist(),
-                            'scale_diag': scale.tolist(),
-                            'rotation': rotation_list,
-                            'radii': radii.tolist(),
-                            'num_samples': len(samples),
-                            'ranges_uT': {'x': [minx, maxx], 'y': [miny, maxy], 'z': [minz, maxz]},
-                            'timestamp': datetime.utcnow().isoformat() + 'Z'
-                        }
-                        
-                        print("\nProposed compass calibration (ellipsoid fit):")
-                        print(f"  bias_uT     = [{center[0]:+.2f}, {center[1]:+.2f}, {center[2]:+.2f}]")
-                        print(f"  scale_diag  = [{scale[0]:.4f}, {scale[1]:.4f}, {scale[2]:.4f}]")
-                        print(f"  radii       = [{radii[0]:.2f}, {radii[1]:.2f}, {radii[2]:.2f}] µT")
-                        print(f"  rotation matrix:")
-                        for i in range(3):
-                            print(f"    [{rotation[i,0]:+.4f}, {rotation[i,1]:+.4f}, {rotation[i,2]:+.4f}]")
-                        print(f"  ranges_uT   = X[{minx:+.1f}..{maxx:+.1f}] Y[{miny:+.1f}..{maxy:+.1f}] Z[{minz:+.1f}..{maxz:+.1f}] (n={len(samples)})")
-                        
-                except ImportError:
-                    print("Error: numpy required for ellipsoid fit, falling back to min-max")
-                    use_ellipsoid = False
-                except Exception as e:
-                    print(f"Error: Ellipsoid fit failed - {e}, falling back to min-max")
-                    import traceback
-                    traceback.print_exc()
-                    use_ellipsoid = False
-            
-            if not use_ellipsoid:
-                # Min-max calibration (diagonal soft-iron approximation)
-                xs = [s[0] for s in samples]
-                ys = [s[1] for s in samples]
-                zs = [s[2] for s in samples]
-                minx, maxx = min(xs), max(xs)
-                miny, maxy = min(ys), max(ys)
-                minz, maxz = min(zs), max(zs)
-                bx = (maxx + minx) / 2.0
-                by = (maxy + miny) / 2.0
-                bz = (maxz + minz) / 2.0
-                rx = (maxx - minx) / 2.0
-                ry = (maxy - miny) / 2.0
-                rz = (maxz - minz) / 2.0
-                r_avg = (rx + ry + rz) / 3.0 if (rx + ry + rz) > 0 else 1.0
-                sx = r_avg / rx if rx != 0 else 1.0
-                sy = r_avg / ry if ry != 0 else 1.0
-                sz = r_avg / rz if rz != 0 else 1.0
-
-                calib = {
-                    'method': 'minmax',
-                    'bias_uT': [bx, by, bz],
-                    'scale_diag': [sx, sy, sz],
-                    'num_samples': len(samples),
-                    'ranges_uT': {'x': [minx, maxx], 'y': [miny, maxy], 'z': [minz, maxz]},
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
-                }
-                # Show summary and confirm save
-                print("\nProposed compass calibration (min-max diag fit):")
-                print(f"  bias_uT     = [{bx:+.2f}, {by:+.2f}, {bz:+.2f}]")
-                print(f"  scale_diag  = [{sx:.4f}, {sy:.4f}, {sz:.4f}]")
-                print(
-                    f"  ranges_uT   = X[{minx:+.1f}..{maxx:+.1f}] Y[{miny:+.1f}..{maxy:+.1f}] Z[{minz:+.1f}..{maxz:+.1f}] (n={len(samples)})")
-
-            def _backup_existing_calibration(calib_filename: str) -> None:
-                """Backup existing calibration file with datestamp from file creation date."""
-                if not os.path.exists(calib_filename):
-                    return  # No existing file to backup
-
-                # Get file modification time (creation date)
-                file_mtime = os.path.getmtime(calib_filename)
-                file_date = datetime.fromtimestamp(
-                    file_mtime).strftime('%Y%m%d_%H%M%S')
-
-                # Create backup directory in nodes/ if it doesn't exist
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                backup_dir = os.path.join(script_dir, 'imu_calib_backups')
-                os.makedirs(backup_dir, exist_ok=True)
-
-                # Create backup filename with datestamp
-                base_name = os.path.splitext(
-                    os.path.basename(calib_filename))[0]
-                backup_filename = os.path.join(
-                    backup_dir, f"{base_name}_{file_date}.json")
-
-                # Copy to backup
-                shutil.copy2(calib_filename, backup_filename)
-                print(f"Backed up previous calibration to: {backup_filename}")
-
-            # Save timestamped samples to /tmp for later plotting
+            # Save timestamped samples to /tmp 
             calib_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             samples_file = f'/tmp/imu_calib_samples_{calib_timestamp}.json'
             samples_data = {
                 'timestamp': calib_timestamp,
-                'samples': [[t, mx, my, mz] for t, mx, my, mz in timestamped_samples],
-                'calibration': calib
+                'samples': [[t, mx, my, mz] for t, mx, my, mz in timestamped_samples]
             }
             with open(samples_file, 'w') as f:
                 json.dump(samples_data, f, indent=2)
-            print(f"Saved calibration data to: {samples_file}")
+            print(f"\nSaved calibration samples to: {samples_file}")
+
+            # Compute calibration from samples
+            calib = compute_calibration_from_samples(samples)
+            
+            if calib is None:
+                print("Error: Calibration computation failed")
+                return
 
             # Generate and display plots
             try:
@@ -1806,19 +1818,23 @@ def main(args=None):
                 print("Warning: matplotlib not available, skipping plot generation")
             except Exception as e:
                 print(f"Warning: Failed to generate plot: {e}")
+            
+            # Update samples file with calibration
+            samples_data['calibration'] = calib
+            with open(samples_file, 'w') as f:
+                json.dump(samples_data, f, indent=2)
 
             # Define calibration file path in nodes/ directory
             script_dir = os.path.dirname(os.path.abspath(__file__))
             calib_file = os.path.join(
                 script_dir, 'invensense-20948-compass-calibration.json')
 
-            if _prompt_yes_no(f"Save calibration to nodes/{os.path.basename(calib_file)}?", default_yes=True):
+            if _prompt_yes_no(f"\nSave calibration to nodes/{os.path.basename(calib_file)}?", default_yes=True):
                 # Backup existing calibration before saving new one
                 _backup_existing_calibration(calib_file)
                 with open(calib_file, 'w') as f:
                     json.dump(calib, f, indent=2)
-                print(
-                    f"Saved compass calibration to nodes/{os.path.basename(calib_file)}")
+                print(f"Saved compass calibration to nodes/{os.path.basename(calib_file)}")
                 
                 # Move samples file from /tmp to nodes/ for persistent storage
                 persistent_samples_file = os.path.join(
@@ -1826,7 +1842,7 @@ def main(args=None):
                 shutil.move(samples_file, persistent_samples_file)
                 print(f"Moved calibration samples to: {persistent_samples_file}")
             else:
-                print("Calibration discarded; file not saved.")
+                print("Calibration not saved to main calibration file")
         except Exception as e:
             print(f"Calibration failed: {e}")
         finally:
