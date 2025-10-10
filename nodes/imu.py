@@ -52,8 +52,9 @@ Command Line Options:
                      - Generates time-series and 3D calibration plots in /tmp
 --plot_calib         Plot the most recent calibration data from /tmp or nodes/
                      - Loads the latest calibration samples
-                     - Generates time-series and 3D visualization plots
-                     - Shows uncalibrated (red) vs calibrated (green) data
+                     - Generates time-series plot showing all 3 axes over time
+                     - Creates interactive 3D plot (rotatable with mouse when DISPLAY set)
+                     - Shows uncalibrated (red) vs calibrated (green) data with ideal sphere
                      - Prints calibration statistics
 
 Calibration Methods:
@@ -178,10 +179,18 @@ def plot_magnetometer_calibration(timestamped_samples, calib, timestamp):
     return plot_file
 
 
-def display_plot(plot_file):
-    """Attempt to display plot file in default image viewer if display is available."""
+def display_plot(plot_file, skip_open=False):
+    """Attempt to display plot file in default image viewer if display is available.
+    
+    Args:
+        plot_file: Path to the plot file
+        skip_open: If True, don't try to open with xdg-open (e.g., already shown interactively)
+    """
     print(f"Saved calibration plot to: {plot_file}")
-
+    
+    if skip_open:
+        return
+    
     if os.environ.get('DISPLAY'):
         try:
             import subprocess
@@ -294,7 +303,7 @@ def apply_ellipsoid_calibration(points, center, radii, rotation):
     return calibrated
 
 
-def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp'):
+def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interactive=None):
     """Generate and save 3D visualization of uncalibrated vs calibrated magnetometer data.
     
     Args:
@@ -302,6 +311,7 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp'):
         calib: Calibration dict with bias_uT, scale_diag, and optionally rotation matrix
         timestamp: Timestamp string for filename
         output_dir: Directory to save plot (default /tmp)
+        interactive: If True, use interactive backend; if None, auto-detect from DISPLAY
         
     Returns:
         Path to saved plot file
@@ -309,7 +319,17 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp'):
     try:
         import numpy as np
         import matplotlib
-        matplotlib.use('Agg')  # Non-interactive backend
+        
+        # Determine if we should use interactive backend
+        if interactive is None:
+            interactive = bool(os.environ.get('DISPLAY'))
+        
+        if interactive:
+            # Use default interactive backend (TkAgg, Qt5Agg, etc.)
+            matplotlib.use('TkAgg')
+        else:
+            matplotlib.use('Agg')  # Non-interactive backend
+            
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
     except ImportError as e:
@@ -334,56 +354,59 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp'):
         # Simple min-max calibration
         calibrated = (points - bias) * scale
     
-    # Create 3D plot
-    fig = plt.figure(figsize=(16, 8))
+    # Create single 3D plot with both datasets
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
     
-    # Uncalibrated data (left subplot)
-    ax1 = fig.add_subplot(121, projection='3d')
-    ax1.scatter(points[:, 0], points[:, 1], points[:, 2], 
-                c='red', marker='o', s=1, alpha=0.6, label='Uncalibrated')
-    ax1.set_xlabel('X (µT)')
-    ax1.set_ylabel('Y (µT)')
-    ax1.set_zlabel('Z (µT)')
-    ax1.set_title('Uncalibrated Magnetometer Data')
-    ax1.legend()
+    # Plot uncalibrated data in red
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], 
+                c='red', marker='o', s=2, alpha=0.5, label='Uncalibrated (raw)')
     
-    # Make axes equal scale
+    # Plot calibrated data in green
+    ax.scatter(calibrated[:, 0], calibrated[:, 1], calibrated[:, 2],
+                c='green', marker='o', s=2, alpha=0.5, label='Calibrated (corrected)')
+    
+    # Create ideal sphere mesh (target for calibrated data)
+    # Use average radius of calibrated data for sphere size
+    cal_radius = np.mean([
+        np.std(calibrated[:, 0]),
+        np.std(calibrated[:, 1]),
+        np.std(calibrated[:, 2])
+    ]) * 2.5  # Approximate sphere radius
+    
+    # Generate sphere mesh
+    u = np.linspace(0, 2 * np.pi, 30)
+    v = np.linspace(0, np.pi, 20)
+    sphere_x = cal_radius * np.outer(np.cos(u), np.sin(v))
+    sphere_y = cal_radius * np.outer(np.sin(u), np.sin(v))
+    sphere_z = cal_radius * np.outer(np.ones(np.size(u)), np.cos(v))
+    
+    # Plot ideal sphere as wireframe in light gray
+    ax.plot_wireframe(sphere_x, sphere_y, sphere_z, 
+                      color='lightgray', alpha=0.5, linewidth=0.5,
+                      label='Ideal sphere')
+    
+    ax.set_xlabel('X (µT)')
+    ax.set_ylabel('Y (µT)')
+    ax.set_zlabel('Z (µT)')
+    ax.set_title('Magnetometer Calibration: Before (Red) vs After (Green)')
+    ax.legend(loc='upper right')
+    
+    # Make axes equal scale to show true shape
+    all_points = np.vstack([points, calibrated])
     max_range = np.array([
-        points[:, 0].max() - points[:, 0].min(),
-        points[:, 1].max() - points[:, 1].min(),
-        points[:, 2].max() - points[:, 2].min()
+        all_points[:, 0].max() - all_points[:, 0].min(),
+        all_points[:, 1].max() - all_points[:, 1].min(),
+        all_points[:, 2].max() - all_points[:, 2].min()
     ]).max() / 2.0
-    mid_x = (points[:, 0].max() + points[:, 0].min()) / 2.0
-    mid_y = (points[:, 1].max() + points[:, 1].min()) / 2.0
-    mid_z = (points[:, 2].max() + points[:, 2].min()) / 2.0
-    ax1.set_xlim(mid_x - max_range, mid_x + max_range)
-    ax1.set_ylim(mid_y - max_range, mid_y + max_range)
-    ax1.set_zlim(mid_z - max_range, mid_z + max_range)
+    mid_x = (all_points[:, 0].max() + all_points[:, 0].min()) / 2.0
+    mid_y = (all_points[:, 1].max() + all_points[:, 1].min()) / 2.0
+    mid_z = (all_points[:, 2].max() + all_points[:, 2].min()) / 2.0
+    ax.set_xlim(mid_x - max_range, mid_x + max_range)
+    ax.set_ylim(mid_y - max_range, mid_y + max_range)
+    ax.set_zlim(mid_z - max_range, mid_z + max_range)
     
-    # Calibrated data (right subplot)
-    ax2 = fig.add_subplot(122, projection='3d')
-    ax2.scatter(calibrated[:, 0], calibrated[:, 1], calibrated[:, 2],
-                c='green', marker='o', s=1, alpha=0.6, label='Calibrated')
-    ax2.set_xlabel('X (µT)')
-    ax2.set_ylabel('Y (µT)')
-    ax2.set_zlabel('Z (µT)')
-    ax2.set_title('Calibrated Magnetometer Data')
-    ax2.legend()
-    
-    # Make axes equal scale for calibrated data
-    max_range_cal = np.array([
-        calibrated[:, 0].max() - calibrated[:, 0].min(),
-        calibrated[:, 1].max() - calibrated[:, 1].min(),
-        calibrated[:, 2].max() - calibrated[:, 2].min()
-    ]).max() / 2.0
-    mid_x_cal = (calibrated[:, 0].max() + calibrated[:, 0].min()) / 2.0
-    mid_y_cal = (calibrated[:, 1].max() + calibrated[:, 1].min()) / 2.0
-    mid_z_cal = (calibrated[:, 2].max() + calibrated[:, 2].min()) / 2.0
-    ax2.set_xlim(mid_x_cal - max_range_cal, mid_x_cal + max_range_cal)
-    ax2.set_ylim(mid_y_cal - max_range_cal, mid_y_cal + max_range_cal)
-    ax2.set_zlim(mid_z_cal - max_range_cal, mid_z_cal + max_range_cal)
-    
-    # Add calibration info
+    # Add calibration info as text
     method = calib.get('method', 'unknown')
     num_samples = len(samples)
     info_text = f"Method: {method}\n"
@@ -398,8 +421,17 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp'):
     plt.suptitle(f'Magnetometer Calibration 3D View - {timestamp}', fontsize=14)
     plt.tight_layout()
     
+    # Save to file
     plot_file = os.path.join(output_dir, f'imu_calib_3d_{timestamp}.png')
     plt.savefig(plot_file, dpi=150)
+    
+    # Show interactively if possible
+    if interactive:
+        try:
+            plt.show()  # This will be interactive and rotatable
+        except Exception:
+            pass  # If show fails, just skip it
+    
     plt.close()
     
     return plot_file
@@ -1344,12 +1376,14 @@ def main(args=None):
                     samples, calib, timestamp)
                 display_plot(plot_file)
                 
-                # 3D visualization plot
+                # 3D visualization plot (interactive if DISPLAY available)
                 samples_3d = [[mx, my, mz] for _, mx, my, mz in samples]
+                has_display = bool(os.environ.get('DISPLAY'))
                 plot_3d_file = plot_magnetometer_3d(
-                    samples_3d, calib, timestamp, output_dir='/tmp')
+                    samples_3d, calib, timestamp, output_dir='/tmp', interactive=has_display)
                 if plot_3d_file:
-                    display_plot(plot_3d_file)
+                    # Skip xdg-open if we already showed it interactively
+                    display_plot(plot_3d_file, skip_open=has_display)
 
                 # Print calibration info
                 print(f"\nCalibration info:")
@@ -1721,12 +1755,13 @@ def main(args=None):
                     timestamped_samples, calib, calib_timestamp)
                 display_plot(plot_file)
                 
-                # 3D visualization plot
-                script_dir = os.path.dirname(os.path.abspath(__file__))
+                # 3D visualization plot (interactive if DISPLAY available)
+                has_display = bool(os.environ.get('DISPLAY'))
                 plot_3d_file = plot_magnetometer_3d(
-                    samples, calib, calib_timestamp, output_dir='/tmp')
+                    samples, calib, calib_timestamp, output_dir='/tmp', interactive=has_display)
                 if plot_3d_file:
-                    display_plot(plot_3d_file)
+                    # Skip xdg-open if we already showed it interactively
+                    display_plot(plot_3d_file, skip_open=has_display)
             except ImportError:
                 print("Warning: matplotlib not available, skipping plot generation")
             except Exception as e:
