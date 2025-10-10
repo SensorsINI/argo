@@ -1182,6 +1182,10 @@ class ImuNode(Node):
                 my_cal = (my - by) * sy
                 mz_cal = (mz - bz) * sz
                 return mx_cal, my_cal, mz_cal
+            
+            elif method == 'unity':
+                # Unity/identity calibration - no transformation (for testing)
+                return mx, my, mz
                 
         except Exception as e:
             # If calibration fails, log once and return uncalibrated values
