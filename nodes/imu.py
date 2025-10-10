@@ -298,6 +298,8 @@ def apply_ellipsoid_calibration(points, center, radii, rotation):
     scale = r_avg / radii
     
     # Apply inverse rotation and scaling
+    # The @ symbol is the matrix multiplication operator in Python (PEP 465, since Python 3.5).
+    # This line transforms the centered points by applying the rotation matrix and scaling:
     calibrated = centered @ rotation @ np.diag(scale)
     
     return calibrated
@@ -367,12 +369,9 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interacti
                 c='green', marker='o', s=2, alpha=0.5, label='Calibrated (corrected)')
     
     # Create ideal sphere mesh (target for calibrated data)
-    # Use average radius of calibrated data for sphere size
-    cal_radius = np.mean([
-        np.std(calibrated[:, 0]),
-        np.std(calibrated[:, 1]),
-        np.std(calibrated[:, 2])
-    ]) * 2.5  # Approximate sphere radius
+    # Calculate sphere radius as mean magnitude of calibrated points
+    # Each point should lie on a sphere with radius = Earth's magnetic field strength
+    cal_radius = np.mean(np.sqrt(calibrated[:, 0]**2 + calibrated[:, 1]**2 + calibrated[:, 2]**2))
     
     # Generate sphere mesh
     u = np.linspace(0, 2 * np.pi, 30)
@@ -383,7 +382,7 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interacti
     
     # Plot ideal sphere as wireframe in light gray
     ax.plot_wireframe(sphere_x, sphere_y, sphere_z, 
-                      color='lightgray', alpha=0.5, linewidth=0.5,
+                      color='lightgray', alpha=0.7, linewidth=0.5,
                       label='Ideal sphere')
     
     ax.set_xlabel('X (µT)')
@@ -989,17 +988,45 @@ class ImuNode(Node):
         return [''.join(row) for row in grid]
 
     def _apply_compass_calibration(self, mx, my, mz):
-        """Apply compass calibration if available."""
-        if isinstance(self._compass_cal, dict) and self._compass_cal.get('method') in ('minmax', 'diag'):
-            try:
-                bx, by, bz = self._compass_cal['bias_uT']
-                sx, sy, sz = self._compass_cal['scale_diag']
+        """Apply compass calibration if available (supports both minmax and ellipsoid methods)."""
+        if not isinstance(self._compass_cal, dict):
+            return mx, my, mz
+        
+        method = self._compass_cal.get('method')
+        
+        try:
+            bias = self._compass_cal.get('bias_uT', [0, 0, 0])
+            scale = self._compass_cal.get('scale_diag', [1, 1, 1])
+            
+            if method == 'ellipsoid' and 'rotation' in self._compass_cal:
+                # Full ellipsoid calibration with rotation
+                import numpy as np
+                point = np.array([mx, my, mz])
+                bias_arr = np.array(bias)
+                rotation = np.array(self._compass_cal['rotation'])
+                
+                # Apply ellipsoid calibration
+                calibrated = apply_ellipsoid_calibration(
+                    point.reshape(1, 3), bias_arr, 
+                    np.ones(3) / np.array(scale), rotation)
+                
+                return calibrated[0, 0], calibrated[0, 1], calibrated[0, 2]
+                
+            elif method in ('minmax', 'diag'):
+                # Simple min-max calibration (bias + diagonal scale)
+                bx, by, bz = bias
+                sx, sy, sz = scale
                 mx_cal = (mx - bx) * sx
                 my_cal = (my - by) * sy
                 mz_cal = (mz - bz) * sz
                 return mx_cal, my_cal, mz_cal
-            except Exception:
-                pass
+                
+        except Exception as e:
+            # If calibration fails, log once and return uncalibrated values
+            if not hasattr(self, '_calib_error_logged'):
+                self.get_logger().warn(f"Compass calibration application failed: {e}")
+                self._calib_error_logged = True
+        
         return mx, my, mz
 
     def _calculate_tilt_compensated_heading(self, mx, my, mz, ax, ay, az):
