@@ -23,8 +23,9 @@ import yaml
 import rclpy
 from rclpy.node import Node
 # Removed QoS imports - using default QoS only
-from std_msgs.msg import Bool, Float64, Float32
+from std_msgs.msg import Bool, Float64, Float32, String
 from geometry_msgs.msg import Vector3
+from sensor_msgs.msg import NavSatFix
 from rclpy.parameter import Parameter
 
 
@@ -75,6 +76,18 @@ class BoatState:
     saltwater_alert: bool = False                # saltwater intrusion alert
     humidity_alert: bool = False                 # high humidity alert
 
+    # Connectivity monitoring (from lora node)
+    shore_connected: bool = False                # LoRa connection to shore
+    last_shore_contact: Optional[float] = None   # timestamp of last contact
+    remote_command: Optional[str] = None         # latest remote command
+
+    # Home position tracking (for return-to-home)
+    home_latitude: Optional[float] = None        # degrees
+    home_longitude: Optional[float] = None       # degrees
+    current_latitude: Optional[float] = None     # degrees
+    current_longitude: Optional[float] = None    # degrees
+    return_to_home_active: bool = False          # RTH mode active
+
     def is_valid_for_control(self) -> bool:
         """Check if we have minimum required data for autonomous control."""
         return (self.compass_heading is not None and
@@ -83,6 +96,50 @@ class BoatState:
     def has_critical_alerts(self) -> bool:
         """Check if any critical alerts are active that should affect control."""
         return self.battery_low_alert or self.saltwater_alert
+
+    def get_bearing_to_home(self) -> Optional[float]:
+        """Calculate bearing from current position to home position in degrees."""
+        if (self.home_latitude is None or self.home_longitude is None or
+            self.current_latitude is None or self.current_longitude is None):
+            return None
+
+        # Convert to radians
+        lat1 = math.radians(self.current_latitude)
+        lon1 = math.radians(self.current_longitude)
+        lat2 = math.radians(self.home_latitude)
+        lon2 = math.radians(self.home_longitude)
+
+        # Calculate bearing using Haversine formula
+        dlon = lon2 - lon1
+        y = math.sin(dlon) * math.cos(lat2)
+        x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+        bearing = math.atan2(y, x)
+        
+        # Convert to degrees (0-360)
+        bearing_deg = (math.degrees(bearing) + 360) % 360
+        return bearing_deg
+
+    def get_distance_to_home(self) -> Optional[float]:
+        """Calculate distance to home position in nautical miles."""
+        if (self.home_latitude is None or self.home_longitude is None or
+            self.current_latitude is None or self.current_longitude is None):
+            return None
+
+        # Convert to radians
+        lat1 = math.radians(self.current_latitude)
+        lon1 = math.radians(self.current_longitude)
+        lat2 = math.radians(self.home_latitude)
+        lon2 = math.radians(self.home_longitude)
+
+        # Haversine formula
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+        c = 2 * math.asin(math.sqrt(a))
+        
+        # Radius of earth in nautical miles = 3440.065
+        distance_nm = 3440.065 * c
+        return distance_nm
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for data logging."""
@@ -208,6 +265,99 @@ class WindAwareController(BaseController):
             cmd_sail = (1 - self.sail_wind_gain) * cmd_sail + \
                 self.sail_wind_gain * wind_sail_cmd
 
+        return ControlCommand(
+            rudder=cmd_rudder,
+            sail=cmd_sail,
+            timestamp=state.timestamp
+        )
+
+
+class ReturnToHomeController(BaseController):
+    """
+    Return-to-home controller that navigates back to starting position.
+    
+    Activates automatically when:
+    1. Shore connection is lost AND return_to_home_active flag is set, OR
+    2. Remote "return_home" command is received via LoRa
+    
+    Uses GPS-based navigation to calculate bearing to home and sail toward it.
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.rudder_gain = config.get('rudder_gain', 1.0)
+        self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)
+        self.sail_wind_gain = config.get('sail_wind_gain', 0.5)
+        self.connection_timeout = config.get('shore_connection_timeout', 120.0)  # seconds
+        self.arrival_distance = config.get('arrival_distance_nm', 0.05)  # 0.05nm = ~90 meters
+        
+    def should_activate(self, state: BoatState) -> bool:
+        """
+        Determine if return-to-home mode should activate.
+        
+        Returns True if:
+        - RTH explicitly commanded via LoRa, OR
+        - Shore connection lost for more than timeout period
+        """
+        # Explicit RTH command
+        if state.return_to_home_active:
+            return True
+        
+        # Automatic RTH on connection loss
+        if state.last_shore_contact is not None:
+            time_since_contact = time.time() - state.last_shore_contact
+            if time_since_contact > self.connection_timeout and not state.shore_connected:
+                return True
+        
+        return False
+
+    def generate_control(self, state: BoatState) -> ControlCommand:
+        """Generate control commands to navigate toward home position."""
+        if not state.is_valid_for_control():
+            return ControlCommand(timestamp=state.timestamp)
+
+        # Check if we have GPS home position
+        bearing_to_home = state.get_bearing_to_home()
+        distance_to_home = state.get_distance_to_home()
+        
+        if bearing_to_home is None or distance_to_home is None:
+            # Fall back to maintaining current heading
+            compass_err = signed_angle_difference_degrees(
+                state.target_heading, state.compass_heading)
+            cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
+            cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
+            cmd_sail = 0.0  # Neutral sail
+            return ControlCommand(
+                rudder=cmd_rudder,
+                sail=cmd_sail,
+                timestamp=state.timestamp
+            )
+        
+        # Check if we've arrived at home
+        if distance_to_home < self.arrival_distance:
+            # Arrived! Switch to drift mode with neutral controls
+            return ControlCommand(
+                rudder=0.0,
+                sail=0.0,
+                timestamp=state.timestamp
+            )
+        
+        # Navigate toward home bearing
+        # Use bearing to home as target heading
+        state.target_heading = bearing_to_home
+        
+        compass_err = signed_angle_difference_degrees(
+            bearing_to_home, state.compass_heading)
+        cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
+        cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
+        
+        # Wind-aware sail control (same as WindAwareController)
+        cmd_sail = 0.0
+        if state.wind_angle is not None:
+            wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
+            wind_sail_cmd = np.clip(wind_sail_cmd, -1.0, 1.0)
+            cmd_sail = self.sail_wind_gain * wind_sail_cmd
+        
         return ControlCommand(
             rudder=cmd_rudder,
             sail=cmd_sail,
@@ -388,6 +538,16 @@ class ControllerNode(Node):
         self.create_subscription(
             Bool, '/humidity_alert', self.humidity_alert_callback, 10)
 
+        # LoRa connectivity monitoring (for return-to-home)
+        self.create_subscription(
+            Bool, '/lora_connection_status', self.lora_connection_callback, 10)
+        self.create_subscription(
+            String, '/lora_remote_command', self.lora_command_callback, 10)
+
+        # GPS position for home tracking and navigation
+        self.create_subscription(
+            NavSatFix, '/fix', self.gps_position_callback, 10)
+
         # --- Timers ---
         # 5 Hz (reduced from 10 Hz for lower CPU usage)
         self.control_loop_period = 0.2
@@ -419,6 +579,11 @@ class ControllerNode(Node):
         elif controller_type == 'wind_aware':
             config['sail_wind_gain'] = 0.5  # Could be a parameter
             self.controller = WindAwareController(config)
+        elif controller_type == 'return_to_home':
+            config['sail_wind_gain'] = 0.5
+            config['shore_connection_timeout'] = 120.0
+            config['arrival_distance_nm'] = 0.05
+            self.controller = ReturnToHomeController(config)
         else:
             self.get_logger().warn(
                 f"Unknown controller type '{controller_type}', using proportional")
@@ -541,6 +706,64 @@ class ControllerNode(Node):
         if msg.data:
             self.get_logger().warn("💦 HIGH HUMIDITY ALERT - Check ventilation")
 
+    # --- LoRa Connectivity Callbacks ---
+    def lora_connection_callback(self, msg):
+        """Receive LoRa connection status from lora node"""
+        # Always process connectivity status, even when paused
+        old_status = self.boat_state.shore_connected
+        self.boat_state.shore_connected = msg.data
+        
+        if msg.data:
+            self.boat_state.last_shore_contact = time.time()
+            if not old_status:
+                self.get_logger().info("📡 Shore connection ESTABLISHED via LoRa")
+        else:
+            if old_status:
+                self.get_logger().warn("📡 Shore connection LOST - Return-to-home may activate")
+
+    def lora_command_callback(self, msg):
+        """Receive remote commands from shore via LoRa"""
+        # Always process remote commands, even when paused
+        command = msg.data.lower().strip()
+        self.boat_state.remote_command = command
+        
+        self.get_logger().info(f"📡 Received remote command: '{command}'")
+        
+        # Process return-to-home command
+        if command == 'return_home':
+            if self.boat_state.home_latitude is not None and self.boat_state.home_longitude is not None:
+                self.boat_state.return_to_home_active = True
+                bearing = self.boat_state.get_bearing_to_home()
+                distance = self.boat_state.get_distance_to_home()
+                self.get_logger().info(
+                    f"🏠 RETURN TO HOME activated - Bearing: {bearing:.1f}°, Distance: {distance:.2f}nm")
+            else:
+                self.get_logger().warn("🏠 Cannot return home - no home position set")
+        elif command == 'autonomous':
+            self.boat_state.return_to_home_active = False
+            self.get_logger().info("🤖 Normal autonomous operation resumed")
+        elif command == 'stop':
+            # Set neutral commands - implementation can be enhanced
+            self.get_logger().warn("⚠️ STOP command received - consider implementing safe stop mode")
+
+    def gps_position_callback(self, msg):
+        """Receive GPS position from gps node"""
+        if self.pause_service.is_paused():
+            return
+        
+        # Update current position
+        self.boat_state.current_latitude = msg.latitude
+        self.boat_state.current_longitude = msg.longitude
+        
+        # Set home position on first valid GPS fix
+        if (self.boat_state.home_latitude is None and 
+            self.boat_state.home_longitude is None and
+            msg.latitude != 0.0 and msg.longitude != 0.0):
+            self.boat_state.home_latitude = msg.latitude
+            self.boat_state.home_longitude = msg.longitude
+            self.get_logger().info(
+                f"🏠 Home position set: {msg.latitude:.6f}°, {msg.longitude:.6f}°")
+
     def timer_callback(self):
         """Main control loop - generates autonomous control commands."""
         # Check if node is paused
@@ -612,6 +835,35 @@ class ControllerNode(Node):
                 if self.boat_state.saltwater_alert:
                     self.get_logger().warn("💧 SALTWATER DETECTED - Consider emergency return",
                                            throttle_duration_sec=10)
+
+            # Check if return-to-home should activate
+            if isinstance(self.controller, ReturnToHomeController):
+                if self.controller.should_activate(self.boat_state):
+                    # Log RTH status periodically
+                    distance = self.boat_state.get_distance_to_home()
+                    bearing = self.boat_state.get_bearing_to_home()
+                    if distance is not None and bearing is not None:
+                        self.get_logger().info(
+                            f"🏠 RETURN TO HOME - Distance: {distance:.2f}nm, Bearing: {bearing:.1f}°, "
+                            f"Current heading: {self.boat_state.compass_heading:.1f}°",
+                            throttle_duration_sec=10)
+            elif hasattr(self.controller, 'should_activate'):
+                # For any controller with should_activate method, check if RTH needed
+                if isinstance(self.controller, ReturnToHomeController) == False:
+                    # Create temporary RTH controller to check
+                    rth_config = {
+                        'rudder_gain': self.get_parameter('rudder_gain').get_parameter_value().double_value,
+                        'rudder_full_scale_deg': self.get_parameter('rudder_full_scale_deg').get_parameter_value().double_value,
+                        'sail_wind_gain': 0.5,
+                        'shore_connection_timeout': 120.0,
+                        'arrival_distance_nm': 0.05
+                    }
+                    temp_rth = ReturnToHomeController(rth_config)
+                    if temp_rth.should_activate(self.boat_state):
+                        self.get_logger().warn(
+                            "🏠 Switching to RETURN TO HOME mode due to connectivity loss",
+                            throttle_duration_sec=5)
+                        self.controller = temp_rth
 
             # **THE CORE ARCHITECTURE: Single generate_control function**
             control_command = self.controller.generate_control(self.boat_state)
