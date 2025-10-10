@@ -67,8 +67,8 @@ def plot_with_gaps(ax, timestamps, values, color, linewidth, label, marker=None,
     # Calculate time differences between consecutive points
     time_diffs = pd.Series(timestamps).diff().dt.total_seconds()
 
-    # Define gap threshold (e.g., 5 minutes = 300 seconds)
-    gap_threshold = 300  # 5 minutes
+    # Define gap threshold (e.g., 10 minutes = 600 seconds for battery data)
+    gap_threshold = 600  # 10 minutes - more appropriate for battery monitoring
 
     # Find indices where gaps exceed threshold
     gap_indices = time_diffs > gap_threshold
@@ -82,17 +82,17 @@ def plot_with_gaps(ax, timestamps, values, color, linewidth, label, marker=None,
             ax.plot(timestamps, values, color=color,
                     linewidth=linewidth, label=label)
     else:
-        # Plot segments between gaps
+        # Plot segments between gaps - FIXED: don't include gap point in segments
         start_idx = 0
         segment_num = 0
 
         for i, is_gap in enumerate(gap_indices):
             if is_gap:
-                # Plot segment up to this gap
-                end_idx = i
+                # Plot segment up to (but not including) this gap point
+                end_idx = i  # Don't include the gap point itself
                 if end_idx > start_idx:
-                    segment_times = timestamps[start_idx:end_idx+1]
-                    segment_values = values[start_idx:end_idx+1]
+                    segment_times = timestamps[start_idx:end_idx]
+                    segment_values = values[start_idx:end_idx]
 
                     # Only add label to first segment
                     segment_label = label if segment_num == 0 else None
@@ -106,7 +106,7 @@ def plot_with_gaps(ax, timestamps, values, color, linewidth, label, marker=None,
 
                     segment_num += 1
 
-                # Start new segment after gap
+                # Start new segment after gap (skip the gap point)
                 start_idx = i + 1
 
         # Plot final segment if it exists
