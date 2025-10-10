@@ -29,6 +29,7 @@ import os
 from datetime import datetime, timedelta
 import argparse
 import gc
+import subprocess
 
 # Global font scale parameter for consistent sizing
 FONT_SCALE = 2.0  # Base scale - can be adjusted for different display sizes
@@ -141,17 +142,18 @@ def format_time_axis(ax, df):
     ax.tick_params(axis='both', which='major', labelsize=LABEL_FONT_SIZE)
 
 
-def find_latest_csv_file():
-    """Find the most recent battery monitor CSV file"""
+def find_latest_csv_files(num_files=3):
+    """Find the most recent battery monitor CSV files
+    
+    Args:
+        num_files: Number of recent files to return (default: 3)
+        
+    Returns:
+        List of file paths sorted by modification time (most recent first)
+    """
     log_dir = "/var/log.hdd/persistent"
     if not os.path.exists(log_dir):
-        return None
-
-    # Look for today's file first
-    today = datetime.now().strftime('%Y%m%d')
-    today_file = os.path.join(log_dir, f"battery-monitor-{today}.csv")
-    if os.path.exists(today_file):
-        return today_file
+        return []
 
     # Look for any battery-monitor CSV files
     csv_files = []
@@ -159,59 +161,88 @@ def find_latest_csv_file():
         if filename.startswith("battery-monitor-") and filename.endswith(".csv"):
             filepath = os.path.join(log_dir, filename)
             csv_files.append((filepath, os.path.getmtime(filepath)))
-            print(f"Found CSV file: {filepath}")
 
     if csv_files:
-        # Return the most recent file
+        # Sort by modification time (most recent first) and return top N
         csv_files.sort(key=lambda x: x[1], reverse=True)
-        print(f"Most recent CSV file: {csv_files[0][0]}")
-        return csv_files[0][0]
+        result = [f[0] for f in csv_files[:num_files]]
+        print(f"Found {len(result)} recent CSV file(s):")
+        for f in result:
+            print(f"  - {f}")
+        return result
 
-    return None
+    return []
 
 
-def load_battery_data(csv_file_path):
-    """Load and prepare battery data from CSV file"""
-    if not os.path.exists(csv_file_path):
-        print(f"Error: CSV file not found at {csv_file_path}")
+def load_battery_data(csv_file_paths):
+    """Load and prepare battery data from one or more CSV files
+    
+    Args:
+        csv_file_paths: Single file path (string) or list of file paths
+        
+    Returns:
+        Combined DataFrame with all data sorted by timestamp
+    """
+    # Ensure we have a list
+    if isinstance(csv_file_paths, str):
+        csv_file_paths = [csv_file_paths]
+    
+    all_dfs = []
+    
+    for csv_file_path in csv_file_paths:
+        if not os.path.exists(csv_file_path):
+            print(f"Warning: CSV file not found at {csv_file_path}, skipping...")
+            continue
+
+        try:
+            # Try to read with headers first
+            df = pd.read_csv(csv_file_path)
+
+            # Clean column names (remove any whitespace)
+            df.columns = df.columns.str.strip()
+
+            # Check if we have the expected columns
+            if 'timestamp' not in df.columns:
+                # If timestamp column is missing, try reading without headers
+                # Updated column names to match current battery_water.py output
+                column_names = [
+                    'timestamp', 'battery_voltage', 'battery_remaining_pct',
+                    'saltwater_voltage', 'sail_current', 'pcb_temperature',
+                    'relative_humidity', 'battery_low_alert', 'saltwater_alert',
+                    'humidity_alert', 'battery_water_health', 'charging_status', 'ac_power_present'
+                ]
+                df = pd.read_csv(csv_file_path, header=None, names=column_names)
+                print(
+                    f"Loaded {len(df)} data points from {os.path.basename(csv_file_path)} (no headers detected)")
+            else:
+                print(
+                    f"Loaded {len(df)} data points from {os.path.basename(csv_file_path)} (headers detected)")
+
+            # Convert timestamp to datetime
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            all_dfs.append(df)
+
+        except Exception as e:
+            print(f"Error loading CSV file {csv_file_path}: {e}")
+            continue
+    
+    if not all_dfs:
+        print("Error: No valid CSV files could be loaded")
         return None
-
-    try:
-        # Try to read with headers first
-        df = pd.read_csv(csv_file_path)
-
-        # Clean column names (remove any whitespace)
-        df.columns = df.columns.str.strip()
-
-        # Check if we have the expected columns
-        if 'timestamp' not in df.columns:
-            # If timestamp column is missing, try reading without headers
-            # Updated column names to match current battery_water.py output
-            column_names = [
-                'timestamp', 'battery_voltage', 'battery_remaining_pct',
-                'saltwater_voltage', 'sail_current', 'pcb_temperature',
-                'relative_humidity', 'battery_low_alert', 'saltwater_alert',
-                'humidity_alert', 'battery_water_health', 'charging_status', 'ac_power_present'
-            ]
-            df = pd.read_csv(csv_file_path, header=None, names=column_names)
-            print(
-                f"Loaded {len(df)} data points from {csv_file_path} (no headers detected)")
-        else:
-            print(
-                f"Loaded {len(df)} data points from {csv_file_path} (headers detected)")
-            print(f"Columns found: {list(df.columns)}")
-
-        # Convert timestamp to datetime
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.sort_values('timestamp')
-
-        print(
-            f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
-        return df
-
-    except Exception as e:
-        print(f"Error loading CSV file: {e}")
-        return None
+    
+    # Concatenate all dataframes
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    
+    # Sort by timestamp and remove duplicates
+    combined_df = combined_df.sort_values('timestamp')
+    combined_df = combined_df.drop_duplicates(subset=['timestamp'], keep='first')
+    
+    print(f"\nCombined dataset:")
+    print(f"  Total data points: {len(combined_df)}")
+    print(f"  Date range: {combined_df['timestamp'].min()} to {combined_df['timestamp'].max()}")
+    print(f"  Files concatenated: {len(all_dfs)}")
+    
+    return combined_df
 
 
 def plot_battery_voltage_decay(df, output_dir):
@@ -276,6 +307,7 @@ def plot_battery_voltage_decay(df, output_dir):
     print(f"Battery voltage decay plot saved: {output_path}")
     plt.close()
     gc.collect()  # Force garbage collection
+    return output_path  # Return path for display
 
 
 def plot_critical_battery_analysis(df, output_dir):
@@ -607,23 +639,84 @@ def print_data_summary(df):
     print("="*60)
 
 
+def display_image(image_path):
+    """Display image using available viewer with proper DISPLAY handling"""
+    try:
+        # Get current environment
+        env = os.environ.copy()
+        
+        # Ensure DISPLAY is set for X11 forwarding
+        if 'DISPLAY' not in env or not env['DISPLAY']:
+            print(f"No DISPLAY variable set - cannot open image viewer")
+            print(f"Plot saved to: {image_path}")
+            print("To view: Use SSH with X11 forwarding (ssh -X argo) or view file locally")
+            return False
+        
+        print(f"Using DISPLAY={env['DISPLAY']}")
+        
+        # Try different image viewers in order of preference
+        viewers = ['eog', 'display', 'feh', 'xdg-open']
+        for viewer in viewers:
+            try:
+                # Check if viewer exists
+                result = subprocess.run(['which', viewer], check=True, 
+                                      capture_output=True, timeout=1)
+                viewer_path = result.stdout.decode().strip()
+                
+                # Viewer exists, try to open image with DISPLAY environment
+                print(f"Attempting to open with {viewer}...")
+                subprocess.Popen([viewer, image_path], 
+                               env=env,
+                               stdout=subprocess.DEVNULL, 
+                               stderr=subprocess.DEVNULL)
+                print(f"✅ Plot opened with {viewer}")
+                print(f"   File: {image_path}")
+                return True
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+        
+        print(f"⚠️  No compatible image viewer found")
+        print(f"Plot saved to: {image_path}")
+        print("Install an image viewer: sudo apt install eog imagemagick feh")
+        return False
+    except Exception as e:
+        print(f"Error opening image: {e}")
+        print(f"Plot saved to: {image_path}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='Plot battery water sensor data from CSV files',
+        description='Plot battery water sensor data from CSV files (concatenates last 3 files by default)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python3 plot-battery-water.py
-    python3 plot-battery-water.py /var/log.hdd/persistent/battery-monitor-20251005.csv
-    python3 plot-battery-water.py --output-dir /tmp/plots
+    python3 plot-battery-water.py                    # Plot last 3 CSV files (voltage decay only)
+    python3 plot-battery-water.py --all              # Generate all plots
+    python3 plot-battery-water.py --critical         # Add critical battery analysis
+    python3 plot-battery-water.py --num-files 5      # Concatenate last 5 CSV files
+    python3 plot-battery-water.py file.csv           # Plot single specific file
+    python3 plot-battery-water.py --no-display       # Don't open plot viewer
         """
     )
     parser.add_argument('csv_file', nargs='?',
-                        help='Path to CSV file (default: auto-detect latest)')
+                        help='Path to specific CSV file (default: auto-concatenate latest files)')
+    parser.add_argument('--num-files', type=int, default=3,
+                        help='Number of recent CSV files to concatenate (default: 3)')
     parser.add_argument('--output-dir', default='/var/log.hdd/persistent',
                         help='Output directory for plots (default: /var/log.hdd/persistent)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Only print data summary, do not generate plots')
+    parser.add_argument('--no-display', action='store_true',
+                        help='Do not open plot viewer after generating')
+    parser.add_argument('--all', action='store_true',
+                        help='Generate all plots (default: voltage decay only)')
+    parser.add_argument('--critical', action='store_true',
+                        help='Add critical battery analysis plot')
+    parser.add_argument('--sensors', action='store_true',
+                        help='Add sensor trends plot')
+    parser.add_argument('--alerts', action='store_true',
+                        help='Add alerts pattern plot')
     parser.add_argument('--font-scale', type=float, default=1.0,
                         help='Font scale factor for plot text sizing (default: 1.0)')
     parser.add_argument('--max-points', type=int, default=5000,
@@ -632,29 +725,34 @@ Examples:
     args = parser.parse_args()
 
     # Update font scale and max points based on arguments
+    global FONT_SCALE, MAX_DATA_POINTS
     FONT_SCALE = args.font_scale
     MAX_DATA_POINTS = args.max_points
 
     # Update font size constants based on new scale
+    global TITLE_FONT_SIZE, SUBTITLE_FONT_SIZE, AXIS_FONT_SIZE, LABEL_FONT_SIZE, LEGEND_FONT_SIZE
     TITLE_FONT_SIZE = int(14 * FONT_SCALE)
     SUBTITLE_FONT_SIZE = int(12 * FONT_SCALE)
     AXIS_FONT_SIZE = int(10 * FONT_SCALE)
     LABEL_FONT_SIZE = int(9 * FONT_SCALE)
     LEGEND_FONT_SIZE = int(8 * FONT_SCALE)
 
-    # Determine CSV file path
+    # Determine CSV file path(s)
     if args.csv_file:
-        csv_file_path = args.csv_file
+        # Single file specified
+        csv_file_paths = args.csv_file
+        print(f"Using specified CSV file: {csv_file_paths}")
     else:
-        csv_file_path = find_latest_csv_file()
-        if not csv_file_path:
-            print("Error: No battery monitor CSV file found.")
+        # Auto-detect and concatenate recent files
+        csv_file_paths = find_latest_csv_files(args.num_files)
+        if not csv_file_paths:
+            print("Error: No battery monitor CSV files found.")
             print("Make sure battery_water.py is running and creating CSV files.")
             sys.exit(1)
-        print(f"Using latest CSV file: {csv_file_path}")
+        print(f"\nConcatenating {len(csv_file_paths)} CSV file(s)")
 
-    # Load data
-    df = load_battery_data(csv_file_path)
+    # Load data (handles both single file and list of files)
+    df = load_battery_data(csv_file_paths)
     if df is None:
         sys.exit(1)
 
@@ -665,13 +763,26 @@ Examples:
         # Create output directory if it doesn't exist
         os.makedirs(args.output_dir, exist_ok=True)
 
-        # Generate plots
+        # Generate plots based on options
         print(f"\nGenerating plots in {args.output_dir}...")
-        plot_battery_voltage_decay(df, args.output_dir)
-        plot_critical_battery_analysis(df, args.output_dir)
-        plot_sensor_trends(df, args.output_dir)
-        plot_alerts(df, args.output_dir)
-        print("All plots generated successfully!")
+        
+        # Always generate voltage decay plot (default)
+        voltage_plot = None
+        voltage_plot = plot_battery_voltage_decay(df, args.output_dir)
+        
+        # Generate optional plots
+        if args.all or args.critical:
+            plot_critical_battery_analysis(df, args.output_dir)
+        if args.all or args.sensors:
+            plot_sensor_trends(df, args.output_dir)
+        if args.all or args.alerts:
+            plot_alerts(df, args.output_dir)
+        
+        print("Plot generation complete!")
+        
+        # Display the main voltage decay plot
+        if voltage_plot and not args.no_display:
+            display_image(voltage_plot)
 
 
 if __name__ == "__main__":
