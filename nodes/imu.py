@@ -81,18 +81,34 @@ import sys
 import os
 import shutil
 
-# ROS imports
-from std_msgs.msg import Bool, Float64
-from geometry_msgs.msg import Vector3
-from rclpy.executors import ExternalShutdownException
-from rclpy.node import Node
-import rclpy
+# Check if we're in standalone mode (plot or calib) before importing ROS2
+# This allows using the script without ROS2 for plotting/calibration
+_STANDALONE_MODE = (
+    '--plot-calib' in sys.argv or '--plot_calib' in sys.argv or
+    '--calib-compass' in sys.argv or '--calib_compass' in sys.argv
+)
 
-# Add custom import path BEFORE importing from it
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
+if not _STANDALONE_MODE:
+    # ROS imports - only needed for node operation
+    from std_msgs.msg import Bool, Float64
+    from geometry_msgs.msg import Vector3
+    from rclpy.executors import ExternalShutdownException
+    from rclpy.node import Node
+    import rclpy
+    
+    # Add custom import path BEFORE importing from it
+    sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+    from toggle_pause_service import TogglePauseService
+else:
+    # Stub classes for standalone mode (plot/calib don't use ROS2)
+    class Node:
+        """Stub Node class for standalone mode"""
+        pass
+    
+    class TogglePauseService:
+        """Stub TogglePauseService for standalone mode"""
+        pass
 
-# Local imports from custom paths (after sys.path is modified)
 # isort: on
 
 
@@ -374,15 +390,15 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interacti
     cal_radius = np.mean(np.sqrt(calibrated[:, 0]**2 + calibrated[:, 1]**2 + calibrated[:, 2]**2))
     
     # Generate sphere mesh
-    u = np.linspace(0, 2 * np.pi, 30)
-    v = np.linspace(0, np.pi, 20)
+    u = np.linspace(0, 2 * np.pi, 90)
+    v = np.linspace(0, np.pi, 90)
     sphere_x = cal_radius * np.outer(np.cos(u), np.sin(v))
     sphere_y = cal_radius * np.outer(np.sin(u), np.sin(v))
     sphere_z = cal_radius * np.outer(np.ones(np.size(u)), np.cos(v))
     
     # Plot ideal sphere as wireframe in light gray
     ax.plot_wireframe(sphere_x, sphere_y, sphere_z, 
-                      color='lightgray', alpha=0.7, linewidth=0.5,
+                      color='blue', alpha=0.3, linewidth=.5,
                       label='Ideal sphere')
     
     ax.set_xlabel('X (µT)')
@@ -391,19 +407,15 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interacti
     ax.set_title('Magnetometer Calibration: Before (Red) vs After (Green)')
     ax.legend(loc='upper right')
     
-    # Make axes equal scale to show true shape
+    # Center axes on zero and use uniform scaling
+    # Find maximum absolute value across all data points and all axes
     all_points = np.vstack([points, calibrated])
-    max_range = np.array([
-        all_points[:, 0].max() - all_points[:, 0].min(),
-        all_points[:, 1].max() - all_points[:, 1].min(),
-        all_points[:, 2].max() - all_points[:, 2].min()
-    ]).max() / 2.0
-    mid_x = (all_points[:, 0].max() + all_points[:, 0].min()) / 2.0
-    mid_y = (all_points[:, 1].max() + all_points[:, 1].min()) / 2.0
-    mid_z = (all_points[:, 2].max() + all_points[:, 2].min()) / 2.0
-    ax.set_xlim(mid_x - max_range, mid_x + max_range)
-    ax.set_ylim(mid_y - max_range, mid_y + max_range)
-    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+    max_val = np.abs(all_points).max()
+    
+    # Set all axes to same scale centered on zero
+    ax.set_xlim(-max_val, max_val)
+    ax.set_ylim(-max_val, max_val)
+    ax.set_zlim(-max_val, max_val)
     
     # Add calibration info as text
     method = calib.get('method', 'unknown')
@@ -1352,8 +1364,7 @@ class ImuNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
-
+    # Parse arguments BEFORE importing ROS2 to support standalone modes
     parser = argparse.ArgumentParser(description='IMU Sensor Node')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging for sensor values')
@@ -1364,6 +1375,7 @@ def main(args=None):
     parsed_args = parser.parse_args(args=args)
 
     # If plot calibration is requested, plot the latest calibration data
+    # This mode doesn't require ROS2
     if parsed_args.plot_calib:
         import glob
         # Find calibration samples in both /tmp and nodes/ directory
@@ -1823,6 +1835,9 @@ def main(args=None):
             except Exception:
                 pass
         return
+
+    # ROS2 mode - modules already imported at top if not in standalone mode
+    rclpy.init(args=args)
 
     imu_node = None
     try:
