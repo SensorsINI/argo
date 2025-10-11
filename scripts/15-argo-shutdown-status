@@ -25,6 +25,44 @@ RESET='\x1B[0m'
 # Check for critical battery flag file
 CRITICAL_BATTERY_FLAG="/tmp/argo_critical_battery"
 
+# Function to calculate time ago from timestamp
+calculate_time_ago() {
+	local timestamp="$1"
+	
+	# Try to parse the timestamp (format: "2025-10-10 10:03:33")
+	local event_epoch=$(date -d "$timestamp" +%s 2>/dev/null)
+	
+	if [[ -z "$event_epoch" ]]; then
+		echo ""
+		return 1
+	fi
+	
+	local now_epoch=$(date +%s)
+	local diff_seconds=$((now_epoch - event_epoch))
+	
+	# Calculate days and hours
+	local days=$((diff_seconds / 86400))
+	local hours=$(((diff_seconds % 86400) / 3600))
+	
+	# Format output
+	if [[ $days -gt 0 ]]; then
+		if [[ $hours -gt 0 ]]; then
+			echo "$days days and $hours hours ago"
+		else
+			echo "$days days ago"
+		fi
+	elif [[ $hours -gt 0 ]]; then
+		echo "$hours hours ago"
+	else
+		local minutes=$((diff_seconds / 60))
+		if [[ $minutes -gt 0 ]]; then
+			echo "$minutes minutes ago"
+		else
+			echo "just now"
+		fi
+	fi
+}
+
 # Function to parse journalctl output for shutdown events
 check_shutdown_event() {
 	# Look for the most recent shutdown/halt event in journalctl
@@ -41,7 +79,11 @@ check_shutdown_event() {
 		
 		echo -e "${RED}⚠ CRITICAL BATTERY SHUTDOWN DETECTED${RESET}"
 		[[ -n "$battery_voltage" ]] && echo -e "  Battery voltage: ${RED}${battery_voltage}V${RESET}"
-		[[ -n "$event_date" ]] && [[ -n "$event_time" ]] && echo -e "  Event time: ${RED}${event_date} at ${event_time}${RESET}"
+		if [[ -n "$event_date" ]] && [[ -n "$event_time" ]]; then
+			local time_ago=$(calculate_time_ago "$event_date $event_time")
+			echo -e "  Event time: ${RED}${event_date} at ${event_time}${RESET}"
+			[[ -n "$time_ago" ]] && echo -e "  ${RED}($time_ago)${RESET}"
+		fi
 		echo -e "  ${YELLOW}Action required: Check battery health and charging system${RESET}"
 		echo ""
 		return 0
@@ -56,7 +98,11 @@ check_shutdown_event() {
 		
 		echo -e "${YELLOW}⚠ LOW BATTERY WARNING (previous session)${RESET}"
 		[[ -n "$battery_voltage" ]] && echo -e "  Battery voltage: ${YELLOW}${battery_voltage}V${RESET}"
-		[[ -n "$event_date" ]] && [[ -n "$event_time" ]] && echo -e "  Event time: ${YELLOW}${event_date} at ${event_time}${RESET}"
+		if [[ -n "$event_date" ]] && [[ -n "$event_time" ]]; then
+			local time_ago=$(calculate_time_ago "$event_date $event_time")
+			echo -e "  Event time: ${YELLOW}${event_date} at ${event_time}${RESET}"
+			[[ -n "$time_ago" ]] && echo -e "  ${YELLOW}($time_ago)${RESET}"
+		fi
 		echo ""
 		return 0
 	fi
@@ -68,7 +114,11 @@ check_shutdown_event() {
 		local event_time=$(echo "$full_timestamp" | awk '{print $2}')
 		
 		echo -e "${GREEN}✓ Normal shutdown via power button${RESET}"
-		[[ -n "$event_date" ]] && [[ -n "$event_time" ]] && echo -e "  Event time: ${CYAN}${event_date} at ${event_time}${RESET}"
+		if [[ -n "$event_date" ]] && [[ -n "$event_time" ]]; then
+			local time_ago=$(calculate_time_ago "$event_date $event_time")
+			echo -e "  Event time: ${CYAN}${event_date} at ${event_time}${RESET}"
+			[[ -n "$time_ago" ]] && echo -e "  ${CYAN}($time_ago)${RESET}"
+		fi
 		echo ""
 		return 0
 	fi
@@ -80,7 +130,11 @@ check_shutdown_event() {
 		local event_time=$(echo "$full_timestamp" | awk '{print $2}')
 		
 		echo -e "${YELLOW}ℹ Previous shutdown detected${RESET}"
-		[[ -n "$event_date" ]] && [[ -n "$event_time" ]] && echo -e "  Event time: ${CYAN}${event_date} at ${event_time}${RESET}"
+		if [[ -n "$event_date" ]] && [[ -n "$event_time" ]]; then
+			local time_ago=$(calculate_time_ago "$event_date $event_time")
+			echo -e "  Event time: ${CYAN}${event_date} at ${event_time}${RESET}"
+			[[ -n "$time_ago" ]] && echo -e "  ${CYAN}($time_ago)${RESET}"
+		fi
 		echo ""
 		return 0
 	fi
@@ -111,18 +165,22 @@ check_battery_csv_history() {
 				local event_time=$(echo "$timestamp" | cut -d' ' -f2)
 				
 				if (( $(echo "$min_voltage < 6.0" | bc -l 2>/dev/null) )); then
+					local time_ago=$(calculate_time_ago "$event_date $event_time")
 					echo -e "${RED}⚠ CRITICAL BATTERY DEPLETION DETECTED IN LOGS${RESET}"
 					echo -e "  ${RED}Minimum voltage: ${min_voltage}V (normal: 7.4-8.4V)${RESET}"
 					echo -e "  ${RED}Event time: ${event_date} at ${event_time}${RESET}"
+					[[ -n "$time_ago" ]] && echo -e "  ${RED}($time_ago)${RESET}"
 					echo -e "  ${RED}Battery was severely depleted - this can damage the battery!${RESET}"
 					echo -e "  ${YELLOW}Log file: ${csv_file##*/}${RESET}"
 					echo -e "  ${YELLOW}⚠ Power control service may not have been running!${RESET}"
 					echo ""
 					return 0
 				elif (( $(echo "$min_voltage < 7.2" | bc -l 2>/dev/null) )); then
+					local time_ago=$(calculate_time_ago "$event_date $event_time")
 					echo -e "${YELLOW}⚠ Low battery detected in logs${RESET}"
 					echo -e "  ${YELLOW}Minimum voltage: ${min_voltage}V${RESET}"
 					echo -e "  ${YELLOW}Event time: ${event_date} at ${event_time}${RESET}"
+					[[ -n "$time_ago" ]] && echo -e "  ${YELLOW}($time_ago)${RESET}"
 					echo -e "  Log file: ${csv_file##*/}"
 					echo ""
 					return 0
