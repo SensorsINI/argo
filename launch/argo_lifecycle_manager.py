@@ -24,6 +24,7 @@ import signal
 import subprocess
 import threading
 import argparse
+import argcomplete
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import json
@@ -1742,6 +1743,8 @@ EXAMPLES:
     parser.add_argument('--toggle_pause', action='store_true',
                         help='Toggle pause state of all pausable nodes (requires lifecycle manager to be running)')
     
+    # Enable bash completion for command-line arguments
+    argcomplete.autocomplete(parser)
     args = parser.parse_args()
     
     # Validate that either a command or --toggle_pause is provided

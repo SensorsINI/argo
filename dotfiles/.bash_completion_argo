@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Argo CLI Tab Completion
+# This file provides bash completion for Argo Python scripts
+
+# Enable global argcomplete for Python scripts in argo directories
+# This is fast because it only activates when TAB is pressed on Python scripts
+if command -v activate-global-python-argcomplete &> /dev/null; then
+    # Global activation for all argcomplete-enabled Python scripts
+    eval "$(activate-global-python-argcomplete 2>/dev/null)" || true
+fi
+
+# Manual completions for key Argo scripts
+# These are registered to work without needing global activation
+if command -v register-python-argcomplete &> /dev/null; then
+    # Register lifecycle manager commands
+    eval "$(register-python-argcomplete argo_lifecycle_manager.py)"
+    
+    # Register node scripts
+    eval "$(register-python-argcomplete imu.py)"
+    eval "$(register-python-argcomplete gps.py)"
+    eval "$(register-python-argcomplete anem.py)"
+    eval "$(register-python-argcomplete controller.py)"
+    eval "$(register-python-argcomplete battery_water.py)"
+    eval "$(register-python-argcomplete rudder_sail_radio.py)"
+    eval "$(register-python-argcomplete temp_monitor.py)"
+    eval "$(register-python-argcomplete lora.py)"
+    eval "$(register-python-argcomplete argo_unified_simulator_bridge.py)"
+fi
+
+# Note: For this to work, Python scripts need to add these 2 lines:
+#   import argcomplete  # (after argparse import)
+#   argcomplete.autocomplete(parser)  # (before parser.parse_args())
+

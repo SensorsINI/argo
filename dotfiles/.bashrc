@@ -1,6 +1,11 @@
 
 source ~/argo/dotfiles/.bash_aliases
 
+# Enable bash completion for Argo Python scripts
+if [ -f ~/argo/dotfiles/.bash_completion_argo ]; then
+    source ~/argo/dotfiles/.bash_completion_argo
+fi
+
 # Run Argo shutdown status check once per terminal session
 # This provides critical battery and shutdown information for both SSH and desktop terminals
 if [[ -z "$ARGO_MOTD_SHOWN" ]]; then

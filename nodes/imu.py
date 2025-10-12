@@ -74,6 +74,7 @@ import math
 import time
 import struct
 import argparse
+import argcomplete
 import json
 from datetime import datetime
 import os.path
@@ -1532,6 +1533,9 @@ def main(args=None):
                         help='Collect magnetometer samples and save calibration')
     parser.add_argument('--plot_calib', action='store_true',
                         help='Plot the most recent calibration data from /tmp')
+    
+    # Enable bash completion for command-line arguments
+    argcomplete.autocomplete(parser)
     parsed_args = parser.parse_args(args=args)
 
     # If plot calibration is requested, load and plot existing calibration (optionally recompute)
