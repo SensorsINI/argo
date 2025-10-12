@@ -1,5 +1,16 @@
 
 source ~/argo/dotfiles/.bash_aliases
+
+# Run Argo shutdown status check once per terminal session
+# This provides critical battery and shutdown information for both SSH and desktop terminals
+if [[ -z "$ARGO_MOTD_SHOWN" ]]; then
+    export ARGO_MOTD_SHOWN=1
+    # Check if the shutdown status script exists
+    if [[ -f ~/argo/scripts/15-argo-shutdown-status ]]; then
+        bash ~/argo/scripts/15-argo-shutdown-status
+    fi
+fi
+
 # Argo service status check and warning (deprecated - use argo_status instead)
 argo_status_check() {
     echo "⚠️  argo_status_check() is deprecated. Use 'argo_status' instead."
