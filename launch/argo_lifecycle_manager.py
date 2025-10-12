@@ -1591,6 +1591,14 @@ class ArgoLifecycleManager:
             [f"0x{a:02x}" for a in detected]) if detected else "<none>"
         print(f"  Detected addresses: {hex_list}")
 
+        # Critical warning if no I2C devices detected at all
+        if not detected:
+            print(f"  ⚠️  CRITICAL: I2C bus {bus} is malfunctioning - NO devices detected!")
+            print(f"  ⚠️  This prevents battery voltage monitoring (ADC at 0x34)")
+            print(f"  ⚠️  Critical battery halt protection is DISABLED without battery monitoring!")
+            print(f"  ⚠️  Check I2C bus wiring and dtoverlay configuration (pi-i2c0)")
+            return
+
         expected_map = {
             "anem": [0x21, 0x22, 0x23],
             "battery_water": [0x34, 0x44],  # 0x34: ADC, 0x44: humidity
