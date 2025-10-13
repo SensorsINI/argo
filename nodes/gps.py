@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 # ROS2 version of gps.py
 
 # Import the shared pause service
@@ -16,6 +17,7 @@ import serial
 import time
 import operator
 import argparse
+import argcomplete
 import re
 import math
 from functools import reduce

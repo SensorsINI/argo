@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# PYTHON_ARGCOMPLETE_OK
 # ROS2 Anemometer Node - Wind Speed and Direction Sensor
 
 # Reading three Sensirion SDP3x differential pressure sensors
@@ -82,6 +83,7 @@ from collections import deque
 import math
 from rclpy.logging import LoggingSeverity
 import argparse
+import argcomplete
 import numpy as np
 import time
 import smbus

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 """
 ROS2 Rudder/Sail Control Node - Combined Hardware Interface and Control Arbitration
 
@@ -99,6 +100,7 @@ from rclpy.parameter import Parameter
 
 import yaml
 import argparse
+import argcomplete
 from pathlib import Path
 import time
 import numpy as np

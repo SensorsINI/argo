@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 # System Temperature ROS2 node
 # - Reads CPU temperature from thermal zones
 # - Monitors system temperature and provides alerts
@@ -32,6 +33,7 @@ from std_msgs.msg import Float32, Bool
 import time
 import sys
 import argparse
+import argcomplete
 import os
 import glob
 from rclpy.executors import ExternalShutdownException

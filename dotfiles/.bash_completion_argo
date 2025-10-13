@@ -2,32 +2,30 @@
 # Argo CLI Tab Completion
 # This file provides bash completion for Argo Python scripts
 
-# Enable global argcomplete for Python scripts in argo directories
-# This is fast because it only activates when TAB is pressed on Python scripts
-if command -v activate-global-python-argcomplete &> /dev/null; then
-    # Global activation for all argcomplete-enabled Python scripts
-    eval "$(activate-global-python-argcomplete 2>/dev/null)" || true
+# Enable global python-argcomplete for user (no sudo required)
+# This allows tab completion for any Python script with argcomplete enabled
+if [ ! -f ~/.bash_completion.d/python-argcomplete.sh ]; then
+    # Install global argcomplete for user if not already installed
+    if command -v activate-global-python-argcomplete3 &> /dev/null; then
+        activate-global-python-argcomplete3 --user &> /dev/null || true
+    elif command -v activate-global-python-argcomplete &> /dev/null; then
+        activate-global-python-argcomplete --user &> /dev/null || true
+    fi
 fi
 
-# Manual completions for key Argo scripts
-# These are registered to work without needing global activation
-if command -v register-python-argcomplete &> /dev/null; then
-    # Register lifecycle manager commands
-    eval "$(register-python-argcomplete argo_lifecycle_manager.py)"
-    
-    # Register node scripts
-    eval "$(register-python-argcomplete imu.py)"
-    eval "$(register-python-argcomplete gps.py)"
-    eval "$(register-python-argcomplete anem.py)"
-    eval "$(register-python-argcomplete controller.py)"
-    eval "$(register-python-argcomplete battery_water.py)"
-    eval "$(register-python-argcomplete rudder_sail_radio.py)"
-    eval "$(register-python-argcomplete temp_monitor.py)"
-    eval "$(register-python-argcomplete lora.py)"
-    eval "$(register-python-argcomplete argo_unified_simulator_bridge.py)"
+# Source the user-level global argcomplete if available
+if [ -f ~/.bash_completion.d/python-argcomplete.sh ]; then
+    source ~/.bash_completion.d/python-argcomplete.sh
 fi
 
-# Note: For this to work, Python scripts need to add these 2 lines:
-#   import argcomplete  # (after argparse import)
-#   argcomplete.autocomplete(parser)  # (before parser.parse_args())
+# Note: For tab completion to work, Python scripts need these 3 elements:
+#   1. #!/usr/bin/env python3 (shebang line)
+#   2. # PYTHON_ARGCOMPLETE_OK (marker for global argcomplete detection)
+#   3. import argcomplete + argcomplete.autocomplete(parser) (in code)
+#
+# Once configured, completion works for BOTH invocation methods:
+#   - python3 script.py --<TAB>  (global argcomplete detects marker in script)
+#   - ./script.py --<TAB>         (global argcomplete detects marker in executable)
+#
+# Use scripts/add_argcomplete_to_script.sh to add all required elements automatically!
 

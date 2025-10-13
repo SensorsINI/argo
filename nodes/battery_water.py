@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 # Battery/Water ROS2 node
 # - Reads MAX11612 ADC: AIN0=battery via 27k/18k divider, AIN1=saltwater probe, AIN2=sail winch shunt
 # - Reads SHT45 temperature/humidity sensor
@@ -38,6 +39,7 @@ from std_srvs.srv import Trigger
 import time
 import sys
 import argparse
+import argcomplete
 import os
 import csv
 from datetime import datetime

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 """
 Argo Unified Simulator Bridge - Local and Remote Simulation Support
 Connects Argo control system with sailboat simulator (local or remote)
@@ -22,6 +23,7 @@ import time
 import math
 import threading
 import argparse
+import argcomplete
 import sys
 import os
 import curses

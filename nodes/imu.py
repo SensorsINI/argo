@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 # ruff: noqa: I001
 """
 IMU Sensor Node for Argo Autonomous Sailboat
@@ -60,6 +61,7 @@ Command Line Options:
 Calibration Methods:
 1. Min-max (simple):    Diagonal soft-iron approximation, good for basic calibration
 2. Ellipsoid (advanced): Full 3D ellipsoid fit with rotation correction, better accuracy
+                         Uses robust fitting with iterative outlier rejection (3σ threshold)
 
 Usage Examples:
   python3 imu.py                    # Normal operation
@@ -221,81 +223,158 @@ def display_plot(plot_file, skip_open=False):
         print("Display not available (headless system or DISPLAY not set)")
 
 
-def fit_ellipsoid_numpy(points):
-    """Fit an ellipsoid to 3D points using algebraic fit (pure numpy).
+def fit_ellipsoid_numpy(points, robust=True, outlier_threshold=1.5, max_iterations=10):
+    """Fit an ellipsoid to 3D points using algebraic fit with optional robust outlier rejection.
     
     Fits ellipsoid equation: ax^2 + by^2 + cz^2 + 2fxy + 2gxz + 2hyz + 2px + 2qy + 2rz + d = 0
     
+    The fitting finds the best-fit ellipsoid to the data cloud, which represents the magnetic
+    field distortion caused by hard-iron (offset) and soft-iron (stretching/rotation) effects.
+    
+    IMPORTANT: The rotation matrix represents the PHYSICAL orientation of the magnetic
+    distortion, NOT a correction to apply. It shows how the ellipsoid's principal axes
+    (directions of max/min magnetic field strength) are oriented relative to the sensor axes.
+    
+    A 90° rotation indicates that the magnetic field distortion is rotated 90° from the
+    sensor axes. This happens when:
+    - Soft-iron materials create distortion along off-axis directions
+    - The IMU is mounted rotated relative to expected orientation
+    - Nearby magnetic materials create directional field distortion
+    
     Args:
         points: Nx3 numpy array of (x, y, z) coordinates
+        robust: If True, use iterative outlier rejection (default: True)
+        outlier_threshold: Standard deviations for outlier rejection (default: 1.5)
+        max_iterations: Maximum outlier rejection iterations (default: 10)
         
     Returns:
-        tuple: (center, radii, rotation_matrix) or None if fit fails
-            center: [cx, cy, cz] center of ellipsoid
-            radii: [rx, ry, rz] semi-axes lengths
-            rotation_matrix: 3x3 rotation matrix
+        tuple: (center, radii, rotation_matrix, inlier_mask) or None if fit fails
+            center: [cx, cy, cz] center of ellipsoid (hard-iron offset)
+            radii: [rx, ry, rz] semi-axes lengths (soft-iron scale factors)
+            rotation_matrix: 3x3 rotation where columns are principal axes directions
+            inlier_mask: boolean array indicating which points were used (if robust=True)
     """
     import numpy as np
     
     if len(points) < 9:
         print("Error: Need at least 9 points for ellipsoid fit")
         return None
-        
-    x = points[:, 0]
-    y = points[:, 1]
-    z = points[:, 2]
     
-    # Build design matrix for algebraic ellipsoid fit
-    # [x^2, y^2, z^2, 2xy, 2xz, 2yz, 2x, 2y, 2z, 1]
-    D = np.column_stack([
-        x*x, y*y, z*z,
-        2*x*y, 2*x*z, 2*y*z,
-        2*x, 2*y, 2*z,
-        np.ones(len(x))
-    ])
+    # Start with all points as inliers
+    inlier_mask = np.ones(len(points), dtype=bool)
+    original_count = len(points)
     
-    # Solve using least squares: D * v = 0, with constraint
-    # Use SVD for numerical stability
-    try:
-        _, _, Vt = np.linalg.svd(D)
-        v = Vt[-1, :]  # Last row of V (smallest singular value)
+    for iteration in range(max_iterations if robust else 1):
+        # Get current inlier points
+        inlier_points = points[inlier_mask]
         
-        # Extract algebraic form parameters
-        a, b, c, f, g, h, p, q, r, d = v
+        if len(inlier_points) < 9:
+            print(f"Error: Too few inliers ({len(inlier_points)}) after outlier rejection")
+            if iteration == 0:
+                return None
+            # Use previous iteration's result
+            break
         
-        # Convert to center form
-        # Build the A matrix for the quadratic form
-        A = np.array([
-            [a, f, g],
-            [f, b, h],
-            [g, h, c]
+        x = inlier_points[:, 0]
+        y = inlier_points[:, 1]
+        z = inlier_points[:, 2]
+        
+        # Build design matrix for algebraic ellipsoid fit
+        # [x^2, y^2, z^2, 2xy, 2xz, 2yz, 2x, 2y, 2z, 1]
+        D = np.column_stack([
+            x*x, y*y, z*z,
+            2*x*y, 2*x*z, 2*y*z,
+            2*x, 2*y, 2*z,
+            np.ones(len(x))
         ])
         
-        # Center vector
-        center = -np.linalg.solve(A, np.array([p, q, r]))
-        
-        # Translation to center
-        T = np.eye(4)
-        T[0:3, 3] = center
-        
-        # Evaluate constant at center
-        d_center = d + p*center[0] + q*center[1] + r*center[2]
-        
-        # Eigenvalue decomposition for radii and rotation
-        # Ensure the matrix is positive definite by using abs(d_center)
-        eigvals, eigvecs = np.linalg.eigh(A / np.abs(d_center))
-        radii = 1.0 / np.sqrt(eigvals)
-        
-        # Ensure right-handed coordinate system (det = +1)
-        # eigh doesn't guarantee this, so we fix it if needed
-        if np.linalg.det(eigvecs) < 0:
-            eigvecs[:, 0] *= -1  # Flip first eigenvector
-        
-        return center, radii, eigvecs
-        
-    except np.linalg.LinAlgError as e:
-        print(f"Error: Ellipsoid fit failed - {e}")
-        return None
+        # Solve using least squares: D * v = 0, with constraint
+        # Use SVD for numerical stability
+        try:
+            _, _, Vt = np.linalg.svd(D)
+            v = Vt[-1, :]  # Last row of V (smallest singular value)
+            
+            # Extract algebraic form parameters
+            a, b, c, f, g, h, p, q, r, d = v
+            
+            # Convert to center form
+            # Build the A matrix for the quadratic form
+            A = np.array([
+                [a, f, g],
+                [f, b, h],
+                [g, h, c]
+            ])
+            
+            # Center vector
+            center = -np.linalg.solve(A, np.array([p, q, r]))
+            
+            # Translation to center
+            T = np.eye(4)
+            T[0:3, 3] = center
+            
+            # Evaluate constant at center
+            d_center = d + p*center[0] + q*center[1] + r*center[2]
+            
+            # Eigenvalue decomposition for radii and rotation
+            eigvals, eigvecs = np.linalg.eigh(A / -d_center)
+            radii = 1.0 / np.sqrt(np.abs(eigvals))
+            
+            # If not using robust fitting, return now
+            if not robust or iteration == max_iterations - 1:
+                if robust:
+                    outlier_count = original_count - np.sum(inlier_mask)
+                    if outlier_count > 0:
+                        print(f"Robust fit: removed {outlier_count}/{original_count} outliers ({outlier_count/original_count*100:.1f}%)")
+                return center, radii, eigvecs, inlier_mask
+            
+            # Calculate residuals for outlier detection
+            # For each point, calculate distance from fitted ellipsoid surface
+            # Ellipsoid equation: (p-c)^T A (p-c) = 1 (for normalized ellipsoid)
+            centered_all = points - center
+            
+            # Transform to ellipsoid frame and normalize by radii
+            # The eigenvectors matrix rotates to principal axes
+            transformed = centered_all @ eigvecs
+            normalized = transformed / radii
+            
+            # Distance from unit sphere (ideal = 1.0)
+            distances = np.sqrt(np.sum(normalized**2, axis=1))
+            residuals = np.abs(distances - 1.0)
+            
+            # Calculate threshold based on residual statistics
+            median_residual = np.median(residuals[inlier_mask])
+            # Use MAD (Median Absolute Deviation) for robust std estimate
+            mad = np.median(np.abs(residuals[inlier_mask] - median_residual))
+            robust_std = 1.4826 * mad  # Scale factor for normal distribution
+            
+            # Mark outliers
+            threshold = median_residual + outlier_threshold * robust_std
+            new_inlier_mask = residuals < threshold
+            
+            # Check if we removed any new outliers
+            newly_removed = np.sum(inlier_mask) - np.sum(new_inlier_mask)
+            if newly_removed == 0:
+                # No more outliers found, we're done
+                outlier_count = original_count - np.sum(inlier_mask)
+                if outlier_count > 0:
+                    print(f"Robust fit converged: removed {outlier_count}/{original_count} outliers ({outlier_count/original_count*100:.1f}%)")
+                return center, radii, eigvecs, inlier_mask
+            
+            # Update inlier mask for next iteration
+            inlier_mask = new_inlier_mask
+            
+        except np.linalg.LinAlgError as e:
+            print(f"Error: Ellipsoid fit failed on iteration {iteration} - {e}")
+            if iteration == 0:
+                return None
+            # Use previous iteration's result
+            break
+    
+    # Should not reach here, but return last valid result
+    outlier_count = original_count - np.sum(inlier_mask)
+    if outlier_count > 0:
+        print(f"Robust fit: removed {outlier_count}/{original_count} outliers ({outlier_count/original_count*100:.1f}%)")
+    return center, radii, eigvecs, inlier_mask
 
 
 def apply_ellipsoid_calibration(points, center, radii, rotation):
@@ -372,30 +451,65 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interacti
     scale = np.array(calib.get('scale_diag', [1, 1, 1]))
     
     # Check if we have rotation matrix (ellipsoid fit)
-    if 'rotation' in calib:
+    has_rotation = 'rotation' in calib
+    num_outliers = calib.get('num_outliers', 0)
+    
+    if has_rotation:
         rotation = np.array(calib['rotation'])
         radii = np.array(calib.get('radii', [1, 1, 1]))
         # Full ellipsoid calibration
         calibrated = apply_ellipsoid_calibration(points, bias, radii, rotation)
+        
+        # Identify outliers for visualization if we have robust fit info
+        if num_outliers > 0:
+            # Recalculate which points are outliers for visualization
+            # (We don't save the mask in the calibration file, so recompute)
+            centered = points - bias
+            transformed = centered @ rotation
+            normalized = transformed / radii
+            distances = np.sqrt(np.sum(normalized**2, axis=1))
+            residuals = np.abs(distances - 1.0)
+            
+            # Use same outlier detection as fitting
+            median_residual = np.median(residuals)
+            mad = np.median(np.abs(residuals - median_residual))
+            robust_std = 1.4826 * mad
+            threshold = median_residual + 3.0 * robust_std
+            inlier_mask = residuals < threshold
+        else:
+            inlier_mask = np.ones(len(points), dtype=bool)
     else:
         # Simple min-max calibration
         calibrated = (points - bias) * scale
+        inlier_mask = np.ones(len(points), dtype=bool)
     
-    # Create single 3D plot with both datasets
-    fig = plt.figure(figsize=(12, 10))
+    # Create single 3D plot
+    fig = plt.figure(figsize=(14, 12))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Plot uncalibrated data in red
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], 
-                c='red', marker='o', s=2, alpha=0.5, label='Uncalibrated (raw)')
+    # Separate inliers and outliers for visualization
+    inliers = points[inlier_mask]
+    outliers = points[~inlier_mask]
+    inliers_cal = calibrated[inlier_mask]
+    outliers_cal = calibrated[~inlier_mask]
     
-    # Plot calibrated data in green
-    ax.scatter(calibrated[:, 0], calibrated[:, 1], calibrated[:, 2],
-                c='green', marker='o', s=2, alpha=0.5, label='Calibrated (corrected)')
+    # Plot uncalibrated data - inliers in red, outliers in orange
+    if len(inliers) > 0:
+        ax.scatter(inliers[:, 0], inliers[:, 1], inliers[:, 2], 
+                    c='red', marker='o', s=2, alpha=0.4, label=f'Uncalibrated inliers ({len(inliers)})')
+    if len(outliers) > 0:
+        ax.scatter(outliers[:, 0], outliers[:, 1], outliers[:, 2], 
+                    c='orange', marker='x', s=20, alpha=0.6, label=f'Outliers removed ({len(outliers)})')
+    
+    # Plot calibrated data - inliers in green, outliers in yellow
+    if len(inliers_cal) > 0:
+        ax.scatter(inliers_cal[:, 0], inliers_cal[:, 1], inliers_cal[:, 2],
+                    c='green', marker='o', s=2, alpha=0.4, label=f'Calibrated inliers ({len(inliers_cal)})')
+    if len(outliers_cal) > 0:
+        ax.scatter(outliers_cal[:, 0], outliers_cal[:, 1], outliers_cal[:, 2],
+                    c='yellow', marker='x', s=20, alpha=0.6, label=f'Calibrated outliers ({len(outliers_cal)})')
     
     # Create ideal sphere mesh (target for calibrated data)
-    # Calculate sphere radius as mean magnitude of calibrated points
-    # Each point should lie on a sphere with radius = Earth's magnetic field strength
     cal_radius = np.mean(np.sqrt(calibrated[:, 0]**2 + calibrated[:, 1]**2 + calibrated[:, 2]**2))
     
     # Generate sphere mesh
@@ -405,23 +519,76 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interacti
     sphere_y = cal_radius * np.outer(np.sin(u), np.sin(v))
     sphere_z = cal_radius * np.outer(np.ones(np.size(u)), np.cos(v))
     
-    # Plot ideal sphere as wireframe in light gray
+    # Plot ideal sphere as wireframe in light blue
     ax.plot_wireframe(sphere_x, sphere_y, sphere_z, 
-                      color='blue', alpha=0.3, linewidth=.5,
+                      color='cyan', alpha=0.15, linewidth=.5,
                       label='Ideal sphere')
     
-    ax.set_xlabel('X (µT)')
-    ax.set_ylabel('Y (µT)')
-    ax.set_zlabel('Z (µT)')
-    ax.set_title('Magnetometer Calibration: Before (Red) vs After (Green)')
-    ax.legend(loc='upper right')
-    
     # Center axes on zero and use uniform scaling
-    # Find maximum absolute value across all data points and all axes
     all_points = np.vstack([points, calibrated])
     max_val = np.abs(all_points).max()
     
-    # Set all axes to same scale centered on zero
+    # Calculate axis length for unit vectors (make them visible but not overwhelming)
+    axis_length = max_val * 0.4
+    
+    # RED AXES: Original/Uncalibrated coordinate frame
+    # These show the sensor coordinate system before calibration
+    ax.quiver(0, 0, 0, axis_length, 0, 0, color='red', arrow_length_ratio=0.15, 
+              linewidth=3, alpha=0.9, label='Raw X-axis')
+    ax.quiver(0, 0, 0, 0, axis_length, 0, color='red', arrow_length_ratio=0.15,
+              linewidth=3, alpha=0.9, label='Raw Y-axis', linestyle='--')
+    ax.quiver(0, 0, 0, 0, 0, axis_length, color='red', arrow_length_ratio=0.15,
+              linewidth=3, alpha=0.9, label='Raw Z-axis', linestyle=':')
+    
+    # Add text labels for red axes
+    ax.text(axis_length * 1.1, 0, 0, 'X (raw)', color='red', fontsize=10, fontweight='bold')
+    ax.text(0, axis_length * 1.1, 0, 'Y (raw)', color='red', fontsize=10, fontweight='bold')
+    ax.text(0, 0, axis_length * 1.1, 'Z (raw)', color='red', fontsize=10, fontweight='bold')
+    
+    # GREEN AXES: Calibrated coordinate frame
+    # For ellipsoid calibration with rotation, these show the rotated/scaled axes
+    if has_rotation:
+        # Transform unit vectors through the calibration
+        # The rotation matrix columns represent the principal axes of the ellipsoid
+        # After calibration, these become the coordinate axes
+        r_avg = np.mean(radii)
+        
+        # Unit vectors in original frame
+        x_unit = np.array([1, 0, 0])
+        y_unit = np.array([0, 1, 0])
+        z_unit = np.array([0, 0, 1])
+        
+        # Apply the rotation to show where calibrated axes point in original frame
+        # rotation @ diag(scale) transforms from raw to calibrated
+        # So rotation.T transforms from calibrated back to raw frame
+        x_cal = rotation[:, 0] * axis_length
+        y_cal = rotation[:, 1] * axis_length
+        z_cal = rotation[:, 2] * axis_length
+    else:
+        # For simple calibration, axes don't rotate, just scale
+        x_cal = np.array([axis_length, 0, 0])
+        y_cal = np.array([0, axis_length, 0])
+        z_cal = np.array([0, 0, axis_length])
+    
+    ax.quiver(0, 0, 0, x_cal[0], x_cal[1], x_cal[2], color='green', arrow_length_ratio=0.15,
+              linewidth=3, alpha=0.9, label='Cal X-axis')
+    ax.quiver(0, 0, 0, y_cal[0], y_cal[1], y_cal[2], color='green', arrow_length_ratio=0.15,
+              linewidth=3, alpha=0.9, label='Cal Y-axis', linestyle='--')
+    ax.quiver(0, 0, 0, z_cal[0], z_cal[1], z_cal[2], color='green', arrow_length_ratio=0.15,
+              linewidth=3, alpha=0.9, label='Cal Z-axis', linestyle=':')
+    
+    # Add text labels for green axes
+    ax.text(x_cal[0] * 1.1, x_cal[1] * 1.1, x_cal[2] * 1.1, 'X (cal)', color='green', fontsize=10, fontweight='bold')
+    ax.text(y_cal[0] * 1.1, y_cal[1] * 1.1, y_cal[2] * 1.1, 'Y (cal)', color='green', fontsize=10, fontweight='bold')
+    ax.text(z_cal[0] * 1.1, z_cal[1] * 1.1, z_cal[2] * 1.1, 'Z (cal)', color='green', fontsize=10, fontweight='bold')
+    
+    ax.set_xlabel('X (µT) [Starboard →]', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Y (µT) [Stern ← Bow]', fontsize=11, fontweight='bold')
+    ax.set_zlabel('Z (µT) [↓ Down]', fontsize=11, fontweight='bold')
+    ax.set_title('Magnetometer Calibration: Red Ellipsoid → Green Sphere\nRed Axes = Raw | Green Axes = Calibrated', 
+                 fontsize=12, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=7, ncol=2)
+    
     ax.set_xlim(-max_val, max_val)
     ax.set_ylim(-max_val, max_val)
     ax.set_zlim(-max_val, max_val)
@@ -429,25 +596,49 @@ def plot_magnetometer_3d(samples, calib, timestamp, output_dir='/tmp', interacti
     # Add calibration info as text
     method = calib.get('method', 'unknown')
     num_samples = len(samples)
-    info_text = f"Method: {method}\n"
-    info_text += f"Samples: {num_samples}\n"
-    info_text += f"Bias: [{bias[0]:.2f}, {bias[1]:.2f}, {bias[2]:.2f}] µT\n"
-    info_text += f"Scale: [{scale[0]:.4f}, {scale[1]:.4f}, {scale[2]:.4f}]"
+    num_inliers = calib.get('num_inliers', num_samples)
+    num_outliers = calib.get('num_outliers', 0)
     
-    fig.text(0.5, 0.02, info_text, fontsize=10, family='monospace',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-             ha='center')
+    info_text = f"Method: {method}"
+    if num_outliers > 0:
+        info_text += f" (robust) | {num_inliers} inliers + {num_outliers} outliers = {num_samples} total\n"
+    else:
+        info_text += f" | Samples: {num_samples}\n"
+    info_text += f"Bias (hard iron): [{bias[0]:.2f}, {bias[1]:.2f}, {bias[2]:.2f}] µT\n"
+    info_text += f"Scale (soft iron): [{scale[0]:.4f}, {scale[1]:.4f}, {scale[2]:.4f}]"
     
-    plt.suptitle(f'Magnetometer Calibration 3D View - {timestamp}', fontsize=14)
-    plt.tight_layout()
+    if has_rotation:
+        info_text += f"\nRadii: [{radii[0]:.2f}, {radii[1]:.2f}, {radii[2]:.2f}] µT"
+        info_text += f"\nRotation Matrix (green axes = rotation columns):\n"
+        for i in range(3):
+            info_text += f"  [{rotation[i,0]:+.4f}, {rotation[i,1]:+.4f}, {rotation[i,2]:+.4f}]\n"
+    
+    fig.text(0.5, 0.01, info_text, fontsize=9, family='monospace',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7),
+             ha='center', va='bottom')
+    
+    plt.tight_layout(rect=[0, 0.15, 1, 0.97])  # Leave space for info text
     
     # Save to file
     plot_file = os.path.join(output_dir, f'imu_calib_3d_{timestamp}.png')
-    plt.savefig(plot_file, dpi=150)
+    plt.savefig(plot_file, dpi=150, bbox_inches='tight')
     
     # Show interactively if possible
     if interactive:
         try:
+            print("\n=== INTERACTIVE 3D PLOT ===")
+            print("You can rotate the plot with your mouse to inspect the calibration from all angles")
+            print("\nWhat to look for:")
+            print("  • Red ellipsoid → Green sphere (calibration transforms ellipsoid to sphere)")
+            print("  • Red axes = Raw sensor coordinate frame (X, Y, Z)")
+            print("  • Green axes = Calibrated coordinate frame (shows rotation applied)")
+            print("  • If green axes differ from red, rotation correction is being applied")
+            print("  • Check if axis directions match your IMU hardware mounting")
+            print("\nDiagnostics:")
+            print("  • Swapped coordinates: Look for 90° rotations between red/green axes")
+            print("  • Sign flips: Look for 180° rotations (axes pointing opposite directions)")
+            print("  • Hardware issue: Scattered data with no clear ellipsoid pattern")
+            print("\nClose the plot window to continue...")
             plt.show()  # This will be interactive and rotatable
         except Exception:
             pass  # If show fails, just skip it
@@ -529,17 +720,17 @@ def compute_calibration_from_samples(samples):
     
     if use_ellipsoid:
         # Ellipsoid fitting
-        print("\nComputing ellipsoid fit...")
+        print("\nComputing robust ellipsoid fit (with outlier rejection)...")
         try:
             import numpy as np
             points = np.array(samples)
-            result = fit_ellipsoid_numpy(points)
+            result = fit_ellipsoid_numpy(points, robust=True, outlier_threshold=1.5, max_iterations=10)
             
             if result is None:
                 print("Ellipsoid fit failed, falling back to min-max method")
                 use_ellipsoid = False
             else:
-                center, radii, rotation = result
+                center, radii, rotation, inlier_mask = result
                 
                 # Convert rotation matrix to list for JSON serialization
                 rotation_list = rotation.tolist()
@@ -548,6 +739,10 @@ def compute_calibration_from_samples(samples):
                 r_avg = np.mean(radii)
                 scale = r_avg / radii
                 
+                # Count inliers/outliers
+                num_inliers = np.sum(inlier_mask)
+                num_outliers = len(samples) - num_inliers
+                
                 calib = {
                     'method': 'ellipsoid',
                     'bias_uT': center.tolist(),
@@ -555,18 +750,101 @@ def compute_calibration_from_samples(samples):
                     'rotation': rotation_list,
                     'radii': radii.tolist(),
                     'num_samples': len(samples),
+                    'num_inliers': int(num_inliers),
+                    'num_outliers': int(num_outliers),
                     'ranges_uT': {'x': [minx, maxx], 'y': [miny, maxy], 'z': [minz, maxz]},
                     'timestamp': datetime.utcnow().isoformat() + 'Z'
                 }
                 
-                print("\nComputed compass calibration (ellipsoid fit):")
+                print("\nComputed compass calibration (robust ellipsoid fit):")
                 print(f"  bias_uT     = [{center[0]:+.2f}, {center[1]:+.2f}, {center[2]:+.2f}]")
                 print(f"  scale_diag  = [{scale[0]:.4f}, {scale[1]:.4f}, {scale[2]:.4f}]")
                 print(f"  radii       = [{radii[0]:.2f}, {radii[1]:.2f}, {radii[2]:.2f}] µT")
-                print(f"  rotation matrix:")
+                print(f"  rotation matrix (each column = principal axis direction in sensor frame):")
                 for i in range(3):
                     print(f"    [{rotation[i,0]:+.4f}, {rotation[i,1]:+.4f}, {rotation[i,2]:+.4f}]")
-                print(f"  ranges_uT   = X[{minx:+.1f}..{maxx:+.1f}] Y[{miny:+.1f}..{maxy:+.1f}] Z[{minz:+.1f}..{maxz:+.1f}] (n={len(samples)})")
+                print(f"  ranges_uT   = X[{minx:+.1f}..{maxx:+.1f}] Y[{miny:+.1f}..{maxy:+.1f}] Z[{minz:+.1f}..{maxz:+.1f}]")
+                print(f"  samples     = {num_inliers} inliers + {num_outliers} outliers = {len(samples)} total")
+                
+                # Diagnostic: Analyze rotation matrix to explain what it means
+                print("\n=== ROTATION ANALYSIS ===")
+                print("The rotation matrix shows how the ellipsoid's principal axes are oriented")
+                print("relative to your sensor's X/Y/Z axes. Each column is a principal axis direction.")
+                print("")
+                
+                # Analyze each principal axis
+                axis_names = ['1st principal', '2nd principal', '3rd principal']
+                for col_idx in range(3):
+                    axis_vec = rotation[:, col_idx]
+                    # Find dominant component
+                    abs_components = np.abs(axis_vec)
+                    max_idx = np.argmax(abs_components)
+                    max_val = axis_vec[max_idx]
+                    component_names = ['X', 'Y', 'Z']
+                    
+                    # Calculate angles from coordinate axes
+                    angle_x = np.degrees(np.arccos(np.abs(axis_vec[0])))
+                    angle_y = np.degrees(np.arccos(np.abs(axis_vec[1])))
+                    angle_z = np.degrees(np.arccos(np.abs(axis_vec[2])))
+                    
+                    print(f"Principal axis {col_idx+1} (radius={radii[col_idx]:.1f}µT):")
+                    print(f"  Direction: [{axis_vec[0]:+.3f}, {axis_vec[1]:+.3f}, {axis_vec[2]:+.3f}]")
+                    print(f"  Angles from sensor axes: X={angle_x:.1f}°, Y={angle_y:.1f}°, Z={angle_z:.1f}°")
+                    
+                    # Interpret the alignment
+                    if abs_components[max_idx] > 0.9:  # Nearly aligned with one axis
+                        sign = "+" if max_val > 0 else "-"
+                        print(f"  → Nearly aligned with {sign}{component_names[max_idx]} axis")
+                    elif abs_components[max_idx] > 0.7:  # Mostly aligned
+                        sign = "+" if max_val > 0 else "-"
+                        print(f"  → Mostly aligned with {sign}{component_names[max_idx]} axis (~{90-angle_x if max_idx==0 else (90-angle_y if max_idx==1 else 90-angle_z):.0f}° from perpendicular)")
+                    else:  # Off-axis
+                        # Find two largest components
+                        sorted_indices = np.argsort(abs_components)[::-1]
+                        comp1_idx = sorted_indices[0]
+                        comp2_idx = sorted_indices[1]
+                        print(f"  → Off-axis: between {component_names[comp1_idx]} and {component_names[comp2_idx]} axes")
+                    print("")
+                
+                # Check for potential issues
+                print("=== DIAGNOSTIC INTERPRETATION ===")
+                
+                # Check if rotation is nearly identity (should be for well-aligned sensors)
+                identity_diff = np.max(np.abs(rotation - np.eye(3)))
+                if identity_diff < 0.1:
+                    print("✓ Rotation is nearly identity - sensor axes align well with magnetic distortion")
+                else:
+                    print(f"⚠ Rotation differs from identity (max diff: {identity_diff:.3f})")
+                    print("  This indicates magnetic distortion is NOT aligned with sensor axes.")
+                    print("  Possible causes:")
+                    
+                    # Check for Z-axis rotation
+                    z_rotation_angle = np.degrees(np.arctan2(rotation[1, 0], rotation[0, 0]))
+                    if abs(z_rotation_angle) > 10:
+                        print(f"  • Z-axis rotation of ~{z_rotation_angle:.0f}° detected")
+                        if abs(abs(z_rotation_angle) - 90) < 15:
+                            print("    → This is close to 90° - possible causes:")
+                            print("       - IMU mounted with X/Y axes swapped or rotated")
+                            print("       - Strong magnetic material in unexpected direction")
+                            print("       - Magnetometer axes not matching accelerometer axes")
+                    
+                    # Check radii uniformity
+                    radii_ratio = np.max(radii) / np.min(radii)
+                    if radii_ratio > 1.5:
+                        print(f"  • Ellipsoid is elongated (radii ratio: {radii_ratio:.2f})")
+                        print("    → Strong directional soft-iron distortion")
+                    
+                    # Check if any axis is nearly perpendicular to expected
+                    for i in range(3):
+                        axis_vec = rotation[:, i]
+                        if abs(axis_vec[i]) < 0.3:  # Should be strong on diagonal
+                            print(f"  • Principal axis {i+1} has weak component on sensor {component_names[i]}-axis")
+                            print(f"    → Distortion axis {i+1} is rotated away from sensor axis {i+1}")
+                
+                print("\nTo understand visually: run 'python3 imu.py --plot_calib' and rotate the 3D plot")
+                print("Look at the green axes (calibrated) vs red axes (raw sensor) to see the rotation.")
+                print("=" * 60)
+                
                 return calib
                 
         except ImportError:
@@ -822,6 +1100,7 @@ class ImuNode(Node):
                     if 'method' in self._compass_cal:
                         self.get_logger().info(
                             f'  Method: {self._compass_cal["method"]}')
+                time.sleep(5)
         except Exception:
             pass
 
@@ -1533,7 +1812,6 @@ def main(args=None):
                         help='Collect magnetometer samples and save calibration')
     parser.add_argument('--plot_calib', action='store_true',
                         help='Plot the most recent calibration data from /tmp')
-    
     # Enable bash completion for command-line arguments
     argcomplete.autocomplete(parser)
     parsed_args = parser.parse_args(args=args)

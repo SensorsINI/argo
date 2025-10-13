@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 # High-level autonomous controller for Argo sailboat
 # Subscribes to sensor data and publishes control commands to rudder_sail_radio.py
 
@@ -19,6 +20,7 @@ import time
 import math
 from pathlib import Path
 import argparse
+import argcomplete
 import yaml
 import rclpy
 from rclpy.node import Node

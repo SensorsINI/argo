@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 """
 Argo LoRa Communication Node
 ============================
@@ -63,6 +64,7 @@ from std_srvs.srv import Trigger
 import time
 import json
 import argparse
+import argcomplete
 import sys
 from typing import Optional, Dict, Any
 import threading

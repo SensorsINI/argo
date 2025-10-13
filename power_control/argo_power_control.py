@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 #
 # argo_power_control.py
 #
@@ -11,32 +12,35 @@
 #   power button monitoring, and LED status indicators. Power relay control is
 #   handled by dedicated startup/shutdown hooks for safety.
 #
-# HARDWARE CONFIGURATION:
-#   - PI3 (Pin 40): !POW - Open drain output to control power relay
-#   - PI9 (Pin 28): !POW_BUT - Input from power button (external pullup required)
-#   - PH4 (Pin 18): Green LED in power button (system running indicator)
-#   - PI1 (Pin 12): Blue LED in power button (status/warning indicator)
+# HARDWARE CONFIGURATION (Rev3 PCB):
+#   - PI3 (Pin 40): POW_OFF - Output for power relay control (active HIGH pulse to reset relay)
+#   - PI9 (Pin 28): POW_BUT - Input from power button (active HIGH when pressed)
+#   - PH4 (Pin 18): Green LED in power button (active LOW - cathode control)
+#   - PI1 (Pin 12): Blue LED in power button (active LOW - cathode control)
 #   - Red LED: Directly connected to power button (not GPIO controlled)
+#   - LEDs: Common anode RGB LED, GPIO controls cathode (LOW = ON, HIGH = OFF)
 #
-# POWER CIRCUIT DESIGN:
-#   The system uses two PFETs to control the power relay:
-#   1. Direct PFET: Connected to power button for immediate power-on
-#   2. GPIO PFET: Connected to !POW pin for software-controlled power management
+# POWER CIRCUIT DESIGN (Rev3 PCB):
+#   The system uses a latching relay with SET/RESET coils:
+#   1. SET coil: Activated by power button press to latch power ON
+#   2. RESET coil: Activated by active-HIGH pulse on POW_OFF to unlatch power
 #
-#   When !POW is pulled low (open drain), the relay is energized, providing power.
-#   When !POW goes high, the relay is de-energized, cutting power.
+#   Button press activates SET coil → relay latches → system powers on
+#   Software shutdown sends HIGH pulse to POW_OFF → RESET coil deactivates relay
 #
-# POWER BUTTON BEHAVIOR:
-#   - Quadruple tap: Toggle Argo service
-#   - Double tap: Toggle recording
+# POWER BUTTON BEHAVIOR (Rev3 PCB - Active HIGH):
+#   - Double tap: Toggle Argo service
+#   - Triple tap: Toggle recording
 #   - Long press (>= threshold DEFAULT_SHUTDOWN_THRESHOLD_S): Initiate shutdown sequence
-#   - Only new button presses after service startup are detected (prevents shutdown during boot)
+#   - Button press at boot activates SET coil; by software start, button is already released
 #
-# LED INDICATORS:
-#   - Green LED: Heartbeat when system is running
-#   - Both LEDs: Countdown pattern during button press (5,4,3,2,1 flashes at 3Hz, then 10 rapid flashes at 10Hz)
-#   - Both LEDs: Alternating short-long pattern during shutdown sequence
-#   - Red LED: Directly connected to power button (not controlled by GPIO)
+# LED INDICATORS (Rev3 PCB - Active LOW):
+#   - Green LED: Heartbeat when system is running (1Hz normal, 2Hz with Argo, 3-flash when recording)
+#   - Both LEDs: Gradual frequency increase during button press (2Hz → 20Hz)
+#   - Both LEDs: Short-long pattern during shutdown sequence (1Hz, 5% duty)
+#   - Blue LED: SOS pattern for low battery warning
+#   - Red LED: Not GPIO controlled (shared anode LED, always reflects button state)
+#   - All LEDs: Active LOW control (GPIO LOW = LED ON, GPIO HIGH = LED OFF)
 #
 # SHUTDOWN SEQUENCE:
 #   1. Broadcast wall message to all users
@@ -82,6 +86,7 @@ import threading
 import logging
 import os
 import argparse
+import argcomplete
 from pathlib import Path
 from datetime import datetime
 import select
@@ -174,6 +179,16 @@ CRITICAL_BATTERY_THRESHOLD_V = 7.2  # Critical battery voltage threshold (halt s
 BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage interval (seconds)
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
+
+# Hardware Polarity Configuration (Rev3 PCB)
+# Power button: Active HIGH (1 = pressed, 0 = released)
+BUTTON_PRESSED_STATE = 1
+BUTTON_RELEASED_STATE = 0
+# LEDs: Active LOW (0 = ON, 1 = OFF) - Common anode RGB LED with cathode control
+LED_ON_STATE = 0
+LED_OFF_STATE = 1
+# Power relay control pulse polarity for shutdown hook (active HIGH to reset relay)
+POWER_OFF_PULSE_STATE = 1
 
 # Configure logging
 
@@ -300,25 +315,13 @@ class PowerController:
         self.recording_active = False
         self.recording_service_available = False
 
-        # Initialize GPIO first to read initial button state
+        # Initialize GPIO and configure button interrupts
+        # Note: Button press activates SET coil which powers on the system,
+        # so by the time software starts, button has already been released.
+        # No need to check initial state - button detection is always active.
         self.init_gpio()
-
-        # Record initial button state during boot (must be done after GPIO init but before event config)
-        self.initial_button_state = self.read_initial_button_state()
-        logger.info(
-            f"Initial button state recorded: {self.initial_button_state}")
-
-        # Set button detection flag based on initial state
-        if self.initial_button_state == 1:  # Button not pressed at startup
-            self.button_detection_active = True  # Can detect presses immediately
-            logger.info("Button detection active - ready to detect presses")
-        else:  # Button pressed at startup
-            self.button_detection_active = False  # Wait for first release
-            logger.info(
-                "Button pressed at startup - waiting for release before detection starts")
-
-        # Now reconfigure the button line for interrupt monitoring
-        self.configure_button_for_interrupts()
+        self.button_detection_active = True
+        logger.info("Button detection active - ready to detect presses")
 
     def _detect_and_cache_desktop_user(self):
         """Detect and cache desktop user and display information"""
@@ -463,16 +466,16 @@ class PowerController:
                 flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE
             )
 
-            # Request LED lines
+            # Request LED lines (active-low: HIGH = OFF)
             self.green_led_line.request(
                 consumer="argo_power_control.py",
                 type=gpiod.LINE_REQ_DIR_OUT,
-                default_vals=[0]  # Start with LED off
+                default_vals=[LED_OFF_STATE]  # Start with LED off (HIGH for active-low)
             )
             self.blue_led_line.request(
                 consumer="argo_power_control.py",
                 type=gpiod.LINE_REQ_DIR_OUT,
-                default_vals=[0]  # Start with LED off
+                default_vals=[LED_OFF_STATE]  # Start with LED off (HIGH for active-low)
             )
 
             logger.info("GPIO pins configured successfully")
@@ -1101,41 +1104,27 @@ class PowerController:
         logger.info("Forcing process exit")
         os._exit(0)
 
-    def read_initial_button_state(self):
-        """Read initial power button state during startup (before interrupt configuration)"""
-        if not self.gpio_available:
-            logger.info(
-                "GPIO not available - assuming button released in test mode")
-            return 1  # Assume released in test mode
-        try:
-            state = self.power_button_line.get_value()
-            logger.info(
-                f"Initial button state read: {state} ({'pressed' if state == 0 else 'released'})")
-            return state
-        except Exception as e:
-            logger.error(f"Error reading initial button state: {e}")
-            return 1  # Assume released on error
-
     def configure_button_for_interrupts(self):
-        """Reconfigure button line for interrupt-based monitoring"""
+        """Configure button line for interrupt-based monitoring (Rev3 PCB: active-high)"""
         if not self.gpio_available:
             logger.info(
                 "GPIO not available - skipping button interrupt configuration in test mode")
             return
         try:
-            # Release the current configuration
+            # Release the initial input configuration
             self.power_button_line.release()
 
-            # Reconfigure for falling edge interrupts
-            # Currently configured for falling edge (POW_BUT going low)
-            # TODO: Change to gpiod.LINE_REQ_EV_RISING_EDGE for future PCB changes where POW_BUT goes high on press
+            # Configure for rising edge interrupts (Rev3 PCB: active-high button)
+            # Button press = rising edge (0 → 1 transition)
+            # Note: Button activates SET coil to power on system, so it's always
+            # released by the time software starts. No startup state checking needed.
             self.power_button_line.request(
                 consumer="argo_power_control.py",
-                type=gpiod.LINE_REQ_EV_FALLING_EDGE,  # Detect POW_BUT going low
+                type=gpiod.LINE_REQ_EV_RISING_EDGE,  # Detect POW_BUT going high (pressed)
                 flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE
             )
             logger.info(
-                "Button line reconfigured for falling edge interrupt monitoring")
+                "Button line configured for rising edge interrupt monitoring (active-high)")
 
         except Exception as e:
             logger.error(f"Error configuring button for interrupts: {e}")
@@ -1149,7 +1138,7 @@ class PowerController:
             return self.power_button_line.get_value()
         except Exception as e:
             logger.error(f"Error reading power button: {e}")
-            return 1  # Assume not pressed on error
+            return BUTTON_RELEASED_STATE  # Assume not pressed on error
 
     # def set_power_relay(self, state):
     #     """Control power relay (True = energized/on, False = de-energized/off)"""
@@ -1177,7 +1166,8 @@ class PowerController:
             self.green_led_state = state
             return
         try:
-            value = 1 if state else 0
+            # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
+            value = LED_ON_STATE if state else LED_OFF_STATE
             self.green_led_line.set_value(value)
             self.green_led_state = state
             logger.debug(f"Green LED set to {'ON' if state else 'OFF'}")
@@ -1192,7 +1182,8 @@ class PowerController:
             self.blue_led_state = state
             return
         try:
-            value = 1 if state else 0
+            # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
+            value = LED_ON_STATE if state else LED_OFF_STATE
             self.blue_led_line.set_value(value)
             self.blue_led_state = state
             logger.info(f"Blue LED set to {'ON' if state else 'OFF'}")
@@ -1473,13 +1464,8 @@ class PowerController:
             return
 
         logger.info("Using hardware interrupt-based button monitoring")
-        logger.info("Monitoring for falling edge events (POW_BUT going low)")
-
-        # IMPORTANT: Do NOT override button_detection_active here!
-        # The __init__ method already set this correctly based on initial button state
-        # If button was pressed at startup, detection remains inactive until first release
-        logger.info(
-            f"Button detection active status: {self.button_detection_active}")
+        logger.info("Monitoring for rising edge events (POW_BUT going high - active-high button)")
+        logger.info("Button detection is always active (button powers on system via SET coil)")
 
         while self.running:
             try:
@@ -1493,30 +1479,26 @@ class PowerController:
                     try:
                         event = self.power_button_line.event_read()
 
-                        # We're configured for falling edge, so this is a button press
-                        if event.type == gpiod.LineEvent.FALLING_EDGE:
-                            if self.button_detection_active:
-                                self.button_press_start_time = time.time()
-                                self.power_button_pressed = True
-                                # Reset warning flag for new button press
-                                self.warning_notification_sent = False
-                                logger.info(
-                                    "Power button pressed (hardware interrupt)")
+                        # We're configured for rising edge (active-high button press)
+                        if event.type == gpiod.LineEvent.RISING_EDGE:
+                            self.button_press_start_time = time.time()
+                            self.power_button_pressed = True
+                            # Reset warning flag for new button press
+                            self.warning_notification_sent = False
+                            logger.info(
+                                "Power button pressed (hardware interrupt)")
 
-                                # Start gradual frequency LED pattern
-                                threading.Thread(
-                                    target=self.gradual_frequency_pattern,
-                                    daemon=True
-                                ).start()
+                            # Start gradual frequency LED pattern
+                            threading.Thread(
+                                target=self.gradual_frequency_pattern,
+                                daemon=True
+                            ).start()
 
-                                # Start monitoring for button release or long press timeout
-                                threading.Thread(
-                                    target=self.monitor_button_release_timeout,
-                                    daemon=True
-                                ).start()
-                            else:
-                                logger.info(
-                                    "Button press detected but detection not yet active - ignoring")
+                            # Start monitoring for button release or long press timeout
+                            threading.Thread(
+                                target=self.monitor_button_release_timeout,
+                                daemon=True
+                            ).start()
                         else:
                             logger.warning(
                                 f"Unexpected event type: {event.type}")
@@ -1524,21 +1506,7 @@ class PowerController:
                     except Exception as e:
                         logger.error(f"Error reading GPIO event: {e}")
 
-                else:
-                    # Timeout - no events, check if we need to activate button detection
-                    # If button was pressed at startup and detection is inactive, check for release
-                    if not self.button_detection_active:
-                        try:
-                            current_state = self.get_current_button_state()
-                            if current_state == 1:  # Button released
-                                self.button_detection_active = True
-                                logger.info(
-                                    "Button released after startup - button detection now active")
-                        except Exception as e:
-                            logger.error(
-                                f"Error checking button state for activation: {e}")
-
-                    # This timeout happens every 1 second and uses minimal CPU
+                # This timeout happens every 1 second and uses minimal CPU
 
             except Exception as e:
                 logger.error(
@@ -1557,8 +1525,8 @@ class PowerController:
                 # Note: This requires switching the line back to input mode temporarily
                 current_state = self.get_current_button_state()
 
-                # Check for button release (rising edge - button goes high)
-                if current_state == 1:  # Button released
+                # Check for button release (active-high button: released = low)
+                if current_state == BUTTON_RELEASED_STATE:  # Button released
                     press_duration = time.time() - self.button_press_start_time
                     logger.info(
                         f"Power button released after {press_duration:.2f} seconds (interrupt + polling)")
@@ -1627,14 +1595,14 @@ class PowerController:
         if not self.gpio_available:
             logger.debug(
                 "GPIO not available - assuming button released in test mode")
-            return 1  # Assume released in test mode
+            return BUTTON_RELEASED_STATE  # Assume released in test mode
         try:
             # The line is configured for events, but we can still read the current value
             # This is needed to detect button release since we only get falling edge interrupts
             return self.power_button_line.get_value()
         except Exception as e:
             logger.error(f"Error reading current button state: {e}")
-            return 1  # Assume released on error
+            return BUTTON_RELEASED_STATE  # Assume released on error
 
     def add_tap(self, press_duration):
         """Add a tap to the detection system and start timeout timer"""
@@ -2302,7 +2270,7 @@ class PowerController:
                     lines = result.stdout.strip().split('\n')
                     message_content = None
 
-                    logger.info(
+                    logger.debug(
                         f"Battery service response has {len(lines)} lines")
 
                     for line in lines:
@@ -2319,7 +2287,7 @@ class PowerController:
                                 message_part = message_part.replace(
                                     '\\n', '\n').replace('\\"', '"')
                                 message_content = message_part
-                                logger.info(
+                                logger.debug(
                                     "Found message content in Trigger_Response")
                                 break
                         # Also support old format: message:
@@ -2341,7 +2309,7 @@ class PowerController:
                         response_data = json.loads(message_content)
                         # Extract raw_data from the response
                         raw_data = response_data.get('raw_data', {})
-                        logger.info(
+                        logger.debug(
                             f"Successfully parsed battery data: {raw_data.get('battery_voltage', 'N/A')}V")
                         return raw_data
                     else:
@@ -2560,7 +2528,15 @@ class PowerController:
         # Broadcast wall message
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"CRITICAL BATTERY: {battery_voltage:.3f}V at {timestamp}\nSystem will halt in 30 seconds unless actively cancelled\nTimeout = automatic halt for safety"
+            message = f"""CRITICAL BATTERY ALERT: {battery_voltage:.3f}V at {timestamp}
+
+⚠️  System will HALT in 30 seconds to preserve battery power.
+
+To CANCEL the shutdown from CLI (close the confirmation dialog):
+  pkill -f zenity
+
+If you take no action within 30 seconds, the system will automatically
+halt to preserve battery for manual sailing operation (safe default)."""
             subprocess.run(['wall', message], check=True,
                            timeout=WALL_MESSAGE_TIMEOUT_S)
             logger.info("Critical battery wall message broadcasted")
@@ -2754,25 +2730,26 @@ DESCRIPTION:
   and LED status indicators. Relay de-energization is handled automatically
   by GPIO pin state reversion on system halt.
 
-HARDWARE CONFIGURATION:
-  - PI3 (Pin 40): !POW - Open drain output to control power relay
-  - PI9 (Pin 28): !POW_BUT - Input from power button (external pullup required)
-  - PH4 (Pin 18): Green LED in power button (system running indicator)
-  - PI1 (Pin 12): Blue LED in power button (status/warning indicator)
-  - Red LED: Directly connected to power button (not GPIO controlled)
+HARDWARE CONFIGURATION (Rev3 PCB):
+  - PI3 (Pin 40): POW_OFF - Output for power relay RESET coil (active HIGH pulse)
+  - PI9 (Pin 28): POW_BUT - Input from power button (active HIGH when pressed)
+  - PH4 (Pin 18): Green LED in power button (active LOW - cathode control)
+  - PI1 (Pin 12): Blue LED in power button (active LOW - cathode control)
+  - Red LED: Not GPIO controlled (common anode RGB LED)
+  - LEDs: Active LOW control (GPIO LOW = ON, GPIO HIGH = OFF)
 
-POWER BUTTON BEHAVIOR:
-  - Short press (< threshold DEFAULT_SHUTDOWN_THRESHOLD_S): No action
-  - Double tap (2 quick taps within 1.5s): Toggle Argo launch service (start/stop all nodes)
-  - Triple tap (3 quick taps within 1.5s): Toggle recording on/off
-  - Long press (>= threshold DEFAULT_SHUTDOWN_THRESHOLD_S): Initiate shutdown sequence
-  - Only new button presses after service startup are detected (prevents shutdown during boot)
+POWER BUTTON BEHAVIOR (Active HIGH):
+  - Double tap (2 quick taps): Toggle Argo launch service (start/stop all nodes)
+  - Triple tap (3 quick taps): Toggle recording on/off
+  - Long press (>= threshold): Initiate shutdown sequence
+  - Button press at boot activates SET coil; software always sees button released
 
-LED INDICATORS:
-  - Green LED: Heartbeat when system is running (1Hz normal, 2Hz when Argo nodes running, 3-flash pattern when recording)
-  - Both LEDs: Countdown pattern during button press (5,4,3,2,1 flashes at 3Hz, then 10 rapid flashes at 10Hz)
-  - Both LEDs: Alternating short-long pattern during shutdown sequence
-  - Red LED: Directly connected to power button (not controlled by GPIO)
+LED INDICATORS (Active LOW):
+  - Green LED: Heartbeat (1Hz normal, 2Hz when Argo running, 3-flash when recording)
+  - Both LEDs: Gradual frequency increase during button press (2Hz → 20Hz)
+  - Both LEDs: Short-long pattern during shutdown sequence (1Hz, 5% duty)
+  - Blue LED: SOS pattern for low battery warning
+  - Red LED: Not GPIO controlled
 
 USAGE:
   ./argo_power_control.py [OPTIONS]
@@ -2848,6 +2825,8 @@ def main():
     parser.add_argument('--simulate-low-battery', action='store_true',
                         help='Simulate low battery condition (SOS LED pattern) for testing')
 
+    # Enable bash completion for command-line arguments
+    argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
     # Handle help
