@@ -13,6 +13,9 @@ Group=orangepi
 WorkingDirectory=/home/orangepi/argo/power_control
 Environment=ROS_DOMAIN_ID=0
 Environment=HOME=/home/orangepi
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py'
 ExecStop=/bin/bash -c 'echo "System shutting down - GPIO pins will automatically revert to input state, de-energizing relay..."'
 Restart=no

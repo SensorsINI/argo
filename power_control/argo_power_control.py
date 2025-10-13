@@ -1517,29 +1517,44 @@ class PowerController:
                     return
 
                 # Find the main process of the user's graphical session to get its environment
+                session_pid = None
                 try:
-                    pgrep_cmd = ['pgrep', '-u', self.cached_desktop_user, 'gnome-shell|plasma-shell|xfce4-session|lxsession|i3|sway', '-o']
-                    result = subprocess.run(
-                        pgrep_cmd, capture_output=True, text=True, timeout=2)
+                    # Try each desktop environment separately (fixed pgrep pattern)
+                    for process_name in ['gnome-shell', 'plasma-shell', 'xfce4-session', 
+                                         'lxsession', 'i3', 'sway']:
+                        pgrep_cmd = ['pgrep', '-u', self.cached_desktop_user, '-o', process_name]
+                        result = subprocess.run(
+                            pgrep_cmd, capture_output=True, text=True, timeout=2)
+                        
+                        if result.returncode == 0:
+                            session_pid = result.stdout.strip()
+                            logger.debug(f"Found {process_name} session with PID: {session_pid}")
+                            break
                     
-                    if result.returncode == 0:
-                        pid = result.stdout.strip()
+                    if session_pid:
                         # Get environment variables from the session process
-                        with open(f'/proc/{pid}/environ', 'r') as f:
+                        # /proc/pid/environ uses null bytes as separators, not newlines
+                        with open(f'/proc/{session_pid}/environ', 'r') as f:
+                            environ_data = f.read()
                             env_vars = dict(
-                                line.strip().split('=', 1) for line in f if '=' in line)
+                                line.split('=', 1) 
+                                for line in environ_data.split('\0') 
+                                if '=' in line
+                            )
                         
                         display = env_vars.get('DISPLAY')
                         dbus_address = env_vars.get('DBUS_SESSION_BUS_ADDRESS')
 
                         if display and dbus_address:
                             logger.debug(
-                                f"Found graphical session for user {self.cached_desktop_user} (PID: {pid})")
+                                f"Found graphical session for user {self.cached_desktop_user} (PID: {session_pid})")
                             logger.debug(
                                 f"  DISPLAY={display}, DBUS_SESSION_BUS_ADDRESS={dbus_address}")
 
+                            # Use 'env' command to properly set environment variables for sudo
                             cmd = [
                                 'sudo', '-u', self.cached_desktop_user,
+                                'env',
                                 f'DISPLAY={display}',
                                 f'DBUS_SESSION_BUS_ADDRESS={dbus_address}',
                                 'notify-send', '--urgency', urgency,
@@ -1558,20 +1573,21 @@ class PowerController:
                     logger.warning(
                         f"Failed to get graphical session environment: {e}")
 
-                # Fallback to the old method if the new one fails
-                logger.debug("Falling back to legacy notification method")
-                if self.cached_display_env:
-                    cmd = [
-                        'sudo', '-u', self.cached_desktop_user,
-                        f'DISPLAY={self.cached_display_env}',
-                        'notify-send', '--urgency', urgency,
-                        '--expire-time', str(expire_time),
-                        test_title, test_message
-                    ]
-                    subprocess.run(
-                        cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                    logger.info(f"Desktop notification sent (legacy): {title}")
-                    return
+                # Fallback to simple notification method with standard environment
+                logger.debug("Falling back to standard environment notification method")
+                cmd = [
+                    'sudo', '-u', self.cached_desktop_user,
+                    'env',
+                    'DISPLAY=:0',
+                    'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus',
+                    'notify-send', '--urgency', urgency,
+                    '--expire-time', str(expire_time),
+                    test_title, test_message
+                ]
+                subprocess.run(
+                    cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                logger.info(f"Desktop notification sent (fallback): {title}")
+                return
 
             else:
                 # Running as a regular user, direct call is fine
