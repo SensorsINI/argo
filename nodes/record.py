@@ -32,7 +32,7 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-# Removed QoS imports - using default QoS only
+
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
@@ -53,6 +53,7 @@ class ArgoRecordingNode(Node):
         self.bag_path = None
         self.recording_process = None
         self.is_recording = False
+        self.stopped_bag_name = None
 
         # Ensure bagfiles directory exists
         os.makedirs(self.bagfiles_dir, exist_ok=True)
@@ -69,6 +70,12 @@ class ArgoRecordingNode(Node):
             Trigger,
             '/argo/recording/stop',
             self.stop_recording_callback
+        )
+
+        self.get_status_service = self.create_service(
+            Trigger,
+            '/argo/recording/get_status',
+            self.get_status_callback
         )
 
         # ROS2 Publishers
@@ -106,6 +113,8 @@ class ArgoRecordingNode(Node):
             "   /argo/recording/start - Start recording (Trigger service)")
         self._log_info(
             "   /argo/recording/stop - Stop recording (Trigger service)")
+        self._log_info(
+            "   /argo/recording/get_status - Get recording status (Trigger service)")
         self._log_info("📡 Topics available:")
         self._log_info("   /argo/recording/status - Recording status (Bool)")
         self._log_info("   /argo/recording/info - Recording info (String)")
@@ -114,6 +123,17 @@ class ArgoRecordingNode(Node):
 
         # Publish initial status
         self.publish_status()
+
+    def get_status_callback(self, request, response):
+        """Service callback to get current recording status."""
+        response.success = self.is_recording
+        if self.is_recording:
+            response.message = f"Recording is active: {self.current_bag_name}"
+        else:
+            response.message = "Recording is not active"
+        self._log_info(
+            f"Status query received: {'ACTIVE' if self.is_recording else 'INACTIVE'}")
+        return response
 
     def _setup_file_logging(self):
         """Setup file logging to /tmp/record.log for detailed debugging"""
@@ -359,7 +379,7 @@ class ArgoRecordingNode(Node):
                             f"⚠️  Could not get bag info: {e}")
 
             # Store bag name before clearing it
-            stopped_bag_name = self.current_bag_name
+            self.stopped_bag_name = self.current_bag_name
 
             self.is_recording = False
             self.current_bag_name = None
@@ -369,8 +389,9 @@ class ArgoRecordingNode(Node):
             self.publish_status()
 
             # Publish detailed info about the stopped recording
-            if stopped_bag_name:
-                bag_path = os.path.join(self.bagfiles_dir, stopped_bag_name)
+            if self.stopped_bag_name:
+                bag_path = os.path.join(
+                    self.bagfiles_dir, self.stopped_bag_name)
                 if os.path.exists(bag_path):
                     try:
                         # Get bag size
@@ -381,7 +402,7 @@ class ArgoRecordingNode(Node):
                         )[0] if size_result.returncode == 0 else "Unknown"
 
                         # Publish detailed info with bag path and size
-                        detailed_info = f"Recording stopped - Bag: {stopped_bag_name} ({bag_size})"
+                        detailed_info = f"Recording stopped - Bag: {self.stopped_bag_name} ({bag_size})"
                         self.publish_info(detailed_info)
                     except Exception as e:
                         self._log_warn(
