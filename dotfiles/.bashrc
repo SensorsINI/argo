@@ -74,7 +74,7 @@ argo_quick_timer() {
     fi
 }
 
-PATH="$HOME/argo/launch:$HOME/argo/nodes:$HOME/argo/scripts:$PATH"
+PATH="$HOME/argo/launch:$HOME/argo/nodes:$HOME/argo/scripts:$HOME/argo/power_control:$PATH"
 
 # Run Argo status check on shell startup (with quick timer)
 # This will only show status if it's been more few minutes since last check
