@@ -89,17 +89,18 @@ install_shutdown_hook:
 	@sudo install -m 0755 $(SCRIPT_DIR)/argo_poweroff.shutdown /lib/systemd/system-shutdown/argo_poweroff
 	@echo "✅ Late shutdown hook installed"
 
-# Install early boot power-on hook (runs once at early boot)
-install_startup_hook:
-	@echo "📋 Installing early boot startup hook..."
-	@sudo install -m 0755 $(SCRIPT_DIR)/argo_poweron.startup /usr/local/sbin/argo_poweron
-	@sed -e "s|^ExecStart=.*|ExecStart=/usr/local/sbin/argo_poweron|" \
-	    $(SCRIPT_DIR)/argo_poweron.service > /tmp/argo_poweron.service
-	@sudo install -m 0644 /tmp/argo_poweron.service /etc/systemd/system/argo_poweron.service
-	@rm -f /tmp/argo_poweron.service
-	@sudo systemctl daemon-reload
-	@sudo systemctl enable argo_poweron.service
-	@echo "✅ Early boot startup hook installed and enabled"
+# # Install early boot power-on hook (runs once at early boot)
+# DISABLED: not needed anymore with rev3 board that uses dual coil relay
+# install_startup_hook:
+# 	@echo "📋 Installing early boot startup hook..."
+# 	@sudo install -m 0755 $(SCRIPT_DIR)/argo_poweron.startup /usr/local/sbin/argo_poweron
+# 	@sed -e "s|^ExecStart=.*|ExecStart=/usr/local/sbin/argo_poweron|" \
+# 	    $(SCRIPT_DIR)/argo_poweron.service > /tmp/argo_poweron.service
+# 	@sudo install -m 0644 /tmp/argo_poweron.service /etc/systemd/system/argo_poweron.service
+# 	@rm -f /tmp/argo_poweron.service
+# 	@sudo systemctl daemon-reload
+# 	@sudo systemctl enable argo_poweron.service
+# 	@echo "✅ Early boot startup hook installed and enabled"
 
 # Enable and start service
 enable_service:
@@ -179,9 +180,10 @@ clean_power_control:
 	@sudo systemctl stop $(POWER_SERVICE_NAME) 2>/dev/null || true
 	@sudo systemctl disable $(POWER_SERVICE_NAME) 2>/dev/null || true
 	@sudo rm -f /etc/systemd/system/$(POWER_SERVICE_NAME).service
-	@sudo systemctl disable argo_poweron.service 2>/dev/null || true
-	@sudo rm -f /etc/systemd/system/argo_poweron.service
-	@sudo rm -f /usr/local/sbin/argo_poweron
+	# DISABLED: not needed anymore with rev3 board that uses dual coil relay
+	# @sudo systemctl disable argo_poweron.service 2>/dev/null || true
+	# @sudo rm -f /etc/systemd/system/argo_poweron.service
+	# @sudo rm -f /usr/local/sbin/argo_poweron
 	@sudo rm -f /lib/systemd/system-shutdown/argo_poweroff
 	@sudo systemctl daemon-reload
 	@echo "✅ Power control cleanup complete"

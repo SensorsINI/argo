@@ -54,17 +54,15 @@ if [ -f "$CRITICAL_BATTERY_FLAG" ]; then
     c_echo "╔════════════════════════════════════════════════════════════════╗"
     c_echo "║ CRITICAL BATTERY HALT - PRESERVING POWER FOR MANUAL SAILING ║"
     c_echo "╚════════════════════════════════════════════════════════════════╝"
-    c_echo "CRITICAL BATTERY FLAG DETECTED -> preserving power for manual sailing"
     c_echo "Power relay will remain energized for radio control"
     c_echo "System halted due to low battery - radio control is ACTIVE"
     
     # Also log to kernel ring buffer for dmesg visibility
     echo "**************************************************ARGO CRITICAL BATTERY HALT: Preserving power relay for manual sailing" > /dev/kmsg 2>/dev/null || true
-    echo "**************************************************ARGO CRITICAL BATTERY HALT: Preserving power relay for manual sailing" > /dev/kmsg 2>/dev/null || true
     echo "ARGO CRITICAL BATTERY: Radio control remains active" > /dev/kmsg 2>/dev/null || true
     
     # Give operator time to see the message
-    sleep 10
+    sleep 3
     exit 0
 fi
 
@@ -98,12 +96,12 @@ fi
 c_echo "╔════════════════════════════════════════════════════════════════╗"
 c_echo "║ NORMAL SHUTDOWN - CUTTING POWER RELAY                        ║"
 c_echo "╚════════════════════════════════════════════════════════════════╝"
-c_echo "Finalizing shutdown power cut in 5s..."
+c_echo "Finalizing shutdown power cut in 3s..."
 
 # Log to kernel ring buffer for dmesg visibility
-echo "ARGO NORMAL SHUTDOWN: Cutting power relay in 5 seconds" > /dev/kmsg 2>/dev/null || true
+echo "ARGO NORMAL SHUTDOWN: Cutting power relay in 3 seconds" > /dev/kmsg 2>/dev/null || true
 
-sleep 5
+sleep 3
 
 # Log final message before power cut
 echo "ARGO SHUTDOWN: Asserting GPIO 259 to cut power NOW" > /dev/kmsg 2>/dev/null || true
