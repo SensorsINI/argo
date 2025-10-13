@@ -55,11 +55,15 @@ CHARGING_GPIO_LINE = 76   # PC12 (pin 36) - !CHARGING from MP2672GD
 ACOK_GPIO_LINE = 233      # PH9 (pin 26) - !ACOK from MP2672GD
 
 # Sample rate configuration - dual timers for different sensor requirements
-SAIL_CURRENT_RATE_HZ = 10.0  # 10 Hz for sail current (control critical)
-BATTERY_SAFETY_INTERVAL_S = 30.0  # 30 seconds for battery/saltwater/humidity (safety critical)
+SAIL_CURRENT_RATE_HZ = 5.0  # Hz for sail current (control critical)
+BATTERY_SAFETY_INTERVAL_S = 10.0  # seconds for battery/saltwater/humidity (safety critical)
 
 # only publish if the change is greater than this percentage
 THRESHOLD_CHANGE_PCT = 0.1  # Reduced from 1.0 to 0.1% for more frequent publishing
+
+# Battery monitoring thresholds
+BATTERY_LOW_THRESHOLD_V = 7.5       # V, ~20% for 2S LiPo, triggers warning
+BATTERY_CRITICAL_THRESHOLD_V = 6.8  # V, ~10% for 2S LiPo, may trigger shutdown
 
 try:
     import smbus2 as smbus2
@@ -209,7 +213,9 @@ class BatteryWaterNode(Node):
         # Threshold parameters
         # LiPo 2S ~20% remaining ≈ 3.6 V/cell -> 7.2 V pack (tweak if needed)
         self.batt_low_threshold_v = float(
-            self.declare_parameter('battery_low_threshold_v', 7.2).value)
+            self.declare_parameter('battery_low_threshold_v', BATTERY_LOW_THRESHOLD_V).value)
+        self.batt_critical_threshold_v = float(
+            self.declare_parameter('battery_critical_threshold_v', BATTERY_CRITICAL_THRESHOLD_V).value)
         # Battery low hysteresis (Volts)
         self.batt_low_hysteresis_v = 0.05
         # Saltwater alert threshold (Volts)
@@ -294,11 +300,11 @@ class BatteryWaterNode(Node):
             self.get_logger().info(
                 'Battery/Water node is idle after --test-adc capture. Press Ctrl+C to exit.')
         else:
-            # High-frequency timer for sail current (control critical - 10Hz)
+            # High-frequency timer for sail current (control critical)
             self.sail_current_timer = self.create_timer(
                 1.0 / SAIL_CURRENT_RATE_HZ, self.read_sail_current)
             
-            # Low-frequency timer for battery safety sensors (30 second interval)
+            # Low-frequency timer for battery safety sensors
             self.battery_safety_timer = self.create_timer(
                 BATTERY_SAFETY_INTERVAL_S, self.read_battery_safety_sensors)
             
