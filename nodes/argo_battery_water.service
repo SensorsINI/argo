@@ -4,7 +4,7 @@ Documentation=file://%h/argo/nodes/battery_water.py
 After=basic.target sysinit.target
 Wants=basic.target
 DefaultDependencies=no
-Before=argo-launch.service shutdown.target
+Before=argo_launch.service shutdown.target
 
 [Service]
 Type=simple

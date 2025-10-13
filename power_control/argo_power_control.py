@@ -669,7 +669,7 @@ class PowerController:
         """Check if the Argo launch service is running"""
         try:
             result = subprocess.run(
-                ['sudo', 'systemctl', 'is-active', 'argo-launch.service'],
+                ['sudo', 'systemctl', 'is-active', 'argo_launch.service'],
                 capture_output=True, text=True, timeout=4
             )
             is_running = result.returncode == 0 and result.stdout.strip() == 'active'
@@ -696,7 +696,7 @@ class PowerController:
                 return True
             logger.info("Starting Argo launch service...")
             result = subprocess.run(
-                ['sudo', 'systemctl', 'start', 'argo-launch.service'],
+                ['sudo', 'systemctl', 'start', 'argo_launch.service'],
                 capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
@@ -733,7 +733,7 @@ class PowerController:
                 return True
 
             result = subprocess.run(
-                ['sudo', 'systemctl', 'stop', 'argo-launch.service'],
+                ['sudo', 'systemctl', 'stop', 'argo_launch.service'],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
@@ -1751,10 +1751,10 @@ class PowerController:
         MAX_CONSECUTIVE_FAILURES = 3  # 90 seconds of failures = assume critical
         
         # Startup grace period - don't count failures until battery service has been seen at least once
-        # This prevents false critical alerts if battery_water.service starts after power_control.service
+        # This prevents false critical alerts if argo_battery_water.service starts after power_control.service
         battery_service_ever_available = False
         startup_time = time.time()
-        STARTUP_GRACE_PERIOD_S = 60.0  # 60 seconds to wait for battery_water.service startup
+        STARTUP_GRACE_PERIOD_S = 60.0  # 60 seconds to wait for argo_battery_water.service startup
 
         while self.running and self.battery_monitoring_active:
             try:
@@ -1795,7 +1795,7 @@ class PowerController:
                             logger.critical(
                                 f"This indicates a sensor/communication problem, NOT a battery problem!")
                             logger.critical(
-                                f"System will continue running - check battery_water.service status")
+                                f"System will continue running - check argo_battery_water.service status")
                         continue
                     
                     # Valid reading - reset invalid counter
@@ -1874,7 +1874,7 @@ class PowerController:
                     if not battery_service_ever_available and time_since_startup < STARTUP_GRACE_PERIOD_S:
                         # During startup grace period and service never seen - don't count failures yet
                         logger.info(
-                            f"Battery service not available yet - waiting for battery_water.service startup "
+                            f"Battery service not available yet - waiting for argo_battery_water.service startup "
                             f"(grace period: {time_since_startup:.0f}s / {STARTUP_GRACE_PERIOD_S:.0f}s)")
                     elif not battery_service_ever_available and time_since_startup >= STARTUP_GRACE_PERIOD_S:
                         # Grace period expired but service never became available - log error but DO NOT HALT
@@ -1883,8 +1883,8 @@ class PowerController:
                         logger.critical(
                             "Battery monitoring is DISABLED - system will continue WITHOUT battery protection!")
                         logger.critical(
-                            "Check if battery_water.service is installed and enabled:")
-                        logger.critical("  sudo systemctl status battery_water.service")
+                            "Check if argo_battery_water.service is installed and enabled:")
+                        logger.critical("  sudo systemctl status argo_battery_water.service")
                         logger.critical(
                             "System will NOT halt - service unavailability is not a battery problem!")
                         # DO NOT HALT - missing service is a configuration problem, not a battery emergency
@@ -1904,7 +1904,7 @@ class PowerController:
                             logger.critical(
                                 "Service failures indicate a monitoring problem, NOT a battery emergency!")
                             logger.critical(
-                                "Check battery_water.service: sudo systemctl status battery_water.service")
+                                "Check argo_battery_water.service: sudo systemctl status argo_battery_water.service")
                             # DO NOT HALT - service failures are monitoring problems, not battery emergencies
 
                 self.last_battery_check_time = time.time()

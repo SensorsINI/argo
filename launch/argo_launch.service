@@ -1,7 +1,7 @@
 [Unit]
 Description=Argo Robot ROS2 Launch Service
-After=network.target argo-radio-servo-module.service
-Wants=argo-radio-servo-module.service
+After=network.target argo_radio_servo_module.service
+Wants=argo_radio_servo_module.service
 
 [Service]
 Type=simple

@@ -2,7 +2,7 @@
 # Argo Restart Script - Restart Argo nodes via systemd service
 
 echo "🔄 Restarting Argo ROS2 nodes via systemd service..."
-sudo systemctl restart argo-launch.service
+sudo systemctl restart argo_launch.service
 
 if [ $? -eq 0 ]; then
     echo "✅ Argo launch service restarted successfully"
@@ -13,7 +13,7 @@ if [ $? -eq 0 ]; then
     sleep 5
     
     # Check if service is running
-    if systemctl is-active --quiet argo-launch.service; then
+    if systemctl is-active --quiet argo_launch.service; then
         echo "✅ Argo launch service is active"
         echo "🔍 Checking node status..."
         
@@ -24,11 +24,11 @@ if [ $? -eq 0 ]; then
     else
         echo "❌ Argo launch service failed to restart"
         echo "📋 Checking service logs..."
-        sudo journalctl -u argo-launch.service --no-pager -n 20
+        sudo journalctl -u argo_launch.service --no-pager -n 20
         exit 1
     fi
 else
-    echo "❌ Failed to restart argo-launch service"
+    echo "❌ Failed to restart argo_launch service"
     exit 1
 fi
 

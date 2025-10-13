@@ -991,10 +991,10 @@ class ArgoLifecycleManager:
         else:
             print("⚡ POWER CONTROL: 🔴 STOPPED")
 
-        # Check if battery_water.service is running (independent service)
+        # Check if argo_battery_water.service is running (independent service)
         battery_service_running = False
         try:
-            result = subprocess.run(['systemctl', 'is-active', 'battery_water.service'],
+            result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
                                     capture_output=True, text=True, timeout=2)
             battery_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
         except Exception:
@@ -1005,10 +1005,10 @@ class ArgoLifecycleManager:
         else:
             print("🔋 BATTERY MONITOR: 🔴 STOPPED")
         
-        # Check if argo-launch.service is running
+        # Check if argo_launch.service is running
         service_running = False
         try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo-launch.service'], 
+            result = subprocess.run(['systemctl', 'is-active', 'argo_launch.service'], 
                                   capture_output=True, text=True, timeout=2)
             service_running = result.returncode == 0 and result.stdout.strip() == 'active'
         except Exception:
@@ -1046,7 +1046,7 @@ class ArgoLifecycleManager:
             try:
                 # Get recent error messages from systemd journal
                 result = subprocess.run([
-                    'journalctl', '-u', 'argo-launch.service', '--since', '5 minutes ago',
+                    'journalctl', '-u', 'argo_launch.service', '--since', '5 minutes ago',
                     '--grep', '(FATAL|ERROR|CRITICAL)', '--no-pager'
                 ], capture_output=True, text=True, timeout=5)
                 
@@ -1203,7 +1203,7 @@ class ArgoLifecycleManager:
             # Check if battery_water service is running independently
             battery_service_running = False
             try:
-                result = subprocess.run(['systemctl', 'is-active', 'battery_water.service'],
+                result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
                                         capture_output=True, text=True, timeout=2)
                 battery_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
             except Exception:
@@ -1375,10 +1375,10 @@ class ArgoLifecycleManager:
         fatal_messages = {}
         
         try:
-            # Get recent FATAL messages from systemd journal for argo-launch.service
+            # Get recent FATAL messages from systemd journal for argo_launch.service
             # Look back further to catch initial startup failures
             result = subprocess.run([
-                'journalctl', '-u', 'argo-launch.service', '--since', self.journal_since,
+                'journalctl', '-u', 'argo_launch.service', '--since', self.journal_since,
                 '--grep', 'FATAL', '--no-pager', '-o', 'short-precise'
             ], capture_output=True, text=True, timeout=5)
             

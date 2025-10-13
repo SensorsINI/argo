@@ -2,7 +2,7 @@
 # Manages systemd services for ROS2 Argo robot
 
 SERVICE_DIR = /etc/systemd/system
-LAUNCH_SERVICE = argo-launch.service
+LAUNCH_SERVICE = argo_launch.service
 # Recording is now handled via ROS2 service, not systemd
 BAGFILES_DIR = $(HOME)/bagfiles
 # Resolve repository directory and installing user
@@ -27,9 +27,9 @@ help:
 	@echo ""
 	@echo "Service Management (in launch/ directory):"
 	@echo "  make -C launch install     - Install all services (launch, storage)"
-	@echo "  make -C launch start       - Start argo-launch service with 30s monitoring"
+	@echo "  make -C launch start       - Start argo_launch service with 30s monitoring"
 	@echo "  make -C launch stop        - Stop all argo services"
-	@echo "  make -C launch restart     - Restart argo-launch service"
+	@echo "  make -C launch restart     - Restart argo_launch service"
 	@echo "  make -C launch clean       - Clean old bag files (>7 days)"
 	@echo "  make -C launch help        - Show detailed service management help"
 	@echo ""

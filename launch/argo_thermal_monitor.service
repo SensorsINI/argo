@@ -4,7 +4,7 @@ After=multi-user.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/thermal-monitor.sh
+ExecStart=/usr/local/bin/argo_thermal_monitor.sh
 Restart=always
 RestartSec=10
 User=root

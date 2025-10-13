@@ -56,13 +56,13 @@ install_boot_env:
 
 install_permissions_service:
 	# Copy the postinit script
-	sudo cp $(PWD)/argo-radio-servo-postinit.sh /usr/local/bin
+	sudo cp $(PWD)/argo_radio_servo_postinit.sh /usr/local/bin
 	# Copy the systemd service file
-	sudo cp $(PWD)/argo-radio-servo-perms.service /etc/systemd/system
+	sudo cp $(PWD)/argo_radio_servo_perms.service /etc/systemd/system
 	# Reload systemd manager configuration to recognize the new service
 	sudo systemctl daemon-reload
 	# Enable the service to start on boot
-	sudo systemctl enable argo-radio-servo-perms.service
+	sudo systemctl enable argo_radio_servo_perms.service
 
 install_module: module
 	@echo "--- Installing kernel module for boot-time loading ---"
@@ -122,9 +122,9 @@ test_pwm:
 install_module_service:
 	@echo "--- Installing kernel module loading service ---"
 	# Copy the kernel module service file
-	sudo cp $(PWD)/argo-radio-servo-module.service /etc/systemd/system/
+	sudo cp $(PWD)/argo_radio_servo_module.service /etc/systemd/system/
 	# Reload systemd manager configuration
 	sudo systemctl daemon-reload
 	# Enable the service to start on boot
-	sudo systemctl enable argo-radio-servo-module.service
+	sudo systemctl enable argo_radio_servo_module.service
 	@echo "Kernel module service installed and enabled"

@@ -4,7 +4,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/argo-cpu-setup.sh
+ExecStart=/usr/local/bin/argo_cpu_setup.sh
 
 [Install]
 WantedBy=multi-user.target

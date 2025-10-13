@@ -5,7 +5,7 @@ Wants=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/argo-radio-servo-postinit.sh
+ExecStart=/usr/local/bin/argo_radio_servo_postinit.sh
 RemainAfterExit=yes
 StandardOutput=journal+console
 StandardError=journal+console

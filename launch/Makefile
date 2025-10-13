@@ -3,7 +3,7 @@
 
 # Service configuration
 SERVICE_DIR = /etc/systemd/system
-LAUNCH_SERVICE = argo-launch.service
+LAUNCH_SERVICE = argo_launch.service
 BAGFILES_DIR = $(HOME)/bagfiles
 ARGO_DIR = $(HOME)/argo
 
@@ -64,8 +64,8 @@ clean:
 # ==================== STORAGE MONITORING SYSTEM ====================
 
 # Storage monitoring service configuration
-STORAGE_SERVICE_NAME = argo-storage-monitor
-STORAGE_SERVICE_FILE = argo-storage-monitor.service
+STORAGE_SERVICE_NAME = argo_storage_monitor
+STORAGE_SERVICE_FILE = argo_storage_monitor.service
 
 # Install storage monitoring service
 install_storage_monitor:
@@ -125,9 +125,9 @@ uninstall_storage_monitor: stop_storage_monitor disable_storage_monitor
 # ==================== THERMAL MONITORING SYSTEM ====================
 
 # Thermal monitoring service configuration
-THERMAL_SERVICE_NAME = thermal-monitor
-THERMAL_SERVICE_FILE = thermal-monitor.service
-THERMAL_SCRIPT = thermal-monitor.sh
+THERMAL_SERVICE_NAME = argo_thermal_monitor
+THERMAL_SERVICE_FILE = argo_thermal_monitor.service
+THERMAL_SCRIPT = argo_thermal_monitor.sh
 SCRIPT_INSTALL_DIR = /usr/local/bin
 
 # Install thermal monitoring service

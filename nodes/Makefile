@@ -3,7 +3,7 @@
 
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 SYSTEMD_SYSTEM_DIR := /etc/systemd/system
-SERVICE_FILE := battery_water.service
+SERVICE_FILE := argo_battery_water.service
 SCRIPT_FILE := battery_water.py
 
 .PHONY: help install uninstall status enable disable restart start stop logs check
@@ -37,10 +37,10 @@ check:
 	@echo "ℹ️  Python package dependencies will be checked when service starts"
 
 install:
-	@echo "Installing battery_water service..."
-	@if systemctl is-active --quiet battery_water.service; then \
+	@echo "Installing argo_battery_water service..."
+	@if systemctl is-active --quiet argo_battery_water.service; then \
 		echo "⚠️  Service is currently running. Stopping it..."; \
-		sudo systemctl stop battery_water.service; \
+		sudo systemctl stop argo_battery_water.service; \
 	fi
 	@echo "📝 Installing service file..."
 	@sudo cp $(SERVICE_FILE) $(SYSTEMD_SYSTEM_DIR)/$(SERVICE_FILE)
@@ -48,18 +48,18 @@ install:
 	@echo "🔄 Reloading systemd daemon..."
 	@sudo systemctl daemon-reload
 	@echo "🚀 Enabling and starting service..."
-	@sudo systemctl enable battery_water.service
-	@sudo systemctl start battery_water.service
+	@sudo systemctl enable argo_battery_water.service
+	@sudo systemctl start argo_battery_water.service
 	@sleep 2
 	@echo ""
-	@echo "✅ Battery water service installed successfully"
+	@echo "✅ Argo battery water service installed successfully"
 	@echo ""
-	@if systemctl is-active --quiet battery_water.service; then \
+	@if systemctl is-active --quiet argo_battery_water.service; then \
 		echo "🟢 Service is RUNNING"; \
 		echo "✅ Auto-start ENABLED"; \
 	else \
 		echo "❌ Service failed to start!"; \
-		echo "Check logs: sudo journalctl -u battery_water.service -n 20"; \
+		echo "Check logs: sudo journalctl -u argo_battery_water.service -n 20"; \
 		exit 1; \
 	fi
 	@echo ""
@@ -67,65 +67,65 @@ install:
 	@$(MAKE) status
 
 uninstall:
-	@echo "Uninstalling battery_water service..."
-	@if systemctl is-active --quiet battery_water.service; then \
+	@echo "Uninstalling argo_battery_water service..."
+	@if systemctl is-active --quiet argo_battery_water.service; then \
 		echo "⚠️  Stopping service..."; \
-		sudo systemctl stop battery_water.service; \
+		sudo systemctl stop argo_battery_water.service; \
 	fi
-	@if systemctl is-enabled --quiet battery_water.service 2>/dev/null; then \
+	@if systemctl is-enabled --quiet argo_battery_water.service 2>/dev/null; then \
 		echo "⚠️  Disabling service..."; \
-		sudo systemctl disable battery_water.service; \
+		sudo systemctl disable argo_battery_water.service; \
 	fi
 	@if [ -f $(SYSTEMD_SYSTEM_DIR)/$(SERVICE_FILE) ]; then \
 		echo "🗑️  Removing service file..."; \
 		sudo rm -f $(SYSTEMD_SYSTEM_DIR)/$(SERVICE_FILE); \
 	fi
 	@sudo systemctl daemon-reload
-	@echo "✅ Battery water service uninstalled"
+	@echo "✅ Argo battery water service uninstalled"
 
 enable:
-	@echo "Enabling battery_water service..."
-	@sudo systemctl enable battery_water.service
+	@echo "Enabling argo_battery_water service..."
+	@sudo systemctl enable argo_battery_water.service
 	@echo "✅ Service will start automatically on boot"
 
 disable:
-	@echo "Disabling battery_water service..."
-	@sudo systemctl disable battery_water.service
+	@echo "Disabling argo_battery_water service..."
+	@sudo systemctl disable argo_battery_water.service
 	@echo "✅ Service will not start on boot"
 
 start:
-	@echo "Starting battery_water service..."
-	@sudo systemctl start battery_water.service
+	@echo "Starting argo_battery_water service..."
+	@sudo systemctl start argo_battery_water.service
 	@sleep 2
 	@$(MAKE) status
 
 stop:
-	@echo "Stopping battery_water service..."
-	@sudo systemctl stop battery_water.service
+	@echo "Stopping argo_battery_water service..."
+	@sudo systemctl stop argo_battery_water.service
 	@sleep 1
 	@$(MAKE) status
 
 restart:
-	@echo "Restarting battery_water service..."
-	@sudo systemctl restart battery_water.service
+	@echo "Restarting argo_battery_water service..."
+	@sudo systemctl restart argo_battery_water.service
 	@sleep 2
 	@$(MAKE) status
 
 status:
-	@echo "Battery Water Service Status:"
-	@echo "=============================="
-	@sudo systemctl status battery_water.service --no-pager -l || true
+	@echo "Argo Battery Water Service Status:"
+	@echo "==================================="
+	@sudo systemctl status argo_battery_water.service --no-pager -l || true
 	@echo ""
 	@echo "Quick status:"
-	@systemctl is-active battery_water.service >/dev/null 2>&1 && echo "🟢 Service is RUNNING" || echo "🔴 Service is STOPPED"
-	@systemctl is-enabled battery_water.service >/dev/null 2>&1 && echo "✅ Auto-start ENABLED" || echo "⚠️  Auto-start DISABLED"
+	@systemctl is-active argo_battery_water.service >/dev/null 2>&1 && echo "🟢 Service is RUNNING" || echo "🔴 Service is STOPPED"
+	@systemctl is-enabled argo_battery_water.service >/dev/null 2>&1 && echo "✅ Auto-start ENABLED" || echo "⚠️  Auto-start DISABLED"
 
 logs:
-	@echo "Battery Water Service Logs (last 50 lines):"
-	@echo "==========================================="
-	@sudo journalctl -u battery_water.service -n 50 --no-pager
+	@echo "Argo Battery Water Service Logs (last 50 lines):"
+	@echo "================================================="
+	@sudo journalctl -u argo_battery_water.service -n 50 --no-pager
 
 logs-follow:
-	@echo "Following battery_water service logs (Ctrl+C to stop):"
-	@sudo journalctl -u battery_water.service -f --no-pager
+	@echo "Following argo_battery_water service logs (Ctrl+C to stop):"
+	@sudo journalctl -u argo_battery_water.service -f --no-pager
 

@@ -224,8 +224,8 @@ help:
 # Makefile for Argo Power Control system
 
 SERVICE_DIR = /etc/systemd/system
-CPU_SETUP_SERVICE = argo-cpu-setup.service
-CPU_SETUP_SCRIPT = argo-cpu-setup.sh
+CPU_SETUP_SERVICE = argo_cpu_setup.service
+CPU_SETUP_SCRIPT = argo_cpu_setup.sh
 
 .PHONY: help install-cpu-tuning uninstall-cpu-tuning
 

@@ -285,12 +285,12 @@ class ArgoStatusGUI:
         if self.status_checker is None:
             return
         
-        # Check argo-launch service
-        launch_status = self.status_checker.get_service_status_fast("argo-launch.service")
+        # Check argo_launch service
+        launch_status = self.status_checker.get_service_status_fast("argo_launch.service")
         color = self.get_status_color(launch_status)
         
         if launch_status == "active":
-            launch_pid = self.status_checker.get_service_pid("argo-launch.service")
+            launch_pid = self.status_checker.get_service_pid("argo_launch.service")
             if launch_pid:
                 stats = self.status_checker.get_process_stats(launch_pid)
                 if stats:
