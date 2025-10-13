@@ -74,6 +74,7 @@ import math
 import time
 import struct
 import argparse
+import argcomplete
 import json
 from datetime import datetime
 import os.path
@@ -281,8 +282,14 @@ def fit_ellipsoid_numpy(points):
         d_center = d + p*center[0] + q*center[1] + r*center[2]
         
         # Eigenvalue decomposition for radii and rotation
-        eigvals, eigvecs = np.linalg.eigh(A / -d_center)
-        radii = 1.0 / np.sqrt(np.abs(eigvals))
+        # Ensure the matrix is positive definite by using abs(d_center)
+        eigvals, eigvecs = np.linalg.eigh(A / np.abs(d_center))
+        radii = 1.0 / np.sqrt(eigvals)
+        
+        # Ensure right-handed coordinate system (det = +1)
+        # eigh doesn't guarantee this, so we fix it if needed
+        if np.linalg.det(eigvecs) < 0:
+            eigvecs[:, 0] *= -1  # Flip first eigenvector
         
         return center, radii, eigvecs
         
@@ -1526,6 +1533,9 @@ def main(args=None):
                         help='Collect magnetometer samples and save calibration')
     parser.add_argument('--plot_calib', action='store_true',
                         help='Plot the most recent calibration data from /tmp')
+    
+    # Enable bash completion for command-line arguments
+    argcomplete.autocomplete(parser)
     parsed_args = parser.parse_args(args=args)
 
     # If plot calibration is requested, load and plot existing calibration (optionally recompute)
