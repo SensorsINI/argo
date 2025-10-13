@@ -17,7 +17,7 @@
 #   - PI9 (Pin 28): POW_BUT - Input from power button (active HIGH when pressed)
 #   - PH4 (Pin 18): Green LED in power button (active LOW - cathode control)
 #   - PI1 (Pin 12): Blue LED in power button (active LOW - cathode control)
-#   - Red LED: Directly connected to power button (not GPIO controlled)
+#   - PI16 (Pin 37): Red LED: GPIO controlled (active LOW - cathode control) 
 #   - LEDs: Common anode RGB LED, GPIO controls cathode (LOW = ON, HIGH = OFF)
 #
 # POWER CIRCUIT DESIGN (Rev3 PCB):
@@ -38,8 +38,8 @@
 #   - Green LED: Heartbeat when system is running (1Hz normal, 2Hz with Argo, 3-flash when recording)
 #   - Both LEDs: Gradual frequency increase during button press (2Hz → 20Hz)
 #   - Both LEDs: Short-long pattern during shutdown sequence (1Hz, 5% duty)
-#   - Blue LED: SOS pattern for low battery warning
-#   - Red LED: Not GPIO controlled (shared anode LED, always reflects button state)
+#   - Blue LED: Show charging status via battery !CHARGING signal reported by the battery monitor
+#   - Red LED: SOS patterns for low battery warning (slow SOS for low battery, fast SOS for critical battery)
 #   - All LEDs: Active LOW control (GPIO LOW = LED ON, GPIO HIGH = LED OFF)
 #
 # SHUTDOWN SEQUENCE:
@@ -92,6 +92,22 @@ from datetime import datetime
 import select
 import tty
 import termios
+import json
+from typing import Optional, Dict, Any
+
+# isort: off
+
+# ROS2 imports for service client
+try:
+    import rclpy
+    from rclpy.node import Node
+    from std_srvs.srv import Trigger
+    ROS2_AVAILABLE = True
+except ImportError:
+    rclpy = None
+    Node = None
+    Trigger = None
+    ROS2_AVAILABLE = False
 
 # Conditional GPIO import - required for production, optional for test mode
 try:
@@ -100,6 +116,8 @@ try:
 except ImportError:
     gpiod = None
     _HAS_GPIOD = False
+
+# isort: on
 
 # ROS2 imports
 import rclpy
@@ -262,6 +280,12 @@ class PowerController:
         self.green_led_state = False
         self.blue_led_state = False
 
+        # Heartbeat control
+        self.heartbeat_paused = False
+        self.heartbeat_pause_event = threading.Event()
+        self.heartbeat_pause_event.set()  # Start un-paused
+        self.heartbeat_frequency_hz = LED_HEARTBEAT_HZ
+
         # Desktop notification caching
         self.cached_desktop_user = None
         self.cached_display_env = None
@@ -282,16 +306,35 @@ class PowerController:
         self.POWER_BUTTON_LINE = 265   # PI9 (Pin 28) - !POW_BUT
         self.GREEN_LED_LINE = 228      # PH4 (Pin 18) - Green LED
         self.BLUE_LED_LINE = 257       # PI1 (Pin 12) - Blue LED
+        self.RED_LED_LINE = 272        # PI16 (Pin 37) - Red LED
 
         # Button press threshold (seconds)
         self.SHUTDOWN_THRESHOLD = threshold
 
-        # No ROS2 setup needed - using subprocess calls only
+        # Initialize ROS2 for service clients
+        self.ros2_node = None
+        if not test_mode and ROS2_AVAILABLE:
+            try:
+                if not rclpy.ok():
+                    rclpy.init()
+                # Use a unique name to avoid conflicts if other nodes are on the same process
+                self.ros2_node = Node('argo_power_control_client', allow_undeclared_parameters=True,
+                                      automatically_declare_parameters_from_overrides=True)
+                logger.info("ROS2 client node initialized for service calls")
+            except Exception as e:
+                logger.error(f"Failed to initialize ROS2 client node: {e}")
+                self.ros2_node = None
+        elif not ROS2_AVAILABLE:
+            logger.warning("rclpy not found. ROS2 service calls will be disabled.")
 
         # Setup signal handlers for graceful service shutdown
         signal.signal(signal.SIGTERM, self.signal_handler)
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGQUIT, self.signal_handler)
+
+        # Simple state tracking - initialize these early for test mode compatibility
+        self.recording_active = False
+        self.recording_service_available = False
 
         # Check if Argo service is already running at startup
         logger.info("Checking if Argo service is already running...")
@@ -310,16 +353,17 @@ class PowerController:
 
         # Initialize desktop user detection and caching
         self._detect_and_cache_desktop_user()
-
-        # Simple state tracking - initialize these early for test mode compatibility
-        self.recording_active = False
-        self.recording_service_available = False
-
+        
         # Initialize GPIO and configure button interrupts
         # Note: Button press activates SET coil which powers on the system,
         # so by the time software starts, button has already been released.
         # No need to check initial state - button detection is always active.
         self.init_gpio()
+        
+        # Configure button line for interrupt-based monitoring
+        if self.gpio_available:
+            self.configure_button_for_interrupts()
+        
         self.button_detection_active = True
         logger.info("Button detection active - ready to detect presses")
 
@@ -441,6 +485,7 @@ class PowerController:
                 self.power_button_line = None
                 self.green_led_line = None
                 self.blue_led_line = None
+                self.red_led_line = None
                 return
             else:
                 # Should never reach here due to check in __init__
@@ -457,6 +502,7 @@ class PowerController:
             self.power_button_line = self.chip.get_line(self.POWER_BUTTON_LINE)
             self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE)
             self.blue_led_line = self.chip.get_line(self.BLUE_LED_LINE)
+            self.red_led_line = self.chip.get_line(self.RED_LED_LINE)
 
             # Initially request power button line as input to read initial state
             # Will be reconfigured for interrupts after reading initial state
@@ -477,6 +523,11 @@ class PowerController:
                 type=gpiod.LINE_REQ_DIR_OUT,
                 default_vals=[LED_OFF_STATE]  # Start with LED off (HIGH for active-low)
             )
+            self.red_led_line.request(
+                consumer="argo_power_control.py",
+                type=gpiod.LINE_REQ_DIR_OUT,
+                default_vals=[LED_OFF_STATE]  # Start with LED off (HIGH for active-low)
+            )
 
             logger.info("GPIO pins configured successfully")
             self.gpio_available = True
@@ -491,6 +542,7 @@ class PowerController:
                 self.power_button_line = None
                 self.green_led_line = None
                 self.blue_led_line = None
+                self.red_led_line = None
             else:
                 logger.error(f"Failed to initialize GPIO: {e}")
                 logger.error(f"GPIO chip path attempted: {self.GPIO_CHIP}")
@@ -500,422 +552,108 @@ class PowerController:
         # No ROS2 setup needed - using subprocess calls only
 
     def start_recording(self):
-        """Start recording via ROS2 service using subprocess call"""
+        """Start recording via ROS2 service call"""
         if self.recording_active:
-            logger.warning("Recording is active - skipping start recording")
+            logger.warning("Recording is already active - skipping start recording")
             self.send_desktop_notification(
-                "Recording Error",
-                "Recording is active - skipping start recording",
-                "warning"
-            )
+                "Recording Error", "Recording is already active", "warning")
             return False
 
-        try:
-            # Check if Argo service is running (like ar alias does)
-            result = subprocess.run(
-                ['sudo', 'systemctl', 'is-active', 'argo-launch.service'],
-                capture_output=True, text=True, timeout=4
-            )
-            if result.returncode != 0 or result.stdout.strip() != 'active':
-                logger.error(
-                    "Argo service is not running - cannot start recording")
+        # Check if Argo service is running (required for ROS2 services to be up)
+        if not self.check_argo_service_status():
+            logger.error(
+                "Argo service is not running - cannot start recording")
+            self.send_desktop_notification(
+                "Recording Error", "Argo service is not running", "critical")
+            return False
+
+        logger.info("🎬 Calling recording start service...")
+        success, message = self._call_trigger_service(
+            '/argo/recording/start', timeout_sec=6.0)
+
+        if success:
+            logger.info(f"✅ Recording started: {message}")
+            self.recording_active = True
+            self.send_desktop_notification("Recording Started", message, "normal")
+            return True
+        else:
+            # Check if it failed because it was already running
+            if "already in progress" in message.lower() or "already active" in message.lower():
+                logger.info(f"📹 Recording was already in progress: {message}")
+                self.recording_active = True  # Sync state
                 self.send_desktop_notification(
-                    "Recording Error",
-                    "Argo service is not running - start it first with: al",
-                    "critical"
-                )
-                return False
-
-            # Call the service using subprocess with proper ROS2 environment (like ar alias)
-            logger.info("🎬 Calling recording start service via subprocess...")
-
-            # Use subprocess to call the ROS2 service with proper environment sourcing (like ar alias)
-            cmd = [
-                'bash', '-c',
-                'source /opt/ros/humble/setup.bash && ros2 service call /argo/recording/start std_srvs/srv/Trigger'
-            ]
-
-            logger.info(f"Executing command: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30.0
-            )
-
-            logger.info(
-                f"Service call completed - return code: {result.returncode}")
-            logger.info(f"stdout: {result.stdout}")
-            if result.stderr:
-                logger.info(f"stderr: {result.stderr}")
-
-            if result.returncode == 0:
-                # Parse the response from stdout - handle both formats
-                success = False
-                message = "Recording started successfully"
-
-                # Check for success in different formats
-                if "success: True" in result.stdout or "success=True" in result.stdout:
-                    success = True
-                elif "success: False" in result.stdout or "success=False" in result.stdout:
-                    success = False
-                else:
-                    # Default to success if return code is 0 and no explicit failure
-                    success = True
-
-                if success:
-                    # Extract message from response
-                    if "message:" in result.stdout:
-                        lines = result.stdout.split('\n')
-                        for line in lines:
-                            if "message:" in line:
-                                message = line.split("message:")[
-                                    1].strip().strip('"')
-                                break
-                    elif "message=" in result.stdout:
-                        # Handle std_srvs.srv.Trigger_Response format
-                        lines = result.stdout.split('\n')
-                        for line in lines:
-                            if "message=" in line:
-                                # Extract from message='...' format
-                                start = line.find("message='") + 9
-                                end = line.find("'", start)
-                                if start > 8 and end > start:
-                                    message = line[start:end]
-                                break
-
-                    logger.info(f"✅ Recording started: {message}")
-                    self.recording_active = True  # Update state
-                    self.send_desktop_notification(
-                        "Recording Started",
-                        message,
-                        "normal"
-                    )
-                    return True
-                else:
-                    # Extract error message
-                    error_msg = "Recording start failed"
-                    if "message:" in result.stdout:
-                        lines = result.stdout.split('\n')
-                        for line in lines:
-                            if "message:" in line:
-                                error_msg = line.split("message:")[
-                                    1].strip().strip('"')
-                                break
-                    elif "message=" in result.stdout:
-                        # Handle std_srvs.srv.Trigger_Response format
-                        lines = result.stdout.split('\n')
-                        for line in lines:
-                            if "message=" in line:
-                                # Extract from message='...' format
-                                start = line.find("message='") + 9
-                                end = line.find("'", start)
-                                if start > 8 and end > start:
-                                    error_msg = line[start:end]
-                                break
-
-                    # Check if recording is already in progress
-                    if "already in progress" in error_msg.lower() or "already active" in error_msg.lower():
-                        logger.info(
-                            f"📹 Recording already in progress: {error_msg}")
-                        self.recording_active = True  # Update state to match reality
-                        self.send_desktop_notification(
-                            "Recording Status",
-                            f"Recording was already active: {error_msg}",
-                            "normal"
-                        )
-                        return True  # Return success since recording is active
-                    else:
-                        logger.error(f"❌ Recording start failed: {error_msg}")
-                        self.send_desktop_notification(
-                            "Recording Error",
-                            error_msg,
-                            "critical"
-                        )
-                        return False
+                    "Recording Status", f"Recording was already active: {message}", "normal")
+                return True
             else:
-                logger.error(
-                    f"Service call failed with return code {result.returncode}")
-                logger.error(f"Error output: {result.stderr}")
+                logger.error(f"❌ Recording start failed: {message}")
                 self.send_desktop_notification(
-                    "Recording Error",
-                    f"Recording start service call failed: {result.stderr}",
-                    "critical"
-                )
+                    "Recording Error", f"Failed to start recording: {message}", "critical")
                 return False
-
-        except subprocess.TimeoutExpired:
-            logger.error("Service call timed out after 15 seconds")
-            self.send_desktop_notification(
-                "Recording Error",
-                "Recording start service call timed out after 15 seconds",
-                "critical"
-            )
-            return False
-        except Exception as e:
-            logger.error(f"Error starting recording: {e}")
-            self.send_desktop_notification(
-                "Recording Error",
-                f"Error starting recording: {e}",
-                "critical"
-            )
-            return False
 
     def stop_recording(self):
-        """Stop recording via ROS2 service using subprocess call"""
+        """Stop recording via ROS2 service call"""
         if not self.recording_active:
             logger.warning("Recording is not active - skipping stop recording")
             self.send_desktop_notification(
-                "Recording Error",
-                "Recording is not active - skipping stop recording",
-                "warning"
-            )
+                "Recording Error", "Recording is not active", "warning")
             return False
 
-        try:
-            # Check if recording service is available using our flag
-            if not self.recording_service_available:
-                logger.warning(
-                    "Recording service not available - Argo system may not be running")
-                return False
+        logger.info("⏹️ Calling recording stop service...")
+        success, message = self._call_trigger_service(
+            '/argo/recording/stop', timeout_sec=15.0)
 
-            # Call the service using subprocess with proper ROS2 environment
-            logger.info("⏹️ Calling recording stop service via subprocess...")
-
-            # Use subprocess to call the ROS2 service with proper environment sourcing (like ac alias)
-            cmd = [
-                'bash', '-c',
-                'source /opt/ros/humble/setup.bash && ros2 service call /argo/recording/stop std_srvs/srv/Trigger'
-            ]
-
-            logger.info(f"Executing command: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30.0
-            )
-
-            logger.info(
-                f"Service call completed - return code: {result.returncode}")
-            logger.info(f"stdout: {result.stdout}")
-            if result.stderr:
-                logger.info(f"stderr: {result.stderr}")
-
-            if result.returncode == 0:
-                # Parse the response from stdout - handle both formats
-                success = False
-                message = "Recording stopped successfully"
-
-                # Check for success in different formats
-                if "success: True" in result.stdout or "success=True" in result.stdout:
-                    success = True
-                elif "success: False" in result.stdout or "success=False" in result.stdout:
-                    success = False
-                else:
-                    # Default to success if return code is 0 and no explicit failure
-                    success = True
-
-                if success:
-                    # Extract message from response
-                    if "message:" in result.stdout:
-                        lines = result.stdout.split('\n')
-                        for line in lines:
-                            if "message:" in line:
-                                message = line.split("message:")[
-                                    1].strip().strip('"')
-                                break
-                    elif "message=" in result.stdout:
-                        # Handle std_srvs.srv.Trigger_Response format
-                        lines = result.stdout.split('\n')
-                        for line in lines:
-                            if "message=" in line:
-                                # Extract from message='...' format
-                                start = line.find("message='") + 9
-                                end = line.find("'", start)
-                                if start > 8 and end > start:
-                                    message = line[start:end]
-                                break
-
-                    logger.info(f"✅ Recording stopped: {message}")
-                    self.recording_active = False  # Update state
-                    self.send_desktop_notification(
-                        "Recording Stopped",
-                        message,
-                        "normal"
-                    )
-                    return True
-                else:
-                    # Extract error message
-                    error_msg = "Recording stop failed"
-                    if "message:" in result.stdout:
-                        lines = result.stdout.split('\n')
-                        for line in lines:
-                            if "message:" in line:
-                                error_msg = line.split("message:")[
-                                    1].strip().strip('"')
-                                break
-                    elif "message=" in result.stdout:
-                        # Handle std_srvs.srv.Trigger_Response format
-                        lines = result.stdout.split('\n')
-                        for line in lines:
-                            if "message=" in line:
-                                # Extract from message='...' format
-                                start = line.find("message='") + 9
-                                end = line.find("'", start)
-                                if start > 8 and end > start:
-                                    error_msg = line[start:end]
-                                break
-
-                    logger.error(f"❌ Recording stop failed: {error_msg}")
-                    self.send_desktop_notification(
-                        "Recording Error",
-                        error_msg,
-                        "critical"
-                    )
-                    return False
-            else:
-                logger.error(
-                    f"Service call failed with return code {result.returncode}")
-                logger.error(f"Error output: {result.stderr}")
-                self.send_desktop_notification(
-                    "Recording Error",
-                    f"Recording stop service call failed: {result.stderr}",
-                    "critical"
-                )
-                return False
-
-        except subprocess.TimeoutExpired:
-            logger.error("Service call timed out after 15 seconds")
+        if success:
+            logger.info(f"✅ Recording stopped: {message}")
+            self.recording_active = False
+            self.send_desktop_notification("Recording Stopped", message, "normal")
+            return True
+        else:
+            logger.error(f"❌ Recording stop failed: {message}")
             self.send_desktop_notification(
-                "Recording Error",
-                "Recording stop service call timed out after 15 seconds",
-                "critical"
-            )
-            return False
-        except Exception as e:
-            logger.error(f"Error stopping recording: {e}")
-            self.send_desktop_notification(
-                "Recording Error",
-                f"Error stopping recording: {e}",
-                "critical"
-            )
+                "Recording Error", f"Failed to stop recording: {message}", "critical")
             return False
 
     def check_recording_service_availability(self):
-        """Check if recording service is available and update flag"""
-        # In test mode, always check the actual service status
-        if self.test_mode:
-            # Check if Argo service is actually running
-            try:
-                result = subprocess.run(
-                    ['sudo', 'systemctl', 'is-active', 'argo-launch.service'],
-                    capture_output=True, text=True, timeout=4
-                )
-                is_running = result.returncode == 0 and result.stdout.strip() == 'active'
-                if is_running:
-                    self.argo_service_running = True
-                    logger.info(
-                        "Argo service detected as running in test mode")
-                else:
-                    self.argo_service_running = False
-                    logger.info("Argo service not running in test mode")
-            except Exception as e:
-                logger.warning(
-                    f"Error checking Argo service status in test mode: {e}")
-                self.argo_service_running = False
-
-        if not self.argo_service_running:
+        """Check if recording service is available using a service client."""
+        if not self.ros2_node:
             self.recording_service_available = False
-            logger.info(
-                "Recording service is not available because Argo service is not running")
+            return False
+        if not self.check_argo_service_status():
+            self.recording_service_available = False
             return False
 
-        # Test if the recording service is available using subprocess with retry
-        max_retries = 3
-        retry_delay = 2  # seconds
-
-        for attempt in range(max_retries):
-            try:
-                # Use subprocess to test if the service is available with proper ROS2 environment
-                result = subprocess.run([
-                    'bash', '-c',
-                    'source /opt/ros/humble/setup.bash && ros2 service list'
-                ], capture_output=True, text=True, timeout=5)
-
-                logger.info(
-                    f"ROS2 service list command result (attempt {attempt + 1}/{max_retries}) - return code: {result.returncode}")
-                if attempt == 0:  # Only log full output on first attempt to avoid spam
-                    logger.info(f"ROS2 service list stdout: {result.stdout}")
-                    if result.stderr:
-                        logger.info(
-                            f"ROS2 service list stderr: {result.stderr}")
-
-                if result.returncode == 0 and '/argo/recording/start' in result.stdout:
-                    self.recording_service_available = True
-                    logger.info("Recording service is available")
-                    return True
-                else:
-                    if attempt < max_retries - 1:
-                        logger.info(
-                            f"Recording service not found, retrying in {retry_delay} seconds...")
-                        time.sleep(retry_delay)
-                    else:
-                        self.recording_service_available = False
-                        logger.info(
-                            "Recording service is not available - service not found in service list after all retries")
-                        return False
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        f"Error checking recording service availability (attempt {attempt + 1}): {e}, retrying...")
-                    time.sleep(retry_delay)
-                else:
-                    self.recording_service_available = False
-                    logger.info(
-                        f"Error checking recording service availability after all retries: {e}")
-                    return False
+        client = self.ros2_node.create_client(Trigger, '/argo/recording/start')
+        try:
+            # Short timeout, we just want to know if it's there
+            if client.wait_for_service(timeout_sec=2.0):
+                logger.info("Recording service is available")
+                self.recording_service_available = True
+                return True
+            else:
+                logger.info("Recording service not available (timed out)")
+                self.recording_service_available = False
+                return False
+        finally:
+            self.ros2_node.destroy_client(client)
 
     def query_current_recording_status(self):
-        """Query current recording status at startup to sync with actual state"""
-        if not self.recording_service_available:
+        """Query current recording status by calling the get_status service."""
+        if not self.check_recording_service_availability():
             logger.info(
                 "Recording service not available - skipping status query")
+            self.recording_active = False  # Assume not recording
             return
 
-        try:
-            # Query the current recording status using subprocess
-            result = subprocess.run([
-                'bash', '-c',
-                'source /opt/ros/humble/setup.bash && timeout 5 ros2 topic echo /argo/recording/status --once'
-            ], capture_output=True, text=True, timeout=10)
+        success, message = self._call_trigger_service(
+            '/argo/recording/get_status', timeout_sec=5.0)
 
-            if result.returncode == 0:
-                # Parse the output to get the recording status
-                old_state = self.recording_active
+        # The 'success' field of the Trigger response indicates the recording state
+        old_state = self.recording_active
+        self.recording_active = success
 
-                if "data: true" in result.stdout:
-                    self.recording_active = True
-                    if old_state != self.recording_active:
-                        logger.info(
-                            "📹 Recording status changed: INACTIVE → ACTIVE (state synchronized)")
-                    else:
-                        logger.debug("Recording status: ACTIVE (confirmed)")
-                elif "data: false" in result.stdout:
-                    self.recording_active = False
-                    if old_state != self.recording_active:
-                        logger.info(
-                            "📹 Recording status changed: ACTIVE → INACTIVE (state synchronized)")
-                    else:
-                        logger.debug("Recording status: INACTIVE (confirmed)")
-                else:
-                    logger.warning(
-                        f"Could not parse recording status from: {result.stdout}")
-            else:
-                logger.warning(
-                    f"Failed to query recording status: {result.stderr}")
-        except Exception as e:
-            logger.warning(f"Error querying current recording status: {e}")
+        if old_state != self.recording_active:
+            logger.info(
+                f"📹 Recording status changed: {'INACTIVE' if old_state else 'ACTIVE'} → {'ACTIVE' if self.recording_active else 'INACTIVE'} (state synchronized)")
 
     def is_argo_system_running(self):
         """Check if the Argo system is running using simple flag approach"""
@@ -1013,13 +751,23 @@ class PowerController:
             return False
 
     def toggle_argo_service(self):
-        """Toggle the Argo launch service on/off"""
+        """Toggle the Argo launch service on/off with immediate feedback"""
         try:
             # First check the actual service status to ensure our flag is accurate
-            actual_status = self.check_argo_service_status()
+            is_currently_running = self.check_argo_service_status()
+            old_state_running = self.argo_service_running
+            self.argo_service_running = is_currently_running
 
-            if actual_status and self.argo_service_running:
-                logger.info("Double tap detected - stopping Argo service")
+            if is_currently_running:
+                logger.info("Double tap detected - requesting to stop Argo service")
+                self.send_desktop_notification(
+                    "Argo Service Control",
+                    "Requesting to stop Argo service...",
+                    "normal"
+                )
+                # Immediately update LED heartbeat to reflect pending state change
+                self.set_heartbeat_frequency(LED_HEARTBEAT_HZ)  # Pending stopped state
+
                 success = self.stop_argo_service()
                 if success:
                     self.send_desktop_notification(
@@ -1033,8 +781,19 @@ class PowerController:
                         "Failed to stop Argo service",
                         "critical"
                     )
-            elif not actual_status and not self.argo_service_running:
-                logger.info("Double tap detected - starting Argo service")
+                    # Revert state on failure
+                    self.argo_service_running = True
+                    self.set_heartbeat_frequency(LED_HEARTBEAT_HZ * 2.0)
+            else:
+                logger.info("Double tap detected - requesting to start Argo service")
+                self.send_desktop_notification(
+                    "Argo Service Control",
+                    "Requesting to start Argo service...",
+                    "normal"
+                )
+                # Immediately update LED heartbeat to reflect pending state change
+                self.set_heartbeat_frequency(LED_HEARTBEAT_HZ * 2.0)  # Pending running state
+
                 success = self.start_argo_service()
                 if success:
                     self.send_desktop_notification(
@@ -1048,34 +807,10 @@ class PowerController:
                         "Failed to start Argo service",
                         "critical"
                     )
-            else:
-                # Service status mismatch - update our flag and try again
-                logger.info(
-                    f"Service status mismatch - actual: {actual_status}, flag: {self.argo_service_running}")
-                self.argo_service_running = actual_status
-                if actual_status:
-                    logger.info(
-                        "Argo service is already running - no action needed")
-                    self.send_desktop_notification(
-                        "Argo Service Status",
-                        "Argo service is already running",
-                        "normal"
-                    )
-                else:
-                    logger.info("Argo service is not running - starting it")
-                    success = self.start_argo_service()
-                    if success:
-                        self.send_desktop_notification(
-                            "Argo Service Started",
-                            "Argo launch service started by double tap",
-                            "normal"
-                        )
-                    else:
-                        self.send_desktop_notification(
-                            "Argo Service Error",
-                            "Failed to start Argo service",
-                            "critical"
-                        )
+                    # Revert state on failure
+                    self.argo_service_running = False
+                    self.set_heartbeat_frequency(LED_HEARTBEAT_HZ)
+
         except Exception as e:
             logger.error(f"Error toggling Argo service: {e}")
             self.send_desktop_notification(
@@ -1083,6 +818,10 @@ class PowerController:
                 f"Error toggling Argo service: {e}",
                 "critical"
             )
+            # Revert to old state on exception
+            self.argo_service_running = old_state_running
+            self.set_heartbeat_frequency(
+                LED_HEARTBEAT_HZ * 2.0 if old_state_running else LED_HEARTBEAT_HZ)
 
     def signal_handler(self, signum, frame):
         """Handle shutdown signals with graceful termination"""
@@ -1161,8 +900,6 @@ class PowerController:
     def set_green_led(self, state):
         """Control green LED (system running indicator)"""
         if not self.gpio_available:
-            logger.debug(
-                f"GPIO not available - simulating green LED {'ON' if state else 'OFF'} in test mode")
             self.green_led_state = state
             return
         try:
@@ -1170,15 +907,12 @@ class PowerController:
             value = LED_ON_STATE if state else LED_OFF_STATE
             self.green_led_line.set_value(value)
             self.green_led_state = state
-            logger.debug(f"Green LED set to {'ON' if state else 'OFF'}")
         except Exception as e:
             logger.error(f"Error controlling green LED: {e}")
 
     def set_blue_led(self, state):
-        """Control blue LED (status/warning indicator)"""
+        """Control blue LED (charging indicator)"""
         if not self.gpio_available:
-            logger.debug(
-                f"GPIO not available - simulating blue LED {'ON' if state else 'OFF'} in test mode")
             self.blue_led_state = state
             return
         try:
@@ -1186,9 +920,19 @@ class PowerController:
             value = LED_ON_STATE if state else LED_OFF_STATE
             self.blue_led_line.set_value(value)
             self.blue_led_state = state
-            logger.info(f"Blue LED set to {'ON' if state else 'OFF'}")
         except Exception as e:
             logger.error(f"Error controlling blue LED: {e}")
+
+    def set_red_led(self, state):
+        """Control red LED (battery warning/SOS indicator)"""
+        if not self.gpio_available:
+            return
+        try:
+            # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
+            value = LED_ON_STATE if state else LED_OFF_STATE
+            self.red_led_line.set_value(value)
+        except Exception as e:
+            logger.error(f"Error controlling red LED: {e}")
 
     def test_recording_function(self):
         """Test the recording function with visual feedback"""
@@ -1243,6 +987,11 @@ class PowerController:
     def green_led_heartbeat(self):
         """Green LED heartbeat - normal pulse when idle, 2X faster when Argo running, 3-flash pattern when recording"""
         while self.running:
+            self.heartbeat_pause_event.wait()  # Block here if paused
+
+            if not self.running:
+                break
+
             if self.recording_active:
                 # Recording mode: 3 quick flashes followed by pause
                 # Total period matches normal heartbeat (1 second)
@@ -1275,12 +1024,12 @@ class PowerController:
                 # Determine heartbeat frequency based on Argo service status
                 if self.argo_service_running:
                     # Argo running: 2X faster heartbeat (2Hz)
-                    heartbeat_frequency = LED_HEARTBEAT_HZ * 2.0
+                    self.heartbeat_frequency_hz = LED_HEARTBEAT_HZ * 2.0
                 else:
                     # Argo stopped: normal heartbeat (1Hz)
-                    heartbeat_frequency = LED_HEARTBEAT_HZ
+                    self.heartbeat_frequency_hz = LED_HEARTBEAT_HZ
 
-                heartbeat_interval = 1.0 / heartbeat_frequency
+                heartbeat_interval = 1.0 / self.heartbeat_frequency_hz
                 half_period = heartbeat_interval / 2.0
 
                 # LED on for first half
@@ -1303,7 +1052,7 @@ class PowerController:
             sleep_time += increment
 
     def sos_led_pattern(self):
-        """SOS LED pattern for low battery warning - Blue LED blinks SOS in Morse code"""
+        """SOS LED pattern for low battery warning - Red LED blinks SOS in Morse code"""
         logger.info("Starting SOS LED pattern for low battery warning")
         self.sos_led_active = True
 
@@ -1341,8 +1090,8 @@ class PowerController:
                     if not self.running or not self.sos_led_active or not self.low_battery_detected or self.critical_battery_detected:
                         break
                     
-                    # Set blue LED state (red LED is not GPIO controlled, so we use blue LED)
-                    self.set_blue_led(led_state)
+                    # Set red LED state for SOS warning
+                    self.set_red_led(led_state)
                     
                     # Sleep in small increments for responsive shutdown
                     sleep_time = 0
@@ -1354,8 +1103,8 @@ class PowerController:
                 logger.error(f"Error in SOS LED pattern: {e}")
                 break
 
-        # Turn off blue LED when done
-        self.set_blue_led(False)
+        # Turn off red LED when done
+        self.set_red_led(False)
         self.sos_led_active = False
         logger.info("SOS LED pattern completed")
 
@@ -1373,7 +1122,6 @@ class PowerController:
         while self.running and self.shutdown_initiated:
             try:
                 # Turn on both LEDs
-                logger.info("Shutdown LED: ON")
                 self.set_green_led(True)
                 self.set_blue_led(True)
 
@@ -1387,7 +1135,6 @@ class PowerController:
                     break
 
                 # Turn off both LEDs
-                logger.info("Shutdown LED: OFF")
                 self.set_green_led(False)
                 self.set_blue_led(False)
 
@@ -1702,143 +1449,50 @@ class PowerController:
         self.tap_timeout_timer = None
 
     def toggle_recording(self):
-        """Toggle rosbag recording on/off using ROS2 service pattern from tutorial"""
-        if self.test_mode:
-            # Test mode - actually test the service call but with better error handling
-            new_state = not self.recording_active
-            logger.info(
-                f"TEST MODE: Testing recording service call from {self.recording_active} to {new_state}")
-            print(
-                f"🎬 TEST: Testing recording {'START' if new_state else 'STOP'} service call")
+        """Toggle rosbag recording on/off with immediate feedback"""
+        # --- Real mode ---
+        # First, sync our internal state with the actual recording status
+        self.query_current_recording_status()
 
-            # Actually test the service call in test mode
-            if new_state:
-                success = self.start_recording()
-                if success:
-                    logger.info(
-                        "TEST MODE: Recording start service call succeeded")
-                    self.send_desktop_notification(
-                        "Recording Test Success",
-                        "Recording start service call succeeded in test mode",
-                        "normal"
-                    )
-                else:
-                    logger.error(
-                        "TEST MODE: Recording start service call failed")
-                    self.send_desktop_notification(
-                        "Recording Test Failed",
-                        "Recording start service call failed in test mode",
-                        "critical"
-                    )
-            else:
-                success = self.stop_recording()
-                if success:
-                    logger.info(
-                        "TEST MODE: Recording stop service call succeeded")
-                    self.send_desktop_notification(
-                        "Recording Test Success",
-                        "Recording stop service call succeeded in test mode",
-                        "normal"
-                    )
-                else:
-                    logger.error(
-                        "TEST MODE: Recording stop service call failed")
-                    self.send_desktop_notification(
-                        "Recording Test Failed",
-                        "Recording stop service call failed in test mode",
-                        "critical"
-                    )
+        # Now, check if services are ready
+        if not self.check_argo_service_status() or not self.check_recording_service_availability():
+            logger.warning(
+                "Triple tap detected but Argo/recording service not ready.")
+            self.send_desktop_notification(
+                "Recording Unavailable", "Argo service is not ready for recording.", "critical")
             return
 
-        # Real mode - ensure Argo service is running first
-        # Always check the actual service status before proceeding
-        self.check_argo_service_status()
-        # Also check recording service availability after Argo service check
-        self.check_recording_service_availability()
-        if not self.argo_service_running:
-            logger.info(
-                "Triple tap detected - Argo not running, starting it first")
+        is_currently_recording = self.recording_active
+
+        if is_currently_recording:
+            logger.info("Triple tap detected - requesting to stop recording")
             self.send_desktop_notification(
-                "Starting Argo Service",
-                "Starting Argo service before recording...",
-                "normal"
-            )
-            success = self.start_argo_service()
+                "Recording Control", "Requesting to stop recording...", "normal")
+            # Immediately update state for LED pattern
+            self.recording_active = False
+
+            success = self.stop_recording()
             if not success:
                 self.send_desktop_notification(
-                    "Recording Error",
-                    "Failed to start Argo service - cannot record",
-                    "critical"
-                )
-                return
-
-            # Wait for recording service to become available
-            logger.info("Waiting for recording service to become available...")
-            import time
-            max_wait = 15  # Wait up to 15 seconds
-            start_time = time.time()
-            while time.time() - start_time < max_wait:
-                self.check_recording_service_availability()
-                if self.recording_service_available:
-                    logger.info("Recording service is now available")
-                    break
-                time.sleep(0.5)
-
-            if not self.recording_service_available:
-                self.send_desktop_notification(
-                    "Recording Error",
-                    "Recording service did not become available in time",
-                    "critical"
-                )
-                return
-
-        # Check if recording service is available
-        if not self.recording_service_available:
-            logger.warning(
-                "Triple tap detected but recording service is not available")
-            self.send_desktop_notification(
-                "Recording Unavailable",
-                "Recording service is not ready - please wait",
-                "critical"
-            )
-            return
-
-        # Toggle recording using the service pattern from ROS2 tutorial
-        if self.recording_active:
-            logger.info("Triple tap detected - stopping recording")
-            success = self.stop_recording()
-            if success:
-                # Success notification will come from recording_info_callback when recording actually stops
-                self.send_desktop_notification(
-                    "Stopping Recording",
-                    "Recording stop requested...",
-                    "normal"
-                )
-            else:
-                self.send_desktop_notification(
-                    "Recording Error",
-                    "Failed to send stop recording request",
-                    "critical"
-                )
+                    "Recording Error", "Failed to stop recording", "critical")
+                # Revert state on failure
+                self.recording_active = True
         else:
-            logger.info("Triple tap detected - starting recording")
+            logger.info("Triple tap detected - requesting to start recording")
+            self.send_desktop_notification(
+                "Recording Control", "Requesting to start recording...", "normal")
+            # Immediately update state for LED pattern
+            self.recording_active = True
+
             success = self.start_recording()
-            if success:
-                # Show immediate feedback that request was sent
+            if not success:
                 self.send_desktop_notification(
-                    "Starting Recording",
-                    "Recording start requested...",
-                    "normal"
-                )
-            else:
-                self.send_desktop_notification(
-                    "Recording Error",
-                    "Failed to send start recording request",
-                    "critical"
-                )
+                    "Recording Error", "Failed to start recording", "critical")
+                # Revert state on failure
+                self.recording_active = False
 
     def send_desktop_notification(self, title, message, urgency="normal", expire_time_ms=None):
-        """Send desktop notification using notify-send with cached user/display info"""
+        """Send desktop notification using notify-send with proper environment for systemd"""
         try:
             # Check if desktop user detection failed previously
             if self.desktop_user_detection_failed:
@@ -1847,103 +1501,97 @@ class PowerController:
                 return
 
             # Modify title and message for test mode
+            test_title = f"[TEST] {title}" if self.test_mode else title
+            test_message = f"{message}\n\n(This is a test notification)" if self.test_mode else message
             if self.test_mode:
-                test_title = f"[TEST] {title}"
-                test_message = f"{message}\n\n(This is a test notification - no actual action taken)"
                 logger.info(
-                    f"TEST MODE: Sending desktop notification - {title}: {message}")
-            else:
-                test_title = title
-                test_message = message
+                    f"TEST MODE: Sending notification - {title}: {message}")
 
             # Use custom expire time or default
             expire_time = expire_time_ms if expire_time_ms is not None else NOTIFICATION_EXPIRE_TIME_MS
 
-            # Check if we're running as root (systemd service)
+            # For systemd services, we need to find the user's graphical session environment
             if os.geteuid() == 0:
-                # Running as root - use cached desktop user and display
-                if not self.cached_desktop_user or not self.cached_display_env:
-                    logger.debug(
-                        "No cached desktop user/display available - skipping notification")
+                if not self.cached_desktop_user:
+                    logger.debug("No cached desktop user - skipping notification")
                     return
 
-                logger.debug(
-                    f"Using cached desktop_user: {self.cached_desktop_user}, display: {self.cached_display_env}")
-
-                cmd = [
-                    'sudo', '-u', self.cached_desktop_user,
-                    'DISPLAY=' + self.cached_display_env,
-                    'notify-send',
-                    '--urgency', urgency,
-                    '--expire-time', str(expire_time),
-                    test_title,
-                    test_message
-                ]
-
-            else:
-                # Running as regular user - use normal method
-                # Set up environment for desktop notifications
-                env = os.environ.copy()
-
-                # Try to find the display for logged-in users
+                # Find the main process of the user's graphical session to get its environment
                 try:
-                    # Get list of logged-in users and their displays
+                    pgrep_cmd = ['pgrep', '-u', self.cached_desktop_user, 'gnome-shell|plasma-shell|xfce4-session|lxsession|i3|sway', '-o']
                     result = subprocess.run(
-                        ['who'], capture_output=True, text=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                        pgrep_cmd, capture_output=True, text=True, timeout=2)
+                    
                     if result.returncode == 0:
-                        for line in result.stdout.strip().split('\n'):
-                            if line and ':' in line:
-                                parts = line.split()
-                                for part in parts:
-                                    if part.startswith(':'):
-                                        # Remove the leading ':'
-                                        display = part[1:]
-                                        if display.isdigit() or '.' in display:
-                                            env['DISPLAY'] = f':{display}'
-                                            break
-                                if 'DISPLAY' in env:
-                                    break
-                except Exception as e:
-                    logger.info(
-                        f"Could not determine display from 'who' command: {e}")
+                        pid = result.stdout.strip()
+                        # Get environment variables from the session process
+                        with open(f'/proc/{pid}/environ', 'r') as f:
+                            env_vars = dict(
+                                line.strip().split('=', 1) for line in f if '=' in line)
+                        
+                        display = env_vars.get('DISPLAY')
+                        dbus_address = env_vars.get('DBUS_SESSION_BUS_ADDRESS')
 
-                # If no display found, try common defaults
-                if 'DISPLAY' not in env:
-                    env['DISPLAY'] = ':0'
+                        if display and dbus_address:
+                            logger.debug(
+                                f"Found graphical session for user {self.cached_desktop_user} (PID: {pid})")
+                            logger.debug(
+                                f"  DISPLAY={display}, DBUS_SESSION_BUS_ADDRESS={dbus_address}")
 
+                            cmd = [
+                                'sudo', '-u', self.cached_desktop_user,
+                                f'DISPLAY={display}',
+                                f'DBUS_SESSION_BUS_ADDRESS={dbus_address}',
+                                'notify-send', '--urgency', urgency,
+                                '--expire-time', str(expire_time),
+                                test_title, test_message
+                            ]
+                            subprocess.run(
+                                cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                            logger.info(f"Desktop notification sent: {title}")
+                            return
+                        else:
+                            logger.warning(
+                                f"Could not find DISPLAY/DBUS for user {self.cached_desktop_user}")
+
+                except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
+                    logger.warning(
+                        f"Failed to get graphical session environment: {e}")
+
+                # Fallback to the old method if the new one fails
+                logger.debug("Falling back to legacy notification method")
+                if self.cached_display_env:
+                    cmd = [
+                        'sudo', '-u', self.cached_desktop_user,
+                        f'DISPLAY={self.cached_display_env}',
+                        'notify-send', '--urgency', urgency,
+                        '--expire-time', str(expire_time),
+                        test_title, test_message
+                    ]
+                    subprocess.run(
+                        cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                    logger.info(f"Desktop notification sent (legacy): {title}")
+                    return
+
+            else:
+                # Running as a regular user, direct call is fine
                 cmd = [
-                    'notify-send',
-                    '--urgency', urgency,
+                    'notify-send', '--urgency', urgency,
                     '--expire-time', str(expire_time),
-                    test_title,
-                    test_message
+                    test_title, test_message
                 ]
-
-            # Execute the notification command
-            if os.geteuid() == 0:
-                # For root execution, don't use env parameter with sudo
-                subprocess.run(cmd, check=True,
-                               timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-            else:
-                # For user execution, use env parameter
-                subprocess.run(cmd, check=True,
-                               timeout=DESKTOP_NOTIFICATION_TIMEOUT_S, env=env)
-
-            if self.test_mode:
-                logger.info(f"TEST MODE: Desktop notification sent: {title}")
-            else:
-                logger.info(f"Desktop notification sent: {title}")
+                subprocess.run(
+                    cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                logger.info(f"Desktop notification sent (user): {title}")
 
         except subprocess.TimeoutExpired:
             logger.warning("Desktop notification timed out")
         except subprocess.CalledProcessError as e:
             logger.warning(f"Failed to send desktop notification: {e}")
-            # Mark desktop user detection as failed to avoid repeated attempts
             self.desktop_user_detection_failed = True
         except Exception as e:
             logger.warning(
                 f"Unexpected error sending desktop notification: {e}")
-            # Mark desktop user detection as failed to avoid repeated attempts
             self.desktop_user_detection_failed = True
 
     def broadcast_shutdown_message(self):
@@ -2018,7 +1666,7 @@ class PowerController:
             subprocess.run(['shutdown', '-h', 'now'], check=True)
             logger.info("Shutdown command executed successfully")
             # Don't set self.running = False here - let the system shutdown
-            # GPIO pins will automatically revert to input state on halt, de-energizing relay
+            # GPIO pins will automatically revert to input state on halt
 
     def run(self):
         """Main control loop"""
@@ -2157,6 +1805,8 @@ class PowerController:
                             logger.critical(
                                 f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
                             self.critical_battery_detected = True
+                            # Pause heartbeat for critical battery
+                            self.pause_heartbeat()
                             # Stop SOS pattern if running (critical takes priority)
                             if self.sos_led_active:
                                 self.sos_led_active = False
@@ -2168,6 +1818,8 @@ class PowerController:
                             logger.warning(
                                 f"LOW BATTERY DETECTED: {battery_voltage:.3f}V < {LOW_BATTERY_THRESHOLD_V}V - Starting SOS LED pattern")
                             self.low_battery_detected = True
+                            # Pause heartbeat to make SOS pattern visible
+                            self.pause_heartbeat()
                             # Start SOS LED pattern in separate thread
                             threading.Thread(target=self.sos_led_pattern, daemon=True).start()
                             # Send desktop notification
@@ -2185,6 +1837,8 @@ class PowerController:
                                 f"Battery voltage recovered from low: {battery_voltage:.3f}V >= {LOW_BATTERY_THRESHOLD_V}V")
                             self.low_battery_detected = False
                             self.sos_led_active = False  # Stop SOS pattern
+                            # Resume heartbeat now that battery is stable
+                            self.resume_heartbeat()
                             self.send_desktop_notification(
                                 "Battery Recovered",
                                 f"Battery voltage recovered: {battery_voltage:.3f}V\nSOS LED pattern stopped",
@@ -2250,93 +1904,24 @@ class PowerController:
 
         logger.info("Critical battery monitoring thread stopped")
 
-    def _call_battery_service(self):
-        """Call battery_water service to get current battery data"""
-        try:
-            # Use subprocess to call the battery service with proper ROS2 environment
-            cmd = [
-                'bash', '-c',
-                'source /opt/ros/humble/setup.bash && ros2 service call /battery_status std_srvs/srv/Trigger'
-            ]
+    def _call_battery_service(self) -> Optional[Dict[str, Any]]:
+        """Call battery_water service to get current battery data using rclpy"""
+        success, message = self._call_trigger_service(
+            '/battery_status', timeout_sec=5.0)
 
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=10)
-
-            if result.returncode == 0:
-                # Parse the JSON response from the service
-                try:
-                    import json
-                    # Extract message content from ROS2 service response
-                    lines = result.stdout.strip().split('\n')
-                    message_content = None
-
-                    logger.debug(
-                        f"Battery service response has {len(lines)} lines")
-
-                    for line in lines:
-                        line = line.strip()
-                        # Look for Trigger_Response format: message='...'
-                        if 'message=' in line:
-                            # Extract content between message=' and the closing '
-                            import re
-                            match = re.search(
-                                r"message='(.*)'", line, re.DOTALL)
-                            if match:
-                                message_part = match.group(1)
-                                # Unescape newlines and quotes
-                                message_part = message_part.replace(
-                                    '\\n', '\n').replace('\\"', '"')
-                                message_content = message_part
-                                logger.debug(
-                                    "Found message content in Trigger_Response")
-                                break
-                        # Also support old format: message:
-                        elif line.startswith('message:'):
-                            # Extract the JSON content from the message field
-                            message_part = line.split(':', 1)[1].strip()
-                            # Remove quotes if present
-                            if message_part.startswith('"') and message_part.endswith('"'):
-                                message_part = message_part[1:-1]
-                            # Unescape newlines and quotes
-                            message_part = message_part.replace(
-                                '\\n', '\n').replace('\\"', '"')
-                            message_content = message_part
-                            logger.info("Found message content in old format")
-                            break
-
-                    if message_content:
-                        # Parse the JSON content
-                        response_data = json.loads(message_content)
-                        # Extract raw_data from the response
-                        raw_data = response_data.get('raw_data', {})
-                        logger.debug(
-                            f"Successfully parsed battery data: {raw_data.get('battery_voltage', 'N/A')}V")
-                        return raw_data
-                    else:
-                        logger.error("No message content found in response")
-                        logger.error(f"Response stdout: {result.stdout[:500]}")
-                        return None
-
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.error(
-                        f"Error parsing battery service response: {e}")
-                    logger.error(
-                        f"Message content was: {message_content[:200] if message_content else 'None'}")
-                    return None
-            else:
-                logger.error(
-                    f"Battery service call failed with return code {result.returncode}")
-                logger.error(f"Stdout: {result.stdout[:200]}")
-                logger.error(f"Stderr: {result.stderr[:200]}")
+        if success:
+            try:
+                response_data = json.loads(message)
+                # Extract raw_data from the response, which is what the caller expects
+                raw_data = response_data.get('raw_data', {})
+                logger.debug(
+                    f"Successfully parsed battery data: {raw_data.get('battery_voltage', 'N/A')}V")
+                return raw_data
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Error parsing battery service response: {e}")
                 return None
-
-        except subprocess.TimeoutExpired:
-            logger.error("Battery service call timed out after 10 seconds")
-            return None
-        except Exception as e:
-            logger.error(f"Error calling battery service: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.error(f"Battery service call failed: {message}")
             return None
 
     def show_critical_battery_confirmation_dialog(self, battery_voltage):
@@ -2349,6 +1934,14 @@ class PowerController:
         CRITICAL: Timeout or dialog failure = return False (proceed with halt for safety)
         """
         try:
+            # Set up environment for desktop dialogs
+            env = os.environ.copy()
+            if self.cached_display_env:
+                env['DISPLAY'] = self.cached_display_env
+            else:
+                # Fallback if display detection failed
+                env['DISPLAY'] = ':0'
+
             # Try to show a zenity dialog first (most reliable on desktop)
             dialog_cmd = [
                 'zenity',
@@ -2363,19 +1956,30 @@ class PowerController:
             ]
             
             logger.info("Showing critical battery confirmation dialog...")
-            result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
+            result = subprocess.run(
+                dialog_cmd, capture_output=True, text=True, timeout=60, env=env)
             
             if result.returncode == 0:
                 # User clicked "Shutdown Now" - proceed with halt
                 logger.info("User confirmed critical battery shutdown")
                 return False  # False = proceed with halt
             elif result.returncode == 1:
-                # User clicked "Cancel Shutdown" - user intervention
-                logger.warning("User actively CANCELLED critical battery shutdown")
-                return True  # True = user cancelled, don't halt
+                # Check if this was a real cancel or a display error
+                if "cannot open display" in result.stderr.lower():
+                    logger.error(
+                        f"Zenity failed to open display: {result.stderr.strip()}")
+                    logger.error(
+                        "Proceeding with halt as a safety measure.")
+                    return False  # Treat display error as timeout/confirm
+                else:
+                    # User clicked "Cancel Shutdown" - user intervention
+                    logger.warning(
+                        "User actively CANCELLED critical battery shutdown")
+                    return True  # True = user cancelled, don't halt
             elif result.returncode == 5:
                 # Dialog timeout (zenity returns 5 for timeout) - proceed with halt (SAFE DEFAULT)
-                logger.info("Critical battery dialog timed out - proceeding with halt (safe default)")
+                logger.info(
+                    "Critical battery dialog timed out - proceeding with halt (safe default)")
                 return False  # False = proceed with halt
             else:
                 # Unexpected return code - default to shutdown for safety
@@ -2398,7 +2002,7 @@ class PowerController:
                     '--no-label=Cancel (I will plug in charger)'
                 ]
                 
-                result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
+                result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35, env=env)
                 
                 if result.returncode == 0:
                     # User clicked "Yes" / "Shutdown Now"
@@ -2410,9 +2014,18 @@ class PowerController:
                         logger.warning("User actively CANCELLED critical battery shutdown (kdialog)")
                         return True  # True = user cancelled
                     else:
-                        # Timeout or error - default to halt for safety
-                        logger.info("kdialog timeout or error - proceeding with halt (safe default)")
-                        return False  # False = proceed with halt
+                        # Check for display error
+                        if "cannot open display" in result.stderr.lower():
+                            logger.error(
+                                f"kdialog failed to open display: {result.stderr.strip()}")
+                            logger.error(
+                                "Proceeding with halt as a safety measure.")
+                            return False # Treat as confirm
+                        else:
+                            # Timeout or error - default to halt for safety
+                            logger.info(
+                                "kdialog timeout or error - proceeding with halt (safe default)")
+                            return False  # False = proceed with halt
                     
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 logger.warning("kdialog also not available or timed out - trying yad...")
@@ -2429,13 +2042,19 @@ class PowerController:
                         '--height=350'
                     ]
                     
-                    result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35)
+                    result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35, env=env)
                     if result.returncode == 0:
                         return False  # Proceed with halt
                     elif result.returncode == 1:
                         logger.warning("User actively CANCELLED via yad")
                         return True  # User cancelled
                     else:
+                        # Check for display error
+                        if "cannot open display" in result.stderr.lower():
+                            logger.error(
+                                f"yad failed to open display: {result.stderr.strip()}")
+                            logger.error(
+                                "Proceeding with halt as a safety measure.")
                         return False  # Timeout or error = proceed with halt
                     
                 except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -2447,54 +2066,23 @@ class PowerController:
             return False  # False = proceed with halt
 
     def _pause_argo_system_for_power_conservation(self):
-        """Pause all sensor nodes to put hardware in low-power shutdown state
-        
-        This allows sensors (IMU, anemometer, LoRa) to enter hardware shutdown
-        mode before system halt to conserve remaining battery power.
-        
-        Critical nodes (battery_water, temp_monitor) are never paused.
-        """
-        try:
-            # Check if Argo service is running
-            if not self.argo_service_running:
-                logger.info("Argo service not running - skipping pause for power conservation")
-                return False
-            
-            logger.info("Pausing Argo system for power conservation...")
-            logger.info("Sensors will enter hardware shutdown state")
-            
-            # Call the lifecycle manager's toggle_pause service
-            cmd = [
-                'bash', '-c',
-                'source /opt/ros/humble/setup.bash && ros2 service call /toggle_pause std_srvs/srv/Trigger'
-            ]
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=10.0
-            )
-            
-            if result.returncode == 0:
-                # Check if pause was successful
-                if "success: True" in result.stdout or "success=True" in result.stdout:
-                    logger.info("✅ Argo system paused successfully for power conservation")
-                    logger.info("Sensors entering hardware shutdown state")
-                    return True
-                else:
-                    logger.warning("⚠️ Pause service call completed but may not have succeeded")
-                    logger.warning(f"Response: {result.stdout[:200]}")
-                    return False
-            else:
-                logger.error(f"❌ Failed to pause Argo system: {result.stderr}")
-                return False
-                
-        except subprocess.TimeoutExpired:
-            logger.error("Pause service call timed out after 10 seconds")
+        """Pause all sensor nodes to put hardware in low-power shutdown state"""
+        if not self.check_argo_service_status():
+            logger.info(
+                "Argo service not running - skipping pause for power conservation")
             return False
-        except Exception as e:
-            logger.error(f"Error pausing Argo system for power conservation: {e}")
+
+        logger.info(
+            "Pausing Argo system for power conservation via service call...")
+        success, message = self._call_trigger_service(
+            '/toggle_pause', timeout_sec=10.0)
+
+        if success:
+            logger.info(
+                f"✅ Argo system pause command successful: {message}")
+            return True
+        else:
+            logger.error(f"❌ Failed to pause Argo system: {message}")
             return False
 
     def initiate_critical_battery_halt(self, battery_voltage):
@@ -2555,6 +2143,8 @@ halt to preserve battery for manual sailing operation (safe default)."""
             logger.warning("User has taken responsibility - they must plug in charger or take action!")
             # Clear the critical battery flag since we're not shutting down
             self._clear_critical_battery_flag()
+            # Resume heartbeat since halt was cancelled
+            self.resume_heartbeat()
             # Send cancellation notification
             self.send_desktop_notification(
                 "HALT CANCELLED BY USER",
@@ -2641,22 +2231,92 @@ halt to preserve battery for manual sailing operation (safe default)."""
             # Turn off LEDs
             self.set_green_led(False)
             self.set_blue_led(False)
+            self.set_red_led(False)
 
             # Close GPIO chip if available
             if hasattr(self, 'chip') and self.chip is not None:
                 self.chip.close()
 
             # ROS2 cleanup
-            try:
-                logger.info("Shutting down ROS2 components...")
-                self.destroy_node()
-            except Exception as e:
-                logger.error(f"Error during ROS2 cleanup: {e}")
+            self._cleanup_ros2()
 
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
         logger.info("Power controller cleanup complete")
+
+    def pause_heartbeat(self):
+        """Pause the green LED heartbeat"""
+        if not self.heartbeat_paused:
+            logger.info("Pausing green LED heartbeat")
+            self.heartbeat_paused = True
+            self.heartbeat_pause_event.clear()
+            # Ensure LED is off
+            self.set_green_led(False)
+
+    def resume_heartbeat(self):
+        """Resume the green LED heartbeat"""
+        if self.heartbeat_paused:
+            logger.info("Resuming green LED heartbeat")
+            self.heartbeat_paused = False
+            self.heartbeat_pause_event.set()
+
+    def set_heartbeat_frequency(self, frequency_hz):
+        """Set the heartbeat frequency"""
+        if frequency_hz > 0:
+            logger.info(f"Setting heartbeat frequency to {frequency_hz} Hz")
+            self.heartbeat_frequency_hz = frequency_hz
+        else:
+            logger.warning(f"Invalid heartbeat frequency: {frequency_hz}")
+
+    def _cleanup_ros2(self):
+        """Clean up ROS2 resources"""
+        if self.ros2_node:
+            try:
+                self.ros2_node.destroy_node()
+            except Exception:
+                pass
+            self.ros2_node = None
+        if rclpy and rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    def _call_trigger_service(self, service_name: str, timeout_sec: float = 5.0) -> tuple[bool, str]:
+        """Centralized function for calling ROS2 Trigger services."""
+        if not self.ros2_node:
+            return False, "ROS2 node not initialized"
+
+        client = None  # Ensure client is defined in outer scope
+        try:
+            client = self.ros2_node.create_client(Trigger, service_name)
+            if not client.wait_for_service(timeout_sec=2.0):
+                logger.error(f"Service {service_name} not available")
+                return False, f"Service {service_name} not available"
+
+            request = Trigger.Request()
+            future = client.call_async(request)
+            rclpy.spin_until_future_complete(
+                self.ros2_node, future, timeout_sec=timeout_sec)
+
+            if future.done():
+                response = future.result()
+                if response is not None:
+                    return response.success, response.message
+                else:
+                    # This can happen if the service call fails without an exception
+                    return False, "Service call failed: received no response"
+            else:
+                logger.error(
+                    f"Service call to {service_name} timed out after {timeout_sec}s")
+                return False, "Service call timed out"
+        except Exception as e:
+            logger.error(f"Exception calling service {service_name}: {e}")
+            return False, str(e)
+        finally:
+            if client is not None and self.ros2_node:
+                self.ros2_node.destroy_client(client)
 
 
 def test_gradual_frequency_pattern(threshold):
@@ -2748,8 +2408,8 @@ LED INDICATORS (Active LOW):
   - Green LED: Heartbeat (1Hz normal, 2Hz when Argo running, 3-flash when recording)
   - Both LEDs: Gradual frequency increase during button press (2Hz → 20Hz)
   - Both LEDs: Short-long pattern during shutdown sequence (1Hz, 5% duty)
-  - Blue LED: SOS pattern for low battery warning
-  - Red LED: Not GPIO controlled
+  - Blue LED: Show charging status via battery !CHARGING signal
+  - Red LED: SOS patterns for low battery warning (slow SOS for low battery, fast SOS for critical battery)
 
 USAGE:
   ./argo_power_control.py [OPTIONS]
@@ -2760,7 +2420,7 @@ OPTIONS:
   --threshold, -T     Set button press threshold for shutdown (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})
   --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
   --test-notification, -n  Test desktop notification functionality and exit (safe for testing)
-  --debug-shutdown-flashing, -d  Test shutdown countdown LED pattern and exit (safe for testing)
+  --test-led-patterns, -d  Test shutdown countdown LED pattern and exit (safe for testing)
   --simulate-double-tap          Simulate a double tap to toggle Argo service
   --simulate-triple-tap          Simulate a triple tap to toggle recording
   --simulate-critical-battery    Simulate critical battery condition for testing
@@ -2775,7 +2435,7 @@ EXAMPLES:
   ./argo_power_control.py -w                      # Test wall message (short form)
   ./argo_power_control.py --test-notification     # Test desktop notification (safe)
   ./argo_power_control.py -n                      # Test desktop notification (short form)
-  ./argo_power_control.py --debug-shutdown-flashing # Test countdown LED pattern (safe)
+  ./argo_power_control.py --test-led-patterns # Test countdown LED pattern (safe)
   ./argo_power_control.py -d                      # Test countdown LED pattern (short form)
   ./argo_power_control.py --simulate-double-tap   # Simulate double tap (Argo service toggle)
   ./argo_power_control.py --simulate-triple-tap   # Simulate triple tap (recording toggle)
@@ -2791,8 +2451,8 @@ REQUIREMENTS:
 SAFETY FEATURES:
   - Open drain configuration prevents damage from multiple control sources
   - Graceful shutdown ensures proper system shutdown before cutting power
-  - GPIO pins automatically revert to input state on halt, de-energizing relay
-  - External pullup resistor requirement prevents floating inputs
+  - GPIO pins automatically revert to input state on halt
+  - External pulldown resistor on power relay output prevents floating output
   - GPIO group membership requirement for controlled GPIO access
 """
     print(help_text)
@@ -2806,15 +2466,15 @@ def main():
     )
     parser.add_argument('--help', '-h', action='store_true',
                         help='Show help message and exit')
-    parser.add_argument('--test-mode', '-t', action='store_true',
+    parser.add_argument('--test-mode',  action='store_true',
                         help='Run in test mode (disable actual shutdown and power control)')
-    parser.add_argument('--threshold', '-T', type=float, default=DEFAULT_SHUTDOWN_THRESHOLD_S,
+    parser.add_argument('--threshold',  type=float, default=DEFAULT_SHUTDOWN_THRESHOLD_S,
                         help=f'Set button press threshold for shutdown in seconds (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})')
-    parser.add_argument('--test-wall-message', '-w', action='store_true',
+    parser.add_argument('--test-wall-message',  action='store_true',
                         help='Test wall message functionality and exit (safe for testing)')
-    parser.add_argument('--test-notification', '-n', action='store_true',
+    parser.add_argument('--test-notification',  action='store_true',
                         help='Test desktop notification functionality and exit (safe for testing)')
-    parser.add_argument('--debug-shutdown-flashing', '-d', action='store_true',
+    parser.add_argument('--test-led-patterns',  action='store_true',
                         help='Test shutdown countdown LED pattern and exit (safe for testing)')
     parser.add_argument('--simulate-double-tap', action='store_true',
                         help='Simulate a double tap to toggle Argo service')
@@ -2909,7 +2569,7 @@ def main():
         sys.exit(0)
 
     # Handle debug shutdown flashing test
-    if args.debug_shutdown_flashing:
+    if args.test_led_patterns:
         print("Testing LED patterns...")
         try:
             # Test gradual frequency pattern with different thresholds
@@ -3006,7 +2666,7 @@ def main():
             except KeyboardInterrupt:
                 print("\nStopping SOS pattern test...")
                 controller.sos_led_active = False
-                controller.set_blue_led(False)
+                controller.set_red_led(False)
         except Exception as e:
             print(f"Error simulating low battery: {e}")
             sys.exit(1)
