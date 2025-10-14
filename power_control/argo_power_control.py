@@ -40,6 +40,7 @@
 #   - Both LEDs: Short-long pattern during shutdown sequence (1Hz, 5% duty)
 #   - Blue LED: Show charging status via battery !CHARGING signal reported by the battery monitor
 #   - Red LED: SOS patterns for low battery warning (slow SOS for low battery, fast SOS for critical battery)
+#   - Red/Green LEDs: Alternating pattern when WiFi connectivity is lost (0.5Hz alternating)
 #   - All LEDs: Active LOW control (GPIO LOW = LED ON, GPIO HIGH = LED OFF)
 #
 # SHUTDOWN SEQUENCE:
@@ -198,6 +199,11 @@ BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage interval (seconds)
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 
+# WiFi Monitoring
+WIFI_MONITORING_INTERVAL_S = 10     # Check WiFi status interval (seconds)
+WIFI_CONNECTIVITY_TIMEOUT_S = 5     # Timeout for WiFi connectivity tests (seconds)
+WIFI_LOSS_LED_FREQUENCY_HZ = 0.5    # Frequency for alternating red/green pattern (0.5Hz = 2 second cycle)
+
 # DEVELOPMENT FLAG: Critical Battery Behavior
 # Set to True to use normal shutdown (cuts power) instead of halt (preserves power)
 # This is useful during development/testing when you want the system to fully power off
@@ -304,6 +310,13 @@ class PowerController:
         self.last_battery_check_time = 0.0
         self.battery_monitoring_active = False
         self.sos_led_active = False
+
+        # WiFi monitoring state
+        self.wifi_connected = True  # Assume connected at startup
+        self.wifi_loss_detected = False
+        self.last_wifi_check_time = 0.0
+        self.wifi_monitoring_active = False
+        self.wifi_loss_led_active = False
 
         # GPIO Configuration
         self.GPIO_CHIP = '/dev/gpiochip0'
@@ -999,6 +1012,11 @@ class PowerController:
             if not self.running:
                 break
 
+            # Skip heartbeat if WiFi loss pattern is active (it uses both LEDs)
+            if self.wifi_loss_led_active:
+                time.sleep(0.1)  # Short sleep to avoid busy waiting
+                continue
+
             if self.recording_active:
                 # Recording mode: 3 quick flashes followed by pause
                 # Total period matches normal heartbeat (1 second)
@@ -1114,6 +1132,51 @@ class PowerController:
         self.set_red_led(False)
         self.sos_led_active = False
         logger.info("SOS LED pattern completed")
+
+    def wifi_loss_led_pattern(self):
+        """Alternating red/green LED pattern for WiFi loss indication"""
+        logger.info("Starting alternating red/green LED pattern for WiFi loss")
+        self.wifi_loss_led_active = True
+
+        # Calculate timing for alternating pattern (0.5Hz = 2 second cycle)
+        # Each LED is on for 1 second, then off for 1 second, alternating
+        cycle_duration = 1.0 / WIFI_LOSS_LED_FREQUENCY_HZ  # 2 seconds total cycle
+        led_duration = cycle_duration / 2.0  # 1 second per LED
+
+        while self.running and self.wifi_loss_led_active and self.wifi_loss_detected and not self.critical_battery_detected:
+            try:
+                # Red LED on, Green LED off
+                self.set_red_led(True)
+                self.set_green_led(False)
+                
+                # Sleep in small increments for responsive shutdown
+                sleep_time = 0
+                while sleep_time < led_duration and self.running and self.wifi_loss_led_active and self.wifi_loss_detected and not self.critical_battery_detected:
+                    time.sleep(0.01)  # Sleep in 10ms increments
+                    sleep_time += 0.01
+
+                if not self.running or not self.wifi_loss_led_active or not self.wifi_loss_detected or self.critical_battery_detected:
+                    break
+
+                # Green LED on, Red LED off
+                self.set_green_led(True)
+                self.set_red_led(False)
+                
+                # Sleep in small increments for responsive shutdown
+                sleep_time = 0
+                while sleep_time < led_duration and self.running and self.wifi_loss_led_active and self.wifi_loss_detected and not self.critical_battery_detected:
+                    time.sleep(0.01)  # Sleep in 10ms increments
+                    sleep_time += 0.01
+
+            except Exception as e:
+                logger.error(f"Error in WiFi loss LED pattern: {e}")
+                break
+
+        # Turn off LEDs when done
+        self.set_red_led(False)
+        self.set_green_led(False)
+        self.wifi_loss_led_active = False
+        logger.info("WiFi loss LED pattern completed")
 
     def shutdown_led_pattern(self):
         """1Hz LED pattern with configurable duty cycle during shutdown sequence"""
@@ -1718,6 +1781,12 @@ class PowerController:
             target=self.monitor_critical_battery, daemon=True)
         battery_thread.start()
 
+        # Start WiFi connectivity monitoring in separate thread
+        logger.info("Starting WiFi connectivity monitoring thread")
+        wifi_thread = threading.Thread(
+            target=self.monitor_wifi_connectivity, daemon=True)
+        wifi_thread.start()
+
         try:
             # Main loop - just keep running while monitoring threads handle GPIO
             last_sync_time = 0
@@ -1927,6 +1996,74 @@ class PowerController:
 
         logger.info("Critical battery monitoring thread stopped")
 
+    def monitor_wifi_connectivity(self):
+        """Monitor WiFi connectivity every 10 seconds and update LED patterns"""
+        logger.info("Starting WiFi connectivity monitoring thread")
+        self.wifi_monitoring_active = True
+        
+        # Track consecutive failures for stability
+        consecutive_failures = 0
+        consecutive_successes = 0
+        MAX_CONSECUTIVE_FAILURES = 2  # Require 2 consecutive failures before declaring WiFi lost
+        MAX_CONSECUTIVE_SUCCESSES = 2  # Require 2 consecutive successes before declaring WiFi restored
+        
+        while self.running and self.wifi_monitoring_active:
+            try:
+                # Check WiFi connectivity
+                wifi_connected = self.check_wifi_connectivity()
+                
+                if wifi_connected:
+                    consecutive_successes += 1
+                    consecutive_failures = 0
+                    
+                    # Check if WiFi was previously lost and now restored
+                    if self.wifi_loss_detected and consecutive_successes >= MAX_CONSECUTIVE_SUCCESSES:
+                        logger.info("WiFi connectivity restored - stopping WiFi loss LED pattern")
+                        self.wifi_loss_detected = False
+                        self.wifi_loss_led_active = False  # Stop the alternating pattern
+                        # Resume normal heartbeat
+                        self.resume_heartbeat()
+                        # Send notification
+                        self.send_desktop_notification(
+                            "WiFi Restored",
+                            "WiFi connectivity has been restored",
+                            "normal"
+                        )
+                        consecutive_successes = 0  # Reset counter
+                        
+                else:
+                    consecutive_failures += 1
+                    consecutive_successes = 0
+                    
+                    # Check if WiFi was previously connected and now lost
+                    if not self.wifi_loss_detected and consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        logger.warning("WiFi connectivity lost - starting alternating red/green LED pattern")
+                        self.wifi_loss_detected = True
+                        # Pause heartbeat to make WiFi loss pattern visible
+                        self.pause_heartbeat()
+                        # Start alternating red/green LED pattern in separate thread
+                        threading.Thread(target=self.wifi_loss_led_pattern, daemon=True).start()
+                        # Send notification
+                        self.send_desktop_notification(
+                            "WiFi Connection Lost",
+                            "WiFi connectivity has been lost\nAlternating red/green LED pattern activated",
+                            "critical"
+                        )
+                        consecutive_failures = 0  # Reset counter
+
+                self.last_wifi_check_time = time.time()
+
+            except Exception as e:
+                logger.error(f"Error in WiFi connectivity monitoring: {e}")
+
+            # Sleep for monitoring interval
+            sleep_time = 0
+            while sleep_time < WIFI_MONITORING_INTERVAL_S and self.running and self.wifi_monitoring_active:
+                time.sleep(1.0)
+                sleep_time += 1.0
+
+        logger.info("WiFi connectivity monitoring thread stopped")
+
     def _call_battery_service(self) -> Optional[Dict[str, Any]]:
         """Call battery_water service to get current battery data using rclpy"""
         success, message = self._call_trigger_service(
@@ -1946,6 +2083,52 @@ class PowerController:
         else:
             logger.error(f"Battery service call failed: {message}")
             return None
+
+    def check_wifi_connectivity(self) -> bool:
+        """Check WiFi connectivity using multiple methods
+        
+        Returns:
+            True if WiFi is connected and has internet access
+            False if WiFi is disconnected or no internet access
+        """
+        try:
+            # Method 1: Check if WiFi interface is up and has an IP address
+            result = subprocess.run(
+                ['ip', 'addr', 'show', 'wlan0'], 
+                capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
+            )
+            
+            if result.returncode != 0:
+                logger.debug("WiFi interface wlan0 not found or not accessible")
+                return False
+            
+            # Check if wlan0 has an IP address (not 127.0.0.1)
+            if 'inet ' in result.stdout and '127.0.0.1' not in result.stdout:
+                # Method 2: Test internet connectivity with a simple ping
+                ping_result = subprocess.run(
+                    ['ping', '-c', '1', '-W', '3', '8.8.8.8'], 
+                    capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
+                )
+                
+                if ping_result.returncode == 0:
+                    logger.debug("WiFi connectivity confirmed: interface up and internet accessible")
+                    return True
+                else:
+                    logger.debug("WiFi interface up but no internet connectivity")
+                    return False
+            else:
+                logger.debug("WiFi interface wlan0 has no valid IP address")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.debug("WiFi connectivity check timed out")
+            return False
+        except FileNotFoundError:
+            logger.debug("Network tools not available for WiFi check")
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking WiFi connectivity: {e}")
+            return False
 
     def show_critical_battery_confirmation_dialog(self, battery_voltage):
         """Show desktop confirmation dialog for critical battery shutdown
@@ -2282,8 +2465,14 @@ If you take no action within 30 seconds, the system will automatically
             # Stop battery monitoring
             self.battery_monitoring_active = False
 
+            # Stop WiFi monitoring
+            self.wifi_monitoring_active = False
+
             # Stop SOS LED pattern if active
             self.sos_led_active = False
+
+            # Stop WiFi loss LED pattern if active
+            self.wifi_loss_led_active = False
 
             # Clear critical battery flag if set
             if self.critical_battery_detected:
@@ -2476,6 +2665,7 @@ LED INDICATORS (Active LOW):
   - Both LEDs: Short-long pattern during shutdown sequence (1Hz, 5% duty)
   - Blue LED: Show charging status via battery !CHARGING signal
   - Red LED: SOS patterns for low battery warning (slow SOS for low battery, fast SOS for critical battery)
+  - Red/Green LEDs: Alternating pattern when WiFi connectivity is lost (0.5Hz alternating)
 
 USAGE:
   ./argo_power_control.py [OPTIONS]
@@ -2491,6 +2681,7 @@ OPTIONS:
   --simulate-triple-tap          Simulate a triple tap to toggle recording
   --simulate-critical-battery    Simulate critical battery condition for testing
   --simulate-low-battery         Simulate low battery condition (SOS LED pattern) for testing
+  --simulate-wifi-loss           Simulate WiFi connectivity loss (alternating red/green LED pattern) for testing
 EXAMPLES:
   ./argo_power_control.py                         # Normal operation
   ./argo_power_control.py --test-mode             # Test mode (safe)
@@ -2507,6 +2698,7 @@ EXAMPLES:
   ./argo_power_control.py --simulate-triple-tap   # Simulate triple tap (recording toggle)
   ./argo_power_control.py --simulate-critical-battery  # Test critical battery halt sequence
   ./argo_power_control.py --simulate-low-battery   # Test low battery SOS LED pattern
+  ./argo_power_control.py --simulate-wifi-loss     # Test WiFi loss alternating red/green LED pattern
 
 REQUIREMENTS:
   - User must be member of 'gpio' group (for GPIO access)
@@ -2557,6 +2749,8 @@ def main():
                         help='Simulate critical battery condition for testing')
     parser.add_argument('--simulate-low-battery', action='store_true',
                         help='Simulate low battery condition (SOS LED pattern) for testing')
+    parser.add_argument('--simulate-wifi-loss', action='store_true',
+                        help='Simulate WiFi connectivity loss (alternating red/green LED pattern) for testing')
 
     # Enable bash completion for command-line arguments
     argcomplete.autocomplete(parser)
@@ -2745,6 +2939,36 @@ def main():
             sys.exit(1)
         sys.exit(0)
 
+    # Handle simulate WiFi loss
+    if args.simulate_wifi_loss:
+        print("Simulating WiFi connectivity loss (alternating red/green LED pattern)")
+        try:
+            # Create a temporary power controller instance for testing
+            controller = PowerController(
+                test_mode=True, threshold=args.threshold)
+            # Simulate WiFi loss
+            print("Simulating WiFi connectivity loss...")
+            controller.wifi_loss_detected = True
+            # Start alternating red/green LED pattern in separate thread
+            import threading
+            wifi_loss_thread = threading.Thread(target=controller.wifi_loss_led_pattern, daemon=True)
+            wifi_loss_thread.start()
+            print("✅ WiFi loss simulation completed - alternating red/green LED pattern running")
+            print("Press Ctrl+C to stop the WiFi loss pattern test")
+            # Let the pattern run for demonstration
+            try:
+                while controller.wifi_loss_led_active:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nStopping WiFi loss pattern test...")
+                controller.wifi_loss_led_active = False
+                controller.set_red_led(False)
+                controller.set_green_led(False)
+        except Exception as e:
+            print(f"Error simulating WiFi loss: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
     # Check if user is in the gpio group (required for GPIO access)
     # Skip this check if:
     #  - Running as root (systemd service)
@@ -2803,6 +3027,7 @@ def main():
         critical_mode = "halt (PRESERVES POWER) - PRODUCTION MODE"
     print(
         f"  - Battery monitoring: Low warning {LOW_BATTERY_THRESHOLD_V}V (SOS LED), Critical {CRITICAL_BATTERY_THRESHOLD_V}V ({critical_mode})")
+    print(f"  - WiFi monitoring: Check every {WIFI_MONITORING_INTERVAL_S}s, alternating red/green LED when lost")
     print("  - Press Ctrl+C to stop")
     print()
 
