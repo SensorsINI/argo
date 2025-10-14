@@ -279,7 +279,8 @@ class LoRaNode(Node):
             
             self.spi.max_speed_hz = 500000  # 500 kHz SPI clock
             self.spi.mode = 0  # SPI Mode 0 (CPOL=0, CPHA=0)
-            self.spi.no_cs = True  # Disable automatic CS - we control it manually via GPIO
+            # Note: We manually control CS via GPIO (LORA_SEL on pin 27)
+            # Hardware CS on pin 24 is not used
 
             self.get_logger().info(
                 f"SPI initialized on bus {self.spi_bus}, device {self.spi_device}")

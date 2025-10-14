@@ -89,8 +89,9 @@ def main():
         spi.open(1, 0)  # SPI1, CS0
         spi.max_speed_hz = 100000  # 100 kHz for easy scope viewing
         spi.mode = 0  # SPI Mode 0 (CPOL=0, CPHA=0)
-        spi.no_cs = True  # Disable automatic CS - we control it manually via GPIO
-        print(f"    SPI initialized: 100 kHz, Mode 0, Manual CS control")
+        # Note: We manually control CS via GPIO (LORA_SEL)
+        # The hardware CS on pin 24 can be ignored since we use pin 27
+        print(f"    SPI initialized: 100 kHz, Mode 0")
         
         print("\n" + "=" * 60)
         print("Starting test loop - watch with oscilloscope!")
