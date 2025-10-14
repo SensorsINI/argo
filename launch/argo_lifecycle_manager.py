@@ -55,11 +55,12 @@ except ImportError:
 
 
 class ArgoLifecycleManager:
-    def __init__(self):
+    def __init__(self, quiet: bool = True):
         self.argo_dir = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))
         self.process = None
         self.node_processes = []
+        self.quiet = quiet  # Suppress initialization messages
         # Removed restart logic - nodes should not be restarted automatically
         # Failures should be preserved for debugging
         self.stabilization_wait = 15.0  # Additional wait time for nodes to stabilize
@@ -86,8 +87,9 @@ class ArgoLifecycleManager:
                     self._handle_toggle_pause
                 )
             except Exception as e:
-                print(
-                    f"Warning: Could not initialize ROS2 service client: {e}")
+                if not quiet:
+                    print(
+                        f"Warning: Could not initialize ROS2 service client: {e}")
                 self.ros2_node = None
                 self.battery_service_client = None
                 self.toggle_pause_service = None
@@ -116,8 +118,8 @@ class ArgoLifecycleManager:
                 self.expected_nodes.append(
                     f"{node}.py")  # Regular Python nodes
 
-        # Log excluded nodes for visibility
-        if self.excluded_nodes:
+        # Log excluded nodes for visibility (only if not in quiet mode)
+        if self.excluded_nodes and not quiet:
             print(
                 f"ℹ️  Excluded nodes (critical services or hardware not ready): {', '.join(self.excluded_nodes)}")
         
@@ -1155,7 +1157,7 @@ class ArgoLifecycleManager:
             print("\r" + " " * 60 + "\r", end='', flush=True)  # Clear the line
             
             # CPU percentage (this waits 1 second by design)
-            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_percent = psutil.cpu_percent(interval=0.3)
 
             # Memory and disk
             memory = psutil.virtual_memory()
@@ -1212,8 +1214,8 @@ class ArgoLifecycleManager:
             if battery_service_running:
                 battery_summary, critical_alerts, charging_status, usb_power_status = self._get_battery_water_status_alerts()
             
-            # Build system info line with optional battery info
-            system_info = f"📊 SYSTEM: CPU {cpu_percent:.1f}% | Mem. {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temp. {cpu_temp}°C"
+            # Build system info line showing running nodes out of total nodes with 'running/total'
+            system_info = f"📊 Nodes {running_count}/{total_count} | CPU {cpu_percent:.1f}% | Mem {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temp. {cpu_temp}°C"
             if battery_summary:
                 system_info += f" | Batt. {battery_summary}"
                 # Add charging and USB power status if available
@@ -1247,6 +1249,66 @@ class ArgoLifecycleManager:
             pass
         
         print("=" * 60)
+    
+    def quick_status(self) -> None:
+        """Show condensed one-line status of Argo system (optimized for quick checks)"""
+        try:
+            # Get node status
+            node_status = self._get_node_status()
+            running_count = sum(1 for status in node_status.values() if "RUNNING" in status)
+            total_count = len(node_status)
+            
+            # Get CPU usage (quick check with minimal interval)
+            cpu_percent = psutil.cpu_percent(interval=0.2)
+            
+            # Get battery info and power status if available (with retry for robustness)
+            battery_summary = None
+            charging_status = None
+            usb_power_status = None
+            try:
+                result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
+                                        capture_output=True, text=True, timeout=2)
+                battery_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
+                if battery_service_running:
+                    # Try to get battery info, with retry on failure
+                    for attempt in range(2):
+                        try:
+                            battery_summary, _, charging_status, usb_power_status = self._get_battery_water_status_alerts()
+                            if battery_summary:
+                                break  # Success
+                            time.sleep(0.1)  # Brief delay before retry
+                        except Exception:
+                            if attempt == 0:
+                                time.sleep(0.1)  # Brief delay before retry
+                            pass
+            except Exception:
+                pass
+            
+            # Build condensed status line
+            status_line = f"🚢 ARGO: [{running_count}/{total_count}] | CPU {cpu_percent:.1f}%"
+            if battery_summary:
+                status_line += f" | Batt. {battery_summary}"
+            if charging_status is not None:
+                charging_icon = "🔌" if charging_status else "🔋"
+                status_line += f" | Charging: {charging_icon}"
+            if usb_power_status is not None:
+                usb_icon = "⚡" if usb_power_status else "🔌"
+                status_line += f" | USB: {usb_icon}"
+            
+            print(status_line, flush=True)
+            
+            # Update timestamp file to prevent redundant quick timer checks
+            try:
+                home_dir = os.path.expanduser('~')
+                last_check_file = os.path.join(home_dir, ".argo_last_check")
+                current_time = int(time.time())
+                with open(last_check_file, 'w') as f:
+                    f.write(str(current_time))
+            except Exception:
+                pass
+                
+        except Exception as e:
+            print(f"🚢 ARGO: Status check failed - {e}", flush=True)
     
     def _start_remote_tunnel(self):
         """Start SSH tunnel for remote simulation"""
@@ -1650,6 +1712,12 @@ COMMANDS:
                    - Shows I2C bus health when nodes are not running
                    - Extracts and displays recent error messages from systemd journal
 
+  quick_status     Show condensed one-line status (optimized for quick checks)
+                   - Fast status check with minimal overhead
+                   - Shows node count and battery summary only
+                   - Skips expensive CPU/memory/disk checks
+                   - Ideal for shell prompts and frequent checks
+
   simulate_local   Start Argo in local simulation mode
                    - Runs sailboat simulator directly on Orange Pi
                    - Excludes conflicting hardware nodes (gps.py, imu.py, anem.py, rudder_sail_radio.py)
@@ -1718,8 +1786,11 @@ EXAMPLES:
   # Start Argo system
   python3 argo_lifecycle_manager.py run
   
-  # Check system status
+  # Check system status (detailed)
   python3 argo_lifecycle_manager.py status
+  
+  # Check system status (quick one-line)
+  python3 argo_lifecycle_manager.py quick_status
   
   # Start local simulation
   python3 argo_lifecycle_manager.py simulate_local
@@ -1735,12 +1806,14 @@ EXAMPLES:
         """)
 
     parser.add_argument('command',
-                        choices=['run', 'stop', 'restart', 'status',
+                        choices=['run', 'stop', 'restart', 'status', 'quick_status',
                                  'simulate_local', 'simulate_remote'],
                         nargs='?',  # Make command optional
                         help='Command to execute (see detailed descriptions below)')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug output for troubleshooting')
+    parser.add_argument('--quiet', action='store_true',
+                        help='Suppress initialization messages (useful for quick_status)')
     parser.add_argument('--toggle_pause', action='store_true',
                         help='Toggle pause state of all pausable nodes (requires lifecycle manager to be running)')
     
@@ -1753,7 +1826,7 @@ EXAMPLES:
         parser.error(
             "Either a command or --toggle_pause option must be provided")
     
-    manager = ArgoLifecycleManager()
+    manager = ArgoLifecycleManager(quiet=args.quiet)
     if args.debug:
         print("🔧 DEBUG: Debug mode enabled")
     
@@ -1770,6 +1843,8 @@ EXAMPLES:
             sys.exit(0 if success else 1)
         elif args.command == 'status':
             manager.status()
+        elif args.command == 'quick_status':
+            manager.quick_status()
         elif args.command == 'simulate_local':
             success = manager.simulate_local()
             sys.exit(0 if success else 1)

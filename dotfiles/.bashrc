@@ -59,18 +59,21 @@ argo_quick_timer() {
     
     # Run check if forced or if it's been more than 5 minutes (300 seconds)
     if [ "$force_check" = true ] || [ $time_diff -ge 300 ]; then
-        if [ "$force_check" = true ]; then
-            echo -n "Force running argo_quick_timer, please wait..."
-        else
-            echo -n "Running argo_quick_timer, please wait..."
+        # Show "please wait" message that can be aborted by pressing Enter
+        echo -n "🔍 Checking Argo status (press Enter to skip)..."
+        
+        # Check if Enter is pressed within short timeout
+        if read -t 1.0 -r; then
+            # User pressed Enter - abort check
+            echo -ne "\r\033[K"  # Clear the line
+            return 0
         fi
-        # Show condensed status and update timestamp
-        local full_status=$(python3 ~/argo/launch/argo_lifecycle_manager.py status)
-        local node_count=$(echo "$full_status" | grep '🤖 ROS NODES:' | sed 's/🤖 ROS NODES: //')
-        local system_info=$(echo "$full_status" | grep '📊 SYSTEM:' | sed 's/📊 SYSTEM: //')
-        local status_result="🚢 ARGO: ${node_count} | ${system_info}"
-        echo -ne "\r\033[K${status_result}\n"
-        echo "$current_time" > "$last_check_file"
+        
+        # Clear the "please wait" message before showing status
+        echo -ne "\r\033[K"
+        
+        # Show condensed status using optimized quick_status command with --quiet flag
+        python3 ~/argo/launch/argo_lifecycle_manager.py quick_status --quiet
     fi
 }
 
