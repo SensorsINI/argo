@@ -12,10 +12,10 @@ KDIR := /lib/modules/$(shell uname -r)/build
 MDIR := /lib/modules/$(shell uname -r)/kernel/drivers/misc/argo
 PWD := $(shell pwd)
 
-.PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup install_module_service # Ensure all targets are listed here
+.PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup install_module_service install_spi_rules # Ensure all targets are listed here
 
 # all target does everything needed to build the module and overlay
-all: module overlay install_module install_overlay install_boot_env install_rules install_permissions_service install_module_service
+all: module overlay install_module install_overlay install_boot_env install_rules install_permissions_service install_module_service install_spi_rules
 
 module:
 	# bulding kernel module for PWM input and output
@@ -128,3 +128,14 @@ install_module_service:
 	# Enable the service to start on boot
 	sudo systemctl enable argo_radio_servo_module.service
 	@echo "Kernel module service installed and enabled"
+
+install_spi_rules:
+	@echo "--- Installing SPI device permissions ---"
+	# Copy the SPI udev rules file for LoRa module access
+	sudo cp $(PWD)/99-argo-spi.rules /etc/udev/rules.d/
+	# Reload udev rules
+	sudo udevadm control --reload-rules
+	# Trigger udev to apply the new rules to existing SPI devices
+	sudo udevadm trigger --subsystem-match=spidev
+	@echo "SPI permissions configured (group: gpio, mode: 0660)"
+	@echo "SPI devices accessible to members of 'gpio' group"

@@ -18,9 +18,9 @@ visualization-msgs       # ROS2 visualization message types (Marker, MarkerArray
 smbus2                   # I2C communication for sensors (MAX11612, SHT45, ICM-20948)
 pyserial                 # Serial communication for GPS (u-blox NEO-M9N)
 pynmea2                  # NMEA sentence parsing for GPS NavSatFix messages
-gpiod                    # Modern GPIO control (libgpiod) for power management
-spidev                   # SPI communication for LoRa SX1276/SX1278 module
-OPi.GPIO                 # Orange Pi GPIO library (fallback/legacy support)
+gpiod                    # Modern GPIO control (libgpiod) for power management, battery monitoring, and LoRa SPI control
+spidev                   # SPI communication for LoRa SX1276/SX1278 module (nodes/lora.py)
+OPi.GPIO                 # Orange Pi GPIO library (legacy support only, prefer gpiod)
 
 # ==================== SCIENTIFIC COMPUTING ====================
 # Numerical computations and data processing

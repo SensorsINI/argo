@@ -1,0 +1,5 @@
+# SPI permissions for Argo LoRa module
+# Allow members of the 'gpio' group to access SPI devices
+
+SUBSYSTEM=="spidev", GROUP="gpio", MODE="0660"
+

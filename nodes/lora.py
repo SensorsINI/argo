@@ -12,21 +12,21 @@ remote commands such as "return home".
 Hardware:
 - LoRa radio based on SX1276 module (https://aithinker-static.oss-cn-shenzhen.aliyuncs.com/docs/_media_old/sx1276_77_78_79.pdf)
 - Onboard versions:
-  * Lora sx1278 AI-thinker 433m wireless RA-02 DIY kit (https://de.aliexpress.com/item/1005006824333382.html)
-  * Ra-01 LoRa SX1278 433M (max range ~10km) (https://de.aliexpress.com/item/1005009649770115.html)
-- Host side: USB To LoRa Data Transfer Module SX1262 (version USB-TO-LoRa-LF-B) (https://de.aliexpress.com/item/1005005461186227.html)
+  * Lora sx1278 AI-thinker 433MHz wireless RA-01 DIY kit (https://de.aliexpress.com/item/1005006824333382.html)
+  * Ra-01 LoRa SX1278 433MHz (max range ~10km) (https://de.aliexpress.com/item/1005009649770115.html)
+- Host side: USB To LoRa Data Transfer Module SX1262 (version USB-TO-LoRa-LF-B, 433MHz) (https://de.aliexpress.com/item/1005005461186227.html)
 
 Connections:
 - LoRa radio to Orange Pi: SPI as specified in the pins on Orange Pi
 - Orange Pi to host side: USB To LoRa Data Transfer Module SX1262 (version USB-TO-LoRa-LF-B) (https://de.aliexpress.com/item/1005005461186227.html)
 
 Pins on Orange Pi:
-  * MISO on pin 21 (PH8/SPI1_MISO)
-  * MOSI on pin 19 (PH7/SPI1_MOSI)
+  * MISO on pin 21 (PH8/SPI1_MISO); this is the input from the LORA chip
+  * MOSI on pin 19 (PH7/SPI1_MOSI); this is the output to the LORA chip
   * SPISCLK on pin 23 (PH6/SPI1_SCLK)
-  * LORA_OUT on pin 31 (PI15) - this is interrupt ouptut
-  * !LORA_SEL on pin 27 (PI10) - selects LORA chip for SPI
-  * !LORA_RST on pin 29 (PI0) - reset LORA chip
+  * LORA_OUT on pin 31 (PI15) - this is interrupt ouptut from the LORA chip
+  * !LORA_SEL on pin 27 (PI10) - low to select LORA chip for SPI
+  * !LORA_RST on pin 29 (PI0) - low to reset LORA chip
   
 The LoRa radio node is connected to the Orange Pi via SPI. On the remote host side (shore side) 
 a USB To LoRa Data Transfer Module SX1262 (version USB-TO-LoRa-LF-B) (https://de.aliexpress.com/item/1005005461186227.html) is used.
@@ -78,15 +78,11 @@ except ImportError:
     print("WARNING: spidev not available. Install with: pip3 install spidev")
 
 try:
-    import RPi.GPIO as GPIO
+    import gpiod
     GPIO_AVAILABLE = True
 except ImportError:
-    try:
-        import OPi.GPIO as GPIO
-        GPIO_AVAILABLE = True
-    except ImportError:
-        GPIO_AVAILABLE = False
-        print("WARNING: GPIO library not available. Install OPi.GPIO or RPi.GPIO")
+    GPIO_AVAILABLE = False
+    print("WARNING: gpiod library not available. Install with: pip3 install gpiod")
 
 
 # SX1276 Register definitions (from Semtech datasheet)
@@ -140,18 +136,11 @@ class SX1276Registers:
     PA_BOOST = 0x80
 
 
-# Orange Pi GPIO pin numbers (physical pin -> GPIO line mapping)
-class OrangePiPins:
-    """Orange Pi Zero 2W GPIO pin mappings"""
-    # SPI1 pins (hardware SPI)
-    SPI1_MISO = 264  # Pin 21 (PH8)
-    SPI1_MOSI = 263  # Pin 19 (PH7)
-    SPI1_SCLK = 262  # Pin 23 (PH6)
-
-    # LoRa control pins
-    LORA_SEL = 266   # Pin 27 (PI10) - Chip Select
-    LORA_RST = 256   # Pin 29 (PI0) - Reset
-    LORA_IRQ = 271   # Pin 31 (PI15) - Interrupt/DIO0
+# Orange Pi GPIO line numbers for gpiod
+# These are the GPIO chip line numbers used by gpiod library
+LORA_SEL_LINE = 266   # PI10 (Pin 27) - Chip Select
+LORA_RST_LINE = 256   # PI0 (Pin 29) - Reset  
+LORA_IRQ_LINE = 271   # PI15 (Pin 31) - Interrupt/DIO0
 
 
 class LoRaNode(Node):
@@ -175,7 +164,7 @@ class LoRaNode(Node):
         # Check if required libraries are available
         if not SPI_AVAILABLE or not GPIO_AVAILABLE:
             self.get_logger().error("CRITICAL: Required libraries not available")
-            self.get_logger().error("Install: pip3 install spidev OPi.GPIO")
+            self.get_logger().error("Install: pip3 install spidev gpiod")
             sys.exit(1)
 
         # Declare and get parameters
@@ -256,17 +245,38 @@ class LoRaNode(Node):
 
         # Initialize SPI and GPIO
         self.spi = None
+        self.gpio_chip = None
+        self.lora_sel_line = None
+        self.lora_rst_line = None
+        self.lora_irq_line = None
+        
         try:
-            # Initialize GPIO
-            GPIO.setmode(GPIO.BOARD)  # Use physical pin numbering
-            GPIO.setup(27, GPIO.OUT)  # LORA_SEL (PI10)
-            GPIO.setup(29, GPIO.OUT)  # LORA_RST (PI0)
-            # LORA_IRQ (PI15)
-            GPIO.setup(31, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+            # Initialize GPIO using gpiod (no root required)
+            self.gpio_chip = gpiod.Chip("/dev/gpiochip0")
+            self.get_logger().debug("GPIO chip opened")
+            
+            # Configure LORA_SEL (Chip Select) as output
+            self.lora_sel_line = self.gpio_chip.get_line(LORA_SEL_LINE)
+            self.lora_sel_line.request(consumer="lora_node", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[1])  # CS high (inactive)
+            self.get_logger().debug(f"LORA_SEL (line {LORA_SEL_LINE}) configured as output")
+            
+            # Configure LORA_RST (Reset) as output
+            self.lora_rst_line = self.gpio_chip.get_line(LORA_RST_LINE)
+            self.lora_rst_line.request(consumer="lora_node", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[1])  # Reset high (inactive)
+            self.get_logger().debug(f"LORA_RST (line {LORA_RST_LINE}) configured as output")
+            
+            # Configure LORA_IRQ (Interrupt) as input
+            self.lora_irq_line = self.gpio_chip.get_line(LORA_IRQ_LINE)
+            self.lora_irq_line.request(consumer="lora_node", type=gpiod.LINE_REQ_DIR_IN)
+            self.get_logger().debug(f"LORA_IRQ (line {LORA_IRQ_LINE}) configured as input")
 
             # Initialize SPI
             self.spi = spidev.SpiDev()
+            self.get_logger().debug(f"Opening SPI bus {self.spi_bus}, device {self.spi_device}")
+            
             self.spi.open(self.spi_bus, self.spi_device)
+            self.get_logger().debug("SPI device opened")
+            
             self.spi.max_speed_hz = 500000  # 500 kHz SPI clock
             self.spi.mode = 0  # SPI Mode 0 (CPOL=0, CPHA=0)
 
@@ -275,8 +285,10 @@ class LoRaNode(Node):
             self.is_connected = True
 
         except Exception as e:
+            import traceback
             self.get_logger().error(
                 f"CRITICAL: Failed to initialize SPI/GPIO: {e}")
+            self.get_logger().error(f"Traceback: {traceback.format_exc()}")
             self.get_logger().error("CRITICAL: LoRa radio not accessible. Operating without LoRa.")
             self.is_connected = False
 
@@ -286,13 +298,11 @@ class LoRaNode(Node):
                 self.is_connected = False
 
         # Setup GPIO interrupt for packet reception
+        # Note: gpiod interrupt handling requires event monitoring in a separate thread
+        # For now, we rely on polling in the timer callback
+        # TODO: Implement gpiod event monitoring for DIO0 interrupt (line 271)
         if self.is_connected:
-            try:
-                GPIO.add_event_detect(
-                    31, GPIO.RISING, callback=self.on_dio0_interrupt)
-                self.get_logger().info("GPIO interrupt configured for packet reception")
-            except Exception as e:
-                self.get_logger().warn(f"Could not setup GPIO interrupt: {e}")
+            self.get_logger().info("LoRa using polling mode (interrupt mode not yet implemented with gpiod)")
 
         # Timers
         self.tx_timer = self.create_timer(
@@ -308,39 +318,39 @@ class LoRaNode(Node):
     def spi_write_register(self, address: int, value: int):
         """Write a single byte to a register"""
         with self.rx_lock:
-            GPIO.output(27, GPIO.LOW)  # CS low
+            self.lora_sel_line.set_value(0)  # CS low (select chip)
             self.spi.xfer2([address | 0x80, value])  # Write bit (MSB=1)
-            GPIO.output(27, GPIO.HIGH)  # CS high
+            self.lora_sel_line.set_value(1)  # CS high (deselect chip)
 
     def spi_read_register(self, address: int) -> int:
         """Read a single byte from a register"""
         with self.rx_lock:
-            GPIO.output(27, GPIO.LOW)  # CS low
+            self.lora_sel_line.set_value(0)  # CS low (select chip)
             result = self.spi.xfer2([address & 0x7F, 0x00])  # Read bit (MSB=0)
-            GPIO.output(27, GPIO.HIGH)  # CS high
+            self.lora_sel_line.set_value(1)  # CS high (deselect chip)
             return result[1]
 
     def spi_write_fifo(self, data: bytes):
         """Write data to FIFO"""
         with self.rx_lock:
-            GPIO.output(27, GPIO.LOW)  # CS low
+            self.lora_sel_line.set_value(0)  # CS low (select chip)
             self.spi.xfer2([SX1276Registers.REG_FIFO | 0x80] + list(data))
-            GPIO.output(27, GPIO.HIGH)  # CS high
+            self.lora_sel_line.set_value(1)  # CS high (deselect chip)
 
     def spi_read_fifo(self, length: int) -> bytes:
         """Read data from FIFO"""
         with self.rx_lock:
-            GPIO.output(27, GPIO.LOW)  # CS low
+            self.lora_sel_line.set_value(0)  # CS low (select chip)
             result = self.spi.xfer2(
                 [SX1276Registers.REG_FIFO & 0x7F] + [0x00] * length)
-            GPIO.output(27, GPIO.HIGH)  # CS high
+            self.lora_sel_line.set_value(1)  # CS high (deselect chip)
             return bytes(result[1:])
 
     def reset_module(self):
         """Reset the LoRa module"""
-        GPIO.output(29, GPIO.LOW)  # Reset low
+        self.lora_rst_line.set_value(0)  # Reset low (active)
         time.sleep(0.01)
-        GPIO.output(29, GPIO.HIGH)  # Reset high
+        self.lora_rst_line.set_value(1)  # Reset high (inactive)
         time.sleep(0.01)
 
     def set_mode(self, mode: int):
@@ -673,7 +683,7 @@ class LoRaNode(Node):
                 self.get_logger().warn(
                     f"LoRa connection timeout - no data for {self.connection_timeout_sec}s")
         else:
-            if not self.is_connected and self.serial_port and self.serial_port.is_open:
+            if not self.is_connected and self.spi:
                 self.is_connected = True
                 self.get_logger().info("LoRa connection restored")
 
@@ -696,20 +706,27 @@ class LoRaNode(Node):
         """Cleanup on node shutdown"""
         self.get_logger().info("Shutting down LoRa node...")
 
-        # Clean up GPIO
+        # Release GPIO lines
         try:
-            GPIO.cleanup()
-            self.get_logger().info("GPIO cleaned up")
-        except:
-            pass
+            if self.lora_sel_line:
+                self.lora_sel_line.release()
+            if self.lora_rst_line:
+                self.lora_rst_line.release()
+            if self.lora_irq_line:
+                self.lora_irq_line.release()
+            if self.gpio_chip:
+                self.gpio_chip.close()
+            self.get_logger().info("GPIO lines released")
+        except Exception as e:
+            self.get_logger().error(f"Error releasing GPIO: {e}")
 
         # Close SPI
         if self.spi:
             try:
                 self.spi.close()
                 self.get_logger().info("SPI closed")
-            except:
-                pass
+            except Exception as e:
+                self.get_logger().error(f"Error closing SPI: {e}")
 
         super().destroy_node()
 
