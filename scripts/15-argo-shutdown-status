@@ -25,6 +25,73 @@ RESET='\x1B[0m'
 # Check for critical battery flag file
 CRITICAL_BATTERY_FLAG="/tmp/argo_critical_battery"
 
+# Function to check and repair truncated journal files
+check_and_repair_journal() {
+	# Check for journal truncation by running a test journalctl command
+	local journal_check=$(journalctl -n 1 2>&1)
+	
+	if echo "$journal_check" | grep -q "is truncated"; then
+		echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+		echo -e "${RED}⚠ CORRUPTED JOURNAL DETECTED${RESET}"
+		echo -e "  ${YELLOW}Journal files were corrupted (likely due to unexpected power loss)${RESET}"
+		echo ""
+		
+		# Extract the truncated journal file path
+		local truncated_file=$(echo "$journal_check" | grep -oP "Journal file \K[^ ]+" | head -1)
+		if [[ -n "$truncated_file" ]]; then
+			echo -e "  ${YELLOW}Truncated file: $truncated_file${RESET}"
+		fi
+		echo ""
+		
+		# Attempt automatic repair
+		echo -e "  ${CYAN}Attempting automatic journal repair...${RESET}"
+		echo ""
+		
+		# Try to remove the corrupted file directly (most effective approach)
+		# Use sudo -n to attempt without password prompt (works if user has NOPASSWD sudo)
+		if [[ -n "$truncated_file" ]] && sudo -n rm -f "$truncated_file" &>/dev/null 2>&1; then
+			echo -e "  ${GREEN}✓ Removed corrupted journal file${RESET}"
+			
+			# Restart journald to recreate clean journal files
+			if sudo -n systemctl restart systemd-journald &>/dev/null 2>&1; then
+				echo -e "  ${GREEN}✓ Journal service restarted${RESET}"
+				echo -e "  ${GREEN}✓ Journal repair completed${RESET}"
+				echo -e "  ${CYAN}ℹ Journal is now clean, continuing to scan logs...${RESET}"
+			else
+				echo -e "  ${YELLOW}⚠ Could not restart journald, but corrupted file removed${RESET}"
+			fi
+		elif sudo -n journalctl --rotate &>/dev/null 2>&1; then
+			echo -e "  ${GREEN}✓ Journal rotated successfully${RESET}"
+			
+			# Vacuum old journal files to clean up corruption
+			if sudo -n journalctl --vacuum-time=1s &>/dev/null 2>&1; then
+				echo -e "  ${GREEN}✓ Old journal files cleaned${RESET}"
+				echo -e "  ${GREEN}✓ Journal repair completed${RESET}"
+				echo -e "  ${CYAN}ℹ Truncated files will be ignored, continuing to scan available logs...${RESET}"
+			else
+				echo -e "  ${YELLOW}⚠ Vacuum failed, but rotation completed${RESET}"
+			fi
+		else
+			# Couldn't auto-repair, provide manual instructions
+			echo -e "  ${YELLOW}⚠ Automatic repair requires sudo privileges${RESET}"
+			echo ""
+			echo -e "  ${CYAN}To repair manually, run:${RESET}"
+			echo -e "    ${CYAN}sudo journalctl --rotate${RESET}"
+			echo -e "    ${CYAN}sudo journalctl --vacuum-time=1s${RESET}"
+			echo ""
+			echo -e "  ${YELLOW}Or to remove only the corrupted file:${RESET}"
+			if [[ -n "$truncated_file" ]]; then
+				echo -e "    ${YELLOW}sudo rm '$truncated_file'${RESET}"
+				echo -e "    ${YELLOW}sudo systemctl restart systemd-journald${RESET}"
+			fi
+		fi
+		
+		echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+		echo ""
+		# Continue to scan remaining journal logs after repair attempt
+	fi
+}
+
 # Function to calculate time ago from timestamp
 calculate_time_ago() {
 	local timestamp="$1"
@@ -226,6 +293,9 @@ check_current_battery() {
 
 # Main execution
 main() {
+	# Check and repair journal corruption first (before any journalctl queries)
+	check_and_repair_journal
+	
 	# Check if critical battery flag file exists (set during critical shutdown)
 	if [[ -f "$CRITICAL_BATTERY_FLAG" ]]; then
 		echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
