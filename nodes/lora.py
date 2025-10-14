@@ -279,6 +279,7 @@ class LoRaNode(Node):
             
             self.spi.max_speed_hz = 500000  # 500 kHz SPI clock
             self.spi.mode = 0  # SPI Mode 0 (CPOL=0, CPHA=0)
+            self.spi.no_cs = True  # Disable automatic CS - we control it manually via GPIO
 
             self.get_logger().info(
                 f"SPI initialized on bus {self.spi_bus}, device {self.spi_device}")
@@ -349,9 +350,9 @@ class LoRaNode(Node):
     def reset_module(self):
         """Reset the LoRa module"""
         self.lora_rst_line.set_value(0)  # Reset low (active)
-        time.sleep(0.01)
+        time.sleep(0.01)  # Hold reset for 10ms
         self.lora_rst_line.set_value(1)  # Reset high (inactive)
-        time.sleep(0.01)
+        time.sleep(0.1)  # Wait 100ms for crystal oscillator to stabilize
 
     def set_mode(self, mode: int):
         """Set operating mode"""
