@@ -13,7 +13,7 @@ POWER_SERVICE_FILE = argo_power_control.service
 INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else id -un; fi)
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 
-.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook install_startup_hook
+.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook
 
 # Default target
 all: install
@@ -21,7 +21,7 @@ all: install
 # ==================== POWER CONTROL SYSTEM ====================
 
 # Main power control installation target
-install: check_deps install_startup_hook install_service enable_service install_shutdown_hook
+install: check_deps install_service enable_service install_shutdown_hook
 	@echo ""
 	@echo "✅ Argo Power Control System Installation Complete!"
 	@echo ""
@@ -212,7 +212,6 @@ help:
 	@echo "  install_service      - Install systemd service only"
 	@echo "  enable_service       - Enable and start the service"
 	@echo "  install_shutdown_hook        - Install late shutdown hook (poweroff/halt only, not reboot)"
-	@echo "  install_startup_hook - Install early boot startup hook (!POW low)"
 	@echo "  clean_power_control  - Stop and disable service, remove service file"
 	@echo ""
 	@echo "Usage examples:"
