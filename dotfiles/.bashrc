@@ -79,6 +79,6 @@ argo_quick_timer() {
 
 PATH="$HOME/argo/launch:$HOME/argo/nodes:$HOME/argo/scripts:$HOME/argo/power_control:$PATH"
 
-# Run Argo status check on shell startup (with quick timer)
-# This will only show status if it's been more few minutes since last check
-argo_quick_timer
+# Add argo_quick_timer to PROMPT_COMMAND for continuous status monitoring
+# This will check status before each prompt (throttled to 5-minute intervals)
+PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }argo_quick_timer"
