@@ -1216,15 +1216,27 @@ class ArgoLifecycleManager:
             
             # Build system info line showing running nodes out of total nodes with 'running/total'
             system_info = f"📊 Nodes {running_count}/{total_count} | CPU {cpu_percent:.1f}% | Mem {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temp. {cpu_temp}°C"
-            if battery_summary:
-                system_info += f" | Batt. {battery_summary}"
-                # Add charging and USB power status if available
-                if charging_status is not None:
-                    charging_icon = "🔌" if charging_status else "🔋"
-                    system_info += f" | Charging: {charging_icon}{charging_status}"
-                if usb_power_status is not None:
-                    usb_icon = "⚡" if usb_power_status else "🔌"
-                    system_info += f" | USB: {usb_icon}{usb_power_status}"
+            
+            # Always show battery status (use ??? if unavailable)
+            battery_display = battery_summary if battery_summary else "???"
+            system_info += f" | 🔋 {battery_display}"
+            
+            # Always show charging status (use ??? if unavailable)
+            if charging_status is True:
+                system_info += f" | Charging: 🔌"
+            elif charging_status is False:
+                system_info += f" | Charging: ❌"
+            else:
+                system_info += f" | Charging: ???"
+            
+            # Always show USB power status (use ??? if unavailable)
+            if usb_power_status is True:
+                system_info += f" | USB: ⚡"
+            elif usb_power_status is False:
+                system_info += f" | USB: ❌"
+            else:
+                system_info += f" | USB: ???"
+            
             print(system_info)
             
             # Display critical alerts if any
@@ -1285,15 +1297,27 @@ class ArgoLifecycleManager:
                 pass
             
             # Build condensed status line
-            status_line = f"🚢 ARGO: [{running_count}/{total_count}] | CPU {cpu_percent:.1f}%"
-            if battery_summary:
-                status_line += f" | Batt. {battery_summary}"
-            if charging_status is not None:
-                charging_icon = "🔌" if charging_status else "🔋"
-                status_line += f" | Charging: {charging_icon}"
-            if usb_power_status is not None:
-                usb_icon = "⚡" if usb_power_status else "🔌"
-                status_line += f" | USB: {usb_icon}"
+            status_line = f"🚢 ARGO: [{running_count}/{total_count}] | 🖥️ {cpu_percent:.1f}%"
+            
+            # Always show battery status (use ??? if unavailable)
+            battery_display = battery_summary if battery_summary else "???"
+            status_line += f" | 🔋 {battery_display}"
+            
+            # Always show charging status (use ??? if unavailable)
+            if charging_status is True:
+                status_line += f" | Charging: 🔌"
+            elif charging_status is False:
+                status_line += f" | Charging: ❌"
+            else:
+                status_line += f" | Charging: ???"
+            
+            # Always show USB power status (use ??? if unavailable)
+            if usb_power_status is True:
+                status_line += f" | USB: ⚡"
+            elif usb_power_status is False:
+                status_line += f" | USB: ❌"
+            else:
+                status_line += f" | USB: ???"
             
             print(status_line, flush=True)
             
