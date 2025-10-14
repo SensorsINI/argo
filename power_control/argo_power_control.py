@@ -198,6 +198,13 @@ BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage interval (seconds)
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 
+# DEVELOPMENT FLAG: Critical Battery Behavior
+# Set to True to use normal shutdown (cuts power) instead of halt (preserves power)
+# This is useful during development/testing when you want the system to fully power off
+# on critical battery instead of preserving power for manual sailing.
+# Production default: False (use halt to preserve power for manual sailing)
+CRITICAL_BATTERY_USE_SHUTDOWN = True  # True = shutdown (cuts power), False = halt (preserves power)
+
 # Hardware Polarity Configuration (Rev3 PCB)
 # Power button: Active HIGH (1 = pressed, 0 = released)
 BUTTON_PRESSED_STATE = 1
@@ -2113,18 +2120,38 @@ class PowerController:
         - Autonomous safety: Timeout = halt proceeds (not cancelled)
         - Developer control: Active cancellation stops halt if user intervenes
         """
+        # Log critical battery mode based on configuration flag
+        if CRITICAL_BATTERY_USE_SHUTDOWN:
+            logger.critical(
+                f"CRITICAL BATTERY SHUTDOWN: {battery_voltage:.3f}V - System will shutdown and CUT POWER")
+            logger.critical(
+                "⚠️  DEVELOPMENT MODE: Using normal shutdown (cuts power) instead of halt")
+            logger.critical(
+                "⚠️  CRITICAL_BATTERY_USE_SHUTDOWN=True - Power will be CUT, not preserved")
+            shutdown_mode = "shutdown (power cut)"
+        else:
+            logger.critical(
+                f"CRITICAL BATTERY HALT: {battery_voltage:.3f}V - System will halt to preserve power")
+            logger.critical(
+                "PRODUCTION MODE: Using halt to preserve power for manual sailing")
+            shutdown_mode = "halt (power preserved)"
+        
         logger.critical(
-            f"CRITICAL BATTERY HALT: {battery_voltage:.3f}V - System will halt to preserve power")
-        logger.critical(
-            "Showing confirmation dialog - timeout (no action) will proceed with halt")
+            f"Showing confirmation dialog - timeout (no action) will proceed with {shutdown_mode}")
 
-        # Set critical battery flag for shutdown hook
-        self._set_critical_battery_flag()
+        # Set critical battery flag for shutdown hook ONLY if using halt mode
+        # If using shutdown mode, we want the hook to cut power normally
+        if not CRITICAL_BATTERY_USE_SHUTDOWN:
+            self._set_critical_battery_flag()
+            logger.info("Critical battery flag set - shutdown hook will preserve power")
+        else:
+            logger.info("Critical battery flag NOT set - shutdown hook will cut power normally")
 
-        # Send critical notification
+        # Send critical notification with appropriate message
+        notification_message = f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will {shutdown_mode} in 30 seconds unless cancelled\nTimeout = automatic shutdown (safe default)"
         self.send_desktop_notification(
             "CRITICAL BATTERY",
-            f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will halt in 30 seconds unless cancelled\nTimeout = automatic halt (safe default)",
+            notification_message,
             "critical",
             30000  # 30 second timeout
         )
@@ -2132,15 +2159,22 @@ class PowerController:
         # Broadcast wall message
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if CRITICAL_BATTERY_USE_SHUTDOWN:
+                action_desc = "SHUTDOWN and CUT POWER"
+                mode_desc = "shutdown to fully power off the system (DEVELOPMENT MODE)"
+            else:
+                action_desc = "HALT to preserve battery power"
+                mode_desc = "halt to preserve battery for manual sailing operation (PRODUCTION MODE)"
+            
             message = f"""CRITICAL BATTERY ALERT: {battery_voltage:.3f}V at {timestamp}
 
-⚠️  System will HALT in 30 seconds to preserve battery power.
+⚠️  System will {action_desc} in 30 seconds.
 
 To CANCEL the shutdown from CLI (close the confirmation dialog):
   pkill -f zenity
 
 If you take no action within 30 seconds, the system will automatically
-halt to preserve battery for manual sailing operation (safe default)."""
+{mode_desc}."""
             subprocess.run(['wall', message], check=True,
                            timeout=WALL_MESSAGE_TIMEOUT_S)
             logger.info("Critical battery wall message broadcasted")
@@ -2154,17 +2188,18 @@ halt to preserve battery for manual sailing operation (safe default)."""
         user_cancelled = self.show_critical_battery_confirmation_dialog(battery_voltage)
         
         if user_cancelled:
-            # User ACTIVELY cancelled the halt
-            logger.warning("Critical battery halt CANCELLED by user intervention")
+            # User ACTIVELY cancelled the halt/shutdown
+            logger.warning(f"Critical battery {shutdown_mode} CANCELLED by user intervention")
             logger.warning("User has taken responsibility - they must plug in charger or take action!")
-            # Clear the critical battery flag since we're not shutting down
-            self._clear_critical_battery_flag()
-            # Resume heartbeat since halt was cancelled
+            # Clear the critical battery flag since we're not shutting down (if it was set)
+            if not CRITICAL_BATTERY_USE_SHUTDOWN:
+                self._clear_critical_battery_flag()
+            # Resume heartbeat since shutdown was cancelled
             self.resume_heartbeat()
             # Send cancellation notification
             self.send_desktop_notification(
-                "HALT CANCELLED BY USER",
-                f"Critical battery halt was cancelled by user\nBattery: {battery_voltage:.3f}V - PLUG IN CHARGER NOW!",
+                "SHUTDOWN CANCELLED BY USER",
+                f"Critical battery {shutdown_mode} was cancelled by user\nBattery: {battery_voltage:.3f}V - PLUG IN CHARGER NOW!",
                 "critical",
                 0  # Stays visible
             )
@@ -2173,8 +2208,8 @@ halt to preserve battery for manual sailing operation (safe default)."""
         # If we reach here, either:
         # 1. User clicked "Shutdown Now" (proceed immediately)
         # 2. Dialog timed out (proceed automatically - SAFE DEFAULT)
-        logger.critical("Proceeding with critical battery halt")
-        logger.critical("Either user confirmed OR timeout occurred (automatic halt for safety)")
+        logger.critical(f"Proceeding with critical battery {shutdown_mode}")
+        logger.critical("Either user confirmed OR timeout occurred (automatic action for safety)")
         
         # Stop battery monitoring to prevent repeated alerts
         self.battery_monitoring_active = False
@@ -2193,16 +2228,31 @@ halt to preserve battery for manual sailing operation (safe default)."""
         logger.critical("Waiting 3 seconds for final notifications...")
         time.sleep(3)
         
-        # Execute halt command (not shutdown - preserves power relay)
+        # Execute command based on configuration flag
         if self.test_mode:
-            logger.info(
-                "TEST MODE: Would execute 'sudo halt' command for critical battery")
-            logger.info("TEST MODE: Critical battery halt sequence completed - system would halt NOW")
+            if CRITICAL_BATTERY_USE_SHUTDOWN:
+                logger.info(
+                    "TEST MODE: Would execute 'shutdown -h now' command for critical battery")
+                logger.info("TEST MODE: Critical battery shutdown sequence completed - system would SHUTDOWN and CUT POWER NOW")
+            else:
+                logger.info(
+                    "TEST MODE: Would execute 'sudo halt' command for critical battery")
+                logger.info("TEST MODE: Critical battery halt sequence completed - system would HALT and PRESERVE POWER NOW")
         else:
-            logger.critical(
-                "Executing halt command NOW for critical battery preservation")
-            subprocess.run(['sudo', 'halt'], check=True)
-            logger.critical("Halt command executed - system should halt immediately")
+            if CRITICAL_BATTERY_USE_SHUTDOWN:
+                logger.critical(
+                    "⚠️  DEVELOPMENT MODE: Executing shutdown command NOW - POWER WILL BE CUT")
+                logger.critical(
+                    "⚠️  CRITICAL_BATTERY_USE_SHUTDOWN=True - Using shutdown instead of halt")
+                subprocess.run(['shutdown', '-h', 'now'], check=True)
+                logger.critical("Shutdown command executed - system will shutdown and cut power")
+            else:
+                logger.critical(
+                    "PRODUCTION MODE: Executing halt command NOW for critical battery preservation")
+                logger.critical(
+                    "Power relay will be preserved for manual sailing - shutdown hook will NOT cut power")
+                subprocess.run(['sudo', 'halt'], check=True)
+                logger.critical("Halt command executed - system should halt immediately with power preserved")
 
     def _set_critical_battery_flag(self):
         """Set critical battery flag file for shutdown hook"""
@@ -2470,6 +2520,13 @@ SAFETY FEATURES:
   - GPIO pins automatically revert to input state on halt
   - External pulldown resistor on power relay output prevents floating output
   - GPIO group membership requirement for controlled GPIO access
+
+DEVELOPMENT CONFIGURATION:
+  - CRITICAL_BATTERY_USE_SHUTDOWN flag in source code (line ~206):
+    * False (default): Use halt to preserve power for manual sailing
+    * True: Use shutdown to cut power completely (useful for development)
+  - This flag controls behavior when battery voltage drops below {CRITICAL_BATTERY_THRESHOLD_V}V
+  - Setting is logged at startup and when critical battery condition occurs
 """
     print(help_text)
 
@@ -2738,8 +2795,14 @@ def main():
 
     print(f"  - Button press threshold: {args.threshold} seconds")
     print(f"  - Button detection mode: Hardware interrupts (efficient)")
+    
+    # Show battery monitoring configuration
+    if CRITICAL_BATTERY_USE_SHUTDOWN:
+        critical_mode = "shutdown (CUTS POWER) - DEVELOPMENT MODE"
+    else:
+        critical_mode = "halt (PRESERVES POWER) - PRODUCTION MODE"
     print(
-        f"  - Battery monitoring: Low warning {LOW_BATTERY_THRESHOLD_V}V (SOS LED), Critical {CRITICAL_BATTERY_THRESHOLD_V}V (halt)")
+        f"  - Battery monitoring: Low warning {LOW_BATTERY_THRESHOLD_V}V (SOS LED), Critical {CRITICAL_BATTERY_THRESHOLD_V}V ({critical_mode})")
     print("  - Press Ctrl+C to stop")
     print()
 

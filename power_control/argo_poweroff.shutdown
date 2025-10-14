@@ -20,10 +20,8 @@
 #   - Keep the pulse short; external circuit should cut power quickly.
 #   - Exit 0 regardless, to never block shutdown.
 # 
-# The hook is working correctly. The system powers off after it because it goes into HALT 
-# state and the pin goes into high impedance mode. 
-# Because of a bug in the PCB design, this causes the relay to open. 
-# This bug will be fixed in next PCB revision.
+# The hook is working correctly in rev3 board.
+
 
 set -euo pipefail
 
@@ -34,7 +32,7 @@ MODE_LC="$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')"
 STARS="**************************************************"
 c_echo() {
     echo "$(date): argo_poweroff: $* $STARS" > /dev/console 2>/dev/null || true
-    sleep 1
+    sleep .2
 }
 
 # Announce invocation
@@ -52,17 +50,17 @@ CRITICAL_BATTERY_FLAG="/tmp/argo_critical_battery"
 if [ -f "$CRITICAL_BATTERY_FLAG" ]; then
     # Log to both console and kernel log for maximum visibility
     c_echo "╔════════════════════════════════════════════════════════════════╗"
-    c_echo "║ CRITICAL BATTERY HALT - PRESERVING POWER FOR MANUAL SAILING ║"
+    c_echo "║ CRITICAL BATTERY HALT - PRESERVING POWER FOR MANUAL SAILING    ║"
+    c_echo "║ Power relay will remain energized for radio control            ║"
+    c_echo "║ System halted due to low battery - radio control is ACTIVE     ║"
     c_echo "╚════════════════════════════════════════════════════════════════╝"
-    c_echo "Power relay will remain energized for radio control"
-    c_echo "System halted due to low battery - radio control is ACTIVE"
     
     # Also log to kernel ring buffer for dmesg visibility
     echo "**************************************************ARGO CRITICAL BATTERY HALT: Preserving power relay for manual sailing" > /dev/kmsg 2>/dev/null || true
     echo "ARGO CRITICAL BATTERY: Radio control remains active" > /dev/kmsg 2>/dev/null || true
     
     # Give operator time to see the message
-    sleep 3
+    sleep 1
     exit 0
 fi
 
