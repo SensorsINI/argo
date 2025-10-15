@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+Argo Transform Publisher for 3D Visualization
+=============================================
+
+This ROS2 node publishes coordinate frame transforms needed for 3D visualization in Foxglove.
+It establishes the relationship between the map frame, boat frame, and sensor frames.
+
+Coordinate Frame Hierarchy:
+- map (fixed world frame at GPS origin)
+  └── odom (odometry frame, same as map for now)
+      └── base_link (boat center)
+          ├── gps_link (GPS antenna position)
+          ├── compass_link (IMU/magnetometer position)
+          ├── wind_sensor_link (anemometer position)
+          └── rudder_link (rudder position)
+
+Published Topics:
+- /tf (geometry_msgs/TransformStamped): Dynamic transforms
+- /tf_static (geometry_msgs/TransformStamped): Static transforms
+
+Subscribed Topics:
+- /fix (sensor_msgs/NavSatFix): GPS position for map frame origin
+- /pose (geometry_msgs/Vector3): Boat heading (z-component)
+- /accel (geometry_msgs/Vector3): IMU accelerometer for roll/pitch estimation
+"""
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import TransformStamped, Vector3
+from sensor_msgs.msg import NavSatFix
+from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
+import math
+import numpy as np
+
+class ArgoTransformPublisher(Node):
+    def __init__(self):
+        super().__init__('argo_transform_publisher')
+        
+        # Transform broadcasters
+        self.tf_broadcaster = TransformBroadcaster(self)
+        self.static_tf_broadcaster = StaticTransformBroadcaster(self)
+        
+        # Frame state
+        self.map_origin_set = False
+        self.map_origin_lat = 0.0
+        self.map_origin_lon = 0.0
+        self.boat_heading = 0.0
+        self.boat_roll = 0.0
+        self.boat_pitch = 0.0
+        
+        # Subscribe to sensor data
+        self.create_subscription(NavSatFix, '/fix', self.gps_callback, 10)
+        self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
+        self.create_subscription(Vector3, '/accel', self.accel_callback, 10)
+        
+        # Publish static transforms at startup
+        self.publish_static_transforms()
+        
+        # Timer for dynamic transforms
+        self.timer = self.create_timer(0.1, self.publish_dynamic_transforms)  # 10 Hz
+        
+        self.get_logger().info("Argo transform publisher started")
+    
+    def gps_callback(self, msg):
+        """Set map origin from first GPS fix"""
+        if not self.map_origin_set and not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
+            self.map_origin_lat = msg.latitude
+            self.map_origin_lon = msg.longitude
+            self.map_origin_set = True
+            self.get_logger().info(f"Map origin set to: {self.map_origin_lat:.6f}, {self.map_origin_lon:.6f}")
+    
+    def pose_callback(self, msg):
+        """Update boat heading from pose topic"""
+        self.boat_heading = msg.z  # Heading in degrees
+    
+    def accel_callback(self, msg):
+        """Estimate roll and pitch from accelerometer data"""
+        # Convert accelerometer readings to roll/pitch angles
+        # Assuming accelerometer is in g units
+        ax, ay, az = msg.x, msg.y, msg.z
+        
+        # Calculate roll and pitch from accelerometer (assuming no linear acceleration)
+        # Roll (rotation around x-axis, positive when starboard side up)
+        self.boat_roll = math.degrees(math.atan2(ay, az))
+        
+        # Pitch (rotation around y-axis, positive when bow up)
+        self.boat_pitch = math.degrees(math.atan2(-ax, math.sqrt(ay*ay + az*az)))
+    
+    def publish_static_transforms(self):
+        """Publish static transforms between sensor frames and base_link"""
+        
+        # GPS antenna offset (assuming GPS is mounted forward and up from boat center)
+        gps_transform = TransformStamped()
+        gps_transform.header.stamp = self.get_clock().now().to_msg()
+        gps_transform.header.frame_id = "base_link"
+        gps_transform.child_frame_id = "gps_link"
+        gps_transform.transform.translation.x = 0.1  # 10cm forward
+        gps_transform.transform.translation.y = 0.0
+        gps_transform.transform.translation.z = 0.05  # 5cm up
+        gps_transform.transform.rotation.x = 0.0
+        gps_transform.transform.rotation.y = 0.0
+        gps_transform.transform.rotation.z = 0.0
+        gps_transform.transform.rotation.w = 1.0
+        self.static_tf_broadcaster.sendTransform(gps_transform)
+        
+        # Compass/IMU offset (assuming IMU is at boat center)
+        compass_transform = TransformStamped()
+        compass_transform.header.stamp = self.get_clock().now().to_msg()
+        compass_transform.header.frame_id = "base_link"
+        compass_transform.child_frame_id = "compass_link"
+        compass_transform.transform.translation.x = 0.0
+        compass_transform.transform.translation.y = 0.0
+        compass_transform.transform.translation.z = 0.0
+        compass_transform.transform.rotation.x = 0.0
+        compass_transform.transform.rotation.y = 0.0
+        compass_transform.transform.rotation.z = 0.0
+        compass_transform.transform.rotation.w = 1.0
+        self.static_tf_broadcaster.sendTransform(compass_transform)
+        
+        # Wind sensor offset (assuming anemometer is mounted on mast)
+        wind_transform = TransformStamped()
+        wind_transform.header.stamp = self.get_clock().now().to_msg()
+        wind_transform.header.frame_id = "base_link"
+        wind_transform.child_frame_id = "wind_sensor_link"
+        wind_transform.transform.translation.x = 0.0
+        wind_transform.transform.translation.y = 0.0
+        wind_transform.transform.translation.z = 0.3  # 30cm up (mast height)
+        wind_transform.transform.rotation.x = 0.0
+        wind_transform.transform.rotation.y = 0.0
+        wind_transform.transform.rotation.z = 0.0
+        wind_transform.transform.rotation.w = 1.0
+        self.static_tf_broadcaster.sendTransform(wind_transform)
+        
+        # Rudder offset (assuming rudder is at stern)
+        rudder_transform = TransformStamped()
+        rudder_transform.header.stamp = self.get_clock().now().to_msg()
+        rudder_transform.header.frame_id = "base_link"
+        rudder_transform.child_frame_id = "rudder_link"
+        rudder_transform.transform.translation.x = -0.2  # 20cm aft
+        rudder_transform.transform.translation.y = 0.0
+        rudder_transform.transform.translation.z = -0.05  # 5cm down
+        rudder_transform.transform.rotation.x = 0.0
+        rudder_transform.transform.rotation.y = 0.0
+        rudder_transform.transform.rotation.z = 0.0
+        rudder_transform.transform.rotation.w = 1.0
+        self.static_tf_broadcaster.sendTransform(rudder_transform)
+        
+        self.get_logger().info("Static transforms published")
+    
+    def publish_dynamic_transforms(self):
+        """Publish dynamic transforms for boat position and orientation"""
+        if not self.map_origin_set:
+            return  # Wait for GPS fix to set map origin
+        
+        # Map to odom transform (identity for now, could be used for odometry drift correction)
+        map_to_odom = TransformStamped()
+        map_to_odom.header.stamp = self.get_clock().now().to_msg()
+        map_to_odom.header.frame_id = "map"
+        map_to_odom.child_frame_id = "odom"
+        map_to_odom.transform.translation.x = 0.0
+        map_to_odom.transform.translation.y = 0.0
+        map_to_odom.transform.translation.z = 0.0
+        map_to_odom.transform.rotation.x = 0.0
+        map_to_odom.transform.rotation.y = 0.0
+        map_to_odom.transform.rotation.z = 0.0
+        map_to_odom.transform.rotation.w = 1.0
+        self.tf_broadcaster.sendTransform(map_to_odom)
+        
+        # Odom to base_link transform (boat position and orientation)
+        # For now, assume boat is at map origin (0,0,0) and only rotates
+        # In a full implementation, this would include GPS position converted to map coordinates
+        
+        # Convert heading to quaternion (yaw rotation around z-axis)
+        heading_rad = math.radians(self.boat_heading)
+        roll_rad = math.radians(self.boat_roll)
+        pitch_rad = math.radians(self.boat_pitch)
+        
+        # Create rotation quaternion from roll, pitch, yaw
+        cy = math.cos(heading_rad * 0.5)
+        sy = math.sin(heading_rad * 0.5)
+        cp = math.cos(pitch_rad * 0.5)
+        sp = math.sin(pitch_rad * 0.5)
+        cr = math.cos(roll_rad * 0.5)
+        sr = math.sin(roll_rad * 0.5)
+        
+        qw = cr * cp * cy + sr * sp * sy
+        qx = sr * cp * cy - cr * sp * sy
+        qy = cr * sp * cy + sr * cp * sy
+        qz = cr * cp * sy - sr * sp * cy
+        
+        odom_to_base = TransformStamped()
+        odom_to_base.header.stamp = self.get_clock().now().to_msg()
+        odom_to_base.header.frame_id = "odom"
+        odom_to_base.child_frame_id = "base_link"
+        odom_to_base.transform.translation.x = 0.0  # TODO: Convert GPS to map coordinates
+        odom_to_base.transform.translation.y = 0.0
+        odom_to_base.transform.translation.z = 0.0
+        odom_to_base.transform.rotation.x = qx
+        odom_to_base.transform.rotation.y = qy
+        odom_to_base.transform.rotation.z = qz
+        odom_to_base.transform.rotation.w = qw
+        self.tf_broadcaster.sendTransform(odom_to_base)
+
+def main(args=None):
+    rclpy.init(args=args)
+    
+    node = ArgoTransformPublisher()
+    
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
