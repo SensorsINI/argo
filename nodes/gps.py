@@ -163,6 +163,10 @@ class GpsNode(Node):
         # Initialize data counter for debugging
         self.data_count = 0
         self.last_data_log_time = time.time()
+        
+        # Track NMEA sentence types received
+        self.sentence_types_seen = set()
+        self.last_sentence_type_log_time = time.time()
 
         # GPS communication timeout tracking
         self.last_data_received_time = time.time()
@@ -174,6 +178,9 @@ class GpsNode(Node):
 
         # Publish initial health status as healthy
         self._publish_health_status(True)
+
+        # Timer to periodically publish satellite count (ensures zero is published when no fix)
+        self.sat_timer = self.create_timer(1.0, self.publish_satellite_count)  # 1 Hz
 
         # Track pause state to manage power save transitions (PSMOO)
         self._prev_paused = False
@@ -382,7 +389,7 @@ class GpsNode(Node):
             import sys
             sys.exit(1)
 
-        self.get_logger().debug("Expected NMEA sentences: GGA, GLL, GSA, GSV, RMC, VTG")
+        self.get_logger().debug("Expected NMEA sentences: GGA (position/satellites), RMC (speed/course), VTG (course)")
         self.get_logger().info("Publishing SOG (Speed Over Ground) to /gps_sog topic")
         self.get_logger().info("Publishing COG (Course Over Ground) to /gps_cog topic")
         self.get_logger().info("Publishing combined velocity vector to /gps_velocity topic")
@@ -391,11 +398,32 @@ class GpsNode(Node):
             "Publishing standard NavSatFix messages to /fix topic (for mapping)")
 
     def enable_nmea_sentences(self):
-        """Enable RMC and VTG NMEA sentences on u-blox NEO-N9M for SOG/COG data."""
-        self.get_logger().info("Configuring u-blox NEO-N9M to enable SOG/COG sentences...")
+        """Enable RMC, VTG, and GGA NMEA sentences on u-blox NEO-N9M for navigation and satellite data."""
+        self.get_logger().info("Configuring u-blox NEO-N9M to enable navigation sentences...")
 
         # UBX-CFG-MSG commands to enable NMEA sentences
         # Format: Class ID, Message ID, Rate for each port (DDC, UART1, UART2, USB, SPI, Reserved)
+
+        # Enable NMEA GGA (Global Positioning System Fix Data) - Class 0xF0, ID 0x00
+        # This provides position, altitude, and satellite count
+        gga_enable = bytes([0xB5, 0x62,  # Sync chars
+                           0x06, 0x01,  # Class: CFG, ID: MSG
+                           0x08, 0x00,  # Length: 8 bytes
+                           0xF0, 0x00,  # NMEA GGA message
+                           0x00,        # Rate on DDC (I2C)
+                           0x01,        # Rate on UART1 (our connection)
+                           0x00,        # Rate on UART2
+                           0x01,        # Rate on USB
+                           0x00,        # Rate on SPI
+                           0x00])       # Reserved
+
+        # Calculate checksum for GGA command
+        gga_ck_a = 0
+        gga_ck_b = 0
+        for byte in gga_enable[2:]:  # Skip sync chars
+            gga_ck_a = (gga_ck_a + byte) & 0xFF
+            gga_ck_b = (gga_ck_b + gga_ck_a) & 0xFF
+        gga_enable += bytes([gga_ck_a, gga_ck_b])
 
         # Enable NMEA RMC (Recommended Minimum Course) - Class 0xF0, ID 0x04
         # Rate 1 = output every measurement cycle
@@ -441,6 +469,10 @@ class GpsNode(Node):
         # Send configuration commands
         if self.serial_port and self.serial_port.is_open:
             try:
+                self.get_logger().debug("Enabling NMEA GGA sentences...")
+                self.serial_port.write(gga_enable)
+                time.sleep(0.1)
+
                 self.get_logger().debug("Enabling NMEA RMC sentences...")
                 self.serial_port.write(rmc_enable)
                 time.sleep(0.1)
@@ -449,12 +481,12 @@ class GpsNode(Node):
                 self.serial_port.write(vtg_enable)
                 time.sleep(0.1)
 
-                self.get_logger().info("✓ SOG/COG sentences enabled on GPS module")
+                self.get_logger().info("✓ Navigation sentences (GGA, RMC, VTG) enabled on GPS module")
                 return True
 
             except serial.SerialException as e:
                 self.get_logger().warn(
-                    f"Failed to configure GPS for SOG/COG: {e}")
+                    f"Failed to configure GPS navigation sentences: {e}")
                 return False
         return False
 
@@ -466,19 +498,30 @@ class GpsNode(Node):
             if len(parts) >= 9:
                 status = parts[2]  # A = valid, V = invalid
                 speed_knots = parts[7]  # Speed over ground in knots
-                course_true = parts[8]  # Course over ground in degrees true
+                course_true = parts[8]  # Course over ground in degrees true (can be empty when stationary)
 
-                if status == 'A' and speed_knots and course_true:
+                if status == 'A' and speed_knots:
+                    # We have a valid fix with speed data
                     self.current_sog = float(speed_knots)
-                    self.current_cog = float(course_true)
+                    
+                    # Course may be empty when stationary (speed near zero)
+                    if course_true:
+                        self.current_cog = float(course_true)
+                        self.get_logger().debug(
+                            f"RMC: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
+                    else:
+                        # Keep previous COG value or set to None if stationary
+                        # Don't clear it - vessel may have stopped but still has heading
+                        self.get_logger().debug(
+                            f"RMC: SOG={self.current_sog:.2f} knots, COG=N/A (stationary)")
+                    
                     self.gps_fix_valid = True
                     # Set NavSat status to indicate we have a fix
                     if self.navsat_status == NavSatStatus.STATUS_NO_FIX:
                         self.navsat_status = NavSatStatus.STATUS_FIX
-                    self.get_logger().debug(
-                        f"RMC: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
                     return True
                 else:
+                    # Invalid status - no GPS fix
                     self.gps_fix_valid = False
                     self.navsat_status = NavSatStatus.STATUS_NO_FIX
                     # Clear navigation data when fix is lost
@@ -494,18 +537,24 @@ class GpsNode(Node):
             # GNVTG format: $GNVTG,course_true,T,course_mag,M,speed_knots,N,speed_kmh,K,mode*checksum
             parts = sentence.split(',')
             if len(parts) >= 8:
-                course_true = parts[1]  # Course over ground, degrees true
+                course_true = parts[1]  # Course over ground, degrees true (can be empty when stationary)
                 speed_knots = parts[5]  # Speed over ground in knots
 
                 # Only process VTG data if we have a valid GPS fix
                 # VTG sentences can contain data even without a fix, so we need to check fix status
-                if course_true and speed_knots and self.gps_fix_valid:
-                    # Only update if we don't have valid data from RMC or if this is more recent
+                if speed_knots and self.gps_fix_valid:
+                    # Only update if we don't have valid data from RMC
                     if self.current_sog is None:
                         self.current_sog = float(speed_knots)
-                        self.current_cog = float(course_true)
-                        self.get_logger().debug(
-                            f"VTG: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
+                        
+                        # Course may be empty when stationary
+                        if course_true:
+                            self.current_cog = float(course_true)
+                            self.get_logger().debug(
+                                f"VTG: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
+                        else:
+                            self.get_logger().debug(
+                                f"VTG: SOG={self.current_sog:.2f} knots, COG=N/A (stationary)")
                     return True
         except (ValueError, IndexError) as e:
             self.get_logger().debug(f"Error parsing VTG sentence: {e}")
@@ -619,10 +668,11 @@ class GpsNode(Node):
                 lon_str = f"{abs(self.current_longitude):.6f}°{'E' if self.current_longitude >= 0 else 'W'}"
 
                 alt_str = f", Alt: {self.current_altitude:.1f}m" if self.current_altitude is not None else ""
+                cog_str = f"COG: {self.current_cog:.1f}°" if self.current_cog is not None else "COG: N/A"
                 self.get_logger().info(
                     f"GPS Fix: {self.satellites_used} satellites, "
                     f"Position: {lat_str} {lon_str}{alt_str}, "
-                    f"COG: {self.current_cog:.1f}°, SOG: {sog_ms:.2f} m/s"
+                    f"{cog_str}, SOG: {sog_ms:.2f} m/s"
                 )
                 self.last_fix_log_time = current_time
 
@@ -646,43 +696,53 @@ class GpsNode(Node):
 
     def publish_navigation_data(self):
         """Publish SOG and COG data to ROS topics."""
-        if (self.current_sog is not None and self.current_cog is not None and
-                self.gps_fix_valid):
-            # Publish individual topics
+        if self.current_sog is not None and self.gps_fix_valid:
+            # Always publish speed if we have a valid fix
             sog_msg = Float64()
             sog_msg.data = self.current_sog
             self.pub_sog.publish(sog_msg)
 
-            cog_msg = Float64()
-            cog_msg.data = self.current_cog
-            self.pub_cog.publish(cog_msg)
-
-            # Publish combined velocity vector (x=north component, y=east component, z=speed magnitude)
+            # Publish velocity vector
             velocity_msg = Vector3()
-            # Convert course (degrees from north) and speed to velocity components
-            cog_rad = math.radians(self.current_cog)
-            velocity_msg.x = self.current_sog * \
-                math.cos(cog_rad)  # North component
-            velocity_msg.y = self.current_sog * \
-                math.sin(cog_rad)  # East component
-            velocity_msg.z = self.current_sog  # Speed magnitude
-            self.pub_velocity.publish(velocity_msg)
+            if self.current_cog is not None:
+                # We have course - publish COG and calculate velocity components
+                cog_msg = Float64()
+                cog_msg.data = self.current_cog
+                self.pub_cog.publish(cog_msg)
 
-            self.get_logger().debug(
-                f"Published nav data: SOG={self.current_sog:.2f}kt, COG={self.current_cog:.1f}°")
+                # Convert course (degrees from north) and speed to velocity components
+                cog_rad = math.radians(self.current_cog)
+                velocity_msg.x = self.current_sog * math.cos(cog_rad)  # North component
+                velocity_msg.y = self.current_sog * math.sin(cog_rad)  # East component
+                velocity_msg.z = self.current_sog  # Speed magnitude
+                
+                self.get_logger().debug(
+                    f"Published nav data: SOG={self.current_sog:.2f}kt, COG={self.current_cog:.1f}°")
+            else:
+                # Stationary or no course available - velocity components are zero
+                velocity_msg.x = 0.0  # North component
+                velocity_msg.y = 0.0  # East component
+                velocity_msg.z = self.current_sog  # Speed magnitude (usually very small when stationary)
+                
+                self.get_logger().debug(
+                    f"Published nav data: SOG={self.current_sog:.2f}kt, COG=N/A (stationary)")
+            
+            self.pub_velocity.publish(velocity_msg)
         else:
             # Debug: Log why navigation data is not being published
             self.get_logger().debug(
-                f"NOT publishing nav data: SOG={self.current_sog}, COG={self.current_cog}, fix_valid={self.gps_fix_valid}")
+                f"NOT publishing nav data: SOG={self.current_sog}, fix_valid={self.gps_fix_valid}")
 
     def publish_satellite_count(self):
-        """Publish satellite count for GPS health monitoring."""
+        """Publish satellite count for GPS health monitoring (called at 1 Hz)."""
         # Always publish satellite count, even if zero (valuable for GPS health monitoring)
         sat_msg = UInt8()
         sat_msg.data = self.satellites_used
         self.pub_satellites.publish(sat_msg)
-        self.get_logger().debug(
-            f"Published satellite count: {self.satellites_used}")
+        
+        # Log satellite count periodically in debug mode
+        if self.debug_mode:
+            self.get_logger().debug(f"Published satellite count: {self.satellites_used}")
 
     def publish_navsat_fix(self):
         """Publish NavSatFix message for mapping applications."""
@@ -755,6 +815,11 @@ class GpsNode(Node):
                     self.data_count += 1
                     self.last_data_received_time = current_time  # Reset timeout
                     self.get_logger().debug(f"GPS Raw: {data_str}")
+                    
+                    # Track sentence types seen
+                    if data_str.startswith('$'):
+                        sentence_type = data_str.split(',')[0]
+                        self.sentence_types_seen.add(sentence_type)
 
                     # Publish raw NMEA data
                     msg = String()
@@ -772,22 +837,37 @@ class GpsNode(Node):
                         # Always parse to extract satellite count
                         self.parse_gga_sentence(data_str)
                         self.publish_navsat_fix()  # Only publishes if valid fix
-                        self.publish_satellite_count()  # Always publishes satellite count
+                        # Note: satellite count published by periodic timer (1 Hz)
 
                     # Handle periodic status logging for normal operation
                     self.periodic_status_logging()
 
+                    # Log sentence types seen every 15 seconds
+                    if current_time - self.last_sentence_type_log_time >= 15.0:
+                        if self.sentence_types_seen:
+                            sentence_list = sorted(list(self.sentence_types_seen))
+                            self.get_logger().info(f"NMEA sentence types received: {', '.join(sentence_list)}")
+                            has_gga = any('GGA' in s for s in self.sentence_types_seen)
+                            if not has_gga:
+                                self.get_logger().warn("No GGA sentences received - satellite count unavailable")
+                        self.last_sentence_type_log_time = current_time
+                    
                     # Log data reception every 10 seconds for debugging (debug mode only)
                     if self.debug_mode:
-                        current_time = time.time()
                         if current_time - self.last_data_log_time >= 10.0:
                             self.get_logger().info(
                                 f"GPS data flowing: {self.data_count} messages received so far")
                             if self.gps_fix_valid:
-                                self.get_logger().info(
-                                    f"Current navigation: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
+                                if self.current_sog is not None and self.current_cog is not None:
+                                    self.get_logger().info(
+                                        f"GPS Fix: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
+                                elif self.current_sog is not None:
+                                    self.get_logger().info(
+                                        f"GPS Fix: SOG={self.current_sog:.2f} knots, COG=N/A (stationary)")
+                                else:
+                                    self.get_logger().info("GPS Fix obtained, waiting for navigation data")
                             else:
-                                self.get_logger().info("No GPS fix - navigation data not available")
+                                self.get_logger().info("No GPS fix - searching for satellites...")
                             self.last_data_log_time = current_time
 
                 # The original script performed manual parsing of NMEA sentences
@@ -805,11 +885,11 @@ class GpsNode(Node):
                 import sys
                 sys.exit(1)
             except Exception as e:
-                self.get_logger().error(
-                    f'CRITICAL: Unexpected error in GPS communication: {e}')
-                self._publish_health_status(False)
-                import sys
-                sys.exit(1)
+                # Log unexpected errors as warnings but don't exit the node
+                # This allows the node to recover from transient errors
+                self.get_logger().warn(
+                    f'Unexpected error in GPS processing: {e}', throttle_duration_sec=5.0)
+                # Don't exit - continue operation and try to recover
 
     def destroy_node(self):
         """Gracefully shutdown the node and the GPS device."""
