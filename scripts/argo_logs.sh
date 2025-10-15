@@ -4,14 +4,16 @@
 # Tails logs from argo-launch, battery_water, and argo_power_control services
 # with color-coded output for easy identification
 #
-# Usage: argo_logs.sh [OPTIONS]
+# Usage: argo_logs.sh [OPTIONS] [PATTERN]
 #   -n N    Show last N lines (default: 20)
 #   -f      Follow mode (tail -f behavior, default)
 #   -h      Show this help
+#   PATTERN Optional grep pattern to filter logs (e.g., "controller", "ERROR", "anem_node")
 
 # Default options
 LINES=20
 FOLLOW=true
+GREP_PATTERN=""
 
 # Color codes for each service
 COLOR_ARGO_LAUNCH='\e[0;96m'      # Cyan for argo-launch
@@ -37,17 +39,26 @@ while getopts "n:fh" opt; do
         h)
             echo "Argo Multi-Service Log Viewer"
             echo ""
-            echo "Usage: argo_logs.sh [OPTIONS]"
+            echo "Usage: argo_logs.sh [OPTIONS] [PATTERN]"
             echo ""
             echo "Options:"
             echo "  -n N    Show last N lines per service (default: 20)"
             echo "  -f      Follow mode (default)"
             echo "  -h      Show this help"
             echo ""
+            echo "Arguments:"
+            echo "  PATTERN Optional grep pattern to filter logs"
+            echo ""
             echo "Services monitored:"
             echo "  - argo-launch.service      (cyan)"
             echo "  - battery_water.service    (yellow)"
             echo "  - argo_power_control.service (green)"
+            echo ""
+            echo "Examples:"
+            echo "  argo_logs.sh                    # Show all logs"
+            echo "  argo_logs.sh controller         # Filter for 'controller'"
+            echo "  argo_logs.sh -n 50 ERROR        # Last 50 lines, filter for 'ERROR'"
+            echo "  argo_logs.sh 'anem_node'        # Filter for anem_node"
             exit 0
             ;;
         \?)
@@ -56,6 +67,10 @@ while getopts "n:fh" opt; do
             ;;
     esac
 done
+
+# Get positional argument (grep pattern) after options
+shift $((OPTIND-1))
+GREP_PATTERN="$1"
 
 # Check if services exist
 check_service() {
@@ -68,6 +83,9 @@ check_service() {
 }
 
 echo "📋 Argo Multi-Service Logs"
+if [ -n "$GREP_PATTERN" ]; then
+    echo "🔍 Filter: $GREP_PATTERN"
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo -e "${COLOR_ARGO_LAUNCH}●${RESET} argo-launch.service (cyan)"
 echo -e "${COLOR_BATTERY}●${RESET} battery_water.service (yellow)"
@@ -84,6 +102,7 @@ if [ "$FOLLOW" = true ]; then
         -u "$SERVICE_POWER" \
         --output=short-iso-precise \
         2>/dev/null | \
+    (if [ -n "$GREP_PATTERN" ]; then grep --line-buffered "$GREP_PATTERN"; else cat; fi) | \
     while IFS= read -r line; do
         # Check for service names in the log line (they appear in different formats)
         if echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
@@ -103,17 +122,35 @@ if [ "$FOLLOW" = true ]; then
 else
     # Non-follow mode - just show last N lines from each service
     echo -e "${COLOR_ARGO_LAUNCH}=== argo-launch.service ===${RESET}"
-    journalctl -u "$SERVICE_ARGO" -n "$LINES" --no-pager 2>/dev/null | \
-        sed "s/^/${COLOR_ARGO_LAUNCH}/" | sed "s/$/${RESET}/"
+    if [ -n "$GREP_PATTERN" ]; then
+        journalctl -u "$SERVICE_ARGO" -n "$LINES" --no-pager 2>/dev/null | \
+            grep "$GREP_PATTERN" | \
+            sed "s/^/${COLOR_ARGO_LAUNCH}/" | sed "s/$/${RESET}/"
+    else
+        journalctl -u "$SERVICE_ARGO" -n "$LINES" --no-pager 2>/dev/null | \
+            sed "s/^/${COLOR_ARGO_LAUNCH}/" | sed "s/$/${RESET}/"
+    fi
     echo ""
     
     echo -e "${COLOR_BATTERY}=== battery_water.service ===${RESET}"
-    journalctl -u "$SERVICE_BATTERY" -n "$LINES" --no-pager 2>/dev/null | \
-        sed "s/^/${COLOR_BATTERY}/" | sed "s/$/${RESET}/"
+    if [ -n "$GREP_PATTERN" ]; then
+        journalctl -u "$SERVICE_BATTERY" -n "$LINES" --no-pager 2>/dev/null | \
+            grep "$GREP_PATTERN" | \
+            sed "s/^/${COLOR_BATTERY}/" | sed "s/$/${RESET}/"
+    else
+        journalctl -u "$SERVICE_BATTERY" -n "$LINES" --no-pager 2>/dev/null | \
+            sed "s/^/${COLOR_BATTERY}/" | sed "s/$/${RESET}/"
+    fi
     echo ""
     
     echo -e "${COLOR_POWER}=== argo_power_control.service ===${RESET}"
-    journalctl -u "$SERVICE_POWER" -n "$LINES" --no-pager 2>/dev/null | \
-        sed "s/^/${COLOR_POWER}/" | sed "s/$/${RESET}/"
+    if [ -n "$GREP_PATTERN" ]; then
+        journalctl -u "$SERVICE_POWER" -n "$LINES" --no-pager 2>/dev/null | \
+            grep "$GREP_PATTERN" | \
+            sed "s/^/${COLOR_POWER}/" | sed "s/$/${RESET}/"
+    else
+        journalctl -u "$SERVICE_POWER" -n "$LINES" --no-pager 2>/dev/null | \
+            sed "s/^/${COLOR_POWER}/" | sed "s/$/${RESET}/"
+    fi
 fi
 
