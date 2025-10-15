@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks
 
 help:
 	@echo "Argo Robot Services Management"
@@ -38,6 +38,7 @@ help:
 	@echo ""
 	@echo "System Fixes:"
 	@echo "  fix-orangepi-ramlog  - Fix orangepi-ramlog to preserve persistent logs"
+	@echo "  setup-wifi-networks  - Configure WiFi networks with proper priority order"
 	@echo ""
 	@echo "MOTD Customization:"
 	@echo "  install-motd    - Install Argo shutdown status MOTD script"
@@ -225,6 +226,16 @@ fix-orangepi-ramlog:
 		./scripts/fix-orangepi-ramlog.sh; \
 	else \
 		echo "❌ Error: scripts/fix-orangepi-ramlog.sh not found!"; \
+		echo "   Make sure you're running this from the Argo project root directory."; \
+		exit 1; \
+	fi
+
+setup-wifi-networks:
+	@echo "Setting up Argo WiFi networks with proper priority order..."
+	@if [ -f scripts/setup_wifi_networks.sh ]; then \
+		./scripts/setup_wifi_networks.sh; \
+	else \
+		echo "❌ Error: scripts/setup_wifi_networks.sh not found!"; \
 		echo "   Make sure you're running this from the Argo project root directory."; \
 		exit 1; \
 	fi
