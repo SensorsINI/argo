@@ -1253,9 +1253,9 @@ class ArgoLifecycleManager:
                     print(f"⚠️  Battery: Nearly depleted (< 6 min remaining)")
                 elif time_to_empty_hours < 1.0:
                     minutes = int(time_to_empty_hours * 60)
-                    print(f"⏱️  Time to depletion: {minutes} min")
+                    print(f"⏱️  Est. battery lifetime: {minutes} min")
                 else:
-                    print(f"⏱️  Time to depletion: {time_to_empty_hours:.1f} hours")
+                    print(f"⏱️  Est. battery lifetime: {time_to_empty_hours:.1f} hours")
             
             # Display critical alerts if any
             if critical_alerts:

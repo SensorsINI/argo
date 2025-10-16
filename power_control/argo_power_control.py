@@ -154,9 +154,9 @@ class Colors:
 
 # Button Press Configuration
 # Default button hold time for shutdown (seconds)
-DEFAULT_SHUTDOWN_THRESHOLD_S = 5.0
+DEFAULT_SHUTDOWN_THRESHOLD_S = 8.0
 # Warn users this many seconds before shutdown to release the button
-SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S = 3.0
+SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S = 4.0
 # Button release polling frequency during press (10 Hz - only used during button press)
 BUTTON_ERROR_RECOVERY_DELAY_S = 0.1     # Delay on button read error (seconds)
 # Maximum duration for multiple taps to toggle states (seconds)
@@ -782,7 +782,7 @@ class PowerController:
                 logger.info("Double tap detected - requesting to stop Argo service")
                 self.send_desktop_notification(
                     "Argo Service Control",
-                    "Requesting to stop Argo service...",
+                    "Requesting to stop Argo nodes...",
                     "normal"
                 )
                 # Immediately update LED heartbeat to reflect pending state change
@@ -792,13 +792,13 @@ class PowerController:
                 if success:
                     self.send_desktop_notification(
                         "Argo Service Stopped",
-                        "Argo launch service stopped by double tap",
+                        "Argo nodes stopped by double tap",
                         "normal"
                     )
                 else:
                     self.send_desktop_notification(
                         "Argo Service Error",
-                        "Failed to stop Argo service",
+                        "Failed to stop Argo nodes",
                         "critical"
                     )
                     # Revert state on failure
@@ -808,7 +808,7 @@ class PowerController:
                 logger.info("Double tap detected - requesting to start Argo service")
                 self.send_desktop_notification(
                     "Argo Service Control",
-                    "Requesting to start Argo service...",
+                    "Requesting to start Argo nodes...",
                     "normal"
                 )
                 # Immediately update LED heartbeat to reflect pending state change
@@ -817,14 +817,14 @@ class PowerController:
                 success = self.start_argo_service()
                 if success:
                     self.send_desktop_notification(
-                        "Argo Service Started",
-                        "Argo launch service started by double tap",
+                        "Argo Nodes Started",
+                        "Argo nodes started by double tap",
                         "normal"
                     )
                 else:
                     self.send_desktop_notification(
                         "Argo Service Error",
-                        "Failed to start Argo service",
+                        "Failed to start Argo nodes",
                         "critical"
                     )
                     # Revert state on failure
@@ -835,7 +835,7 @@ class PowerController:
             logger.error(f"Error toggling Argo service: {e}")
             self.send_desktop_notification(
                 "Argo Service Error",
-                f"Error toggling Argo service: {e}",
+                f"Error toggling Argo nodes launch service: {e}",
                 "critical"
             )
             # Revert to old state on exception
