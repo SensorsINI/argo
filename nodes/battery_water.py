@@ -38,6 +38,7 @@ from std_msgs.msg import Float32, Bool
 from std_srvs.srv import Trigger
 import time
 import sys
+import signal
 import argparse
 import argcomplete
 import os
@@ -181,8 +182,8 @@ class BatteryWaterNode(Node):
         self._voltage_samples = deque(maxlen=self.battery_lifetime_sample_window)
         
         # Persistent charging/discharging slopes (V/s) for early estimates
-        self._charging_slope = None  # V/s when charging
-        self._discharging_slope = None  # V/s when discharging
+        self._charging_slope_v_per_s = None  # V/s when charging
+        self._discharging_slope_v_per_s = None  # V/s when discharging
         self._slopes_file_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), BATTERY_SLOPES_FILE)
         self._load_battery_slopes()
@@ -348,6 +349,21 @@ class BatteryWaterNode(Node):
 
             # Publish initial health status as healthy
             self._publish_health_status(True)
+        
+        # Setup signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully and save slopes"""
+        self.get_logger().info(f"Received signal {signum}, saving slopes and shutting down...")
+        try:
+            self._save_battery_slopes()
+        except Exception as e:
+            self.get_logger().error(f"Error saving slopes during shutdown: {e}")
+        # Let ROS2 handle the actual shutdown
+        if rclpy.ok():
+            rclpy.shutdown()
 
     def _publish_health_status(self, is_healthy: bool):
         """Publish health status and update internal state"""
@@ -508,11 +524,11 @@ class BatteryWaterNode(Node):
             if os.path.exists(self._slopes_file_path):
                 with open(self._slopes_file_path, 'r') as f:
                     slopes_data = json.load(f)
-                    self._charging_slope = slopes_data.get('charging_slope')
-                    self._discharging_slope = slopes_data.get('discharging_slope')
+                    self._charging_slope_v_per_s = slopes_data.get('charging_slope_v_per_s')
+                    self._discharging_slope_v_per_s = slopes_data.get('discharging_slope_v_per_s')
                     self.get_logger().info(
-                        f"Loaded battery slopes: charging={self._charging_slope:.6f} V/s, "
-                        f"discharging={self._discharging_slope:.6f} V/s" if self._charging_slope and self._discharging_slope else
+                        f"Loaded battery slopes: charging={self._charging_slope_v_per_s:.6f} V/s, "
+                        f"discharging={self._discharging_slope_v_per_s:.6f} V/s" if self._charging_slope_v_per_s and self._discharging_slope_v_per_s else
                         "Loaded partial battery slopes from persistent storage"
                     )
         except Exception as e:
@@ -521,19 +537,33 @@ class BatteryWaterNode(Node):
     def _save_battery_slopes(self):
         """Save current battery charging/discharging slopes to persistent storage"""
         try:
-            if self._charging_slope is not None or self._discharging_slope is not None:
+            # Validate that slopes are meaningful (not None, not zero, within reasonable range)
+            has_meaningful_charging = (self._charging_slope_v_per_s is not None and 
+                                      abs(self._charging_slope_v_per_s) > 1e-9 and 
+                                      abs(self._charging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
+            has_meaningful_discharging = (self._discharging_slope_v_per_s is not None and 
+                                         abs(self._discharging_slope_v_per_s) > 1e-9 and 
+                                         abs(self._discharging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
+            
+            if has_meaningful_charging or has_meaningful_discharging:
                 slopes_data = {
-                    'charging_slope': self._charging_slope,
-                    'discharging_slope': self._discharging_slope,
+                    'charging_slope_v_per_s': self._charging_slope_v_per_s if has_meaningful_charging else None,
+                    'discharging_slope_v_per_s': self._discharging_slope_v_per_s if has_meaningful_discharging else None,
                     'timestamp': datetime.now().isoformat()
                 }
                 with open(self._slopes_file_path, 'w') as f:
                     json.dump(slopes_data, f, indent=2)
-                self.get_logger().info(
-                    f"Saved battery slopes: charging={self._charging_slope:.6f} V/s, "
-                    f"discharging={self._discharging_slope:.6f} V/s" if self._charging_slope and self._discharging_slope else
-                    "Saved partial battery slopes to persistent storage"
-                )
+                
+                # Build descriptive log message
+                slope_info = []
+                if has_meaningful_charging:
+                    slope_info.append(f"charging={self._charging_slope_v_per_s:.6f} V/s")
+                if has_meaningful_discharging:
+                    slope_info.append(f"discharging={self._discharging_slope_v_per_s:.6f} V/s")
+                
+                self.get_logger().info(f"Saved battery slopes: {', '.join(slope_info)}")
+            else:
+                self.get_logger().info("No meaningful battery slopes to save (insufficient data collected)")
         except Exception as e:
             self.get_logger().error(f"Failed to save battery slopes: {e}")
     
@@ -594,40 +624,40 @@ class BatteryWaterNode(Node):
             fit_result = self._linear_least_squares(self._voltage_samples)
             
             if fit_result is not None:
-                slope, intercept = fit_result
+                slope_v_per_s, intercept = fit_result
                 
                 # Update persistent slopes if we have good data
-                if charging and slope > 1e-6:  # Positive slope for charging
-                    self._charging_slope = slope
-                elif not charging and slope < -1e-6:  # Negative slope for discharging
-                    self._discharging_slope = slope
+                if charging and slope_v_per_s > 1e-6:  # Positive slope for charging
+                    self._charging_slope_v_per_s = slope_v_per_s
+                elif not charging and slope_v_per_s < -1e-6:  # Negative slope for discharging
+                    self._discharging_slope_v_per_s = slope_v_per_s
             else:
                 # Use persistent slopes if available
                 if charging:
-                    slope = self._charging_slope
+                    slope_v_per_s = self._charging_slope_v_per_s
                 else:
-                    slope = self._discharging_slope
+                    slope_v_per_s = self._discharging_slope_v_per_s
                 
-                if slope is None:
+                if slope_v_per_s is None:
                     return None
             
             # Compute time to target voltage
             if charging:
                 # Time to BATTERY_FULLY_CHARGED_THRESHOLD_V
                 target_voltage = BATTERY_FULLY_CHARGED_THRESHOLD_V
-                if slope <= 1e-6:  # Not charging or charging too slowly
+                if slope_v_per_s <= 1e-6:  # Not charging or charging too slowly
                     return None
                 if voltage >= target_voltage:
                     return 0.0  # Already at target
-                time_seconds = (target_voltage - voltage) / slope
+                time_seconds = (target_voltage - voltage) / slope_v_per_s
             else:
                 # Time to 0% (approximate as 6.0V for 2S LiPo, empty)
                 target_voltage = 6.0  # Conservative empty voltage
-                if slope >= -1e-6:  # Not discharging or discharging too slowly
+                if slope_v_per_s >= -1e-6:  # Not discharging or discharging too slowly
                     return None
                 if voltage <= target_voltage:
                     return 0.0  # Already depleted
-                time_seconds = (target_voltage - voltage) / slope
+                time_seconds = (target_voltage - voltage) / slope_v_per_s
             
             # Convert to hours and clamp to reasonable range
             time_hours = time_seconds / 3600.0
