@@ -15,3 +15,6 @@ ExecStop=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 launch/argo_
 Restart=no
 StandardOutput=journal
 StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
