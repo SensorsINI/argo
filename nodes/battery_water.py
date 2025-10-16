@@ -42,8 +42,11 @@ import argparse
 import argcomplete
 import os
 import csv
+import json
 from datetime import datetime
 from rclpy.executors import ExternalShutdownException
+from collections import deque
+from typing import Optional, Tuple
 
 # Using standard Trigger service - no custom imports needed
 
@@ -64,6 +67,12 @@ THRESHOLD_CHANGE_PCT = 0.1  # Reduced from 1.0 to 0.1% for more frequent publish
 # Battery monitoring thresholds
 BATTERY_LOW_THRESHOLD_V = 7.5       # V, ~20% for 2S LiPo, triggers warning
 BATTERY_CRITICAL_THRESHOLD_V = 6.8  # V, ~10% for 2S LiPo, may trigger shutdown
+BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with USB charging pluugged in under full laod (sans servos)
+
+# Battery lifetime estimation configuration
+BATTERY_LIFETIME_SAMPLE_WINDOW = 300  # Number of samples for linear regression (default: 300 samples)
+BATTERY_LIFETIME_MIN_SAMPLES = 30     # Minimum samples required for estimation (default: 30 samples)
+BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
 
 try:
     import smbus2 as smbus2
@@ -135,6 +144,10 @@ class BatteryWaterNode(Node):
             Bool, 'charging_status', 10)
         self.pub_ac_power_present = self.create_publisher(
             Bool, 'ac_power_present', 10)
+        
+        # Battery lifetime estimation publisher
+        self.pub_battery_lifetime_hours = self.create_publisher(
+            Float32, 'battery_lifetime_hours', 10)
 
         # Service for on-demand battery status using standard Trigger service
         self.srv_battery_status = self.create_service(
@@ -157,6 +170,27 @@ class BatteryWaterNode(Node):
         self._latest_charging_status = None
         self._latest_ac_power_present = None
         self._latest_timestamp = None
+        
+        # Battery lifetime estimation
+        self.battery_lifetime_sample_window = int(
+            self.declare_parameter('battery_lifetime_sample_window', BATTERY_LIFETIME_SAMPLE_WINDOW).value)
+        self.battery_lifetime_min_samples = int(
+            self.declare_parameter('battery_lifetime_min_samples', BATTERY_LIFETIME_MIN_SAMPLES).value)
+        
+        # Voltage sample history (timestamp, voltage) for lifetime estimation
+        self._voltage_samples = deque(maxlen=self.battery_lifetime_sample_window)
+        
+        # Persistent charging/discharging slopes (V/s) for early estimates
+        self._charging_slope = None  # V/s when charging
+        self._discharging_slope = None  # V/s when discharging
+        self._slopes_file_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), BATTERY_SLOPES_FILE)
+        self._load_battery_slopes()
+        
+        # Latest lifetime estimates for service response and publishing
+        self._latest_time_to_full_hours = None
+        self._latest_time_to_empty_hours = None
+        self._latest_battery_lifetime_hours = None
 
         # CSV logging setup
         self.csv_log_dir = "/var/log.hdd/persistent"
@@ -398,8 +432,6 @@ class BatteryWaterNode(Node):
     def battery_status_callback(self, request, response):
         """Service callback to provide latest battery and sensor status as JSON string"""
         try:
-            import json
-
             # Get current timestamp
             now = self.get_clock().now()
 
@@ -418,7 +450,9 @@ class BatteryWaterNode(Node):
                 'ac_power_present': self._latest_ac_power_present if self._latest_ac_power_present is not None else False,
                 'battery_water_health': self.health_status,
                 'timestamp_sec': now.seconds_nanoseconds()[0],
-                'timestamp_nanosec': now.seconds_nanoseconds()[1]
+                'timestamp_nanosec': now.seconds_nanoseconds()[1],
+                'time_to_full_hours': self._latest_time_to_full_hours,
+                'time_to_empty_hours': self._latest_time_to_empty_hours
             }
 
             # Format battery summary
@@ -467,6 +501,144 @@ class BatteryWaterNode(Node):
             response.success = False
             response.message = f"Error: {str(e)}"
             return response
+    
+    def _load_battery_slopes(self):
+        """Load persistent battery charging/discharging slopes from file"""
+        try:
+            if os.path.exists(self._slopes_file_path):
+                with open(self._slopes_file_path, 'r') as f:
+                    slopes_data = json.load(f)
+                    self._charging_slope = slopes_data.get('charging_slope')
+                    self._discharging_slope = slopes_data.get('discharging_slope')
+                    self.get_logger().info(
+                        f"Loaded battery slopes: charging={self._charging_slope:.6f} V/s, "
+                        f"discharging={self._discharging_slope:.6f} V/s" if self._charging_slope and self._discharging_slope else
+                        "Loaded partial battery slopes from persistent storage"
+                    )
+        except Exception as e:
+            self.get_logger().warning(f"Failed to load battery slopes: {e}")
+    
+    def _save_battery_slopes(self):
+        """Save current battery charging/discharging slopes to persistent storage"""
+        try:
+            if self._charging_slope is not None or self._discharging_slope is not None:
+                slopes_data = {
+                    'charging_slope': self._charging_slope,
+                    'discharging_slope': self._discharging_slope,
+                    'timestamp': datetime.now().isoformat()
+                }
+                with open(self._slopes_file_path, 'w') as f:
+                    json.dump(slopes_data, f, indent=2)
+                self.get_logger().info(
+                    f"Saved battery slopes: charging={self._charging_slope:.6f} V/s, "
+                    f"discharging={self._discharging_slope:.6f} V/s" if self._charging_slope and self._discharging_slope else
+                    "Saved partial battery slopes to persistent storage"
+                )
+        except Exception as e:
+            self.get_logger().error(f"Failed to save battery slopes: {e}")
+    
+    def _linear_least_squares(self, samples: deque) -> Optional[Tuple[float, float]]:
+        """
+        Compute linear least squares fit for voltage samples.
+        
+        Args:
+            samples: deque of (timestamp, voltage) tuples
+        
+        Returns:
+            Tuple of (slope, intercept) in V/s and V, or None if insufficient samples
+        """
+        if len(samples) < self.battery_lifetime_min_samples:
+            return None
+        
+        try:
+            # Extract timestamps and voltages
+            n = len(samples)
+            t0 = samples[0][0]  # Reference time for numerical stability
+            times = [t - t0 for t, v in samples]
+            voltages = [v for t, v in samples]
+            
+            # Compute sums for least squares
+            sum_t = sum(times)
+            sum_v = sum(voltages)
+            sum_tv = sum(t * v for t, v in zip(times, voltages))
+            sum_t2 = sum(t * t for t in times)
+            
+            # Compute slope and intercept
+            # slope = (n * sum_tv - sum_t * sum_v) / (n * sum_t2 - sum_t * sum_t)
+            denominator = n * sum_t2 - sum_t * sum_t
+            if abs(denominator) < 1e-9:
+                return None  # Avoid division by zero
+            
+            slope = (n * sum_tv - sum_t * sum_v) / denominator
+            intercept = (sum_v - slope * sum_t) / n
+            
+            return (slope, intercept)
+        
+        except Exception as e:
+            self.get_logger().error(f"Linear least squares fit failed: {e}")
+            return None
+    
+    def _estimate_battery_lifetime(self, voltage: float, charging: bool) -> Optional[float]:
+        """
+        Estimate time to full charge or depletion in hours.
+        
+        Args:
+            voltage: Current battery voltage
+            charging: True if charging, False if discharging
+        
+        Returns:
+            Time in hours, or None if estimation not possible
+        """
+        try:
+            # Use linear regression on recent samples
+            fit_result = self._linear_least_squares(self._voltage_samples)
+            
+            if fit_result is not None:
+                slope, intercept = fit_result
+                
+                # Update persistent slopes if we have good data
+                if charging and slope > 1e-6:  # Positive slope for charging
+                    self._charging_slope = slope
+                elif not charging and slope < -1e-6:  # Negative slope for discharging
+                    self._discharging_slope = slope
+            else:
+                # Use persistent slopes if available
+                if charging:
+                    slope = self._charging_slope
+                else:
+                    slope = self._discharging_slope
+                
+                if slope is None:
+                    return None
+            
+            # Compute time to target voltage
+            if charging:
+                # Time to BATTERY_FULLY_CHARGED_THRESHOLD_V
+                target_voltage = BATTERY_FULLY_CHARGED_THRESHOLD_V
+                if slope <= 1e-6:  # Not charging or charging too slowly
+                    return None
+                if voltage >= target_voltage:
+                    return 0.0  # Already at target
+                time_seconds = (target_voltage - voltage) / slope
+            else:
+                # Time to 0% (approximate as 6.0V for 2S LiPo, empty)
+                target_voltage = 6.0  # Conservative empty voltage
+                if slope >= -1e-6:  # Not discharging or discharging too slowly
+                    return None
+                if voltage <= target_voltage:
+                    return 0.0  # Already depleted
+                time_seconds = (target_voltage - voltage) / slope
+            
+            # Convert to hours and clamp to reasonable range
+            time_hours = time_seconds / 3600.0
+            if time_hours < 0 or time_hours > 1000:  # Sanity check
+                return None
+            
+            return time_hours
+        
+        except Exception as e:
+            self.get_logger().error(f"Battery lifetime estimation failed: {e}")
+            return None
 
     # ---------- I2C helpers ----------
     def _i2c_write(self, addr: int, byte_val: int) -> None:
@@ -985,6 +1157,32 @@ class BatteryWaterNode(Node):
         self._prev_charging_status = charging_status
         self._prev_ac_power_present = ac_power_present
 
+        # Add battery voltage sample for lifetime estimation
+        self._voltage_samples.append((current_time, battery_voltage))
+        
+        # Compute battery lifetime estimates
+        if charging_status is not None:
+            if charging_status:
+                # Charging: estimate time to full
+                self._latest_time_to_full_hours = self._estimate_battery_lifetime(
+                    battery_voltage, charging=True)
+                self._latest_time_to_empty_hours = None
+                self._latest_battery_lifetime_hours = self._latest_time_to_full_hours
+            else:
+                # Discharging: estimate time to empty
+                self._latest_time_to_full_hours = None
+                self._latest_time_to_empty_hours = self._estimate_battery_lifetime(
+                    battery_voltage, charging=False)
+                self._latest_battery_lifetime_hours = self._latest_time_to_empty_hours
+            
+            # Publish battery lifetime hours topic
+            if self._latest_battery_lifetime_hours is not None and rclpy.ok():
+                try:
+                    self.pub_battery_lifetime_hours.publish(
+                        Float32(data=self._latest_battery_lifetime_hours))
+                except Exception:
+                    pass
+
         self._process_alerts(battery_voltage, saltwater_voltage, humidity)
         
         self._log_sensor_states(battery_voltage, battery_remaining_pct, saltwater_voltage, self._latest_sail_current, temperature, humidity, charging_status, ac_power_present)
@@ -1081,6 +1279,7 @@ This ROS2 node monitors various sensors on the Argo autonomous sailboat:
 - SHT45: Temperature and humidity sensor
 - Calculates battery state-of-charge using LiPo discharge curve
 - Publishes alerts for low battery, saltwater detection, and high humidity
+- Estimates time to full charge or depletion using linear regression
 
 Topics:
   Publishes:
@@ -1090,6 +1289,7 @@ Topics:
     /pcb_temperature: Float32 - PCB temperature in Celsius (from SHT45 sensor)
     /relative_humidity: Float32 - Relative humidity percentage
     /battery_remaining_pct: Float32 - Battery state-of-charge percentage
+    /battery_lifetime_hours: Float32 - Estimated hours to full/empty
     /battery_low_alert: Bool - Battery low voltage alert
     /saltwater_alert: Bool - Saltwater detection alert
     /humidity_alert: Bool - High humidity alert
@@ -1100,6 +1300,8 @@ Parameters:
   humidity_alert_threshold_pct: High humidity threshold percentage (default: 75.0)
   battery_series_cells: Number of battery cells in series (default: 2)
   soc_S, soc_V0, soc_A, soc_B: LiPo state-of-charge curve parameters
+  battery_lifetime_sample_window: Sample window size for lifetime estimation (default: 300)
+  battery_lifetime_min_samples: Minimum samples for estimation (default: 30)
 
 Options:
   --debug: Enable ASCII terminal visualization of sensor values
@@ -1131,6 +1333,12 @@ Hardware:
         pass
     finally:
         if node:
+            try:
+                # Save battery slopes on shutdown
+                if hasattr(node, '_save_battery_slopes'):
+                    node._save_battery_slopes()
+            except Exception as e:
+                print(f"Error saving battery slopes: {e}")
             try:
                 if hasattr(node, '_teardown_ascii_vis'):
                     node._teardown_ascii_vis()

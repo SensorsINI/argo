@@ -1201,7 +1201,7 @@ class ArgoLifecycleManager:
 
             # Battery and alerts
             # Note: battery_water.py runs as independent service
-            battery_summary, critical_alerts, charging_status, usb_power_status = None, None, None, None
+            battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = None, None, None, None, None, None
             # Check if battery_water service is running independently
             battery_service_running = False
             try:
@@ -1212,7 +1212,7 @@ class ArgoLifecycleManager:
                 pass
 
             if battery_service_running:
-                battery_summary, critical_alerts, charging_status, usb_power_status = self._get_battery_water_status_alerts()
+                battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = self._get_battery_water_status_alerts()
             
             # Build system info line showing running nodes out of total nodes with 'running/total'
             system_info = f"📊 Nodes {running_count}/{total_count} | CPU {cpu_percent:.1f}% | Mem {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temp. {cpu_temp}°C"
@@ -1238,6 +1238,24 @@ class ArgoLifecycleManager:
                 system_info += f" | USB: ???"
             
             print(system_info)
+            
+            # Display battery lifetime estimates if available
+            if time_to_full_hours is not None:
+                if time_to_full_hours < 0.1:
+                    print(f"⏱️  Battery: Fully charged (< 6 min to 8.2V)")
+                elif time_to_full_hours < 1.0:
+                    minutes = int(time_to_full_hours * 60)
+                    print(f"⏱️  Time to full charge: {minutes} min")
+                else:
+                    print(f"⏱️  Time to full charge: {time_to_full_hours:.1f} hours")
+            elif time_to_empty_hours is not None:
+                if time_to_empty_hours < 0.1:
+                    print(f"⚠️  Battery: Nearly depleted (< 6 min remaining)")
+                elif time_to_empty_hours < 1.0:
+                    minutes = int(time_to_empty_hours * 60)
+                    print(f"⏱️  Time to depletion: {minutes} min")
+                else:
+                    print(f"⏱️  Time to depletion: {time_to_empty_hours:.1f} hours")
             
             # Display critical alerts if any
             if critical_alerts:
@@ -1277,6 +1295,8 @@ class ArgoLifecycleManager:
             battery_summary = None
             charging_status = None
             usb_power_status = None
+            time_to_full_hours = None
+            time_to_empty_hours = None
             try:
                 result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
                                         capture_output=True, text=True, timeout=2)
@@ -1285,7 +1305,7 @@ class ArgoLifecycleManager:
                     # Try to get battery info, with retry on failure
                     for attempt in range(2):
                         try:
-                            battery_summary, _, charging_status, usb_power_status = self._get_battery_water_status_alerts()
+                            battery_summary, _, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = self._get_battery_water_status_alerts()
                             if battery_summary:
                                 break  # Success
                             time.sleep(0.1)  # Brief delay before retry
@@ -1318,6 +1338,24 @@ class ArgoLifecycleManager:
                 status_line += f" | USB: ❌"
             else:
                 status_line += f" | USB: ???"
+            
+            # Add battery lifetime estimate if available (condensed format)
+            if time_to_full_hours is not None:
+                if time_to_full_hours < 0.1:
+                    status_line += f" | ⏱️ Full"
+                elif time_to_full_hours < 1.0:
+                    minutes = int(time_to_full_hours * 60)
+                    status_line += f" | ⏱️ +{minutes}m"
+                else:
+                    status_line += f" | ⏱️ +{time_to_full_hours:.1f}h"
+            elif time_to_empty_hours is not None:
+                if time_to_empty_hours < 0.1:
+                    status_line += f" | ⚠️ Empty"
+                elif time_to_empty_hours < 1.0:
+                    minutes = int(time_to_empty_hours * 60)
+                    status_line += f" | ⏱️ -{minutes}m"
+                else:
+                    status_line += f" | ⏱️ -{time_to_empty_hours:.1f}h"
             
             print(status_line, flush=True)
             
@@ -1608,8 +1646,8 @@ class ArgoLifecycleManager:
             print(f"❌ Toggle pause failed: {message}")
             return False
 
-    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool]]:
-        """Get battery info, alerts, charging status, and USB power status using the battery Trigger service client"""
+    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool], Optional[float], Optional[float]]:
+        """Get battery info, alerts, charging status, USB power status, and lifetime estimates using the battery Trigger service client"""
         try:
             # Use ROS2 service client if available, otherwise fallback to subprocess
             if self.battery_service_client and ROS2_AVAILABLE:
@@ -1625,13 +1663,15 @@ class ArgoLifecycleManager:
                 raw_data = battery_data.get('raw_data', {})
                 charging_status = raw_data.get('charging_status')
                 usb_power_status = raw_data.get('ac_power_present')
-                return battery_summary, critical_alerts, charging_status, usb_power_status
+                time_to_full_hours = raw_data.get('time_to_full_hours')
+                time_to_empty_hours = raw_data.get('time_to_empty_hours')
+                return battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours
             else:
-                return None, None, None, None
+                return None, None, None, None, None, None
 
         except Exception as e:
             print(f"    Error getting battery and alerts: {e}")
-            return None, None, None, None
+            return None, None, None, None, None, None
 
     def _call_battery_service_client(self) -> Optional[Dict[str, Any]]:
         """Call battery service using centralized Trigger service call"""
