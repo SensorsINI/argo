@@ -146,6 +146,14 @@ class BatteryWaterNode(Node):
         self.pub_ac_power_present = self.create_publisher(
             Bool, 'ac_power_present', 10)
         
+        # Time-based status tracking for MP2672GD behavior
+        # Note: When battery is fully charged, MP2672GD cycles between charging
+        # and supplementing modes. We track "recently charging" over a time window.
+        self._charging_window_s = 30.0  # Report "charging" if seen in last 30s
+        self._ac_power_window_s = 30.0   # Report "AC power" if seen in last 30s
+        self._last_charging_true_time = 0.0
+        self._last_ac_power_true_time = 0.0
+        
         # Battery lifetime estimation publisher
         self.pub_battery_lifetime_hours = self.create_publisher(
             Float32, 'battery_lifetime_hours', 10)
@@ -339,13 +347,17 @@ class BatteryWaterNode(Node):
             self.sail_current_timer = self.create_timer(
                 1.0 / SAIL_CURRENT_RATE_HZ, self.read_sail_current)
             
+            # High-frequency timer for GPIO status (1 Hz to catch MP2672GD cycling)
+            self.gpio_status_timer = self.create_timer(
+                1.0, self.read_gpio_status_only)
+            
             # Low-frequency timer for battery safety sensors
             self.battery_safety_timer = self.create_timer(
                 BATTERY_SAFETY_INTERVAL_S, self.read_battery_safety_sensors)
             
             self.get_logger().info(
                 f'Battery/Water node initialized - Sail current: {SAIL_CURRENT_RATE_HZ}Hz, '
-                f'Battery safety: {BATTERY_SAFETY_INTERVAL_S}s intervals')
+                f'GPIO status: 1Hz, Battery safety: {BATTERY_SAFETY_INTERVAL_S}s intervals')
 
             # Publish initial health status as healthy
             self._publish_health_status(True)
@@ -756,26 +768,26 @@ class BatteryWaterNode(Node):
 
     # ---------- GPIO reading helpers ----------
     def _read_gpio_status(self):
-        """Read GPIO status from MP2672GD charger"""
-        charging_status = None
-        ac_power_present = None
+        """
+        Get current GPIO status based on time-window filtering.
         
+        Note: When battery is fully charged, the MP2672GD cycles between charging
+        and supplementing modes. This is normal behavior. We report "charging" or
+        "AC power present" if seen within the last time window to provide stable
+        status reporting despite the rapid cycling.
+        
+        The actual GPIO polling happens at 1Hz in read_gpio_status_only().
+        This method just returns the time-filtered status.
+        """
         if not self.gpio_available:
-            return charging_status, ac_power_present
+            return None, None
             
-        try:
-            # Read !CHARGING GPIO (PC12, line 76) - invert logic for charging status
-            if self.charging_gpio_line is not None:
-                charging_gpio_value = self.charging_gpio_line.get_value()
-                charging_status = not charging_gpio_value  # Invert: !CHARGING=0 means charging=True
-                
-            # Read !ACOK GPIO (PH9, line 233) - invert logic for AC power present
-            if self.acok_gpio_line is not None:
-                acok_gpio_value = self.acok_gpio_line.get_value()
-                ac_power_present = not acok_gpio_value  # Invert: !ACOK=0 means AC power present=True
-                
-        except Exception as e:
-            self.get_logger().error(f'GPIO read failed: {e}')
+        current_time = time.monotonic()
+        
+        # Determine status based on time windows
+        # Report True if seen as True within the time window
+        charging_status = (current_time - self._last_charging_true_time) < self._charging_window_s
+        ac_power_present = (current_time - self._last_ac_power_true_time) < self._ac_power_window_s
             
         return charging_status, ac_power_present
 
@@ -807,10 +819,11 @@ class BatteryWaterNode(Node):
             self.sail_current_timer.cancel()
         if hasattr(self, 'battery_safety_timer'):
             self.battery_safety_timer.cancel()
+        # Keep GPIO timer running even in retry mode
         
         # Create single low-frequency retry timer (1 Hz)
         self.retry_timer = self.create_timer(1.0, self._retry_callback)
-        self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
+        self.get_logger().info("Switched to 1Hz retry mode for I2C recovery (GPIO monitoring continues)")
         
         # Reset consecutive error counter for recovery tracking
         self._consecutive_io_errors = 0
@@ -826,6 +839,7 @@ class BatteryWaterNode(Node):
             1.0 / SAIL_CURRENT_RATE_HZ, self.read_sail_current)
         self.battery_safety_timer = self.create_timer(
             BATTERY_SAFETY_INTERVAL_S, self.read_battery_safety_sensors)
+        # GPIO timer is continuous and doesn't need recreation
         
         self.get_logger().info("Switched back to normal mode - I2C communication recovered")
 
@@ -1057,6 +1071,38 @@ class BatteryWaterNode(Node):
                          previous_value) * 100.0
         return change_pct >= threshold_pct
 
+    # ---------- High-frequency GPIO status reading (1Hz) ----------
+    def read_gpio_status_only(self):
+        """High-frequency reading of GPIO status only (1Hz) to track MP2672GD cycling"""
+        if self._shutdown_requested or not self.gpio_available:
+            return
+            
+        current_time = time.monotonic()
+        
+        try:
+            # Read raw GPIO values
+            # Read !CHARGING GPIO (PC12, line 76) - invert logic for charging status
+            if self.charging_gpio_line is not None:
+                charging_gpio_value = self.charging_gpio_line.get_value()
+                charging_raw = not charging_gpio_value  # Invert: !CHARGING=0 means charging=True
+                
+                # Update last-seen time when charging is active
+                if charging_raw:
+                    self._last_charging_true_time = current_time
+                
+            # Read !ACOK GPIO (PH9, line 233) - invert logic for AC power present
+            if self.acok_gpio_line is not None:
+                acok_gpio_value = self.acok_gpio_line.get_value()
+                ac_power_raw = not acok_gpio_value  # Invert: !ACOK=0 means AC power present=True
+                
+                # Update last-seen time when AC power is present
+                if ac_power_raw:
+                    self._last_ac_power_true_time = current_time
+                    
+        except Exception as e:
+            # Silently handle errors in high-frequency polling
+            pass
+    
     # ---------- High-frequency sail current reading (10Hz) ----------
     def read_sail_current(self):
         """High-frequency reading of sail current for control purposes (10Hz)"""
