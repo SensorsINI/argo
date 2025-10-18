@@ -1040,10 +1040,9 @@ class BNO085:
     """
     BNO085 9-DOF IMU sensor class based on Bosch BNO080/085 with Hillcrest SH-2 firmware.
     
-    The BNO085 uses a different communication protocol than traditional I2C sensors.
-    It uses a packet-based protocol with report types for different sensor data.
-    
-    Based on Adafruit CircuitPython library and BNO080/085 datasheet.
+    The BNO085 uses SHTP (Sensor Hub Transport Protocol) for communication.
+    This implementation focuses on raw sensor data for compatibility with existing
+    magnetometer calibration and sensor fusion systems.
     """
     
     def __init__(self, bus, address=0x4a):
@@ -1052,36 +1051,51 @@ class BNO085:
         self._sequence_number = 0
         self._packet_buffer = []
         
-        # Report types for different sensor data
-        self.REPORT_ACCELEROMETER = 0x01
-        self.REPORT_GYROSCOPE = 0x02
-        self.REPORT_MAGNETOMETER = 0x03
-        self.REPORT_ROTATION_VECTOR = 0x05
-        self.REPORT_GRAVITY = 0x06
-        self.REPORT_LINEAR_ACCELERATION = 0x07
+        # SHTP Report IDs for raw sensor data (based on BNO085 datasheet)
+        self.REPORT_RAW_ACCELEROMETER = 0x01  # Raw accelerometer data
+        self.REPORT_RAW_GYROSCOPE = 0x02      # Raw gyroscope data  
+        self.REPORT_RAW_MAGNETOMETER = 0x03   # Raw magnetometer data
+        
+        # Alternative report IDs for calibrated sensor data
+        self.REPORT_ACCELEROMETER = 0x01      # Calibrated accelerometer
+        self.REPORT_GYROSCOPE = 0x02          # Calibrated gyroscope
+        self.REPORT_MAGNETOMETER = 0x03       # Calibrated magnetometer
+        
+        # SHTP Channel numbers
+        self.CHANNEL_CONTROL = 0x00
+        self.CHANNEL_REPORTS = 0x01
         
         # Packet structure constants
         self.SHTP_HEADER_SIZE = 4
         self.MAX_PACKET_SIZE = 128
         
     def _read_packet(self):
-        """Read a complete packet from the BNO085."""
+        """Read a complete SHTP packet from the BNO085 using single I2C transaction."""
         try:
-            # Read header first (4 bytes)
+            # Read header first (4 bytes: length_low, length_high, sequence, channel)
+            # Use single I2C transaction to avoid repeated start conditions
             header = self.bus.read_i2c_block_data(self.addr, 0, self.SHTP_HEADER_SIZE)
             
-            # Parse header
-            packet_length = (header[1] << 8) | header[0]
+            # Parse header according to SHTP specification
+            packet_length = (header[1] << 8) | header[0]  # Little-endian length
             sequence_number = header[2]
             channel = header[3]
             
-            if packet_length > self.MAX_PACKET_SIZE:
+            # Validate packet length
+            if packet_length > self.MAX_PACKET_SIZE or packet_length < 0:
                 return None
                 
-            # Read payload
-            payload = []
-            if packet_length > 0:
-                payload = self.bus.read_i2c_block_data(self.addr, 0, packet_length)
+            # If packet length is 0, return header-only packet
+            if packet_length == 0:
+                return {
+                    'length': 0,
+                    'sequence': sequence_number,
+                    'channel': channel,
+                    'payload': []
+                }
+                
+            # Read payload in separate transaction (BNO085 doesn't support repeated start)
+            payload = self.bus.read_i2c_block_data(self.addr, 0, packet_length)
             
             return {
                 'length': packet_length,
@@ -1093,11 +1107,11 @@ class BNO085:
             return None
     
     def _write_packet(self, channel, data):
-        """Write a packet to the BNO085."""
+        """Write a SHTP packet to the BNO085."""
         try:
             packet_length = len(data)
             header = [
-                packet_length & 0xFF,           # Length low byte
+                packet_length & 0xFF,           # Length low byte (little-endian)
                 (packet_length >> 8) & 0xFF,    # Length high byte
                 self._sequence_number & 0xFF,   # Sequence number
                 channel & 0xFF                  # Channel
@@ -1116,30 +1130,33 @@ class BNO085:
             return False
     
     def initialize(self):
-        """Initialize the BNO085 sensor."""
+        """Initialize the BNO085 sensor and enable raw sensor reports."""
         try:
             # Reset the sensor
-            self._write_packet(0, [0x01, 0x00])  # Reset command
+            self._write_packet(self.CHANNEL_CONTROL, [0x01, 0x00])  # Reset command
             time.sleep(0.1)
             
-            # Enable reports for accelerometer, gyroscope, and magnetometer
-            self._write_packet(0, [
-                0x02, 0x00,  # Set feature command
-                0x01,        # Report ID: Accelerometer
+            # Enable accelerometer reports (Report ID 0x01)
+            # Command: Set Feature Report (0x02) + Report ID + Interval + Feature flags
+            self._write_packet(self.CHANNEL_CONTROL, [
+                0x02, 0x00,  # Set Feature Report command
+                self.REPORT_ACCELEROMETER,      # Report ID: Accelerometer (0x01)
                 0x00, 0x00,  # Report interval (0 = 50Hz)
                 0x00, 0x00   # Feature flags
             ])
             
-            self._write_packet(0, [
-                0x02, 0x00,  # Set feature command
-                0x02,        # Report ID: Gyroscope
+            # Enable gyroscope reports (Report ID 0x02)
+            self._write_packet(self.CHANNEL_CONTROL, [
+                0x02, 0x00,  # Set Feature Report command
+                self.REPORT_GYROSCOPE,          # Report ID: Gyroscope (0x02)
                 0x00, 0x00,  # Report interval (0 = 50Hz)
                 0x00, 0x00   # Feature flags
             ])
             
-            self._write_packet(0, [
-                0x02, 0x00,  # Set feature command
-                0x03,        # Report ID: Magnetometer
+            # Enable magnetometer reports (Report ID 0x03)
+            self._write_packet(self.CHANNEL_CONTROL, [
+                0x02, 0x00,  # Set Feature Report command
+                self.REPORT_MAGNETOMETER,       # Report ID: Magnetometer (0x03)
                 0x00, 0x00,  # Report interval (0 = 50Hz)
                 0x00, 0x00   # Feature flags
             ])
@@ -1149,40 +1166,58 @@ class BNO085:
         except Exception:
             return False
     
+    def _parse_sensor_data(self, payload, report_id):
+        """Parse sensor data from SHTP packet payload."""
+        if len(payload) < 12:  # Minimum payload size for sensor data (3x 32-bit floats)
+            return None, None, None
+            
+        # BNO085 sensor data format: 3x 32-bit floats (little-endian)
+        # Each axis is 4 bytes, total 12 bytes
+        try:
+            x = struct.unpack('<f', bytes(payload[0:4]))[0]   # 32-bit float
+            y = struct.unpack('<f', bytes(payload[4:8]))[0]   # 32-bit float
+            z = struct.unpack('<f', bytes(payload[8:12]))[0]  # 32-bit float
+            
+            # BNO085 provides data in standard units:
+            # - Accelerometer: m/s²
+            # - Gyroscope: rad/s  
+            # - Magnetometer: µT (microtesla)
+            
+            return x, y, z
+        except (struct.error, IndexError):
+            return None, None, None
+    
     def read_accelerometer(self):
         """Read accelerometer data in m/s²."""
-        packet = self._read_packet()
-        if packet and packet['channel'] == 0 and len(packet['payload']) >= 12:
-            payload = packet['payload']
-            # Parse accelerometer data (3x 32-bit floats)
-            x = struct.unpack('<f', bytes(payload[0:4]))[0]
-            y = struct.unpack('<f', bytes(payload[4:8]))[0]
-            z = struct.unpack('<f', bytes(payload[8:12]))[0]
-            return x, y, z
+        # Try to read multiple packets to find accelerometer data
+        for _ in range(5):  # Try up to 5 packets
+            packet = self._read_packet()
+            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 6:
+                # Check if this is an accelerometer report
+                if len(packet['payload']) > 0 and packet['payload'][0] == self.REPORT_ACCELEROMETER:
+                    return self._parse_sensor_data(packet['payload'][1:], self.REPORT_ACCELEROMETER)
         return None, None, None
     
     def read_gyroscope(self):
         """Read gyroscope data in rad/s."""
-        packet = self._read_packet()
-        if packet and packet['channel'] == 0 and len(packet['payload']) >= 12:
-            payload = packet['payload']
-            # Parse gyroscope data (3x 32-bit floats)
-            x = struct.unpack('<f', bytes(payload[0:4]))[0]
-            y = struct.unpack('<f', bytes(payload[4:8]))[0]
-            z = struct.unpack('<f', bytes(payload[8:12]))[0]
-            return x, y, z
+        # Try to read multiple packets to find gyroscope data
+        for _ in range(5):  # Try up to 5 packets
+            packet = self._read_packet()
+            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 6:
+                # Check if this is a gyroscope report
+                if len(packet['payload']) > 0 and packet['payload'][0] == self.REPORT_GYROSCOPE:
+                    return self._parse_sensor_data(packet['payload'][1:], self.REPORT_GYROSCOPE)
         return None, None, None
     
     def read_magnetometer(self):
         """Read magnetometer data in µT (microtesla)."""
-        packet = self._read_packet()
-        if packet and packet['channel'] == 0 and len(packet['payload']) >= 12:
-            payload = packet['payload']
-            # Parse magnetometer data (3x 32-bit floats)
-            x = struct.unpack('<f', bytes(payload[0:4]))[0]
-            y = struct.unpack('<f', bytes(payload[4:8]))[0]
-            z = struct.unpack('<f', bytes(payload[8:12]))[0]
-            return x, y, z
+        # Try to read multiple packets to find magnetometer data
+        for _ in range(5):  # Try up to 5 packets
+            packet = self._read_packet()
+            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 6:
+                # Check if this is a magnetometer report
+                if len(packet['payload']) > 0 and packet['payload'][0] == self.REPORT_MAGNETOMETER:
+                    return self._parse_sensor_data(packet['payload'][1:], self.REPORT_MAGNETOMETER)
         return None, None, None
 
 
