@@ -1148,20 +1148,21 @@ class BNO085:
             return None
     
     def _read_packet(self):
-        """Read a complete SHTP packet from the BNO085 using single I2C transaction."""
+        """Read a complete SHTP packet from the BNO085 using proper I2C protocol."""
         try:
-            # Read header first (4 bytes: length_low, length_high, sequence, channel)
-            # Use single I2C transaction to avoid repeated start conditions
+            # Read header first (4 bytes: length_low, length_high, channel, sequence)
+            # BNO080 doesn't support repeated start, so use separate transactions
             header = self.bus.read_i2c_block_data(self.addr, 0, self.SHTP_HEADER_SIZE)
             
-            # Parse header according to SHTP specification
+            # Parse header according to SHTP specification from datasheet
+            # Byte 0: Length LSB, Byte 1: Length MSB, Byte 2: Channel, Byte 3: SeqNum
             packet_length = (header[1] << 8) | header[0]  # Little-endian length
-            sequence_number = header[2]
-            channel = header[3]
+            channel = header[2]
+            sequence_number = header[3]
             
-            self._debug_print(f"Header: length={packet_length}, seq={sequence_number}, channel={channel}, raw={header}")
+            self._debug_print(f"Header: length={packet_length}, channel={channel}, seq={sequence_number}, raw={header}")
             
-            # Validate packet length
+            # Validate packet length (datasheet: max 32766 minus header bytes)
             if packet_length > self.MAX_PACKET_SIZE or packet_length < 0:
                 self._debug_print(f"Invalid packet length: {packet_length}")
                 return None
@@ -1176,9 +1177,14 @@ class BNO085:
                     'payload': []
                 }
                 
-            # Read payload in separate transaction (BNO085 doesn't support repeated start)
-            payload = self.bus.read_i2c_block_data(self.addr, 0, packet_length)
-            self._debug_print(f"Payload: {payload}")
+            # Read payload in separate transaction (BNO080 doesn't support repeated start)
+            # The length includes the header, so payload length is length - 4
+            payload_length = packet_length - self.SHTP_HEADER_SIZE
+            if payload_length > 0:
+                payload = self.bus.read_i2c_block_data(self.addr, 0, payload_length)
+                self._debug_print(f"Payload: {payload}")
+            else:
+                payload = []
             
             return {
                 'length': packet_length,
@@ -1193,12 +1199,14 @@ class BNO085:
     def _write_packet(self, channel, data):
         """Write a SHTP packet to the BNO085."""
         try:
-            packet_length = len(data)
+            # SHTP header format: Length LSB, Length MSB, Channel, SeqNum
+            # Length includes header + payload
+            packet_length = len(data) + self.SHTP_HEADER_SIZE
             header = [
-                packet_length & 0xFF,           # Length low byte (little-endian)
-                (packet_length >> 8) & 0xFF,    # Length high byte
-                self._sequence_number & 0xFF,   # Sequence number
-                channel & 0xFF                  # Channel
+                packet_length & 0xFF,           # Length LSB (little-endian)
+                (packet_length >> 8) & 0xFF,    # Length MSB
+                channel & 0xFF,                 # Channel
+                self._sequence_number & 0xFF    # Sequence number
             ]
             
             self._debug_print(f"Writing packet: channel={channel}, length={packet_length}, seq={self._sequence_number}, data={data}")
@@ -1220,6 +1228,29 @@ class BNO085:
         """Initialize the BNO085 sensor and enable sensor reports."""
         try:
             self._debug_print("Starting BNO085 initialization...")
+            
+            # Test basic I2C communication first
+            self._debug_print("Testing basic I2C communication...")
+            try:
+                # Try to read a single byte to test I2C communication
+                test_data = self.bus.read_i2c_block_data(self.addr, 0, 1)
+                self._debug_print(f"Basic I2C test successful: {test_data}")
+            except Exception as e:
+                self._debug_print(f"Basic I2C test failed: {e}")
+                
+                # Try to wake up the BNO085 - send a simple command
+                self._debug_print("Attempting to wake up BNO085...")
+                try:
+                    # Send a simple write command to wake up the device
+                    self.bus.write_i2c_block_data(self.addr, 0, [0x00])
+                    time.sleep(0.1)
+                    
+                    # Try reading again
+                    test_data = self.bus.read_i2c_block_data(self.addr, 0, 1)
+                    self._debug_print(f"Wake-up successful: {test_data}")
+                except Exception as e2:
+                    self._debug_print(f"Wake-up failed: {e2}")
+                    return False
             
             # Skip reset command for now - try direct communication
             # self._write_packet(self.CHANNEL_EXECUTABLE, [0x01])  # Reset command - commented out
