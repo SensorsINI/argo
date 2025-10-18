@@ -5,15 +5,20 @@
 IMU Sensor Node for Argo Autonomous Sailboat
 ============================================
 
-This ROS2 node interfaces with the ICM-20948 9-axis IMU sensor (accelerometer, 
+This ROS2 node interfaces with 9-axis IMU sensors (accelerometer, 
 gyroscope, magnetometer) via I2C and publishes raw sensor data to ROS2 topics.
 
-Hardware:
-- SparkfunICM-20948 9-axis 
-IMU sensor https://invensense.tdk.com/products/motion-tracking/9-axis/icm-20948/#documentation 
-https://www.sparkfun.com/sparkfun-9dof-imu-breakout-icm-20948-qwiic.html
-- I2C bus 0, address 0x69
-- AK09916 magnetometer (integrated in ICM-20948)
+Supported Hardware:
+- ICM-20948 9-axis IMU sensor (Sparkfun breakout)
+  https://invensense.tdk.com/products/motion-tracking/9-axis/icm-20948/#documentation 
+  https://www.sparkfun.com/sparkfun-9dof-imu-breakout-icm-20948-qwiic.html
+  I2C bus 0, address 0x69, AK09916 magnetometer (integrated)
+  
+- BNO085 9-axis IMU sensor (Adafruit breakout)
+  https://learn.adafruit.com/adafruit-9-dof-orientation-imu-fusion-breakout-bno085
+  I2C bus 0, address 0x4a (or 0x4b), Bosch BNO080/085 with Hillcrest SH-2 firmware
+
+The node automatically detects which sensor is connected and configures itself accordingly.
 
 Axes/Coordinate Frame: (see https://cdn.sparkfun.com/assets/learn_tutorials/8/9/3/DS-000189-ICM-20948-v1.3.pdf section 15, figs 12-13)
 For the ICM-20948, the coordinate frame is defined as follows for the accelerometer:
@@ -47,7 +52,7 @@ Command Line Options:
                      - Press Ctrl+C to finish and save calibration
                      - Robust against transient I2C errors with automatic recovery
                      - Choose between min-max or ellipsoid fitting methods
-                     - Saves calibration to nodes/invensense-20948-compass-calibration.json
+                     - Saves calibration to sensor-specific file (e.g., nodes/bno085-compass-calibration.json)
                      - Backs up old calibration to nodes/imu_calib_backups/
                      - Saves timestamped samples to nodes/ for persistent storage
                      - Generates time-series and 3D calibration plots in /tmp
@@ -1031,6 +1036,187 @@ class ICM20948:
         return mx_uT, my_uT, mz_uT
 
 
+class BNO085:
+    """
+    BNO085 9-DOF IMU sensor class based on Bosch BNO080/085 with Hillcrest SH-2 firmware.
+    
+    The BNO085 uses a different communication protocol than traditional I2C sensors.
+    It uses a packet-based protocol with report types for different sensor data.
+    
+    Based on Adafruit CircuitPython library and BNO080/085 datasheet.
+    """
+    
+    def __init__(self, bus, address=0x4a):
+        self.bus = bus
+        self.addr = address
+        self._sequence_number = 0
+        self._packet_buffer = []
+        
+        # Report types for different sensor data
+        self.REPORT_ACCELEROMETER = 0x01
+        self.REPORT_GYROSCOPE = 0x02
+        self.REPORT_MAGNETOMETER = 0x03
+        self.REPORT_ROTATION_VECTOR = 0x05
+        self.REPORT_GRAVITY = 0x06
+        self.REPORT_LINEAR_ACCELERATION = 0x07
+        
+        # Packet structure constants
+        self.SHTP_HEADER_SIZE = 4
+        self.MAX_PACKET_SIZE = 128
+        
+    def _read_packet(self):
+        """Read a complete packet from the BNO085."""
+        try:
+            # Read header first (4 bytes)
+            header = self.bus.read_i2c_block_data(self.addr, 0, self.SHTP_HEADER_SIZE)
+            
+            # Parse header
+            packet_length = (header[1] << 8) | header[0]
+            sequence_number = header[2]
+            channel = header[3]
+            
+            if packet_length > self.MAX_PACKET_SIZE:
+                return None
+                
+            # Read payload
+            payload = []
+            if packet_length > 0:
+                payload = self.bus.read_i2c_block_data(self.addr, 0, packet_length)
+            
+            return {
+                'length': packet_length,
+                'sequence': sequence_number,
+                'channel': channel,
+                'payload': payload
+            }
+        except Exception:
+            return None
+    
+    def _write_packet(self, channel, data):
+        """Write a packet to the BNO085."""
+        try:
+            packet_length = len(data)
+            header = [
+                packet_length & 0xFF,           # Length low byte
+                (packet_length >> 8) & 0xFF,    # Length high byte
+                self._sequence_number & 0xFF,   # Sequence number
+                channel & 0xFF                  # Channel
+            ]
+            
+            # Write header
+            self.bus.write_i2c_block_data(self.addr, 0, header)
+            
+            # Write payload if any
+            if data:
+                self.bus.write_i2c_block_data(self.addr, 0, data)
+            
+            self._sequence_number = (self._sequence_number + 1) % 256
+            return True
+        except Exception:
+            return False
+    
+    def initialize(self):
+        """Initialize the BNO085 sensor."""
+        try:
+            # Reset the sensor
+            self._write_packet(0, [0x01, 0x00])  # Reset command
+            time.sleep(0.1)
+            
+            # Enable reports for accelerometer, gyroscope, and magnetometer
+            self._write_packet(0, [
+                0x02, 0x00,  # Set feature command
+                0x01,        # Report ID: Accelerometer
+                0x00, 0x00,  # Report interval (0 = 50Hz)
+                0x00, 0x00   # Feature flags
+            ])
+            
+            self._write_packet(0, [
+                0x02, 0x00,  # Set feature command
+                0x02,        # Report ID: Gyroscope
+                0x00, 0x00,  # Report interval (0 = 50Hz)
+                0x00, 0x00   # Feature flags
+            ])
+            
+            self._write_packet(0, [
+                0x02, 0x00,  # Set feature command
+                0x03,        # Report ID: Magnetometer
+                0x00, 0x00,  # Report interval (0 = 50Hz)
+                0x00, 0x00   # Feature flags
+            ])
+            
+            time.sleep(0.1)
+            return True
+        except Exception:
+            return False
+    
+    def read_accelerometer(self):
+        """Read accelerometer data in m/s²."""
+        packet = self._read_packet()
+        if packet and packet['channel'] == 0 and len(packet['payload']) >= 12:
+            payload = packet['payload']
+            # Parse accelerometer data (3x 32-bit floats)
+            x = struct.unpack('<f', bytes(payload[0:4]))[0]
+            y = struct.unpack('<f', bytes(payload[4:8]))[0]
+            z = struct.unpack('<f', bytes(payload[8:12]))[0]
+            return x, y, z
+        return None, None, None
+    
+    def read_gyroscope(self):
+        """Read gyroscope data in rad/s."""
+        packet = self._read_packet()
+        if packet and packet['channel'] == 0 and len(packet['payload']) >= 12:
+            payload = packet['payload']
+            # Parse gyroscope data (3x 32-bit floats)
+            x = struct.unpack('<f', bytes(payload[0:4]))[0]
+            y = struct.unpack('<f', bytes(payload[4:8]))[0]
+            z = struct.unpack('<f', bytes(payload[8:12]))[0]
+            return x, y, z
+        return None, None, None
+    
+    def read_magnetometer(self):
+        """Read magnetometer data in µT (microtesla)."""
+        packet = self._read_packet()
+        if packet and packet['channel'] == 0 and len(packet['payload']) >= 12:
+            payload = packet['payload']
+            # Parse magnetometer data (3x 32-bit floats)
+            x = struct.unpack('<f', bytes(payload[0:4]))[0]
+            y = struct.unpack('<f', bytes(payload[4:8]))[0]
+            z = struct.unpack('<f', bytes(payload[8:12]))[0]
+            return x, y, z
+        return None, None, None
+
+
+def detect_imu_sensor(bus):
+    """
+    Detect which IMU sensor is connected by scanning I2C addresses.
+    
+    Returns:
+        tuple: (sensor_type, address) where sensor_type is 'icm20948', 'bno085', or None
+    """
+    # Check for ICM-20948 at 0x69
+    try:
+        bus.read_byte(0x69)
+        return 'icm20948', 0x69
+    except Exception:
+        pass
+    
+    # Check for BNO085 at 0x4a
+    try:
+        bus.read_byte(0x4a)
+        return 'bno085', 0x4a
+    except Exception:
+        pass
+    
+    # Check for BNO085 at 0x4b (alternative address)
+    try:
+        bus.read_byte(0x4b)
+        return 'bno085', 0x4b
+    except Exception:
+        pass
+    
+    return None, None
+
+
 class ImuNode(Node):
     def __init__(self, debug=False):
         super().__init__('imu_node')
@@ -1050,8 +1236,8 @@ class ImuNode(Node):
 
         # Define calibration file paths (in nodes/ directory)
         self._script_dir = os.path.dirname(os.path.abspath(__file__))
-        self._calib_file = os.path.join(
-            self._script_dir, 'invensense-20948-compass-calibration.json')
+        # Will be set after sensor detection
+        self._calib_file = None
         self._backup_dir = os.path.join(self._script_dir, 'imu_calib_backups')
 
         # I2C setup
@@ -1070,9 +1256,33 @@ class ImuNode(Node):
             rclpy.shutdown()
             return
 
-        # IMU device
-        self.icm_addr = 0x69
-        self.icm = ICM20948(self.bus, self.icm_addr)
+        # Detect and initialize IMU sensor
+        self.sensor_type, self.sensor_addr = detect_imu_sensor(self.bus)
+        
+        if self.sensor_type is None:
+            self.get_logger().fatal("FATAL: No IMU sensor detected at expected addresses (0x69, 0x4a, 0x4b)")
+            self.destroy_node()
+            rclpy.shutdown()
+            return
+        
+        self.get_logger().info(f"Detected {self.sensor_type.upper()} sensor at address 0x{self.sensor_addr:02x}")
+        
+        # Set sensor-specific calibration file path
+        if self.sensor_type == 'icm20948':
+            self._calib_file = os.path.join(self._script_dir, 'invensense-20948-compass-calibration.json')
+        elif self.sensor_type == 'bno085':
+            self._calib_file = os.path.join(self._script_dir, 'bno085-compass-calibration.json')
+        
+        # Initialize the appropriate sensor
+        if self.sensor_type == 'icm20948':
+            self.imu = ICM20948(self.bus, self.sensor_addr)
+        elif self.sensor_type == 'bno085':
+            self.imu = BNO085(self.bus, self.sensor_addr)
+        else:
+            self.get_logger().fatal(f"FATAL: Unsupported sensor type: {self.sensor_type}")
+            self.destroy_node()
+            rclpy.shutdown()
+            return
 
         if not self._initialize_sensors():
             self.get_logger().fatal("FATAL: IMU init failed")
@@ -1110,6 +1320,10 @@ class ImuNode(Node):
         self.pub_magnetometer = self.create_publisher(
             Vector3, 'magnetometer', 10)
         self.pub_compass = self.create_publisher(Float64, 'compass', 10)
+        
+        # Quaternion and Euler angle publishers for 3D visualization
+        self.pub_quaternion = self.create_publisher(Vector3, 'imu_quaternion', 10)
+        self.pub_euler = self.create_publisher(Vector3, 'imu_euler', 10)
 
         # Health status publisher
         self.pub_health = self.create_publisher(Bool, 'imu_health', 10)
@@ -1222,26 +1436,42 @@ class ImuNode(Node):
             self.get_logger().info("Switched back to normal 10Hz mode - I2C communication recovered")
 
     def _initialize_sensors(self, verbose=True):
-        """Initialize IMU sensors (ICM-20948 and AK09916 magnetometer)
+        """Initialize IMU sensors based on detected sensor type
 
         Args:
             verbose: If False, suppress logging (for throttled retry attempts)
         """
         try:
-            # Initialize the ICM-20948
-            self.icm.initialize()
+            if self.sensor_type == 'icm20948':
+                # Initialize the ICM-20948
+                self.imu.initialize()
 
-            # Setup AK09916 magnetometer via bypass
-            AK_ADDR = 0x0C
-            # soft reset
-            self.bus.write_byte_data(AK_ADDR, 0x32, 0x01)
-            time.sleep(0.05)
-            # continuous measurement 100Hz
-            self.bus.write_byte_data(AK_ADDR, 0x31, 0x08)
-            time.sleep(0.01)
+                # Setup AK09916 magnetometer via bypass
+                AK_ADDR = 0x0C
+                # soft reset
+                self.bus.write_byte_data(AK_ADDR, 0x32, 0x01)
+                time.sleep(0.05)
+                # continuous measurement 100Hz
+                self.bus.write_byte_data(AK_ADDR, 0x31, 0x08)
+                time.sleep(0.01)
 
-            if verbose:
-                self.get_logger().info("ICM-20948 init complete (raw mode)")
+                if verbose:
+                    self.get_logger().info("ICM-20948 init complete (raw mode)")
+                    
+            elif self.sensor_type == 'bno085':
+                # Initialize the BNO085
+                if self.imu.initialize():
+                    if verbose:
+                        self.get_logger().info("BNO085 init complete (sensor fusion mode)")
+                else:
+                    if verbose:
+                        self.get_logger().error("BNO085 initialization failed")
+                    return False
+            else:
+                if verbose:
+                    self.get_logger().error(f"Unknown sensor type: {self.sensor_type}")
+                return False
+                
             return True
 
         except Exception as e:
@@ -1482,7 +1712,13 @@ class ImuNode(Node):
         return mx, my, mz
 
     def _calculate_tilt_compensated_heading(self, mx, my, mz, ax, ay, az):
-        """Compute tilt-compensated compass heading."""
+        """
+        Compute tilt-compensated compass heading using Euler angles.
+        
+        NOTE: This method is no longer used. We now use quaternion-based heading
+        computation via _calculate_quaternion_pose() + _quaternion_to_euler() 
+        which is more robust against gimbal lock issues.
+        """
         # Transform magnetometer readings to accelerometer coordinate frame
         # Accel frame: +x=starboard, +y=bow, +z=down (gravity vector)
         # Mag frame: +x=starboard, +y=stern, +z=down
@@ -1528,6 +1764,238 @@ class ImuNode(Node):
             heading_deg += 360.0
 
         return heading_deg
+
+    def _calculate_quaternion_pose(self, mx, my, mz, ax, ay, az):
+        """
+        Compute quaternion pose from accelerometer and magnetometer data.
+        
+        This addresses gimbal lock issues by using quaternions instead of Euler angles.
+        The quaternion represents the rotation from the sensor frame to the world frame.
+        
+        Args:
+            mx, my, mz: Calibrated magnetometer readings (µT)
+            ax, ay, az: Accelerometer readings (g)
+            
+        Returns:
+            tuple: (qw, qx, qy, qz) quaternion components
+        """
+        # Normalize accelerometer data (gravity vector)
+        a_norm = math.sqrt(ax**2 + ay**2 + az**2)
+        if a_norm < 0.1:
+            a_norm = 1.0
+        
+        # Normalized gravity vector (should point down when level)
+        gx = ax / a_norm
+        gy = ay / a_norm  
+        gz = az / a_norm
+        
+        # Normalize magnetometer data
+        m_norm = math.sqrt(mx**2 + my**2 + mz**2)
+        if m_norm < 0.1:
+            m_norm = 1.0
+            
+        # Normalized magnetic field vector
+        mx_norm = mx / m_norm
+        my_norm = my / m_norm
+        mz_norm = mz / m_norm
+        
+        # World frame reference vectors
+        # Gravity points down (0, 0, -1) in world frame
+        # Magnetic field points north (0, 1, 0) in world frame (assuming no declination)
+        world_down = [0.0, 0.0, -1.0]
+        world_north = [0.0, 1.0, 0.0]
+        
+        # Current sensor frame vectors
+        sensor_down = [gx, gy, gz]
+        sensor_mag = [mx_norm, my_norm, mz_norm]
+        
+        # Remove magnetic field component parallel to gravity
+        # This gives us the horizontal component of the magnetic field
+        mag_dot_grav = (sensor_mag[0] * sensor_down[0] + 
+                       sensor_mag[1] * sensor_down[1] + 
+                       sensor_mag[2] * sensor_down[2])
+        
+        sensor_east = [0.0, 0.0, 0.0]
+        sensor_east[0] = sensor_mag[0] - mag_dot_grav * sensor_down[0]
+        sensor_east[1] = sensor_mag[1] - mag_dot_grav * sensor_down[1] 
+        sensor_east[2] = sensor_mag[2] - mag_dot_grav * sensor_down[2]
+        
+        # Normalize the east vector
+        east_norm = math.sqrt(sensor_east[0]**2 + sensor_east[1]**2 + sensor_east[2]**2)
+        if east_norm > 0.1:
+            sensor_east[0] /= east_norm
+            sensor_east[1] /= east_norm
+            sensor_east[2] /= east_norm
+            
+            # Cross product: sensor_north = sensor_down × sensor_east
+            sensor_north = [
+                sensor_down[1] * sensor_east[2] - sensor_down[2] * sensor_east[1],
+                sensor_down[2] * sensor_east[0] - sensor_down[0] * sensor_east[2],
+                sensor_down[0] * sensor_east[1] - sensor_down[1] * sensor_east[0]
+            ]
+        else:
+            # If magnetic field is too close to vertical, use a default north
+            sensor_north = [0.0, 1.0, 0.0]
+        
+        # Build rotation matrix from sensor frame to world frame
+        # R = [sensor_north_x, sensor_east_x, sensor_down_x]
+        #     [sensor_north_y, sensor_east_y, sensor_down_y]  
+        #     [sensor_north_z, sensor_east_z, sensor_down_z]
+        
+        # Convert rotation matrix to quaternion using Shepperd's method
+        # This avoids gimbal lock issues that occur with Euler angles
+        
+        # Calculate trace of rotation matrix
+        trace = sensor_north[0] + sensor_east[1] + sensor_down[2]
+        
+        if trace > 0:
+            # Case 1: trace > 0
+            s = math.sqrt(trace + 1.0) * 2  # s = 4 * qw
+            qw = 0.25 * s
+            qx = (sensor_east[2] - sensor_down[1]) / s
+            qy = (sensor_down[0] - sensor_north[2]) / s
+            qz = (sensor_north[1] - sensor_east[0]) / s
+        elif sensor_north[0] > sensor_east[1] and sensor_north[0] > sensor_down[2]:
+            # Case 2: sensor_north[0] is the largest diagonal element
+            s = math.sqrt(1.0 + sensor_north[0] - sensor_east[1] - sensor_down[2]) * 2  # s = 4 * qx
+            qw = (sensor_east[2] - sensor_down[1]) / s
+            qx = 0.25 * s
+            qy = (sensor_north[1] + sensor_east[0]) / s
+            qz = (sensor_down[0] + sensor_north[2]) / s
+        elif sensor_east[1] > sensor_down[2]:
+            # Case 3: sensor_east[1] is the largest diagonal element
+            s = math.sqrt(1.0 + sensor_east[1] - sensor_north[0] - sensor_down[2]) * 2  # s = 4 * qy
+            qw = (sensor_down[0] - sensor_north[2]) / s
+            qx = (sensor_north[1] + sensor_east[0]) / s
+            qy = 0.25 * s
+            qz = (sensor_east[2] + sensor_down[1]) / s
+        else:
+            # Case 4: sensor_down[2] is the largest diagonal element
+            s = math.sqrt(1.0 + sensor_down[2] - sensor_north[0] - sensor_east[1]) * 2  # s = 4 * qz
+            qw = (sensor_north[1] - sensor_east[0]) / s
+            qx = (sensor_down[0] + sensor_north[2]) / s
+            qy = (sensor_east[2] + sensor_down[1]) / s
+            qz = 0.25 * s
+        
+        # Normalize quaternion
+        q_norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+        if q_norm > 0.001:
+            qw /= q_norm
+            qx /= q_norm
+            qy /= q_norm
+            qz /= q_norm
+        
+        return qw, qx, qy, qz
+
+    def _analyze_gimbal_lock_risk(self, mx, my, mz):
+        """
+        Analyze gimbal lock risk based on magnetometer readings.
+        
+        Gimbal lock occurs when two of the calibrated magnetometer outputs 
+        are close to zero and the third is aligned with the field.
+        This causes sensitivity to small changes and 2π discontinuities.
+        
+        Args:
+            mx, my, mz: Calibrated magnetometer readings (µT)
+            
+        Returns:
+            str: Analysis of gimbal lock risk
+        """
+        # Calculate magnitude of each component
+        mx_abs = abs(mx)
+        my_abs = abs(my)
+        mz_abs = abs(mz)
+        
+        # Total field magnitude
+        mag_total = math.sqrt(mx**2 + my**2 + mz**2)
+        
+        # Threshold for "close to zero" (10% of total field)
+        zero_threshold = 0.1 * mag_total if mag_total > 1.0 else 1.0
+        
+        # Count components close to zero
+        near_zero_count = 0
+        if mx_abs < zero_threshold:
+            near_zero_count += 1
+        if my_abs < zero_threshold:
+            near_zero_count += 1
+        if mz_abs < zero_threshold:
+            near_zero_count += 1
+        
+        # Analyze the risk
+        if near_zero_count >= 2:
+            # High risk: two or more components near zero
+            dominant_axis = "X" if mx_abs >= my_abs and mx_abs >= mz_abs else \
+                          "Y" if my_abs >= mz_abs else "Z"
+            return f"HIGH RISK: {near_zero_count} axes near zero (dominant: {dominant_axis})"
+        elif near_zero_count == 1:
+            # Medium risk: one component near zero
+            if mx_abs < zero_threshold:
+                weak_axis = "X"
+            elif my_abs < zero_threshold:
+                weak_axis = "Y"
+            else:
+                weak_axis = "Z"
+            return f"MEDIUM RISK: {weak_axis} axis near zero"
+        else:
+            # Low risk: no components near zero
+            return "LOW RISK: All axes have good signal strength"
+        
+        # Additional analysis for field alignment issues
+        # Check if field is too close to any axis (causing singularities)
+        if mag_total > 1.0:
+            # Calculate angle to each axis
+            angle_x = math.degrees(math.acos(min(1.0, abs(mx) / mag_total)))
+            angle_y = math.degrees(math.acos(min(1.0, abs(my) / mag_total)))
+            angle_z = math.degrees(math.acos(min(1.0, abs(mz) / mag_total)))
+            
+            # If field is within 15 degrees of any axis, that's problematic
+            if min(angle_x, angle_y, angle_z) < 15.0:
+                closest_axis = "X" if angle_x <= angle_y and angle_x <= angle_z else \
+                              "Y" if angle_y <= angle_z else "Z"
+                return f"AXIS ALIGNMENT: Field close to {closest_axis} axis"
+
+    def _quaternion_to_euler(self, qw, qx, qy, qz):
+        """
+        Convert quaternion to Euler angles (roll, pitch, yaw).
+        
+        Uses the standard aerospace convention:
+        - Roll (φ): rotation about X-axis (positive = right wing down)
+        - Pitch (θ): rotation about Y-axis (positive = nose up)  
+        - Yaw (ψ): rotation about Z-axis (positive = clockwise from above)
+        
+        Args:
+            qw, qx, qy, qz: Quaternion components
+            
+        Returns:
+            tuple: (roll_deg, pitch_deg, yaw_deg) in degrees
+        """
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (qw * qx + qy * qz)
+        cosr_cosp = 1 - 2 * (qx * qx + qy * qy)
+        roll_rad = math.atan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (y-axis rotation)
+        sinp = 2 * (qw * qy - qz * qx)
+        if abs(sinp) >= 1:
+            pitch_rad = math.copysign(math.pi / 2, sinp)  # use 90 degrees if out of range
+        else:
+            pitch_rad = math.asin(sinp)
+        
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (qw * qz + qx * qy)
+        cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
+        yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+        
+        # Convert to degrees
+        roll_deg = math.degrees(roll_rad)
+        pitch_deg = math.degrees(pitch_rad)
+        yaw_deg = math.degrees(yaw_rad)
+        
+        # Normalize yaw to 0-360 degrees (compass convention)
+        if yaw_deg < 0:
+            yaw_deg += 360.0
+            
+        return roll_deg, pitch_deg, yaw_deg
 
     def timer_callback(self):
         # Handle pause/unpause transitions for IMU sleep management
@@ -1600,22 +2068,54 @@ class ImuNode(Node):
             return  # Skip normal sensor processing when unhealthy
 
         try:
-            ax_cnt, ay_cnt, az_cnt = self.icm.read_accel()
-            gx_cnt, gy_cnt, gz_cnt = self.icm.read_gyro()
+            # DEBUG: Add print to see if we reach sensor reading
+            if self._vis_ascii:
+                print(f"DEBUG: Attempting sensor read, node_healthy={self.node_healthy}", file=sys.stderr)
+            
+            # Read sensor data based on sensor type
+            if self.sensor_type == 'icm20948':
+                # Read ICM-20948 data
+                ax_cnt, ay_cnt, az_cnt = self.imu.read_accel()
+                gx_cnt, gy_cnt, gz_cnt = self.imu.read_gyro()
+                
+                # DEBUG: Add print to see if sensor read succeeds
+                if self._vis_ascii:
+                    print(f"DEBUG: ICM-20948 sensor read successful: ax={ax_cnt}, ay={ay_cnt}, az={az_cnt}", file=sys.stderr)
 
-            # Convert to physical units
-            # Note: Flipping z-axis to represent gravity vector (down) rather than reaction force (up)
-            ax_g = ax_cnt / 16384.0
-            ay_g = ay_cnt / 16384.0
-            # Flip z to match gravity vector convention
-            az_g = -(az_cnt / 16384.0)
+                # Convert to physical units
+                # Note: Flipping z-axis to represent gravity vector (down) rather than reaction force (up)
+                ax_g = ax_cnt / 16384.0
+                ay_g = ay_cnt / 16384.0
+                # Flip z to match gravity vector convention
+                az_g = -(az_cnt / 16384.0)
 
-            gx_dps = gx_cnt / 131.072
-            gy_dps = gy_cnt / 131.072
-            gz_dps = gz_cnt / 131.072
+                gx_dps = gx_cnt / 131.072
+                gy_dps = gy_cnt / 131.072
+                gz_dps = gz_cnt / 131.072
 
-            # Read magnetometer data
-            mx_uT, my_uT, mz_uT = self.icm.read_magnetometer()
+                # Read magnetometer data
+                mx_uT, my_uT, mz_uT = self.imu.read_magnetometer()
+                
+            elif self.sensor_type == 'bno085':
+                # Read BNO085 data (already in physical units)
+                ax_ms2, ay_ms2, az_ms2 = self.imu.read_accelerometer()
+                gx_rads, gy_rads, gz_rads = self.imu.read_gyroscope()
+                mx_uT, my_uT, mz_uT = self.imu.read_magnetometer()
+                
+                # DEBUG: Add print to see if sensor read succeeds
+                if self._vis_ascii:
+                    print(f"DEBUG: BNO085 sensor read successful: ax={ax_ms2}, ay={ay_ms2}, az={az_ms2}", file=sys.stderr)
+                
+                # Convert BNO085 units to match ICM-20948 units
+                # BNO085 accelerometer is in m/s², convert to g
+                ax_g = ax_ms2 / 9.80665
+                ay_g = ay_ms2 / 9.80665
+                az_g = az_ms2 / 9.80665
+                
+                # BNO085 gyroscope is in rad/s, convert to deg/s
+                gx_dps = gx_rads * 180.0 / math.pi
+                gy_dps = gy_rads * 180.0 / math.pi
+                gz_dps = gz_rads * 180.0 / math.pi
 
             # Validate sensor data - check if all sensors return zeros (sensor not initialized properly)
             if (abs(ax_g) < 0.01 and abs(ay_g) < 0.01 and abs(az_g) < 0.01 and
@@ -1676,15 +2176,39 @@ class ImuNode(Node):
             mx_raw, my_raw, mz_raw = mx_uT, my_uT, mz_uT
             mx_cal, my_cal, mz_cal = self._apply_compass_calibration(
                 mx_raw, my_raw, mz_raw)
-            heading_deg = self._calculate_tilt_compensated_heading(
+            
+            # Calculate quaternion pose first (robust against gimbal lock)
+            qw, qx, qy, qz = self._calculate_quaternion_pose(
                 mx_cal, my_cal, mz_cal, ax_g, ay_g, az_g)
+            
+            # Extract robust compass heading from quaternion (yaw component)
+            roll_deg, pitch_deg, heading_deg = self._quaternion_to_euler(qw, qx, qy, qz)
 
+            # Publish in physical units
+            self.pub_accel.publish(Vector3(x=ax_g, y=ay_g, z=az_g))
+            self.pub_gyro.publish(Vector3(x=gx_dps, y=gy_dps, z=gz_dps))
+            self.pub_magnetometer.publish(
+                Vector3(x=mx_cal, y=my_cal, z=mz_cal))
+            self.pub_compass.publish(Float64(data=heading_deg))
+            
+            # Publish quaternion and Euler angles for 3D visualization
+            self.pub_quaternion.publish(Vector3(x=qx, y=qy, z=qz))  # Note: qw not included (redundant with normalization)
+            
+            # Convert quaternion to Euler angles and publish
+            roll_deg, pitch_deg, yaw_deg = self._quaternion_to_euler(qw, qx, qy, qz)
+            self.pub_euler.publish(Vector3(x=roll_deg, y=pitch_deg, z=yaw_deg))
+
+            # ASCII display (inside try block so variables are accessible)
             if self._vis_ascii:
                 try:
+                    # DEBUG: Add print to see if we reach ASCII display
+                    print(f"DEBUG: Starting ASCII display", file=sys.stderr)
+                    
                     # Values are pre-calculated, just render them
                     sys.stdout.write('\x1b[2J')    # clear
                     sys.stdout.write('\x1b[H')     # home
                     sys.stdout.flush()
+                    
                     # Nominal limits for bars
                     a_lim = 2.0   # g
                     g_lim = 500.0  # dps
@@ -1730,11 +2254,21 @@ class ImuNode(Node):
                         f"Mz {mz_cal:+7.1f} uT  " +
                         self._signed_bar(mz_cal, m_lim, bar_width),
                         "",
-                        f"=== Compass Heading: {heading_deg:6.1f}° (0°=N, 90°=E, 180°=S, 270°=W) ===",
+                        f"=== Compass Heading (Quaternion-based): {heading_deg:6.1f}° (0°=N, 90°=E, 180°=S, 270°=W) ===",
+                        "",
+                        "=== Quaternion Pose (Gimbal Lock Analysis) ===",
+                        f"Qw {qw:+7.3f}  Qx {qx:+7.3f}  Qy {qy:+7.3f}  Qz {qz:+7.3f}",
+                        f"Mag: {math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz):.4f}",
+                        "",
+                        "=== Euler Angles (for ROS2 Visualization) ===",
+                        f"Roll {roll_deg:+7.1f}°  Pitch {pitch_deg:+7.1f}°  Yaw {yaw_deg:+7.1f}°",
+                        "",
+                        "=== Gimbal Lock Detection ===",
+                        self._analyze_gimbal_lock_risk(mx_cal, my_cal, mz_cal),
                         ""
                     ]
 
-                    # Calculate available height for compass (sensor data + footer takes ~20 lines)
+                    # Calculate available height for compass (sensor data + footer takes ~30 lines now)
                     sensor_lines_count = len(sensor_lines)
                     footer_lines_count = 2  # blank line + "Ctrl-C to exit"
                     available_height = term_height - sensor_lines_count - footer_lines_count
@@ -1755,15 +2289,14 @@ class ImuNode(Node):
                     sys.stdout.flush()
                 except Exception:
                     pass
-
-            # Publish in physical units
-            self.pub_accel.publish(Vector3(x=ax_g, y=ay_g, z=az_g))
-            self.pub_gyro.publish(Vector3(x=gx_dps, y=gy_dps, z=gz_dps))
-            self.pub_magnetometer.publish(
-                Vector3(x=mx_cal, y=my_cal, z=mz_cal))
-            self.pub_compass.publish(Float64(data=heading_deg))
+                except Exception as e:
+                    # ASCII display failed, but don't crash the node
+                    print(f"DEBUG: ASCII display failed: {e}", file=sys.stderr)
 
         except Exception as e:
+            # DEBUG: Add print to see sensor read failures
+            if self._vis_ascii:
+                print(f"DEBUG: Sensor read failed: {e}", file=sys.stderr)
             self._handle_io_error(e)
 
     def _enter_sleep_mode(self) -> None:
@@ -1936,13 +2469,33 @@ def main(args=None):
             except Exception:
                 from smbus import SMBus  # type: ignore
             bus = SMBus(0)
-            icm = ICM20948(bus, 0x69)
-            icm.initialize()
-            AK_ADDR = 0x0C
-            bus.write_byte_data(AK_ADDR, 0x32, 0x01)
-            time.sleep(0.05)
-            bus.write_byte_data(AK_ADDR, 0x31, 0x08)
-            time.sleep(0.01)
+            
+            # Detect sensor type
+            sensor_type, sensor_addr = detect_imu_sensor(bus)
+            if sensor_type is None:
+                print("ERROR: No IMU sensor detected at expected addresses (0x69, 0x4a, 0x4b)")
+                return
+            
+            print(f"Detected {sensor_type.upper()} sensor at address 0x{sensor_addr:02x}")
+            
+            # Initialize the appropriate sensor
+            if sensor_type == 'icm20948':
+                imu = ICM20948(bus, sensor_addr)
+                imu.initialize()
+                # Setup AK09916 magnetometer via bypass
+                AK_ADDR = 0x0C
+                bus.write_byte_data(AK_ADDR, 0x32, 0x01)
+                time.sleep(0.05)
+                bus.write_byte_data(AK_ADDR, 0x31, 0x08)
+                time.sleep(0.01)
+            elif sensor_type == 'bno085':
+                imu = BNO085(bus, sensor_addr)
+                if not imu.initialize():
+                    print("ERROR: BNO085 initialization failed")
+                    return
+            else:
+                print(f"ERROR: Unsupported sensor type: {sensor_type}")
+                return
 
             print(
                 "Rotate the device slowly through all orientations (figure-8). Press Ctrl-C to finish and save.")
@@ -2016,12 +2569,15 @@ def main(args=None):
                             recovery_attempts += 1
                             last_recovery_attempt = current_time
                             try:
-                                # Reinitialize IMU and magnetometer
-                                icm.initialize()
-                                bus.write_byte_data(AK_ADDR, 0x32, 0x01)
-                                time.sleep(0.05)
-                                bus.write_byte_data(AK_ADDR, 0x31, 0x08)
-                                time.sleep(0.01)
+                                # Reinitialize IMU based on sensor type
+                                if sensor_type == 'icm20948':
+                                    imu.initialize()
+                                    bus.write_byte_data(0x0C, 0x32, 0x01)
+                                    time.sleep(0.05)
+                                    bus.write_byte_data(0x0C, 0x31, 0x08)
+                                    time.sleep(0.01)
+                                elif sensor_type == 'bno085':
+                                    imu.initialize()
                                 # Don't immediately mark as healthy - wait for successful read
                             except Exception as e:
                                 # Recovery failed, will try again later
@@ -2029,15 +2585,25 @@ def main(args=None):
                                     render_bars()
                     
                     try:
-                        st1 = bus.read_byte_data(0x0C, 0x10)
-                        if st1 & 0x01:
-                            mb = list(bus.read_i2c_block_data(0x0C, 0x11, 8))
-                            mx_cnt = struct.unpack('<h', bytes(mb[0:2]))[0]
-                            my_cnt = struct.unpack('<h', bytes(mb[2:4]))[0]
-                            mz_cnt = struct.unpack('<h', bytes(mb[4:6]))[0]
-                            mx_uT = mx_cnt * 0.15
-                            my_uT = my_cnt * 0.15
-                            mz_uT = mz_cnt * 0.15
+                        # Read magnetometer data based on sensor type
+                        if sensor_type == 'icm20948':
+                            # Read ICM-20948 magnetometer via AK09916
+                            st1 = bus.read_byte_data(0x0C, 0x10)
+                            if st1 & 0x01:
+                                mb = list(bus.read_i2c_block_data(0x0C, 0x11, 8))
+                                mx_cnt = struct.unpack('<h', bytes(mb[0:2]))[0]
+                                my_cnt = struct.unpack('<h', bytes(mb[2:4]))[0]
+                                mz_cnt = struct.unpack('<h', bytes(mb[4:6]))[0]
+                                mx_uT = mx_cnt * 0.15
+                                my_uT = my_cnt * 0.15
+                                mz_uT = mz_cnt * 0.15
+                            else:
+                                continue  # No data ready
+                        elif sensor_type == 'bno085':
+                            # Read BNO085 magnetometer
+                            mx_uT, my_uT, mz_uT = imu.read_magnetometer()
+                            if mx_uT is None or my_uT is None or mz_uT is None:
+                                continue  # No data available
                             
                             # Successful read - reset error tracking
                             if not sensor_healthy:
@@ -2145,10 +2711,14 @@ def main(args=None):
             with open(samples_file, 'w') as f:
                 json.dump(samples_data, f, indent=2)
 
-            # Define calibration file path in nodes/ directory
+            # Define calibration file path in nodes/ directory (sensor-specific)
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            calib_file = os.path.join(
-                script_dir, 'invensense-20948-compass-calibration.json')
+            if sensor_type == 'icm20948':
+                calib_file = os.path.join(script_dir, 'invensense-20948-compass-calibration.json')
+            elif sensor_type == 'bno085':
+                calib_file = os.path.join(script_dir, 'bno085-compass-calibration.json')
+            else:
+                calib_file = os.path.join(script_dir, f'{sensor_type}-compass-calibration.json')
 
             if _prompt_yes_no(f"\nSave calibration to nodes/{os.path.basename(calib_file)}?", default_yes=True):
                 # Backup existing calibration before saving new one
