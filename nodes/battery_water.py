@@ -211,6 +211,9 @@ class BatteryWaterNode(Node):
         # Sensor failure tracking
         self._adc_failure_count = 0
         self._sht_failure_count = 0
+        self._sht_sensor_available = True  # Track SHT45 sensor availability
+        self._sht_last_error_time = 0.0
+        self._sht_error_log_interval = 60.0  # Log SHT45 errors max once per minute
         
         # I2C failure logging throttling
         self._last_i2c_error_log_time = 0.0
@@ -766,6 +769,61 @@ class BatteryWaterNode(Node):
         humidity = max(0.0, min(100.0, humidity))
         return temperature, humidity
 
+    def _read_sht45_robust(self):
+        """
+        Read SHT45 sensor with graceful failure handling.
+        Returns (temperature, humidity) or (None, None) if sensor unavailable.
+        """
+        if not self._sht_sensor_available:
+            return None, None
+            
+        try:
+            temperature, humidity = self._read_sht45()
+            # Reset failure count on successful read
+            self._sht_failure_count = 0
+            return temperature, humidity
+            
+        except Exception as e:
+            self._sht_failure_count += 1
+            current_time = time.monotonic()
+            
+            # Log error with throttling (max once per minute)
+            if current_time - self._sht_last_error_time >= self._sht_error_log_interval:
+                self.get_logger().warn(
+                    f"SHT45 sensor error (failure {self._sht_failure_count}): {e}")
+                self._sht_last_error_time = current_time
+            
+            # Mark sensor as unavailable after multiple failures
+            if self._sht_failure_count >= 5:
+                if self._sht_sensor_available:
+                    self._sht_sensor_available = False
+                    self.get_logger().warn(
+                        "SHT45 sensor marked as unavailable after multiple failures. "
+                        "Temperature and humidity readings disabled.")
+            
+            return None, None
+
+    def _attempt_sht45_recovery(self):
+        """
+        Attempt to recover SHT45 sensor by testing communication.
+        Returns True if sensor is recovered, False otherwise.
+        """
+        if self._sht_sensor_available:
+            return True  # Already available
+            
+        try:
+            # Try a simple read to test if sensor is back
+            temperature, humidity = self._read_sht45()
+            if temperature is not None and humidity is not None:
+                self._sht_sensor_available = True
+                self._sht_failure_count = 0
+                self.get_logger().info("SHT45 sensor recovered - temperature and humidity readings restored")
+                return True
+        except Exception:
+            pass  # Sensor still unavailable
+            
+        return False
+
     # ---------- GPIO reading helpers ----------
     def _read_gpio_status(self):
         """
@@ -917,6 +975,9 @@ class BatteryWaterNode(Node):
         except Exception as e:
             # Continue in retry mode
             pass
+        
+        # Attempt SHT45 sensor recovery (non-blocking)
+        self._attempt_sht45_recovery()
 
     # ---------- Test: RC decay of REFOUT on AIN3 with sampling & PNG ----------
     def _set_ain3_mode(self, sel_bits: int):
@@ -1146,6 +1207,7 @@ class BatteryWaterNode(Node):
 
         current_time = time.monotonic()
         
+        # Read critical ADC sensors (battery and saltwater) - these are essential
         try:
             # ADC averages for battery and saltwater
             raw0 = self._read_adc_channel_avg(0)
@@ -1153,11 +1215,8 @@ class BatteryWaterNode(Node):
 
             battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
             saltwater_voltage = raw1 * self.lsb_value
-
-            # SHT45
-            temperature, humidity = self._read_sht45()
             
-            # Update successful read time
+            # Update successful read time for critical sensors
             self._last_successful_read_time = time.monotonic()
             
             # If we were unhealthy but now have successful reads, recover to normal mode
@@ -1168,15 +1227,22 @@ class BatteryWaterNode(Node):
                 self._recovery_attempt_count = 0
                 self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
 
-            # Update latest sensor values
+            # Update latest critical sensor values
             self._latest_battery_voltage = battery_voltage
             self._latest_saltwater_voltage = saltwater_voltage
-            self._latest_temperature = temperature
-            self._latest_humidity = humidity
             
         except Exception as e:
-            self._handle_io_error(e, "I2C sensors")
-            return  # Skip publishing on error
+            self._handle_io_error(e, "ADC sensors")
+            return  # Skip publishing on error - ADC failure is critical
+        
+        # Read SHT45 sensor separately - this is non-critical and can fail gracefully
+        temperature, humidity = self._read_sht45_robust()
+        self._latest_temperature = temperature
+        self._latest_humidity = humidity
+        
+        # Attempt SHT45 recovery if sensor was previously unavailable
+        if not self._sht_sensor_available:
+            self._attempt_sht45_recovery()
 
         # Calculate battery remaining percentage
         battery_remaining_pct = None
