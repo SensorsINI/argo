@@ -72,7 +72,7 @@ BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with
 
 # Battery lifetime estimation configuration
 BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression 
-BATTERY_LIFETIME_MIN_SAMPLES = 5     # Minimum samples required for estimation 
+BATTERY_LIFETIME_MIN_SAMPLES = 5     # Minimum samples required for estimation
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
 
 try:
@@ -166,7 +166,7 @@ class BatteryWaterNode(Node):
         self._salt_alert_prev = False
         self._humid_alert_prev = False
 
-        # Latest sensor values for service response
+        # Latest sensor values for service response (double buffer for consistency)
         self._latest_battery_voltage = 0.0
         self._latest_saltwater_voltage = 0.0
         self._latest_sail_current = 0.0
@@ -179,6 +179,28 @@ class BatteryWaterNode(Node):
         self._latest_charging_status = None
         self._latest_ac_power_present = None
         self._latest_timestamp = None
+        
+        # Thread-safe double buffer for service responses
+        self._service_buffer = {
+            'battery_voltage': 0.0,
+            'saltwater_voltage': 0.0,
+            'sail_current': 0.0,
+            'temperature': None,
+            'humidity': None,
+            'battery_remaining_pct': None,
+            'battery_low_alert': False,
+            'saltwater_alert': False,
+            'humidity_alert': False,
+            'charging_status': None,
+            'ac_power_present': None,
+            'time_to_full_hours': None,
+            'time_to_empty_hours': None,
+            'timestamp': None
+        }
+        
+        # Thread lock for service buffer access
+        import threading
+        self._buffer_lock = threading.Lock()
         
         # Battery lifetime estimation
         self.battery_lifetime_sample_window = int(
@@ -388,6 +410,9 @@ class BatteryWaterNode(Node):
             f"Initial readings complete - Battery={self._latest_battery_voltage:.3f}V, "
             f"Saltwater={self._latest_saltwater_voltage:.3f}V, Sail_current={self._latest_sail_current:.3f}A"
         )
+        
+        # Initialize service buffer with initial readings
+        self._update_service_buffer()
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully and save slopes"""
@@ -399,6 +424,26 @@ class BatteryWaterNode(Node):
         # Let ROS2 handle the actual shutdown
         if rclpy.ok():
             rclpy.shutdown()
+    
+    def _update_service_buffer(self):
+        """Atomically update the service buffer with latest complete sensor values"""
+        with self._buffer_lock:
+            self._service_buffer.update({
+                'battery_voltage': self._latest_battery_voltage,
+                'saltwater_voltage': self._latest_saltwater_voltage,
+                'sail_current': self._latest_sail_current,
+                'temperature': self._latest_temperature,
+                'humidity': self._latest_humidity,
+                'battery_remaining_pct': self._latest_battery_remaining_pct,
+                'battery_low_alert': self._latest_battery_low_alert,
+                'saltwater_alert': self._latest_saltwater_alert,
+                'humidity_alert': self._latest_humidity_alert,
+                'charging_status': self._latest_charging_status,
+                'ac_power_present': self._latest_ac_power_present,
+                'time_to_full_hours': self._latest_time_to_full_hours,
+                'time_to_empty_hours': self._latest_time_to_empty_hours,
+                'timestamp': time.monotonic()
+            })
 
     def _publish_health_status(self, is_healthy: bool):
         """Publish health status and update internal state"""
@@ -485,25 +530,29 @@ class BatteryWaterNode(Node):
         try:
             # Get current timestamp
             now = self.get_clock().now()
+            
+            # Use thread-safe double buffer to ensure consistent state
+            with self._buffer_lock:
+                buffer_copy = self._service_buffer.copy()
 
-            # Build battery data dictionary
+            # Build battery data dictionary from consistent buffer
             battery_data = {
-                'battery_voltage': self._latest_battery_voltage,
-                'saltwater_voltage': self._latest_saltwater_voltage,
-                'sail_current': self._latest_sail_current,
-                'pcb_temperature': self._latest_temperature if self._latest_temperature is not None else 0.0,
-                'relative_humidity': self._latest_humidity if self._latest_humidity is not None else 0.0,
-                'battery_remaining_pct': self._latest_battery_remaining_pct if self._latest_battery_remaining_pct is not None else 0.0,
-                'battery_low_alert': self._latest_battery_low_alert,
-                'saltwater_alert': self._latest_saltwater_alert,
-                'humidity_alert': self._latest_humidity_alert,
-                'charging_status': self._latest_charging_status if self._latest_charging_status is not None else False,
-                'ac_power_present': self._latest_ac_power_present if self._latest_ac_power_present is not None else False,
+                'battery_voltage': buffer_copy['battery_voltage'],
+                'saltwater_voltage': buffer_copy['saltwater_voltage'],
+                'sail_current': buffer_copy['sail_current'],
+                'pcb_temperature': buffer_copy['temperature'] if buffer_copy['temperature'] is not None else 0.0,
+                'relative_humidity': buffer_copy['humidity'] if buffer_copy['humidity'] is not None else 0.0,
+                'battery_remaining_pct': buffer_copy['battery_remaining_pct'] if buffer_copy['battery_remaining_pct'] is not None else 0.0,
+                'battery_low_alert': buffer_copy['battery_low_alert'],
+                'saltwater_alert': buffer_copy['saltwater_alert'],
+                'humidity_alert': buffer_copy['humidity_alert'],
+                'charging_status': buffer_copy['charging_status'] if buffer_copy['charging_status'] is not None else False,
+                'ac_power_present': buffer_copy['ac_power_present'] if buffer_copy['ac_power_present'] is not None else False,
                 'battery_water_health': self.health_status,
                 'timestamp_sec': now.seconds_nanoseconds()[0],
                 'timestamp_nanosec': now.seconds_nanoseconds()[1],
-                'time_to_full_hours': self._latest_time_to_full_hours,
-                'time_to_empty_hours': self._latest_time_to_empty_hours
+                'time_to_full_hours': buffer_copy['time_to_full_hours'],
+                'time_to_empty_hours': buffer_copy['time_to_empty_hours']
             }
 
             # Format battery summary
@@ -1317,6 +1366,9 @@ class BatteryWaterNode(Node):
                     
             self._prev_sail_current = sail_current
             
+            # Update service buffer with latest sail current
+            self._update_service_buffer()
+            
         except Exception as e:
             self._handle_io_error(e, "ADC (sail current)")
 
@@ -1479,6 +1531,9 @@ class BatteryWaterNode(Node):
                 charging_status, ac_power_present
             )
             self._last_csv_log_time = current_time
+        
+        # Atomically update service buffer with complete sensor readings
+        self._update_service_buffer()
 
     def _process_alerts(self, battery_voltage, saltwater_voltage, humidity):
         """Process and publish alert states"""
