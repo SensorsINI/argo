@@ -71,8 +71,8 @@ BATTERY_CRITICAL_THRESHOLD_V = 6.8  # V, ~10% for 2S LiPo, may trigger shutdown
 BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with USB charging pluugged in under full laod (sans servos)
 
 # Battery lifetime estimation configuration
-BATTERY_LIFETIME_SAMPLE_WINDOW = 300  # Number of samples for linear regression (default: 300 samples)
-BATTERY_LIFETIME_MIN_SAMPLES = 30     # Minimum samples required for estimation (default: 30 samples)
+BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression 
+BATTERY_LIFETIME_MIN_SAMPLES = 5     # Minimum samples required for estimation 
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
 
 try:
@@ -364,11 +364,31 @@ class BatteryWaterNode(Node):
 
             # Publish initial health status as healthy
             self._publish_health_status(True)
+            
+            # Perform initial sensor readings for immediate status display
+            self._perform_initial_readings()
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
     
+    def _perform_initial_readings(self):
+        """Perform initial sensor readings for immediate status display"""
+        self.get_logger().info("Performing initial sensor readings...")
+        
+        # Use existing sensor reading methods to avoid code duplication
+        # Read sail current (high frequency sensor)
+        self.read_sail_current()
+        
+        # Read battery safety sensors (includes ADC, SHT45, GPIO, and lifetime estimation)
+        self.read_battery_safety_sensors()
+        
+        # Log initial status summary
+        self.get_logger().info(
+            f"Initial readings complete - Battery={self._latest_battery_voltage:.3f}V, "
+            f"Saltwater={self._latest_saltwater_voltage:.3f}V, Sail_current={self._latest_sail_current:.3f}A"
+        )
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully and save slopes"""
         self.get_logger().info(f"Received signal {signum}, saving slopes and shutting down...")
@@ -552,6 +572,28 @@ class BatteryWaterNode(Node):
     def _save_battery_slopes(self):
         """Save current battery charging/discharging slopes to persistent storage"""
         try:
+            # Check if slopes file already exists
+            file_exists = os.path.exists(self._slopes_file_path)
+            
+            # Only save if file doesn't exist OR we have at least minimum samples
+            should_save = not file_exists or len(self._voltage_samples) >= self.battery_lifetime_min_samples
+            
+            if not should_save:
+                self.get_logger().info(f"Skipping slope save - file exists and insufficient samples (< {self.battery_lifetime_min_samples})")
+                return
+            
+            # Load existing slopes to preserve valid data
+            existing_charging_slope = None
+            existing_discharging_slope = None
+            if file_exists:
+                try:
+                    with open(self._slopes_file_path, 'r') as f:
+                        existing_data = json.load(f)
+                        existing_charging_slope = existing_data.get('charging_slope_v_per_s')
+                        existing_discharging_slope = existing_data.get('discharging_slope_v_per_s')
+                except Exception as e:
+                    self.get_logger().warning(f"Failed to load existing slopes: {e}")
+            
             # Validate that slopes are meaningful (not None, not zero, within reasonable range)
             has_meaningful_charging = (self._charging_slope_v_per_s is not None and 
                                       abs(self._charging_slope_v_per_s) > 1e-9 and 
@@ -560,27 +602,69 @@ class BatteryWaterNode(Node):
                                          abs(self._discharging_slope_v_per_s) > 1e-9 and 
                                          abs(self._discharging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
             
-            if has_meaningful_charging or has_meaningful_discharging:
+            # Additional validation: slopes should only be saved if they represent
+            # proper charging/discharging periods (not mixed or uncertain states)
+            valid_charging_slope = False
+            valid_discharging_slope = False
+            
+            if has_meaningful_charging:
+                # Only save charging slope if it's positive (voltage increasing)
+                valid_charging_slope = self._charging_slope_v_per_s > 0
+            
+            if has_meaningful_discharging:
+                # Only save discharging slope if it's negative (voltage decreasing)
+                valid_discharging_slope = self._discharging_slope_v_per_s < 0
+            
+            # Determine final slopes to save (preserve existing valid slopes if new ones aren't valid)
+            final_charging_slope = self._charging_slope_v_per_s if valid_charging_slope else existing_charging_slope
+            final_discharging_slope = self._discharging_slope_v_per_s if valid_discharging_slope else existing_discharging_slope
+            
+            # Only save if we have at least one valid slope (new or existing)
+            if final_charging_slope is not None or final_discharging_slope is not None:
                 slopes_data = {
-                    'charging_slope_v_per_s': self._charging_slope_v_per_s if has_meaningful_charging else None,
-                    'discharging_slope_v_per_s': self._discharging_slope_v_per_s if has_meaningful_discharging else None,
-                    'timestamp': datetime.now().isoformat()
+                    'charging_slope_v_per_s': final_charging_slope,
+                    'discharging_slope_v_per_s': final_discharging_slope,
+                    'timestamp': datetime.now().isoformat(),
+                    'sample_count': len(self._voltage_samples)
                 }
                 with open(self._slopes_file_path, 'w') as f:
                     json.dump(slopes_data, f, indent=2)
                 
                 # Build descriptive log message
                 slope_info = []
-                if has_meaningful_charging:
-                    slope_info.append(f"charging={self._charging_slope_v_per_s:.6f} V/s")
-                if has_meaningful_discharging:
-                    slope_info.append(f"discharging={self._discharging_slope_v_per_s:.6f} V/s")
+                if valid_charging_slope:
+                    slope_info.append(f"charging={self._charging_slope_v_per_s:.6f} V/s (updated)")
+                elif final_charging_slope is not None:
+                    slope_info.append(f"charging={final_charging_slope:.6f} V/s (preserved)")
                 
-                self.get_logger().info(f"Saved battery slopes: {', '.join(slope_info)}")
+                if valid_discharging_slope:
+                    slope_info.append(f"discharging={self._discharging_slope_v_per_s:.6f} V/s (updated)")
+                elif final_discharging_slope is not None:
+                    slope_info.append(f"discharging={final_discharging_slope:.6f} V/s (preserved)")
+                
+                self.get_logger().info(f"Saved battery slopes ({len(self._voltage_samples)} samples): {', '.join(slope_info)}")
             else:
-                self.get_logger().info("No meaningful battery slopes to save (insufficient data collected)")
+                self.get_logger().info("No valid battery slopes to save (insufficient data or mixed charging states)")
         except Exception as e:
             self.get_logger().error(f"Failed to save battery slopes: {e}")
+    
+    def _is_proper_charging_state(self, charging_status: Optional[bool], voltage_samples: deque) -> bool:
+        """
+        Check if we're in a proper charging state for slope calculation.
+        Returns True if we have a clear charging state (charging=True) or if charging status
+        is unknown but we have sufficient samples to determine the trend.
+        """
+        if charging_status is True:
+            return True  # Definitely charging
+        
+        if charging_status is False:
+            return True  # Definitely discharging (not charging)
+        
+        # If charging status is unknown, check if we have enough samples to determine trend
+        if len(voltage_samples) >= self.battery_lifetime_min_samples * 6:  # Need more samples when status is unknown
+            return True
+        
+        return False
     
     def _linear_least_squares(self, samples: deque) -> Optional[Tuple[float, float]]:
         """
@@ -641,11 +725,15 @@ class BatteryWaterNode(Node):
             if fit_result is not None:
                 slope_v_per_s, intercept = fit_result
                 
-                # Update persistent slopes if we have good data
-                if charging and slope_v_per_s > 1e-6:  # Positive slope for charging
+                # Update persistent slopes if we have good data, sufficient samples, and proper charging state
+                if (charging and slope_v_per_s > 1e-6 and len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
+                    self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples)):  # Positive slope for charging
                     self._charging_slope_v_per_s = slope_v_per_s
-                elif not charging and slope_v_per_s < -1e-6:  # Negative slope for discharging
+                    self.get_logger().debug(f"Updated charging slope: {slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples")
+                elif (not charging and slope_v_per_s < -1e-6 and len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
+                      self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples)):  # Negative slope for discharging
                     self._discharging_slope_v_per_s = slope_v_per_s
+                    self.get_logger().debug(f"Updated discharging slope: {slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples")
             else:
                 # Use persistent slopes if available
                 if charging:
@@ -1067,6 +1155,39 @@ class BatteryWaterNode(Node):
             if humid_pct is not None:
                 lines.append(f"Humid {humid_pct:7.2f} %  " +
                              self._bar(humid_pct, 100.0))
+            
+            # Add battery lifetime and slope information
+            if self._latest_battery_remaining_pct is not None:
+                lines.append(f"Batt% {self._latest_battery_remaining_pct:7.1f}%  " +
+                             self._bar(self._latest_battery_remaining_pct, 100.0))
+            
+            # Add lifetime estimates
+            if self._latest_battery_lifetime_hours is not None:
+                if self._latest_charging_status:
+                    lines.append(f"T2Full {self._latest_battery_lifetime_hours:7.1f}h")
+                else:
+                    lines.append(f"T2Empty {self._latest_battery_lifetime_hours:7.1f}h")
+            else:
+                lines.append("T2Full/Empty: N/A")
+            
+            # Add slope information
+            slope_info = []
+            if self._charging_slope_v_per_s is not None:
+                slope_info.append(f"Chg:{self._charging_slope_v_per_s*3600:.3f} V/h")
+            if self._discharging_slope_v_per_s is not None:
+                slope_info.append(f"Dch:{self._discharging_slope_v_per_s*3600:.3f} V/h")
+            
+            if slope_info:
+                lines.append(f"Slopes: {' '.join(slope_info)}")
+            else:
+                lines.append("Slopes: Collecting data...")
+            
+            # Add charging status
+            if self._latest_charging_status is not None and self._latest_ac_power_present is not None:
+                charging_icon = "🔌" if self._latest_charging_status else "🔋"
+                ac_icon = "⚡" if self._latest_ac_power_present else "🔌"
+                lines.append(f"Status: {charging_icon}Chg={self._latest_charging_status}, {ac_icon}AC={self._latest_ac_power_present}")
+            
             lines.append("Ctrl-C to exit")
             for ln in lines:
                 sys.stdout.write(ln + '\n')
@@ -1324,6 +1445,24 @@ class BatteryWaterNode(Node):
                         Float32(data=self._latest_battery_lifetime_hours))
                 except Exception:
                     pass
+        else:
+            # If charging status is unknown, still try to estimate based on voltage trend
+            # This helps provide estimates even when GPIO is not available
+            self._latest_time_to_full_hours = self._estimate_battery_lifetime(
+                battery_voltage, charging=True)
+            self._latest_time_to_empty_hours = self._estimate_battery_lifetime(
+                battery_voltage, charging=False)
+            # Use the more conservative estimate (longer time)
+            if (self._latest_time_to_full_hours is not None and 
+                self._latest_time_to_empty_hours is not None):
+                self._latest_battery_lifetime_hours = max(
+                    self._latest_time_to_full_hours, self._latest_time_to_empty_hours)
+            elif self._latest_time_to_full_hours is not None:
+                self._latest_battery_lifetime_hours = self._latest_time_to_full_hours
+            elif self._latest_time_to_empty_hours is not None:
+                self._latest_battery_lifetime_hours = self._latest_time_to_empty_hours
+            else:
+                self._latest_battery_lifetime_hours = None
 
         self._process_alerts(battery_voltage, saltwater_voltage, humidity)
         
