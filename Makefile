@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status
 
 help:
 	@echo "Argo Robot Services Management"
@@ -58,6 +58,17 @@ help:
 	@echo "  stop-power-control     - Stop power control service"
 	@echo "  status-power-control   - Show power control status"
 	@echo "  uninstall-power-control - Uninstall power control system"
+	@echo ""
+	@echo "Battery Status Monitor (in scripts/ directory):"
+	@echo "  make -C scripts install-battery-monitor - Install battery status monitor"
+	@echo "  make -C scripts setup-battery-panel     - Configure XFCE4 panel"
+	@echo "  make -C scripts test-battery-status     - Test battery status scripts"
+	@echo "  make -C scripts help                    - Show battery monitor help"
+	@echo ""
+	@echo "Battery Monitor Convenience Targets:"
+	@echo "  install-battery-monitor - Install battery status monitor"
+	@echo "  setup-battery-panel     - Configure XFCE4 panel with battery status"
+	@echo "  test-battery-status     - Test battery status functionality"
 	@echo ""
 	@echo "Utilities:"
 	@echo "  aliases-install - Install/update aliases and activate them immediately"
@@ -430,4 +441,18 @@ test-motd:
 	@echo ""
 	@echo "💡 This is what will be displayed on SSH login"
 	@echo "   To install: make install-motd"
+
+# ==================== BATTERY STATUS MONITOR CONVENIENCE TARGETS ====================
+
+install-battery-monitor:
+	@echo "Installing battery status monitor..."
+	@$(MAKE) -C scripts install-battery-monitor
+
+setup-battery-panel:
+	@echo "Setting up battery status panel in XFCE4..."
+	@$(MAKE) -C scripts setup-battery-panel
+
+test-battery-status:
+	@echo "Testing battery status functionality..."
+	@$(MAKE) -C scripts test-battery-status
 
