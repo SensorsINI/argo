@@ -1056,19 +1056,88 @@ class BNO085:
         self.REPORT_RAW_GYROSCOPE = 0x02      # Raw gyroscope data  
         self.REPORT_RAW_MAGNETOMETER = 0x03   # Raw magnetometer data
         
-        # Alternative report IDs for calibrated sensor data
-        self.REPORT_ACCELEROMETER = 0x01      # Calibrated accelerometer
-        self.REPORT_GYROSCOPE = 0x02          # Calibrated gyroscope
-        self.REPORT_MAGNETOMETER = 0x03       # Calibrated magnetometer
+        # SH-2 Report IDs (from BNO080 datasheet)
+        self.REPORT_GET_FEATURE_REQUEST = 0xFE    # Get Feature Request
+        self.REPORT_SET_FEATURE_COMMAND = 0xFD    # Set Feature Command
+        self.REPORT_GET_FEATURE_RESPONSE = 0xFC   # Get Feature Response
+        self.REPORT_PRODUCT_ID_REQUEST = 0xF9     # Product ID Request
+        self.REPORT_PRODUCT_ID_RESPONSE = 0xF8    # Product ID Response
         
-        # SHTP Channel numbers
-        self.CHANNEL_CONTROL = 0x00
-        self.CHANNEL_REPORTS = 0x01
+        # Sensor report IDs (from SH-2 protocol)
+        self.REPORT_ACCELEROMETER = 0x01      # Accelerometer
+        self.REPORT_GYROSCOPE = 0x02          # Gyroscope
+        self.REPORT_MAGNETOMETER = 0x03       # Magnetometer
+        
+        # SHTP Channel numbers (from BNO080 datasheet)
+        self.CHANNEL_COMMAND = 0x00      # SHTP command channel
+        self.CHANNEL_EXECUTABLE = 0x01   # Executable channel
+        self.CHANNEL_CONTROL = 0x02      # Sensor hub control channel (SH-2)
+        self.CHANNEL_REPORTS = 0x03      # Input sensor reports
+        self.CHANNEL_WAKE = 0x04         # Wake input sensor reports
+        self.CHANNEL_GYRO_RV = 0x05      # Gyro rotation vector
         
         # Packet structure constants
         self.SHTP_HEADER_SIZE = 4
         self.MAX_PACKET_SIZE = 128
         
+        # Debug flag
+        self.debug = False
+        
+    def _debug_print(self, message):
+        """Print debug message if debug mode is enabled."""
+        if self.debug:
+            print(f"BNO085 DEBUG: {message}")
+    
+    def _get_product_id(self):
+        """Get BNO085 product ID and version information."""
+        try:
+            self._debug_print("Requesting Product ID...")
+            # Send Product ID request (Report ID 0xF9)
+            self._write_packet(self.CHANNEL_CONTROL, [
+                self.REPORT_PRODUCT_ID_REQUEST,  # Report ID
+                0x00  # Reserved
+            ])
+            
+            # Wait for response
+            time.sleep(0.1)
+            
+            # Read response packets
+            for _ in range(10):  # Try up to 10 packets
+                packet = self._read_packet()
+                if packet and packet['channel'] == self.CHANNEL_CONTROL:
+                    self._debug_print(f"Received packet: length={packet['length']}, channel={packet['channel']}, payload={packet['payload']}")
+                    
+                    if (len(packet['payload']) > 0 and 
+                        packet['payload'][0] == self.REPORT_PRODUCT_ID_RESPONSE and
+                        len(packet['payload']) >= 16):
+                        
+                        # Parse Product ID response
+                        reset_cause = packet['payload'][1]
+                        sw_major = packet['payload'][2]
+                        sw_minor = packet['payload'][3]
+                        sw_part = (packet['payload'][7] << 24) | (packet['payload'][6] << 16) | (packet['payload'][5] << 8) | packet['payload'][4]
+                        sw_build = (packet['payload'][11] << 24) | (packet['payload'][10] << 16) | (packet['payload'][9] << 8) | packet['payload'][8]
+                        sw_patch = (packet['payload'][13] << 8) | packet['payload'][12]
+                        
+                        version_info = {
+                            'reset_cause': reset_cause,
+                            'sw_major': sw_major,
+                            'sw_minor': sw_minor,
+                            'sw_patch': sw_patch,
+                            'sw_part': sw_patch,
+                            'sw_build': sw_build
+                        }
+                        
+                        self._debug_print(f"Product ID Response: Reset={reset_cause}, Version={sw_major}.{sw_minor}.{sw_patch}, Part=0x{sw_part:08X}, Build={sw_build}")
+                        return version_info
+                        
+            self._debug_print("No Product ID response received")
+            return None
+            
+        except Exception as e:
+            self._debug_print(f"Error getting Product ID: {e}")
+            return None
+    
     def _read_packet(self):
         """Read a complete SHTP packet from the BNO085 using single I2C transaction."""
         try:
@@ -1081,12 +1150,16 @@ class BNO085:
             sequence_number = header[2]
             channel = header[3]
             
+            self._debug_print(f"Header: length={packet_length}, seq={sequence_number}, channel={channel}, raw={header}")
+            
             # Validate packet length
             if packet_length > self.MAX_PACKET_SIZE or packet_length < 0:
+                self._debug_print(f"Invalid packet length: {packet_length}")
                 return None
                 
             # If packet length is 0, return header-only packet
             if packet_length == 0:
+                self._debug_print("Zero-length packet received")
                 return {
                     'length': 0,
                     'sequence': sequence_number,
@@ -1096,6 +1169,7 @@ class BNO085:
                 
             # Read payload in separate transaction (BNO085 doesn't support repeated start)
             payload = self.bus.read_i2c_block_data(self.addr, 0, packet_length)
+            self._debug_print(f"Payload: {payload}")
             
             return {
                 'length': packet_length,
@@ -1103,7 +1177,8 @@ class BNO085:
                 'channel': channel,
                 'payload': payload
             }
-        except Exception:
+        except Exception as e:
+            self._debug_print(f"Error reading packet: {e}")
             return None
     
     def _write_packet(self, channel, data):
@@ -1117,6 +1192,8 @@ class BNO085:
                 channel & 0xFF                  # Channel
             ]
             
+            self._debug_print(f"Writing packet: channel={channel}, length={packet_length}, seq={self._sequence_number}, data={data}")
+            
             # Write header
             self.bus.write_i2c_block_data(self.addr, 0, header)
             
@@ -1126,44 +1203,59 @@ class BNO085:
             
             self._sequence_number = (self._sequence_number + 1) % 256
             return True
-        except Exception:
+        except Exception as e:
+            self._debug_print(f"Error writing packet: {e}")
             return False
     
     def initialize(self):
-        """Initialize the BNO085 sensor and enable raw sensor reports."""
+        """Initialize the BNO085 sensor and enable sensor reports."""
         try:
-            # Reset the sensor
-            self._write_packet(self.CHANNEL_CONTROL, [0x01, 0x00])  # Reset command
+            self._debug_print("Starting BNO085 initialization...")
+            
+            # Reset the sensor using executable channel
+            self._write_packet(self.CHANNEL_EXECUTABLE, [0x01])  # Reset command
             time.sleep(0.1)
             
-            # Enable accelerometer reports (Report ID 0x01)
-            # Command: Set Feature Report (0x02) + Report ID + Interval + Feature flags
+            # Get product ID and version information
+            version_info = self._get_product_id()
+            if version_info:
+                self._debug_print(f"BNO085 Version: {version_info['sw_major']}.{version_info['sw_minor']}.{version_info['sw_patch']}")
+            else:
+                self._debug_print("Could not get version information")
+            
+            # Enable accelerometer reports using SH-2 control channel
+            # Command: Set Feature Command (0xFD) + Report ID + Interval + Feature flags
             self._write_packet(self.CHANNEL_CONTROL, [
-                0x02, 0x00,  # Set Feature Report command
-                self.REPORT_ACCELEROMETER,      # Report ID: Accelerometer (0x01)
+                self.REPORT_SET_FEATURE_COMMAND,  # Set Feature Command (0xFD)
+                0x00,  # Reserved
+                self.REPORT_ACCELEROMETER,        # Report ID: Accelerometer (0x01)
                 0x00, 0x00,  # Report interval (0 = 50Hz)
                 0x00, 0x00   # Feature flags
             ])
             
-            # Enable gyroscope reports (Report ID 0x02)
+            # Enable gyroscope reports
             self._write_packet(self.CHANNEL_CONTROL, [
-                0x02, 0x00,  # Set Feature Report command
-                self.REPORT_GYROSCOPE,          # Report ID: Gyroscope (0x02)
+                self.REPORT_SET_FEATURE_COMMAND,  # Set Feature Command (0xFD)
+                0x00,  # Reserved
+                self.REPORT_GYROSCOPE,            # Report ID: Gyroscope (0x02)
                 0x00, 0x00,  # Report interval (0 = 50Hz)
                 0x00, 0x00   # Feature flags
             ])
             
-            # Enable magnetometer reports (Report ID 0x03)
+            # Enable magnetometer reports
             self._write_packet(self.CHANNEL_CONTROL, [
-                0x02, 0x00,  # Set Feature Report command
-                self.REPORT_MAGNETOMETER,       # Report ID: Magnetometer (0x03)
+                self.REPORT_SET_FEATURE_COMMAND,  # Set Feature Command (0xFD)
+                0x00,  # Reserved
+                self.REPORT_MAGNETOMETER,         # Report ID: Magnetometer (0x03)
                 0x00, 0x00,  # Report interval (0 = 50Hz)
                 0x00, 0x00   # Feature flags
             ])
             
             time.sleep(0.1)
+            self._debug_print("BNO085 initialization complete")
             return True
-        except Exception:
+        except Exception as e:
+            self._debug_print(f"BNO085 initialization failed: {e}")
             return False
     
     def _parse_sensor_data(self, payload, report_id):
@@ -1192,10 +1284,12 @@ class BNO085:
         # Try to read multiple packets to find accelerometer data
         for _ in range(5):  # Try up to 5 packets
             packet = self._read_packet()
-            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 6:
+            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 12:
                 # Check if this is an accelerometer report
                 if len(packet['payload']) > 0 and packet['payload'][0] == self.REPORT_ACCELEROMETER:
+                    self._debug_print(f"Found accelerometer report: {packet['payload']}")
                     return self._parse_sensor_data(packet['payload'][1:], self.REPORT_ACCELEROMETER)
+        self._debug_print("No accelerometer data found")
         return None, None, None
     
     def read_gyroscope(self):
@@ -1203,10 +1297,12 @@ class BNO085:
         # Try to read multiple packets to find gyroscope data
         for _ in range(5):  # Try up to 5 packets
             packet = self._read_packet()
-            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 6:
+            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 12:
                 # Check if this is a gyroscope report
                 if len(packet['payload']) > 0 and packet['payload'][0] == self.REPORT_GYROSCOPE:
+                    self._debug_print(f"Found gyroscope report: {packet['payload']}")
                     return self._parse_sensor_data(packet['payload'][1:], self.REPORT_GYROSCOPE)
+        self._debug_print("No gyroscope data found")
         return None, None, None
     
     def read_magnetometer(self):
@@ -1214,10 +1310,12 @@ class BNO085:
         # Try to read multiple packets to find magnetometer data
         for _ in range(5):  # Try up to 5 packets
             packet = self._read_packet()
-            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 6:
+            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 12:
                 # Check if this is a magnetometer report
                 if len(packet['payload']) > 0 and packet['payload'][0] == self.REPORT_MAGNETOMETER:
+                    self._debug_print(f"Found magnetometer report: {packet['payload']}")
                     return self._parse_sensor_data(packet['payload'][1:], self.REPORT_MAGNETOMETER)
+        self._debug_print("No magnetometer data found")
         return None, None, None
 
 
@@ -1313,6 +1411,9 @@ class ImuNode(Node):
             self.imu = ICM20948(self.bus, self.sensor_addr)
         elif self.sensor_type == 'bno085':
             self.imu = BNO085(self.bus, self.sensor_addr)
+            # Enable debug mode if --debug flag is set
+            if self.debug:
+                self.imu.debug = True
         else:
             self.get_logger().fatal(f"FATAL: Unsupported sensor type: {self.sensor_type}")
             self.destroy_node()
