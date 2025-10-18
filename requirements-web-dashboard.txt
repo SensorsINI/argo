@@ -1,0 +1,6 @@
+# Python dependencies for Argo Web Dashboard
+# Install with: pip3 install -r requirements-web-dashboard.txt
+
+flask>=2.3.0
+flask-cors>=4.0.0
+

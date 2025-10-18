@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Argo Control Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>🚢 ARGO CONTROL</h1>
+            <div class="status-badge" id="connection-status">🟢 CONNECTED</div>
+        </header>
+
+        <!-- System Status Card -->
+        <div class="card">
+            <h2>System Status</h2>
+            <div class="status-grid">
+                <div class="status-item">
+                    <span class="label">System:</span>
+                    <span class="value" id="system-status">⏳ Loading...</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Nodes:</span>
+                    <span class="value" id="nodes-status">-/-</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Battery:</span>
+                    <span class="value" id="battery-status">-.- V (--%)</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Charging:</span>
+                    <span class="value" id="charging-status">???</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">CPU Temp:</span>
+                    <span class="value" id="cpu-temp">-- °C</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">USB Power:</span>
+                    <span class="value" id="usb-power">???</span>
+                </div>
+            </div>
+            <div class="battery-time" id="battery-time"></div>
+        </div>
+
+        <!-- GPS Status Card -->
+        <div class="card">
+            <h2>GPS & Navigation</h2>
+            <div class="status-grid">
+                <div class="status-item">
+                    <span class="label">GPS Lock:</span>
+                    <span class="value" id="gps-lock">🔴 NO LOCK</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Position:</span>
+                    <span class="value" id="gps-position">--</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Heading:</span>
+                    <span class="value" id="compass-heading">--- °</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Speed:</span>
+                    <span class="value" id="gps-speed">-.-- kts</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Course:</span>
+                    <span class="value" id="gps-course">--- °</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Wind:</span>
+                    <span class="value" id="wind-status">-.-- m/s @ ---°</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Home Position Card -->
+        <div class="card" id="home-card" style="display: none;">
+            <h2>🏠 Home Position</h2>
+            <div class="status-grid">
+                <div class="status-item">
+                    <span class="label">Distance:</span>
+                    <span class="value" id="home-distance">-.-- nm</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Bearing:</span>
+                    <span class="value" id="home-bearing">--- °</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controller Status Card -->
+        <div class="card">
+            <h2>Controller</h2>
+            <div class="status-grid">
+                <div class="status-item">
+                    <span class="label">Mode:</span>
+                    <span class="value" id="control-mode">👤 HUMAN</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Type:</span>
+                    <span class="value" id="controller-type">Unknown</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controller Actions -->
+        <div class="card">
+            <h2>Controller Actions</h2>
+            <div class="button-grid">
+                <button class="btn btn-warning" onclick="switchController('return_to_home')">
+                    🏠 Return to Home
+                </button>
+                <button class="btn btn-secondary" onclick="switchController('proportional')">
+                    🎯 Proportional
+                </button>
+                <button class="btn btn-secondary" onclick="switchController('wind_aware')">
+                    🌬️ Wind Aware
+                </button>
+            </div>
+        </div>
+
+        <!-- System Control -->
+        <div class="card">
+            <h2>System Control</h2>
+            <div class="button-grid">
+                <button class="btn btn-primary" onclick="togglePause()">
+                    ⏸️ Pause/Resume Nodes
+                </button>
+                <button class="btn btn-success" onclick="startRecording()">
+                    🔴 Start Recording
+                </button>
+                <button class="btn btn-warning" onclick="stopRecording()">
+                    ⏹️ Stop Recording
+                </button>
+                <button class="btn btn-danger" onclick="confirmStop()">
+                    🛑 Stop System
+                </button>
+            </div>
+        </div>
+
+        <!-- Node Status Details (Collapsible) -->
+        <div class="card">
+            <h2 onclick="toggleNodeDetails()" style="cursor: pointer;">
+                📋 Node Details <span id="node-toggle">▼</span>
+            </h2>
+            <div id="node-details" class="node-details" style="display: none;">
+                <div id="node-list">Loading nodes...</div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <small>Last update: <span id="last-update">--</span></small>
+        </footer>
+    </div>
+
+    <!-- Modal for confirmations -->
+    <div id="modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <h3 id="modal-title">Confirm Action</h3>
+            <p id="modal-message">Are you sure?</p>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-danger" id="modal-confirm" onclick="confirmAction()">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let statusData = {};
+        let pendingAction = null;
+
+        // Fetch status every 2 seconds
+        function updateStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    statusData = data;
+                    updateUI(data);
+                    document.getElementById('connection-status').textContent = '🟢 CONNECTED';
+                    document.getElementById('connection-status').className = 'status-badge status-ok';
+                })
+                .catch(error => {
+                    console.error('Error fetching status:', error);
+                    document.getElementById('connection-status').textContent = '🔴 DISCONNECTED';
+                    document.getElementById('connection-status').className = 'status-badge status-error';
+                });
+        }
+
+        function updateUI(data) {
+            // System status
+            document.getElementById('system-status').textContent = 
+                data.system_running ? '🟢 RUNNING' : '🔴 STOPPED';
+            document.getElementById('nodes-status').textContent = 
+                `${data.nodes_running}/${data.nodes_total}`;
+            
+            // Battery
+            if (data.battery_voltage && data.battery_pct) {
+                document.getElementById('battery-status').textContent = 
+                    `${data.battery_voltage.toFixed(1)} V (${data.battery_pct.toFixed(0)}%)`;
+            }
+            
+            document.getElementById('charging-status').textContent = 
+                data.battery_charging === true ? '🔌 YES' :
+                data.battery_charging === false ? '❌ NO' : '???';
+            
+            document.getElementById('usb-power').textContent = 
+                data.battery_usb_power === true ? '⚡ YES' :
+                data.battery_usb_power === false ? '❌ NO' : '???';
+            
+            // Battery time estimates
+            let batteryTimeText = '';
+            if (data.battery_time_to_full !== null && data.battery_time_to_full !== undefined) {
+                if (data.battery_time_to_full < 0.1) {
+                    batteryTimeText = '⏱️ Fully charged (< 6 min to full)';
+                } else if (data.battery_time_to_full < 1.0) {
+                    batteryTimeText = `⏱️ Time to full: ${Math.round(data.battery_time_to_full * 60)} min`;
+                } else {
+                    batteryTimeText = `⏱️ Time to full: ${data.battery_time_to_full.toFixed(1)} hours`;
+                }
+            } else if (data.battery_time_to_empty !== null && data.battery_time_to_empty !== undefined) {
+                if (data.battery_time_to_empty < 0.1) {
+                    batteryTimeText = '⚠️ Battery nearly depleted (< 6 min)';
+                } else if (data.battery_time_to_empty < 1.0) {
+                    batteryTimeText = `⏱️ Est. runtime: ${Math.round(data.battery_time_to_empty * 60)} min`;
+                } else {
+                    batteryTimeText = `⏱️ Est. runtime: ${data.battery_time_to_empty.toFixed(1)} hours`;
+                }
+            }
+            document.getElementById('battery-time').textContent = batteryTimeText;
+            
+            // CPU temp
+            document.getElementById('cpu-temp').textContent = 
+                data.cpu_temp ? `${data.cpu_temp} °C` : '-- °C';
+            
+            // GPS
+            document.getElementById('gps-lock').textContent = 
+                data.gps_locked ? '🟢 LOCKED' : '🔴 NO LOCK';
+            
+            if (data.gps_latitude && data.gps_longitude) {
+                const latDir = data.gps_latitude >= 0 ? 'N' : 'S';
+                const lonDir = data.gps_longitude >= 0 ? 'E' : 'W';
+                document.getElementById('gps-position').textContent = 
+                    `${Math.abs(data.gps_latitude).toFixed(6)}° ${latDir}, ${Math.abs(data.gps_longitude).toFixed(6)}° ${lonDir}`;
+            } else {
+                document.getElementById('gps-position').textContent = '--';
+            }
+            
+            document.getElementById('compass-heading').textContent = 
+                data.compass_heading ? `${Math.round(data.compass_heading)}°` : '--- °';
+            
+            document.getElementById('gps-speed').textContent = 
+                data.gps_sog ? `${data.gps_sog.toFixed(2)} kts` : '-.-- kts';
+            
+            document.getElementById('gps-course').textContent = 
+                data.gps_cog ? `${Math.round(data.gps_cog)}°` : '--- °';
+            
+            // Wind
+            if (data.wind_speed !== null && data.wind_angle !== null) {
+                document.getElementById('wind-status').textContent = 
+                    `${data.wind_speed.toFixed(2)} m/s @ ${Math.round(data.wind_angle)}°`;
+            } else {
+                document.getElementById('wind-status').textContent = '-.-- m/s @ ---°';
+            }
+            
+            // Home position
+            if (data.distance_to_home !== null) {
+                document.getElementById('home-card').style.display = 'block';
+                document.getElementById('home-distance').textContent = 
+                    `${data.distance_to_home.toFixed(2)} nm (${Math.round(data.distance_to_home * 1852)} m)`;
+                document.getElementById('home-bearing').textContent = 
+                    data.bearing_to_home ? `${Math.round(data.bearing_to_home)}°` : '--- °';
+            } else {
+                document.getElementById('home-card').style.display = 'none';
+            }
+            
+            // Controller
+            document.getElementById('control-mode').textContent = 
+                data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
+            document.getElementById('controller-type').textContent = data.controller_type;
+            
+            // Node details
+            if (data.nodes_list) {
+                let nodeHTML = '<div class="node-list">';
+                for (const [node, status] of Object.entries(data.nodes_list)) {
+                    nodeHTML += `<div class="node-item">${node}: ${status}</div>`;
+                }
+                nodeHTML += '</div>';
+                document.getElementById('node-list').innerHTML = nodeHTML;
+            }
+            
+            // Last update time
+            const now = new Date();
+            document.getElementById('last-update').textContent = now.toLocaleTimeString();
+        }
+
+        function toggleNodeDetails() {
+            const details = document.getElementById('node-details');
+            const toggle = document.getElementById('node-toggle');
+            if (details.style.display === 'none') {
+                details.style.display = 'block';
+                toggle.textContent = '▲';
+            } else {
+                details.style.display = 'none';
+                toggle.textContent = '▼';
+            }
+        }
+
+        function showModal(title, message, action) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-message').textContent = message;
+            document.getElementById('modal').style.display = 'flex';
+            pendingAction = action;
+        }
+
+        function closeModal() {
+            document.getElementById('modal').style.display = 'none';
+            pendingAction = null;
+        }
+
+        function confirmAction() {
+            if (pendingAction) {
+                pendingAction();
+            }
+            closeModal();
+        }
+
+        // API Actions
+        function togglePause() {
+            fetch('/api/toggle_pause', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.success ? `✅ ${data.message}` : `❌ ${data.message}`);
+                    updateStatus();
+                })
+                .catch(error => alert(`❌ Error: ${error}`));
+        }
+
+        function switchController(type) {
+            const typeNames = {
+                'return_to_home': 'Return to Home',
+                'proportional': 'Proportional',
+                'wind_aware': 'Wind Aware'
+            };
+            
+            showModal(
+                'Switch Controller',
+                `Switch to ${typeNames[type]} controller?`,
+                () => {
+                    fetch('/api/controller/switch', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ type: type })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.success ? `✅ ${data.message}` : `⚠️ ${data.message}`);
+                        updateStatus();
+                    })
+                    .catch(error => alert(`❌ Error: ${error}`));
+                }
+            );
+        }
+
+        function startRecording() {
+            fetch('/api/recording/start', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.success ? `✅ Recording started` : `❌ ${data.message}`);
+                    updateStatus();
+                })
+                .catch(error => alert(`❌ Error: ${error}`));
+        }
+
+        function stopRecording() {
+            fetch('/api/recording/stop', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.success ? `✅ Recording stopped` : `❌ ${data.message}`);
+                    updateStatus();
+                })
+                .catch(error => alert(`❌ Error: ${error}`));
+        }
+
+        function confirmStop() {
+            showModal(
+                '⚠️ Stop System',
+                'This will stop all Argo nodes. Are you sure?',
+                () => {
+                    fetch('/api/lifecycle/stop', { method: 'POST' })
+                        .then(response => response.json())
+                        .then(data => {
+                            alert(data.success ? `✅ System stopped` : `❌ ${data.message}`);
+                            updateStatus();
+                        })
+                        .catch(error => alert(`❌ Error: ${error}`));
+                }
+            );
+        }
+
+        // Auto-update every 2 seconds
+        updateStatus();
+        setInterval(updateStatus, 2000);
+    </script>
+</body>
+</html>
+

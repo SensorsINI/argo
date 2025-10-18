@@ -28,6 +28,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Float64, Float32, String
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
+from std_srvs.srv import Trigger
 from rclpy.parameter import Parameter
 
 
@@ -453,6 +454,13 @@ class ControllerNode(Node):
         self.pause_service = TogglePauseService(
             self, f'{self.get_name()}/toggle_pause')
 
+        # Service for controller switching (for web dashboard)
+        self.switch_controller_service = self.create_service(
+            Trigger,
+            f'{self.get_name()}/switch_controller',
+            self._handle_switch_controller
+        )
+
         # --- Parameters ---
         self.declare_parameter('param_file_path', 'argo.yaml')
         self.declare_parameter('controller_type', 'proportional')
@@ -497,6 +505,10 @@ class ControllerNode(Node):
         # Real-time control commands (use default QoS)
         self.pub_rudder_sail_cmd = self.create_publisher(
             Vector3, '/rudder_sail_cmd', 10)
+        
+        # Controller state for web dashboard
+        self.pub_controller_state = self.create_publisher(
+            String, '/controller_state', 10)
 
         # --- Subscribers ---
         # Control status from rudder_sail_radio.py (use default QoS)
@@ -607,6 +619,31 @@ class ControllerNode(Node):
 
         self.get_logger().info(
             f"Switched controller from {old_controller} to {self.controller.name}")
+    
+    def _handle_switch_controller(self, request, response):
+        """Service handler for switching controller types via web dashboard."""
+        try:
+            # For Trigger service, we'll use a workaround since it doesn't have a data field
+            # The web dashboard should pass controller type via a parameter or separate topic
+            # For now, we'll cycle through controller types or default to RTH
+            # TODO: Implement proper service type with string parameter
+            
+            # Default to return_to_home for emergency RTH button
+            controller_type = 'return_to_home'
+            
+            old_controller = self.controller.name if self.controller else "None"
+            self.switch_controller(controller_type)
+            
+            response.success = True
+            response.message = f"Switched from {old_controller} to {self.controller.name}"
+            self.get_logger().info(f"Controller switched via service: {response.message}")
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Error switching controller: {str(e)}"
+            self.get_logger().error(response.message)
+        
+        return response
 
     # --- Sensor Callbacks ---
     def human_control_callback(self, msg):
@@ -873,6 +910,11 @@ class ControllerNode(Node):
             # Publish control command to rudder_sail_radio.py
             if control_command:
                 self.pub_rudder_sail_cmd.publish(control_command.to_vector3())
+            
+            # Publish current controller state for web dashboard
+            if self.controller:
+                state_msg = String(data=self.controller.name)
+                self.pub_controller_state.publish(state_msg)
 
                 # Only format debug string if debug logging is enabled (CPU optimization)
                 if self.get_logger().get_effective_level() <= 10:  # DEBUG level
