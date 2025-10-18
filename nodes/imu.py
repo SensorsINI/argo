@@ -129,6 +129,15 @@ def get_terminal_size():
         return 80, 24  # fallback width, height
 
 
+def clear_screen_and_home():
+    """Clear screen and move cursor to top-left. Can be disabled for debugging."""
+    # Comment out these lines to disable screen clearing for debugging
+    # sys.stdout.write('\x1b[2J')    # clear screen
+    # sys.stdout.write('\x1b[H')     # home cursor
+    # sys.stdout.flush()
+    pass
+
+
 def plot_magnetometer_calibration(timestamped_samples, calib, timestamp):
     """Generate and save magnetometer calibration plot.
 
@@ -1691,9 +1700,7 @@ class ImuNode(Node):
             # Force terminal reset on initialization
             sys.stdout.write('\x1b[0m')    # reset attributes
             sys.stdout.write('\x1b[?25l')  # hide cursor
-            sys.stdout.write('\x1b[2J')    # clear screen
-            sys.stdout.write('\x1b[H')     # home cursor
-            sys.stdout.flush()
+            clear_screen_and_home()
             self._vis_initialized = True
         except Exception as e:
             # If visualization initialization fails, disable it
@@ -1705,8 +1712,7 @@ class ImuNode(Node):
             return
         try:
             sys.stdout.write('\x1b[0m')
-            sys.stdout.write('\x1b[2J')
-            sys.stdout.write('\x1b[H')
+            clear_screen_and_home()
             sys.stdout.write('\x1b[?25h')
             sys.stdout.flush()
         except Exception:
@@ -2655,8 +2661,7 @@ def main(args=None):
             # Terminal setup
             try:
                 sys.stdout.write('\x1b[?25l')  # hide cursor
-                sys.stdout.write('\x1b[2J')    # clear
-                sys.stdout.flush()
+                clear_screen_and_home()
                 visual_ok = True
             except Exception:
                 visual_ok = False
@@ -2786,8 +2791,7 @@ def main(args=None):
                 if visual_ok:
                     try:
                         sys.stdout.write('\x1b[0m')
-                        sys.stdout.write('\x1b[2J')
-                        sys.stdout.write('\x1b[H')
+                        clear_screen_and_home()
                         sys.stdout.write('\x1b[?25h')
                         sys.stdout.flush()
                     except Exception:
