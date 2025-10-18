@@ -1,6 +1,6 @@
 [Unit]
 Description=Argo Robot ROS2 Launch Service
-After=network.target argo_radio_servo_module.service
+After=network.target
 Wants=argo_radio_servo_module.service
 
 [Service]
