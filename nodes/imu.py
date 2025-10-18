@@ -1212,8 +1212,8 @@ class BNO085:
         try:
             self._debug_print("Starting BNO085 initialization...")
             
-            # Reset the sensor using executable channel
-            self._write_packet(self.CHANNEL_EXECUTABLE, [0x01])  # Reset command
+            # Skip reset command for now - try direct communication
+            # self._write_packet(self.CHANNEL_EXECUTABLE, [0x01])  # Reset command - commented out
             time.sleep(0.1)
             
             # Get product ID and version information
@@ -2171,9 +2171,9 @@ class ImuNode(Node):
                 try:
                     time_since_healthy = current_time - self._last_successful_read_time
 
-                    sys.stdout.write('\x1b[2J')    # clear
-                    sys.stdout.write('\x1b[H')     # home
-                    sys.stdout.flush()
+                    # sys.stdout.write('\x1b[2J')    # clear - commented out for debugging
+                    # sys.stdout.write('\x1b[H')     # home - commented out for debugging
+                    # sys.stdout.flush()
 
                     # Build recovery status display
                     term_width, term_height = get_terminal_size()
@@ -2341,9 +2341,9 @@ class ImuNode(Node):
                     print(f"DEBUG: Starting ASCII display", file=sys.stderr)
                     
                     # Values are pre-calculated, just render them
-                    sys.stdout.write('\x1b[2J')    # clear
-                    sys.stdout.write('\x1b[H')     # home
-                    sys.stdout.flush()
+                    # sys.stdout.write('\x1b[2J')    # clear - commented out for debugging
+                    # sys.stdout.write('\x1b[H')     # home - commented out for debugging
+                    # sys.stdout.flush()
                     
                     # Nominal limits for bars
                     a_lim = 2.0   # g
