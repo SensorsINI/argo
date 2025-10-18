@@ -21,7 +21,6 @@ make-scripts-executable:
 	@echo "🔧 Making battery status scripts executable..."
 	@chmod +x battery_status_*.sh
 	@chmod +x battery_status_*.py
-	@chmod +x show_battery_status.sh
 	@chmod +x setup_battery_panel.sh
 	@echo "✅ All battery status scripts are now executable"
 
@@ -48,15 +47,12 @@ test-battery-status:
 	@echo "Testing genmon XML output..."
 	@./battery_status_genmon_wrapper.sh
 	@echo ""
-	@echo "Testing launcher script..."
-	@./show_battery_status.sh
-	@echo ""
 	@echo "✅ All battery status tests completed"
 
 # Test ROS2 service availability
 test-battery-service:
 	@echo "🔍 Testing battery service availability..."
-	@if ros2 service list | grep -q "/battery_status"; then \
+	@if ros2 service list 2>/dev/null | grep -q "/battery_status"; then \
 		echo "✅ Battery service is available"; \
 		ros2 service call /battery_status std_srvs/srv/Trigger; \
 	else \
@@ -64,13 +60,6 @@ test-battery-service:
 		echo "   Start with: python3 ../nodes/battery_water.py"; \
 	fi
 
-# Create desktop entry for battery status launcher
-install-desktop-entry:
-	@echo "🔧 Installing desktop entry for battery status launcher..."
-	@mkdir -p ~/.local/share/applications
-	@cp ../.local/share/applications/argo-battery-panel.desktop ~/.local/share/applications/ 2>/dev/null || \
-		echo "Desktop entry already exists or not found"
-	@echo "✅ Desktop entry installed"
 
 # Clean up battery monitor files
 clean-battery-monitor:
@@ -87,9 +76,8 @@ help:
 	@echo "  install-genmon-plugin    - Install xfce4-genmon-plugin package"
 	@echo "  make-scripts-executable  - Make all battery scripts executable"
 	@echo "  setup-battery-panel      - Configure XFCE4 panel with battery status"
-	@echo "  test-battery-status      - Test all battery status scripts"
+	@echo "  test-battery-status      - Test battery status scripts"
 	@echo "  test-battery-service     - Test ROS2 battery service"
-	@echo "  install-desktop-entry    - Install desktop entry for launcher"
 	@echo "  clean-battery-monitor    - Clean up temporary files"
 	@echo "  help                     - Show this help message"
 	@echo ""

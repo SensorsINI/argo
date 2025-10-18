@@ -158,6 +158,8 @@ def main():
             
             print(f"\n  Loop {loop_count} complete. Waiting 1 second...\n")
             time.sleep(1)
+            # Clear the terminal screen and move the cursor to home position
+            print("\033[2J\033[H", end="")
             
     except KeyboardInterrupt:
         print("\n\n" + "=" * 60)
