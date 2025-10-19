@@ -180,6 +180,14 @@ bno08x-build: bno08x-init
 		echo "Creating symlink to submodule..."; \
 		ln -sf $(PWD)/$(BNO08X_SUBMODULE_DIR) $(BNO08X_BUILD_DIR)/src/bno08x_driver; \
 	fi
+	@echo "Applying Argo-specific configuration (I2C bus fix)..."
+	@if grep -q '"/dev/i2c-7"' $(BNO08X_SUBMODULE_DIR)/config/bno085_i2c.yaml 2>/dev/null; then \
+		echo "⚠️  Patching I2C bus from i2c-7 to i2c-0 for Orange Pi Zero 2W..."; \
+		sed -i 's|bus: "/dev/i2c-7"|bus: "/dev/i2c-0"|g' $(BNO08X_SUBMODULE_DIR)/config/bno085_i2c.yaml; \
+		echo "✅ I2C bus configuration patched"; \
+	else \
+		echo "✅ I2C bus already configured correctly"; \
+	fi
 	@echo "Sourcing ROS2 environment..."
 	@bash -c "source /opt/ros/humble/setup.bash && \
 		cd $(BNO08X_BUILD_DIR) && \

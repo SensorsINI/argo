@@ -203,6 +203,32 @@ eval "$(register-python-argcomplete bno085.py)"
 
 ## Configuration
 
+### Automatic I2C Bus Configuration
+
+**IMPORTANT**: The BNO08x driver submodule defaults to `/dev/i2c-7`, but Orange Pi Zero 2W uses `/dev/i2c-0`. The Makefile **automatically patches** this during the build process.
+
+**How it works:**
+1. **Fresh clone**: Submodule has `bus: "/dev/i2c-7"` (upstream default)
+2. **Run build**: `make bno08x-build` or `make bno085-service-install`
+3. **Auto-patch**: Makefile detects i2c-7 and changes to i2c-0
+4. **Build proceeds**: Correct I2C bus configuration is used
+
+**Manual verification:**
+```bash
+# Check if patch is needed
+grep 'bus:' nodes/vendor/bno08x_driver/config/bno085_i2c.yaml
+# Should show: bus: "/dev/i2c-0"
+
+# If it shows i2c-7, run:
+make bno08x-build  # Will auto-patch
+```
+
+**Why automatic patching?**
+- **Submodule is upstream**: Can't commit hardware-specific changes without forking
+- **Hardware-specific**: Orange Pi Zero 2W requires i2c-0 (not i2c-7)
+- **Fresh install support**: Ensures new clones work immediately after `make bno085-service-install`
+- **Maintainability**: No need to remember manual configuration steps
+
 ### Driver Configuration
 
 The BNO08x C++ driver is configured via `nodes/vendor/bno08x_driver_argo.yaml`. This file is automatically loaded by both launch files.
@@ -510,7 +536,7 @@ Unlike other Argo sensor nodes, the BNO085 **requires** systemd service manageme
 **Solution**: This is a transient error during initialization. The driver recovers and works correctly.
 
 **Issue**: "Failed to open the I2C bus" - Bus `/dev/i2c-7` not found  
-**Solution**: The driver config was pointing to wrong bus. Ensure `nodes/vendor/bno08x_driver/config/bno085_i2c.yaml` has `bus: "/dev/i2c-0"` (not i2c-7). This is a submodule file, so changes must be maintained locally.
+**Solution**: The `make bno085-service-install` and `make bno08x-build` targets automatically patch the I2C bus from i2c-7 to i2c-0 for Orange Pi Zero 2W. This happens automatically on fresh installs.
 
 **Issue**: No compass data  
 **Solution**: Check that both C++ driver AND bridge node are running:
