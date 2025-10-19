@@ -775,7 +775,7 @@ class ArgoLifecycleManager:
 
         Hardware nodes that conflict with simulator are excluded:
         - gps.py (conflicts with simulator GPS topics)
-        - imu.py (conflicts with simulator compass topics)
+        - bno085.py (conflicts with simulator compass topics)
         - anem.py (conflicts with simulator wind topics)
         - rudder_sail_radio.py (conflicts with simulator control)
         
@@ -790,7 +790,7 @@ class ArgoLifecycleManager:
 
         print("Simulation mode excludes conflicting hardware nodes:")
         print("  - gps.py (GPS data provided by simulator)")
-        print("  - imu.py (compass data provided by simulator)")
+        print("  - bno085.py (compass data provided by simulator)")
         print("  - anem.py (wind data provided by simulator)")
         print("  - rudder_sail_radio.py (control handled by simulator)")
         print("Simulation mode includes visualization:")
@@ -1730,7 +1730,7 @@ class ArgoLifecycleManager:
         expected_map = {
             "anem": [0x21, 0x22, 0x23],
             "battery_water": [0x34, 0x44],  # 0x34: ADC, 0x44: humidity
-            "imu": [0x69],
+            "bno085": [0x4a],  # BNO085 IMU at 0x4a (replaces old IMU at 0x69)
         }
 
         for sensor, addrs in expected_map.items():
@@ -1784,7 +1784,7 @@ COMMANDS:
 
   simulate_local   Start Argo in local simulation mode
                    - Runs sailboat simulator directly on Orange Pi
-                   - Excludes conflicting hardware nodes (gps.py, imu.py, anem.py, rudder_sail_radio.py)
+                   - Excludes conflicting hardware nodes (gps.py, bno085.py, anem.py, rudder_sail_radio.py)
                    - Includes simulator bridge, controller, and monitoring nodes
                    - Provides keyboard control via curses interface
                    - Enables Foxglove visualization at ws://localhost:9090
@@ -1820,7 +1820,7 @@ PAUSE TOGGLING:
     - pwm.py: Servo control
     - controller.py: Autonomous navigation
     - gps.py: GPS navigation
-    - imu.py: IMU/compass data
+    - bno085.py: IMU/compass data
     - anem.py: Wind sensor
     - rudder_sail_radio.py: Radio control interface
     - record.py: Data recording
