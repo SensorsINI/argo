@@ -1,9 +1,0 @@
-{
-  "method": "unity",
-  "bias_uT": [0.0, 0.0, 0.0],
-  "scale_diag": [1.0, 1.0, 1.0],
-  "num_samples": 0,
-  "ranges_uT": {"x": [0, 0], "y": [0, 0], "z": [0, 0]},
-  "timestamp": "2025-10-10T00:00:00Z",
-  "description": "Unity calibration - no transformation applied (for testing)"
-}
