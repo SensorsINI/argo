@@ -86,6 +86,28 @@ class SimpleBatteryStatus(Node):
             if ac_power is True:
                 display_text += " ⚡"
             
+            # Add battery lifetime information if available
+            charging_status = raw_data.get('charging_status')
+            time_to_full = raw_data.get('time_to_full_hours')
+            time_to_empty = raw_data.get('time_to_empty_hours')
+            
+            if charging_status is True and time_to_full is not None:
+                if time_to_full > 0:
+                    if time_to_full < 1:
+                        display_text += f" +{time_to_full*60:.0f}m"  # Show minutes if less than 1 hour
+                    else:
+                        display_text += f" +{time_to_full:.1f}h"  # Show hours with 1 decimal
+                else:
+                    display_text += " ✓"  # Fully charged
+            elif charging_status is False and time_to_empty is not None:
+                if time_to_empty > 0:
+                    if time_to_empty < 1:
+                        display_text += f" -{time_to_empty*60:.0f}m"  # Show minutes if less than 1 hour
+                    else:
+                        display_text += f" -{time_to_empty:.1f}h"  # Show hours with 1 decimal
+                else:
+                    display_text += " ⚠"  # Empty
+            
             return display_text
             
         except Exception:
