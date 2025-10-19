@@ -63,7 +63,15 @@ ros2 run argo gps.py --debug
 #### 2. `bno085.py` - Inertial Measurement Unit Node
 **Purpose**: Interfaces with [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU for sensor fusion and motion data
 
+**⚠️ IMPORTANT**: The BNO085 uses a **unique two-process architecture** (C++ driver + Python bridge) that requires systemd service management, unlike other sensor nodes. See **[BNO085_README.md](BNO085_README.md)** for complete documentation.
+
 **Hardware**: I2C0 address 0x4a (via C++ `bno08x_driver` with Python bridge)
+
+**Architecture**: 
+- **C++ Driver** (`bno08x_driver`): Direct I2C hardware access
+- **Python Bridge** (`bno085.py`): Converts to Argo topics
+- **Systemd Service** (`argo_bno085.service`): **Required** for production use
+- **I2C Recovery**: Automatic service restart on sensor failures
 
 **Topics Published**:
 - `/compass` (Vector3) - Magnetic field heading in µT (x, y, z=heading_deg)
@@ -77,25 +85,34 @@ ros2 run argo gps.py --debug
 - **Rotation Vector Output**: Quaternion-based absolute orientation (magnetic north reference)
 - **Automatic Calibration**: On-board magnetometer, accelerometer, and gyroscope calibration
 - **Health Monitoring**: Auto-recovery with 3-second data timeout detection
+- **I2C Error Recovery**: Automatic systemd service restart on failures
 - **Multiple Modes**: Bridge, calibration, verification, and status checking
 
-**Usage**:
+**Quick Start** (see [BNO085_README.md](BNO085_README.md) for details):
 ```bash
-# Run as bridge (normal operation)
-python3 bno085.py bridge
+# Install systemd service (first time)
+cd /home/orangepi/argo/nodes
+make bno085-service-install
+
+# Service management
+make bno085-service-status
+make bno085-service-restart
+make bno085-service-logs
+
+# Calibration and verification
+python3 bno085.py calibrate --duration 60
+python3 bno085.py verify
 
 # Check system status
 python3 bno085.py status
-
-# Run calibration (figure-8 motion for magnetometer)
-python3 bno085.py calibrate --duration 120
-
-# Verify rotation vector output
-python3 bno085.py verify --duration 60
-
-# Get help
-python3 bno085.py --help
 ```
+
+**Documentation**: See **[BNO085_README.md](BNO085_README.md)** for:
+- Systemd service architecture and setup
+- I2C error recovery mechanisms
+- Calibration procedures
+- Troubleshooting guide
+- Comparison with direct I2C sensor nodes
 
 #### 3. `anem.py` - Wind Sensor Node
 **Purpose**: Calculates wind speed and direction using 3 differential pressure sensors
