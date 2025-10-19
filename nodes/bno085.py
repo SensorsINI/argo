@@ -197,7 +197,7 @@ import collections
 # ============================================================================
 
 class BNO085Bridge(Node):
-    """Bridge node that converts BNO08x driver topics to Argo format."""
+    """Bridge node that converts BNO08x driver topics to Argo format with I2C error recovery."""
     
     def __init__(self):
         super().__init__('bno085_bridge')
@@ -213,13 +213,26 @@ class BNO085Bridge(Node):
         self.sub_imu = self.create_subscription(Imu, '/imu', self.imu_callback, 10)
         self.sub_mag = self.create_subscription(MagneticField, '/magnetic_field', self.mag_callback, 10)
         
-        # Health monitoring
+        # Health monitoring and recovery tracking
         self.health_status = False  # Start unhealthy until first data received
         self.last_imu_time = None
+        self.last_successful_read_time = time.time()
         self.health_check_timer = self.create_timer(1.0, self._check_health)
+        
+        # I2C error recovery tracking
+        self.node_healthy = False  # Track if we're receiving data
+        self.recovery_attempt_count = 0
+        self.last_recovery_attempt_time = 0.0
+        self.last_unreachable_log_time = 0.0
+        self.consecutive_failures = 0
+        self.total_errors_this_session = 0
+        
+        # Recovery mode flag (switches to low-frequency checks when unhealthy)
+        self.in_recovery_mode = False
         
         self.get_logger().info("BNO085 Bridge: Converting C++ driver → Argo topics")
         self.get_logger().info("Publishing: /compass, /pose, /accel, /gyro, /imu_health")
+        self.get_logger().info("I2C error recovery: Enabled with automatic C++ driver restart")
     
     def quaternion_to_euler(self, w, x, y, z):
         """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees."""
@@ -245,8 +258,25 @@ class BNO085Bridge(Node):
     
     def imu_callback(self, msg: Imu):
         """Process IMU message: extract heading, gyro, accel."""
+        current_time = time.time()
+        
         # Update health tracking
-        self.last_imu_time = time.time()
+        self.last_imu_time = current_time
+        self.last_successful_read_time = current_time
+        self.consecutive_failures = 0
+        
+        # Mark as healthy if we were unhealthy
+        if not self.node_healthy:
+            self.node_healthy = True
+            self.recovery_attempt_count = 0
+            self.total_errors_this_session = 0
+            self.last_unreachable_log_time = 0.0
+            self.get_logger().info("BNO085 I2C communication recovered - data flowing normally")
+            
+            # Switch back to normal health check interval if in recovery mode
+            if self.in_recovery_mode:
+                self._switch_to_normal_mode()
+        
         if not self.health_status:
             self._publish_health_status(True)
         
@@ -281,21 +311,43 @@ class BNO085Bridge(Node):
         pass
     
     def _check_health(self):
-        """Periodic health check - mark unhealthy if no data received."""
+        """Periodic health check with I2C error detection and recovery."""
+        current_time = time.time()
+        
         if self.last_imu_time is None:
             # No data received yet
             if self.health_status:
                 self._publish_health_status(False)
+            
+            # Check if we should attempt recovery
+            time_since_start = current_time - self.last_successful_read_time
+            if time_since_start > 5.0 and not self.node_healthy:
+                self._attempt_recovery(current_time)
             return
         
-        # Check if data is stale (no data for 3 seconds)
-        time_since_last = time.time() - self.last_imu_time
+        # Check if data is stale (no data for 3 seconds = likely I2C failure)
+        time_since_last = current_time - self.last_imu_time
+        
         if time_since_last > 3.0:
+            # Data is stale - likely I2C communication failure
+            self.consecutive_failures += 1
+            self.total_errors_this_session += 1
+            
             if self.health_status:
-                self.get_logger().warn(f"No IMU data for {time_since_last:.1f}s - marking unhealthy")
+                self.get_logger().warn(f"No IMU data for {time_since_last:.1f}s - I2C communication issue detected")
                 self._publish_health_status(False)
+            
+            # Mark node as unhealthy
+            if self.node_healthy:
+                self.node_healthy = False
+                self.get_logger().warn("BNO085 marked UNHEALTHY - switching to recovery mode")
+                self._switch_to_recovery_mode()
+            
+            # Attempt recovery
+            self._attempt_recovery(current_time)
+            
         elif not self.health_status:
-            # Recovered
+            # Data recovered
             self._publish_health_status(True)
     
     def _publish_health_status(self, is_healthy: bool):
@@ -310,6 +362,64 @@ class BNO085Bridge(Node):
                 self.get_logger().info("BNO085 health: HEALTHY")
             else:
                 self.get_logger().warn("BNO085 health: UNHEALTHY")
+    
+    def _switch_to_recovery_mode(self):
+        """Switch to low-frequency recovery mode (checking every 3 seconds)."""
+        if not self.in_recovery_mode:
+            self.in_recovery_mode = True
+            self.health_check_timer.destroy()
+            self.health_check_timer = self.create_timer(3.0, self._check_health)
+            self.get_logger().info("Switched to recovery mode (3s check interval)")
+    
+    def _switch_to_normal_mode(self):
+        """Switch back to normal health check frequency (1 second)."""
+        if self.in_recovery_mode:
+            self.in_recovery_mode = False
+            self.health_check_timer.destroy()
+            self.health_check_timer = self.create_timer(1.0, self._check_health)
+            self.get_logger().info("Switched back to normal mode (1s check interval)")
+    
+    def _attempt_recovery(self, current_time):
+        """Attempt to recover from I2C failure by restarting the C++ driver."""
+        # Throttle recovery attempts (try every 5 seconds)
+        time_since_last_attempt = current_time - self.last_recovery_attempt_time
+        if time_since_last_attempt < 5.0:
+            return
+        
+        self.recovery_attempt_count += 1
+        self.last_recovery_attempt_time = current_time
+        
+        # Log throttled unreachable sensor status (once per 60s)
+        time_since_last_log = current_time - self.last_unreachable_log_time
+        if time_since_last_log >= 60.0 or self.last_unreachable_log_time == 0.0:
+            time_since_healthy = current_time - self.last_successful_read_time
+            self.get_logger().error(
+                f"BNO085 sensor unreachable for {time_since_healthy:.1f}s "
+                f"(recovery attempts: {self.recovery_attempt_count}, "
+                f"failures: {self.total_errors_this_session})")
+            self.last_unreachable_log_time = current_time
+        
+        # Attempt to restart the C++ driver
+        self.get_logger().info(f"Attempting recovery #{self.recovery_attempt_count}: Restarting bno08x_driver...")
+        
+        try:
+            # Try to restart the driver using systemctl
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'restart', 'bno08x-driver.service'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                self.get_logger().info("bno08x_driver service restart command successful - waiting for data...")
+            else:
+                self.get_logger().warn(f"bno08x_driver restart command failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            self.get_logger().error("Driver restart command timed out")
+        except Exception as e:
+            self.get_logger().error(f"Failed to restart driver: {e}")
 
 
 # ============================================================================
