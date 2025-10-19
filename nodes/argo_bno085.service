@@ -1,0 +1,31 @@
+[Unit]
+Description=Argo BNO085 IMU Sensor Service
+Documentation=file://%h/argo/nodes/bno085.py
+After=basic.target sysinit.target
+Wants=basic.target
+DefaultDependencies=no
+Before=argo_launch.service shutdown.target
+
+[Service]
+Type=simple
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/argo/nodes
+Environment=ROS_DOMAIN_ID=0
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && source /home/orangepi/argo_bno08x_ws/install/setup.bash && ros2 run bno08x_driver bno08x_driver --ros-args --params-file /home/orangepi/argo/nodes/vendor/bno08x_driver_argo.yaml'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+
+# Security settings
+NoNewPrivileges=false
+PrivateTmp=false
+
+[Install]
+WantedBy=basic.target
+

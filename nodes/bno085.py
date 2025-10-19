@@ -403,18 +403,18 @@ class BNO085Bridge(Node):
         self.get_logger().info(f"Attempting recovery #{self.recovery_attempt_count}: Restarting bno08x_driver...")
         
         try:
-            # Try to restart the driver using systemctl
+            # Try to restart the C++ driver service using systemctl
             result = subprocess.run(
-                ['sudo', 'systemctl', 'restart', 'bno08x-driver.service'],
+                ['sudo', 'systemctl', 'restart', 'argo_bno085.service'],
                 capture_output=True,
                 text=True,
                 timeout=10
             )
             
             if result.returncode == 0:
-                self.get_logger().info("bno08x_driver service restart command successful - waiting for data...")
+                self.get_logger().info("argo_bno085.service restart command successful - waiting for data...")
             else:
-                self.get_logger().warn(f"bno08x_driver restart command failed: {result.stderr}")
+                self.get_logger().warn(f"argo_bno085.service restart command failed: {result.stderr}")
                 
         except subprocess.TimeoutExpired:
             self.get_logger().error("Driver restart command timed out")

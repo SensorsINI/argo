@@ -239,3 +239,96 @@ bno08x-clean:
 	@rm -rf $(BNO08X_BUILD_DIR)
 	@echo "✅ Build artifacts cleaned"
 
+# ============================================================================
+# BNO085 Service Management (Systemd integration)
+# ============================================================================
+
+BNO085_SERVICE_FILE := argo_bno085.service
+BNO085_SERVICE_DEST := /etc/systemd/system/$(BNO085_SERVICE_FILE)
+
+.PHONY: bno085-service-install bno085-service-uninstall bno085-service-enable bno085-service-disable
+.PHONY: bno085-service-start bno085-service-stop bno085-service-restart bno085-service-status bno085-service-logs
+
+bno085-service-install: bno08x-build
+	@echo "Installing argo_bno085 service..."
+	@if systemctl is-active --quiet argo_bno085.service; then \
+		echo "⏸️  Stopping existing service..."; \
+		sudo systemctl stop argo_bno085.service; \
+	fi
+	@echo "📝 Installing service file..."
+	@sudo cp $(BNO085_SERVICE_FILE) $(BNO085_SERVICE_DEST)
+	@sudo chmod 644 $(BNO085_SERVICE_DEST)
+	@sudo systemctl daemon-reload
+	@echo "▶️  Starting service..."
+	@sudo systemctl enable argo_bno085.service
+	@sudo systemctl start argo_bno085.service
+	@sleep 2
+	@echo ""
+	@echo "✅ Argo BNO085 service installed successfully"
+	@echo ""
+	@if systemctl is-active --quiet argo_bno085.service; then \
+		echo "🟢 Service is RUNNING"; \
+		echo ""; \
+		echo "Check status: make bno085-service-status"; \
+		echo "Check logs: sudo journalctl -u argo_bno085.service -n 20"; \
+	else \
+		echo "⚠️  Service failed to start - check logs:"; \
+		echo "   sudo journalctl -u argo_bno085.service -n 20"; \
+	fi
+
+bno085-service-uninstall:
+	@echo "Uninstalling argo_bno085 service..."
+	@if systemctl is-active --quiet argo_bno085.service; then \
+		echo "⏸️  Stopping service..."; \
+		sudo systemctl stop argo_bno085.service; \
+	fi
+	@if systemctl is-enabled --quiet argo_bno085.service 2>/dev/null; then \
+		echo "🔧 Disabling service..."; \
+		sudo systemctl disable argo_bno085.service; \
+	fi
+	@if [ -f "$(BNO085_SERVICE_DEST)" ]; then \
+		sudo rm $(BNO085_SERVICE_DEST); \
+		sudo systemctl daemon-reload; \
+	fi
+	@echo "✅ Argo BNO085 service uninstalled"
+
+bno085-service-enable:
+	@echo "Enabling argo_bno085 service..."
+	@sudo systemctl enable argo_bno085.service
+	@echo "✅ Service will start automatically on boot"
+
+bno085-service-disable:
+	@echo "Disabling argo_bno085 service..."
+	@sudo systemctl disable argo_bno085.service
+	@echo "✅ Service will not start automatically on boot"
+
+bno085-service-start:
+	@echo "Starting argo_bno085 service..."
+	@sudo systemctl start argo_bno085.service
+	@sleep 1
+	@systemctl is-active argo_bno085.service && echo "✅ Service started" || echo "❌ Service failed to start"
+
+bno085-service-stop:
+	@echo "Stopping argo_bno085.service..."
+	@sudo systemctl stop argo_bno085.service
+	@echo "✅ Service stopped"
+
+bno085-service-restart:
+	@echo "Restarting argo_bno085 service..."
+	@sudo systemctl restart argo_bno085.service
+	@sleep 1
+	@systemctl is-active argo_bno085.service && echo "✅ Service restarted" || echo "❌ Service failed to restart"
+
+bno085-service-status:
+	@echo "Argo BNO085 Service Status:"
+	@echo ""
+	@sudo systemctl status argo_bno085.service --no-pager -l || true
+	@echo ""
+	@systemctl is-active argo_bno085.service >/dev/null 2>&1 && echo "🟢 Service is RUNNING" || echo "🔴 Service is STOPPED"
+	@systemctl is-enabled argo_bno085.service >/dev/null 2>&1 && echo "✅ Auto-start ENABLED" || echo "⚠️  Auto-start DISABLED"
+
+bno085-service-logs:
+	@echo "Argo BNO085 Service Logs (last 50 lines):"
+	@echo ""
+	@sudo journalctl -u argo_bno085.service -n 50 --no-pager
+

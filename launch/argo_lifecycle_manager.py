@@ -1007,6 +1007,20 @@ class ArgoLifecycleManager:
         else:
             print("🔋 BATTERY MONITOR: 🔴 STOPPED")
         
+        # Check if argo_bno085.service is running (BNO085 IMU driver)
+        bno085_service_running = False
+        try:
+            result = subprocess.run(['systemctl', 'is-active', 'argo_bno085.service'],
+                                    capture_output=True, text=True, timeout=2)
+            bno085_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
+        except Exception:
+            bno085_service_running = False
+
+        if bno085_service_running:
+            print("🧭 BNO085 IMU: 🟢 RUNNING")
+        else:
+            print("🧭 BNO085 IMU: 🔴 STOPPED")
+        
         # Check if argo_launch.service is running
         service_running = False
         try:
