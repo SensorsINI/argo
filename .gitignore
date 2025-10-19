@@ -147,3 +147,13 @@ argo-path-2023-05-11-08-34-16.html
 
 # RTIMULib2 - external library, not tracked in git
 nodes/RTIMULib2/
+nodes/BNO085_README.md
+nodes/bno085_bridge.py.backup
+.gitignore
+nodes/bno085_calibration.py.backup
+.gitignore
+nodes/bno085_verify_rotation_vector.py.backup
+nodes/bno085_old_launcher.py.backup
+BNO080_Datasheet_v1.3 selectable 2017.pdf
+Sensor-Hub-Transport-Protocol-v1.7.pdf
+SH-2-Reference-Manual-v1.2.pdf

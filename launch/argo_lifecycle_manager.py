@@ -270,7 +270,7 @@ class ArgoLifecycleManager:
             node_mapping = {
                 'controller.py': 'controller_node',
                 'anem.py': 'anem_node',
-                'imu.py': 'imu_node',
+                'bno085.py': 'bno085_bridge',
                 'record.py': 'record',
                 'rudder_sail_radio.py': 'rudder_sail_radio_node',
                 'sailing_area_publisher.py': 'sailing_area_publisher',

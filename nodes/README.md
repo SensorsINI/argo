@@ -15,7 +15,7 @@ The Argo system consists of multiple sensor and control nodes that work together
 
 - **Orange Pi Zero 2W** (Allwinner H618 SoC)
 - **GPS**: u-blox NEO-M9N via UART5 (/dev/ttyS5)
-- **IMU**: ICM-20948 9-DOF via I2C0 (0x69)
+- **IMU**: [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU via I2C0 (0x4a)
 - **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23)
 - **ADC**: MAX11612 for battery/water sensing via I2C0 (0x34)
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
@@ -29,7 +29,7 @@ The Argo system consists of multiple sensor and control nodes that work together
   - 0x21, 0x22, 0x23: Wind sensors (SDP3x differential pressure)
   - 0x34: MAX11612 ADC (battery/water monitoring)
   - 0x44: SHT45 temperature/humidity sensor
-  - 0x69: ICM-20948 IMU
+  - 0x4a: BNO085 IMU (9-DOF Orientation)
 - **Bus Speed**: Standard 100kHz I2C operation
 - **Power**: 3.3V logic levels, pull-up resistors on PCB
 
@@ -60,27 +60,41 @@ ros2 run argo gps.py
 ros2 run argo gps.py --debug
 ```
 
-#### 2. `imu.py` - Inertial Measurement Unit Node
-**Purpose**: Reads ICM-20948 9-DOF sensor for orientation and motion data
+#### 2. `bno085.py` - Inertial Measurement Unit Node
+**Purpose**: Interfaces with [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU for sensor fusion and motion data
 
-**Hardware**: I2C0 address 0x69
+**Hardware**: I2C0 address 0x4a (via C++ `bno08x_driver` with Python bridge)
 
 **Topics Published**:
-- `/accel` (Vector3) - Raw acceleration in g (x, y, z)
-- `/gyro` (Vector3) - Raw angular velocity in deg/s (x, y, z)  
-- `/compass` (Vector3) - Raw magnetic field in µT (x, y, z)
+- `/compass` (Vector3) - Magnetic field heading in µT (x, y, z=heading_deg)
+- `/pose` (Vector3) - IMU orientation (x=roll, y=pitch, z=yaw in degrees)
+- `/accel` (Vector3) - Linear acceleration in m/s² (x, y, z)
+- `/gyro` (Vector3) - Angular velocity in rad/s (x, y, z)
+- `/imu_health` (Bool) - Health status (true=healthy, false=unhealthy)
 
 **Features**:
-- Automatic sensor initialization and configuration
-- Magnetometer calibration support
-- Temperature compensation
-- Configurable sample rates and filters
+- **Sensor Fusion**: CEVA Hillcrest Labs SH-2 firmware for accurate orientation
+- **Rotation Vector Output**: Quaternion-based absolute orientation (magnetic north reference)
+- **Automatic Calibration**: On-board magnetometer, accelerometer, and gyroscope calibration
+- **Health Monitoring**: Auto-recovery with 3-second data timeout detection
+- **Multiple Modes**: Bridge, calibration, verification, and status checking
 
 **Usage**:
 ```bash
-ros2 run argo imu.py
-# With debug output:
-ros2 run argo imu.py --debug
+# Run as bridge (normal operation)
+python3 bno085.py bridge
+
+# Check system status
+python3 bno085.py status
+
+# Run calibration (figure-8 motion for magnetometer)
+python3 bno085.py calibrate --duration 120
+
+# Verify rotation vector output
+python3 bno085.py verify --duration 60
+
+# Get help
+python3 bno085.py --help
 ```
 
 #### 3. `anem.py` - Wind Sensor Node
@@ -294,7 +308,7 @@ Key packages:
 3. **I2C device verification**:
    ```bash
    sudo i2cdetect -y 0
-   # Should show: 21 22 23 (wind), 34 (ADC), 44 (humidity), 69 (IMU)
+   # Should show: 21 22 23 (wind), 34 (ADC), 44 (humidity), 4a (BNO085 IMU)
    # All sensors are on I2C bus 0 exclusively
    ```
 
@@ -310,7 +324,7 @@ ros2 run argo <node_name>.py --debug
 ```bash
 # Check I2C devices on bus 0 (all sensors use this bus exclusively)
 sudo i2cdetect -y 0
-# Expected devices: 21 22 23 (wind), 34 (ADC), 44 (humidity), 69 (IMU)
+# Expected devices: 21 22 23 (wind), 34 (ADC), 44 (humidity), 4a (BNO085 IMU)
 
 # Check PWM kernel module
 lsmod | grep argo

@@ -6,7 +6,7 @@ An autonomous sailboat system based on Dragonforce 65 hull, running on Orange Pi
 
 The Argo system consists of multiple ROS2 nodes that work together to provide autonomous sailing capabilities:
 
-- **Sensor Nodes**: GPS (u-blox NEO-M9N), IMU (ICM-20948), Wind sensors (3x Sensirion SDP3x), Battery/Water monitoring
+- **Sensor Nodes**: GPS (u-blox NEO-M9N), IMU ([Adafruit BNO085](https://www.adafruit.com/product/4754)), Wind sensors (3x Sensirion SDP3x), Battery/Water monitoring
 - **Control Interface**: PWM capture for radio control and servo output  
 - **Autonomous Control**: Navigation and sail trimming algorithms
 - **Safety Systems**: Manual override, battery monitoring, water intrusion detection
@@ -20,7 +20,7 @@ See the Argo autonomous sailboat in action at the 2024 CCNW (before current wate
 
 - **Orange Pi Zero 2W** (Allwinner H618 SoC)
 - **GPS**: u-blox NEO-M9N via UART5 (/dev/ttyS5)
-- **IMU**: ICM-20948 9-DOF via I2C0 (0x69)
+- **IMU**: [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU via I2C0 (0x4a)
 - **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23)
 - **ADC**: MAX11612 for battery/water sensing via I2C0 (0x34)
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
@@ -159,7 +159,7 @@ Foxglove Studio integration for live system monitoring:
 
 **Core ROS2 Nodes:**
 - **`gps.py`** - GPS receiver interface (UART5, u-blox NEO-M9N)
-- **`imu.py`** - 9-DOF IMU sensor fusion (I2C, ICM-20948)
+- **`bno085.py`** - 9-DOF Orientation IMU with sensor fusion (I2C, [Adafruit BNO085](https://www.adafruit.com/product/4754))
 - **`anem.py`** - Wind sensor array (3x SDP3x pressure sensors)
 - **`battery_water.py`** - Power monitoring and safety systems
 - **`rudder_sail_radio.py`** - Radio control input and servo output interface
@@ -274,7 +274,7 @@ sudo usermod -a -G i2c,dialout $USER
 
 ### 6. Verify Hardware Setup
 ```bash
-# Check I2C devices (should show: 21 22 23 34 44 69)
+# Check I2C devices (should show: 21 22 23 34 44 4a)
 sudo i2cdetect -y 0
 
 # Check PWM kernel module
@@ -338,7 +338,8 @@ python3 launch/argo_lifecycle_manager.py run
 ```bash
 # Test individual sensors with debug output
 python3 nodes/gps.py --debug
-python3 nodes/imu.py --debug
+python3 nodes/bno085.py bridge  # IMU bridge mode
+python3 nodes/bno085.py status  # Check IMU health
 python3 nodes/anem.py --debug
 python3 nodes/battery_water.py --debug
 python3 nodes/rudder_sail_radio.py
@@ -357,7 +358,7 @@ ros2 topic echo /rudder_sail_radio
 ## Key ROS2 Nodes
 
 - **`gps.py`**: GPS interface via UART5, publishes `/gps_data`
-- **`imu.py`**: 9-DOF IMU data, publishes `/accel`, `/gyro`, `/compass`
+- **`bno085.py`**: [Adafruit BNO085](https://www.adafruit.com/product/4754) IMU with sensor fusion, publishes `/compass`, `/pose`, `/accel`, `/gyro`, `/imu_health`
 - **`anem.py`**: Wind speed/direction from 3 pressure sensors, publishes `/anem_speed_angle_temp`
 - **`battery_water.py`**: Power and safety monitoring, publishes battery/water alerts
 - **`rudder_sail_radio.py`**: Radio control interface and servo output

@@ -3,3 +3,6 @@
 	url = https://github.com/SensorsINI/sailboat-playground.git
 
 
+[submodule "nodes/vendor/bno08x_driver"]
+	path = nodes/vendor/bno08x_driver
+	url = https://github.com/bnbhat/bno08x-ros2-driver.git

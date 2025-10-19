@@ -129,3 +129,113 @@ logs-follow:
 	@echo "Following argo_battery_water service logs (Ctrl+C to stop):"
 	@sudo journalctl -u argo_battery_water.service -f --no-pager
 
+# ============================================================================
+# BNO08x Driver (C++ ROS2 driver for BNO085 IMU)
+# ============================================================================
+
+BNO08X_SUBMODULE_DIR := vendor/bno08x_driver
+BNO08X_BUILD_DIR := $(HOME)/argo_bno08x_ws
+BNO08X_CONFIG := vendor/bno08x_driver_argo.yaml
+
+.PHONY: bno08x-help bno08x-init bno08x-build bno08x-test bno08x-launch bno08x-calibrate bno08x-clean
+
+bno08x-help:
+	@echo "BNO08x Driver Management"
+	@echo "========================"
+	@echo ""
+	@echo "Targets:"
+	@echo "  bno08x-init        - Initialize BNO08x submodule (if not already done)"
+	@echo "  bno08x-build       - Build the BNO08x ROS2 driver with colcon"
+	@echo "  bno08x-test        - Test if BNO085 hardware is detected"
+	@echo "  bno08x-launch      - Launch the BNO08x C++ driver only"
+	@echo "  bno08x-launch-full - Launch complete system (C++ driver + Python bridge)"
+	@echo "  bno08x-calibrate   - Run interactive calibration tool (requires driver running)"
+	@echo "  bno08x-clean       - Clean build artifacts"
+	@echo ""
+	@echo "Quick start:"
+	@echo "  make bno08x-build bno08x-test bno08x-launch-full"
+	@echo ""
+	@echo "For Argo integration, use: bno08x-launch-full"
+	@echo "This provides /compass, /pose, /accel, /gyro topics"
+	@echo ""
+	@echo "For calibration (with driver already running):"
+	@echo "  make bno08x-calibrate"
+	@echo ""
+
+bno08x-init:
+	@echo "Checking BNO08x submodule..."
+	@if [ ! -d "$(BNO08X_SUBMODULE_DIR)/.git" ]; then \
+		echo "Initializing BNO08x submodule..."; \
+		git submodule update --init --recursive $(BNO08X_SUBMODULE_DIR); \
+		echo "✅ BNO08x submodule initialized"; \
+	else \
+		echo "✅ BNO08x submodule already initialized"; \
+	fi
+
+bno08x-build: bno08x-init
+	@echo "Building BNO08x ROS2 driver..."
+	@echo "Creating workspace at $(BNO08X_BUILD_DIR)..."
+	@mkdir -p $(BNO08X_BUILD_DIR)/src
+	@if [ ! -L "$(BNO08X_BUILD_DIR)/src/bno08x_driver" ]; then \
+		echo "Creating symlink to submodule..."; \
+		ln -sf $(PWD)/$(BNO08X_SUBMODULE_DIR) $(BNO08X_BUILD_DIR)/src/bno08x_driver; \
+	fi
+	@echo "Sourcing ROS2 environment..."
+	@bash -c "source /opt/ros/humble/setup.bash && \
+		cd $(BNO08X_BUILD_DIR) && \
+		echo 'Running colcon build...' && \
+		colcon build --packages-select bno08x_driver --symlink-install"
+	@echo "✅ BNO08x driver built successfully"
+	@echo ""
+	@echo "To use the driver, source the workspace:"
+	@echo "  source $(BNO08X_BUILD_DIR)/install/setup.bash"
+
+bno08x-test:
+	@echo "Testing BNO085 I2C connection..."
+	@echo "Checking if i2c-0 exists..."
+	@if [ ! -e "/dev/i2c-0" ]; then \
+		echo "❌ /dev/i2c-0 not found"; \
+		echo "   Run: sudo modprobe i2c-dev"; \
+		exit 1; \
+	fi
+	@echo "✅ /dev/i2c-0 exists"
+	@echo ""
+	@echo "Scanning I2C bus 0 for BNO085 at 0x4a..."
+	@if command -v i2cdetect >/dev/null 2>&1; then \
+		i2cdetect -y 0 | grep -E "(4a|UU)" && \
+		echo "✅ BNO085 detected at 0x4a on bus 0" || \
+		echo "❌ BNO085 not detected - check wiring"; \
+	else \
+		echo "⚠️  i2cdetect not found, install i2c-tools: sudo apt install i2c-tools"; \
+	fi
+
+bno08x-launch: bno08x-build
+	@echo "Launching BNO08x driver with Argo config..."
+	@bash -c "source /opt/ros/humble/setup.bash && \
+		source $(BNO08X_BUILD_DIR)/install/setup.bash && \
+		ros2 run bno08x_driver bno08x_driver --ros-args --params-file $(BNO08X_CONFIG)"
+
+bno08x-launch-full: bno08x-build
+	@echo "Launching BNO085 complete system (C++ driver + Python bridge)..."
+	@echo "Starting C++ driver in background..."
+	@bash -c "source /opt/ros/humble/setup.bash && \
+		source $(BNO08X_BUILD_DIR)/install/setup.bash && \
+		ros2 run bno08x_driver bno08x_driver --ros-args --params-file $(BNO08X_CONFIG) &"
+	@sleep 3
+	@echo "Starting Python bridge..."
+	@bash -c "source /opt/ros/humble/setup.bash && \
+		python3 bno085.py bridge"
+
+bno08x-calibrate: bno08x-build
+	@echo "Starting BNO085 calibration tool..."
+	@echo "This will guide you through the calibration process."
+	@echo "Make sure the BNO08x driver is running!"
+	@echo ""
+	@bash -c "source /opt/ros/humble/setup.bash && \
+		python3 bno085.py calibrate --duration 120"
+
+bno08x-clean:
+	@echo "Cleaning BNO08x build artifacts..."
+	@rm -rf $(BNO08X_BUILD_DIR)
+	@echo "✅ Build artifacts cleaned"
+
