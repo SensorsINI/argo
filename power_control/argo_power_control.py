@@ -79,6 +79,128 @@
 # AUTHOR: Generated for Orange Pi Zero 2W Power Control System
 # VERSION: 1.0
 # DATE: September 2024
+#
+# SERVICE CLIENT PERFORMANCE OPTIMIZATION ALTERNATIVES
+# ===================================================
+#
+# CURRENT IMPLEMENTATION: Ephemeral Service Clients
+# - Creates and destroys ROS2 service clients for each call
+# - Each call takes 2-4 seconds due to service discovery overhead
+# - Reliable but slow for repeated calls
+# - Used in _call_trigger_service() method
+#
+# ALTERNATIVE 1: Persistent Service Clients
+# =========================================
+# Pros:
+#   - Much faster subsequent calls (~0.1-0.5s vs 2-4s)
+#   - Better performance for frequent calls (battery monitoring every 30s)
+#   - Reduced ROS2 daemon load
+#
+# Cons:
+#   - Service discovery issues if services restart during development
+#   - Stale references to services that no longer exist
+#   - ROS2 daemon restart can invalidate clients
+#   - Memory usage and file descriptor overhead
+#   - May not detect service availability changes
+#
+# Implementation:
+#   def __init__(self):
+#       self.recording_start_client = self.ros2_node.create_client(Trigger, '/argo/recording/start')
+#       self.recording_stop_client = self.ros2_node.create_client(Trigger, '/argo/recording/stop')
+#       # ... other clients
+#
+#   def _call_persistent_service(self, client, timeout_sec=2.0):
+#       if not client.service_is_ready():
+#           return False, "Service not ready"
+#       # ... make call
+#
+# ALTERNATIVE 2: Hybrid Approach with Fallback
+# ============================================
+# - Try persistent client first, fallback to ephemeral if needed
+# - Best of both worlds: speed when possible, reliability when needed
+#
+# Implementation:
+#   def _call_trigger_service(self, service_name, timeout_sec=2.0):
+#       # Try persistent client first
+#       if hasattr(self, f'{service_name.replace("/", "_")}_client'):
+#           client = getattr(self, f'{service_name.replace("/", "_")}_client')
+#           if client and client.service_is_ready():
+#               return self._call_persistent_service(client, timeout_sec)
+#       # Fallback to ephemeral client
+#       return self._call_ephemeral_service(service_name, timeout_sec)
+#
+# ALTERNATIVE 3: Client Pool with TTL
+# ==================================
+# - Maintains clients for a limited time (e.g., 5 minutes)
+# - Automatically recreates stale clients
+# - Balances performance and reliability
+#
+# Implementation:
+#   class ServiceClientPool:
+#       def __init__(self, ros2_node):
+#           self.clients = {}
+#           self.last_used = {}
+#           self.max_age = 300  # 5 minutes
+#       
+#       def get_client(self, service_name):
+#           now = time.time()
+#           if service_name in self.clients:
+#               if now - self.last_used[service_name] < self.max_age:
+#                   return self.clients[service_name]
+#               else:
+#                   # Recreate expired client
+#                   self._recreate_client(service_name)
+#           return self._create_client(service_name)
+#
+# ALTERNATIVE 4: Health-Checked Persistent Clients
+# ===============================================
+# - Persistent clients with automatic health checking
+# - Recreates clients when they become unhealthy
+# - Most robust but most complex
+#
+# Implementation:
+#   def _check_client_health(self, client):
+#       try:
+#           return client.service_is_ready()
+#       except:
+#           return False
+#
+#   def _recreate_client_if_needed(self, service_name):
+#       client_attr = f'{service_name.replace("/", "_")}_client'
+#       if hasattr(self, client_attr):
+#           client = getattr(self, client_attr)
+#           if not self._check_client_health(client):
+#               logger.warning(f"Recreating unhealthy client for {service_name}")
+#               self.ros2_node.destroy_client(client)
+#               setattr(self, client_attr, self.ros2_node.create_client(Trigger, service_name))
+#
+# PERFORMANCE IMPACT ANALYSIS
+# ==========================
+# Current (Ephemeral):     First call: 2-4s, Subsequent: 2-4s
+# Persistent:              First call: 2-4s, Subsequent: 0.1-0.5s
+# Client Pool:             First call: 2-4s, Subsequent: 0.1-0.5s (within TTL)
+# Hybrid:                  First call: 2-4s, Subsequent: 0.1-0.5s (when persistent works)
+#
+# RECOMMENDATION FOR ARGO POWER CONTROL
+# =====================================
+# Current ephemeral approach is acceptable because:
+# - Recording toggles are infrequent (user-initiated)
+# - Controller pause toggles are occasional (user-initiated)
+# - Battery monitoring every 30s is acceptable
+# - System prioritizes reliability over speed
+# - Development environment benefits from fresh clients
+#
+# Consider implementing Client Pool (Alternative 3) if:
+# - Battery monitoring becomes more frequent
+# - Service calls become a bottleneck
+# - Performance testing shows significant delays
+#
+# To implement any alternative:
+# 1. Replace _call_trigger_service() method
+# 2. Add client management in __init__() and cleanup()
+# 3. Test thoroughly in development environment
+# 4. Monitor for service discovery issues
+# 5. Add health checking if using persistent clients
 
 import time
 import signal
@@ -174,6 +296,11 @@ LED_PRESS_DUTY_CYCLE = 0.5              # 50% duty cycle during button press
 # Shutdown Pattern Configuration
 LED_SHUTDOWN_FREQUENCY_HZ = 1.0         # Shutdown flash frequency (1 Hz)
 LED_SHUTDOWN_DUTY_CYCLE = 0.05           # 5% duty cycle during shutdown
+
+# Button Action LED Feedback Configuration
+LED_ACTION_FEEDBACK_DURATION_S = 2.0    # Duration for immediate action feedback (2 seconds)
+LED_SERVICE_WAIT_FREQUENCY_HZ = 3.0     # R+G flashing frequency during service calls (3 Hz)
+LED_SERVICE_WAIT_DUTY_CYCLE = 0.5       # 50% duty cycle for R+G flashing
 
 # Shutdown Sequence Timing
 # No delay - shutdown immediately after wall message
@@ -321,6 +448,9 @@ class PowerController:
         self.wifi_monitoring_active = False
         self.wifi_loss_led_active = False
 
+        # Service wait pattern state
+        self.service_wait_active = False
+
         # GPIO Configuration
         self.GPIO_CHIP = '/dev/gpiochip0'
 
@@ -334,9 +464,9 @@ class PowerController:
         # Button press threshold (seconds)
         self.SHUTDOWN_THRESHOLD = threshold
 
-        # Initialize ROS2 for service clients
+        # Initialize ROS2 for service clients (allow in test mode for service testing)
         self.ros2_node = None
-        if not test_mode and ROS2_AVAILABLE:
+        if ROS2_AVAILABLE:
             try:
                 if not rclpy.ok():
                     rclpy.init()
@@ -358,6 +488,9 @@ class PowerController:
         # Simple state tracking - initialize these early for test mode compatibility
         self.recording_active = False
         self.recording_service_available = False
+        
+        # Throttled logging for recording service availability
+        self.last_logged_recording_service_state = None
 
         # Check if Argo service is already running at startup
         logger.info("Checking if Argo service is already running...")
@@ -645,30 +778,45 @@ class PowerController:
             self.recording_service_available = False
             return False
 
-        client = self.ros2_node.create_client(Trigger, '/argo/recording/start')
+        # Use a more reliable approach - try to call the get_status service
+        # This both checks availability and gets current state
         try:
-            # Short timeout, we just want to know if it's there
-            if client.wait_for_service(timeout_sec=2.0):
-                logger.info("Recording service is available")
+            success, message = self._call_trigger_service(
+                '/argo/recording/get_status', timeout_sec=2.0)
+            if success is not None:  # Service responded (regardless of recording state)
+                # Throttled logging - only log when state changes
+                if self.last_logged_recording_service_state != True:
+                    logger.info("Recording service is available")
+                    self.last_logged_recording_service_state = True
                 self.recording_service_available = True
                 return True
             else:
-                logger.info("Recording service not available (timed out)")
+                # Throttled logging - only log when state changes
+                if self.last_logged_recording_service_state != False:
+                    logger.info("Recording service not available (no response)")
+                    self.last_logged_recording_service_state = False
                 self.recording_service_available = False
                 return False
-        finally:
-            self.ros2_node.destroy_client(client)
+        except Exception as e:
+            # Throttled logging - only log when state changes
+            if self.last_logged_recording_service_state != False:
+                logger.info(f"Recording service not available: {e}")
+                self.last_logged_recording_service_state = False
+            self.recording_service_available = False
+            return False
 
     def query_current_recording_status(self):
         """Query current recording status by calling the get_status service."""
         if not self.check_recording_service_availability():
-            logger.info(
-                "Recording service not available - skipping status query")
+            # Throttled logging - only log when state changes
+            if self.last_logged_recording_service_state != False:
+                logger.info(
+                    "Recording service not available - skipping status query")
             self.recording_active = False  # Assume not recording
             return
 
         success, message = self._call_trigger_service(
-            '/argo/recording/get_status', timeout_sec=5.0)
+            '/argo/recording/get_status', timeout_sec=2.0)
 
         # The 'success' field of the Trigger response indicates the recording state
         old_state = self.recording_active
@@ -677,6 +825,13 @@ class PowerController:
         if old_state != self.recording_active:
             logger.info(
                 f"📹 Recording status changed: {'INACTIVE' if old_state else 'ACTIVE'} → {'ACTIVE' if self.recording_active else 'INACTIVE'} (state synchronized)")
+
+    def force_recording_state_sync(self):
+        """Force synchronization of recording state - useful before critical operations"""
+        logger.info("🔄 Forcing recording state synchronization...")
+        self.query_current_recording_status()
+        logger.info(f"📹 Current recording state: {'ACTIVE' if self.recording_active else 'INACTIVE'}")
+        return self.recording_active
 
     def is_argo_system_running(self):
         """Check if the Argo system is running using simple flag approach"""
@@ -793,8 +948,19 @@ class PowerController:
                 "normal"
             )
             
+            # Start service wait pattern for delayed service call
+            self.service_wait_active = True
+            service_wait_thread = threading.Thread(
+                target=self.service_wait_pattern,
+                daemon=True
+            )
+            service_wait_thread.start()
+            
             success, message = self._call_trigger_service(
-                '/controller_node/toggle_pause', timeout_sec=5.0)
+                '/controller_node/toggle_pause', timeout_sec=2.0)
+            
+            # Stop service wait pattern
+            self.service_wait_active = False
             
             if success:
                 # The service response message should indicate the new state
@@ -838,6 +1004,14 @@ class PowerController:
                 )
                 return True
             
+            # Start service wait pattern for delayed service restart
+            self.service_wait_active = True
+            service_wait_thread = threading.Thread(
+                target=self.service_wait_pattern,
+                daemon=True
+            )
+            service_wait_thread.start()
+            
             # Stop service first
             result = subprocess.run(
                 ['sudo', 'systemctl', 'stop', 'argo_launch.service'],
@@ -850,6 +1024,8 @@ class PowerController:
                     "Failed to stop Argo nodes for restart",
                     "critical"
                 )
+                # Stop service wait pattern
+                self.service_wait_active = False
                 return False
             
             # Wait a moment for clean shutdown
@@ -860,6 +1036,9 @@ class PowerController:
                 ['sudo', 'systemctl', 'start', 'argo_launch.service'],
                 capture_output=True, text=True, timeout=15
             )
+            
+            # Stop service wait pattern
+            self.service_wait_active = False
             if result.returncode == 0:
                 logger.info("✅ Argo launch service restarted")
                 self.argo_service_running = True
@@ -1343,6 +1522,91 @@ class PowerController:
         self.set_blue_led(False)
         logger.info("Shutdown LED pattern completed")
 
+    def immediate_action_feedback_pattern(self, action_type):
+        """Immediate LED feedback pattern for button actions
+        
+        Args:
+            action_type: Type of action ('single', 'double', 'quadruple')
+        """
+        logger.info(f"Starting immediate feedback pattern for {action_type} tap")
+        
+        # Define patterns for each action type
+        patterns = {
+            'single': [  # Controller pause toggle - 1 quick flash
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+            ],
+            'double': [  # Recording toggle - 2 quick flashes
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+            ],
+            'quadruple': [  # Service restart - 4 quick flashes
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+                (0.1, True),   # 100ms on
+                (0.1, False),  # 100ms off
+            ]
+        }
+        
+        if action_type not in patterns:
+            logger.warning(f"Unknown action type: {action_type}")
+            return
+            
+        pattern = patterns[action_type]
+        
+        # Execute the pattern
+        for duration, led_state in pattern:
+            if not self.running:
+                break
+            self.set_green_led(led_state)
+            time.sleep(duration)
+        
+        # Ensure LED is off at the end
+        self.set_green_led(False)
+        logger.info(f"Immediate feedback pattern for {action_type} tap completed")
+
+    def service_wait_pattern(self):
+        """R+G alternating flash pattern during service calls"""
+        logger.info("Starting service wait pattern (R+G alternating)")
+        
+        # Calculate timing for alternating pattern
+        period = 1.0 / LED_SERVICE_WAIT_FREQUENCY_HZ
+        half_period = period / 2.0
+        
+        while self.running and hasattr(self, 'service_wait_active') and self.service_wait_active:
+            try:
+                # Red LED on, Green LED off
+                self.set_red_led(True)
+                self.set_green_led(False)
+                time.sleep(half_period)
+                
+                if not self.running or not self.service_wait_active:
+                    break
+                
+                # Green LED on, Red LED off
+                self.set_red_led(False)
+                self.set_green_led(True)
+                time.sleep(half_period)
+                
+            except Exception as e:
+                logger.error(f"Error in service wait pattern: {e}")
+                break
+        
+        # Turn off both LEDs when done
+        self.set_red_led(False)
+        self.set_green_led(False)
+        logger.info("Service wait pattern completed")
+
     def gradual_frequency_pattern(self):
         """Gradual frequency increase LED pattern during button press - 2Hz to 20Hz over threshold time"""
         start_time = time.time()
@@ -1614,16 +1878,43 @@ class PowerController:
                 if tap_count == 1:
                     logger.info("Single tap detected!")
                     self.tap_times.clear()
+                    # Immediate feedback for single tap
+                    threading.Thread(
+                        target=self.immediate_action_feedback_pattern,
+                        args=('single',),
+                        daemon=True
+                    ).start()
+                    # Immediate desktop notification
+                    self.send_desktop_notification(
+                        "Controller Pause", "Single tap detected - toggling controller pause...", "normal")
                     self.toggle_controller_pause()
                 elif tap_count == 2:
                     logger.info(
                         f"Double tap detected! ({duration:.2f}s duration)")
                     self.tap_times.clear()
+                    # Immediate feedback for double tap
+                    threading.Thread(
+                        target=self.immediate_action_feedback_pattern,
+                        args=('double',),
+                        daemon=True
+                    ).start()
+                    # Immediate desktop notification
+                    self.send_desktop_notification(
+                        "Recording Control", "Double tap detected - toggling recording...", "normal")
                     self.toggle_recording()
                 elif tap_count == 4:
                     logger.info(
                         f"Quadruple tap detected! ({duration:.2f}s duration)")
                     self.tap_times.clear()
+                    # Immediate feedback for quadruple tap
+                    threading.Thread(
+                        target=self.immediate_action_feedback_pattern,
+                        args=('quadruple',),
+                        daemon=True
+                    ).start()
+                    # Immediate desktop notification
+                    self.send_desktop_notification(
+                        "Argo Service Control", "Quadruple tap detected - restarting Argo service...", "normal")
                     self.restart_argo_service()
                 elif tap_count == 3 or tap_count == 5:
                     logger.info(
@@ -1640,40 +1931,63 @@ class PowerController:
     def toggle_recording(self):
         """Toggle rosbag recording on/off with immediate feedback"""
         # --- Real mode ---
-        # First, sync our internal state with the actual recording status
-        self.query_current_recording_status()
+        # Force synchronization of recording state before toggling
+        logger.info("Double tap detected - forcing recording state synchronization...")
+        is_currently_recording = self.force_recording_state_sync()
 
-        # Now, check if services are ready
-        if not self.check_argo_service_status() or not self.check_recording_service_availability():
+        # Check if services are ready after state query
+        if not self.check_argo_service_status() or not self.recording_service_available:
             logger.warning(
-                "Triple tap detected but Argo/recording service not ready.")
+                "Double tap detected but Argo/recording service not ready.")
             self.send_desktop_notification(
                 "Recording Unavailable", "Argo service is not ready for recording.", "critical")
             return
 
-        is_currently_recording = self.recording_active
-
         if is_currently_recording:
-            logger.info("Triple tap detected - requesting to stop recording")
+            logger.info("Double tap detected - requesting to stop recording")
             self.send_desktop_notification(
                 "Recording Control", "Requesting to stop recording...", "normal")
             # Immediately update state for LED pattern
             self.recording_active = False
 
+            # Start service wait pattern for delayed service call
+            self.service_wait_active = True
+            service_wait_thread = threading.Thread(
+                target=self.service_wait_pattern,
+                daemon=True
+            )
+            service_wait_thread.start()
+
             success = self.stop_recording()
+            
+            # Stop service wait pattern
+            self.service_wait_active = False
+            
             if not success:
                 self.send_desktop_notification(
                     "Recording Error", "Failed to stop recording", "critical")
                 # Revert state on failure
                 self.recording_active = True
         else:
-            logger.info("Triple tap detected - requesting to start recording")
+            logger.info("Double tap detected - requesting to start recording")
             self.send_desktop_notification(
                 "Recording Control", "Requesting to start recording...", "normal")
             # Immediately update state for LED pattern
             self.recording_active = True
 
+            # Start service wait pattern for delayed service call
+            self.service_wait_active = True
+            service_wait_thread = threading.Thread(
+                target=self.service_wait_pattern,
+                daemon=True
+            )
+            service_wait_thread.start()
+
             success = self.start_recording()
+            
+            # Stop service wait pattern
+            self.service_wait_active = False
+            
             if not success:
                 self.send_desktop_notification(
                     "Recording Error", "Failed to start recording", "critical")
@@ -1909,7 +2223,9 @@ class PowerController:
         try:
             # Main loop - just keep running while monitoring threads handle GPIO
             last_sync_time = 0
-            sync_interval = 300  # Sync every 30 seconds
+            sync_interval = 60  # Sync every 60 seconds (more frequent for better sync)
+            last_recording_sync_time = 0
+            recording_sync_interval = 30  # Recording state sync every 30 seconds
 
             while self.running:
                 current_time = time.time()
@@ -1921,6 +2237,14 @@ class PowerController:
                             "Performing periodic recording state synchronization...")
                         self.query_current_recording_status()
                     last_sync_time = current_time
+
+                # More frequent recording state synchronization
+                if (current_time - last_recording_sync_time >= recording_sync_interval and 
+                    self.argo_service_running):
+                    # Always try to sync recording state, even if service availability is unknown
+                    logger.debug("Performing frequent recording state synchronization...")
+                    self.query_current_recording_status()
+                    last_recording_sync_time = current_time
 
                 # Sleep in smaller increments to be more responsive to shutdown signals
                 for _ in range(10):  # 10 * 0.1s = 1s total, but check running flag every 0.1s
@@ -2687,7 +3011,7 @@ If you take no action within 30 seconds, the system will automatically
             except Exception:
                 pass
 
-    def _call_trigger_service(self, service_name: str, timeout_sec: float = 5.0) -> tuple[bool, str]:
+    def _call_trigger_service(self, service_name: str, timeout_sec: float = 2.0) -> tuple[bool, str]:
         """Centralized function for calling ROS2 Trigger services."""
         if not self.ros2_node:
             return False, "ROS2 node not initialized"
