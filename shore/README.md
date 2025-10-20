@@ -2,6 +2,33 @@
 
 This directory contains shore-side ROS2 nodes for communicating with the Argo sailboat via LoRa radio.
 
+## 📋 Quick Start
+
+### Prerequisites
+
+- **ROS2 Humble** installed (see [INSTALL.md](INSTALL.md) for setup)
+- **pyserial** Python package
+- **Waveshare USB-TO-LoRa module** connected
+
+### Installation
+
+```bash
+# 1. Install ROS2 (one-time setup)
+#    See INSTALL.md for complete instructions
+sudo apt install ros-humble-ros-base
+
+# 2. Install Python dependencies
+pip3 install -r requirements.txt
+
+# 3. Source ROS2 environment
+source /opt/ros/humble/setup.bash
+
+# 4. Run shore node
+python3 lora_shore.py
+```
+
+**👉 For detailed installation instructions, see [INSTALL.md](INSTALL.md)**
+
 ## Components
 
 ### lora_shore.py
@@ -13,26 +40,25 @@ Shore-side ROS2 node that interfaces with the Waveshare USB-TO-LoRa module.
 - Sends commands to Argo via LoRa
 - Monitors connection health
 
+**Dependencies:**
+- ROS2 Humble (`ros-humble-ros-base`)
+- Python 3.10+
+- pyserial (`pip3 install pyserial`)
+
 ## Hardware Requirements
 
 - **Waveshare USB-TO-LoRa-LF-B** (SX1262) module
   - Or any SX1276/SX1278-based USB LoRa module
 - USB connection to computer running ROS2
 - Antenna connected to LoRa module
+- Computer running Ubuntu 22.04 or compatible Linux
 
-## Installation
+## Configuration
 
-### 1. Install Dependencies
-
-```bash
-# Python serial library (if not already installed)
-pip3 install pyserial
-```
-
-### 2. Configure Waveshare Module
+### Waveshare Module Setup
 
 The Waveshare module should be configured with:
-- **Network ID**: 18 (0x12)
+- **Network ID**: 18 (0x12) - Must match Argo
 - **Frequency**: 433 MHz (Channel 23 for LF version)
 - **Spreading Factor**: 7
 - **Bandwidth**: 125 kHz (0)
@@ -40,20 +66,19 @@ The Waveshare module should be configured with:
 - **Mode**: Stream (1)
 - **Encryption**: Disabled (KEY=0)
 
-See `nodes/README-LORA-TO-WAVESHARE.md` for AT command configuration details.
+**See `../nodes/README-LORA-TO-WAVESHARE.md` for AT command configuration details.**
 
-### 3. Check Serial Port
+### Serial Port Setup
 
 ```bash
 # Find the Waveshare device
 ls -l /dev/ttyACM*
-
 # Should show: crw-rw---- 1 root dialout ...
 
 # Ensure your user is in dialout group
 groups | grep dialout
 
-# If not, add yourself:
+# If not, add yourself (one-time setup):
 sudo usermod -a -G dialout $USER
 # Then log out and back in
 ```

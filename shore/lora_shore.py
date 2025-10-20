@@ -9,18 +9,63 @@ Republishes Argo data to ROS2 topics for Foxglove visualization.
 Hardware: Waveshare USB-TO-LoRa-LF-B (SX1262)
 Interface: USB Serial (/dev/ttyACM0, 115200 baud)
 Protocol: Transparent mode with optional Waveshare 4-byte header stripping
+
+Dependencies:
+  - ROS2 Humble: sudo apt install ros-humble-ros-base
+  - pyserial: pip3 install pyserial
+  - See INSTALL.md for complete setup instructions
 """
 
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-from std_msgs.msg import String, Float64, Bool, Int32
-from geometry_msgs.msg import Vector3
-import serial
+import sys
 import json
 import time
 import threading
 from datetime import datetime
+
+# Check for ROS2 before other imports
+try:
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+    from std_msgs.msg import String, Float64, Bool, Int32
+    from geometry_msgs.msg import Vector3
+except ImportError as e:
+    print("=" * 70)
+    print("ERROR: ROS2 (rclpy) not found!")
+    print("=" * 70)
+    print()
+    print("This node requires ROS2 Humble to be installed.")
+    print()
+    print("Quick fix:")
+    print("  1. Source ROS2 environment:")
+    print("     source /opt/ros/humble/setup.bash")
+    print()
+    print("  2. Or install ROS2 Humble:")
+    print("     sudo apt install ros-humble-ros-base")
+    print()
+    print("See shore/INSTALL.md for detailed installation instructions.")
+    print()
+    print("=" * 70)
+    sys.exit(1)
+
+# Check for pyserial
+try:
+    import serial
+except ImportError:
+    print("=" * 70)
+    print("ERROR: pyserial not found!")
+    print("=" * 70)
+    print()
+    print("This node requires pyserial for serial communication.")
+    print()
+    print("Install with:")
+    print("  pip3 install pyserial")
+    print()
+    print("Or install all dependencies:")
+    print("  pip3 install -r shore/requirements.txt")
+    print()
+    print("=" * 70)
+    sys.exit(1)
 
 class LoRaShoreNode(Node):
     def __init__(self):
