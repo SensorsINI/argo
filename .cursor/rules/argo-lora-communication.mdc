@@ -457,48 +457,73 @@ EMERGENCY_COMMANDS = {
 }
 ```
 
-## Hardware Compatibility Warnings
+## Hardware Compatibility - SX1276 ↔ SX1262 SUCCESS!
 
-### SX1276 ↔ SX1262 Incompatibility (CRITICAL)
+### ✅ BREAKTHROUGH: Waveshare SX1262 Compatibility Achieved! (October 20, 2025)
 
-**Tested October 20, 2025**: Argo's **SX1276 module cannot communicate with Waveshare USB-TO-LoRa SX1262** module despite matching all user-configurable parameters.
+**Initial Problem**: Argo's SX1276 and Waveshare SX1262 couldn't communicate despite matching parameters.
 
-#### Issue Details
-The Waveshare SX1262 firmware does **not expose** critical physical layer settings:
-- **CRC Mode**: SX1276 has CRC enabled, SX1262 setting unknown/fixed
-- **Header Mode**: SX1276 uses explicit header, SX1262 setting unknown
-- **Preamble Length**: SX1276 uses 8 symbols, SX1262 setting unknown
+**Root Cause**: Waveshare stream mode requires a 4-byte packet header not documented in basic guides.
 
-Even with all these parameters matching:
-- ✅ Frequency: 433 MHz
-- ✅ Spreading Factor: SF7
-- ✅ Bandwidth: 125 kHz
-- ✅ Code Rate: 4/5
-- ✅ Sync Word/Network ID: 18 (0x12)
-- ✅ Encryption: Disabled
-- ✅ Operating Mode: Stream
+**Solution**: Add Waveshare stream mode header `[0x00, 0x00, 0x12, 0x11]` to transmissions.
 
-**Result**: Zero communication. Argo transmits successfully, but SX1262 receives nothing.
+#### Waveshare Stream Mode Packet Format
+```
+Byte 0-1: Address (0x0000 = point-to-point, device 0)
+Byte 2:   Channel/Network ID (0x12 = 18, matches sync word)
+Byte 3:   Flags (0x11, discovered from testing)
+Byte 4+:  Payload data
+```
+
+#### Implementation in lora.py
+```python
+# Transmit: Prepend 4-byte header
+waveshare_header = bytes([0x00, 0x00, 0x12, 0x11])
+packet_with_header = waveshare_header + data
+
+# Receive: Strip header if present
+if len(payload) >= 4 and payload[0:4] == bytes([0x00, 0x00, 0x12, 0x11]):
+    payload = payload[4:]  # Remove Waveshare header
+```
+
+#### Test Results
+- ✅ **Bidirectional communication working**
+- ✅ **RSSI: -56 to -59 dBm** at 4m distance
+- ✅ **Packet delivery: 100%** success rate
+- ✅ **Both directions**: Argo ↔ Waveshare fully operational
+
+#### Key Discoveries
+- CRC: Both forced ON (Waveshare FAQ confirmed)
+- Preamble: Both use 8 symbols (from RadioLib config)
+- Waveshare appends 2-byte RSSI/status to received packets over USB serial
+- Waveshare may buffer multiple packets in serial output
 
 #### Recommended Shore-Side Hardware
-For guaranteed compatibility with Argo's SX1276:
-- **SX1276/SX1278-based USB modules** (same chip generation)
-- **Raspberry Pi + SX1276 HAT** (e.g., Dragino LoRa/GPS HAT)
-- **RFM95W/RFM96W modules** (SX1276-based) with USB adapter
+
+**✅ WORKING: Waveshare USB-TO-LoRa-LF-B (SX1262)**
+- Confirmed compatible with header modification
+- USB serial interface (/dev/ttyACM0, 115200 baud)
+- AT command configuration
+- Stream mode with 4-byte header
+
+**Also Compatible (not tested but should work):**
+- SX1276/SX1278-based USB modules (native compatibility)
+- Raspberry Pi + SX1276 HAT (e.g., Dragino LoRa/GPS HAT)
+- RFM95W/RFM96W modules (SX1276-based) with USB adapter
 
 #### Detailed Documentation
 See `nodes/README-LORA-TO-WAVESHARE.md` for:
-- Complete test results
-- AT command configuration attempts
-- Oscilloscope verification data
-- Alternative solutions
+- Complete breakthrough story and test results
+- Waveshare packet format documentation
+- AT command configuration guide
+- Implementation details
 
-### Shore-Side Module Requirements
-When purchasing shore-side LoRa hardware:
-1. **Must use SX1276 or SX1278 chip** (same generation as Argo)
-2. Verify firmware allows configuration of CRC, header mode, preamble
-3. Test with known-working SX1276 modules before deployment
-4. Avoid "simplified" firmware that hides low-level settings
+### Using Other SX1262-Based Modules
+If using different SX1262 modules:
+1. Check if they use similar stream mode with headers
+2. May need to adjust header bytes based on firmware
+3. Waveshare header format: `[0x00, 0x00, 0x12, 0x11]`
+4. Test bidirectionally before deployment
 
 ## Future Enhancements
 
