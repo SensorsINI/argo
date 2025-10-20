@@ -3,20 +3,29 @@
 Argo Boat 3D Visualization Node
 ===============================
 
-This ROS2 node creates 3D visualization markers for the Argo sailboat, showing:
+Purpose
+-------
+Publishes standard visualization markers for rendering the Argo sailboat state
+in RViz and the Foxglove 3D panel. Intended for operator situational awareness
+during development and testing. Does not affect control logic.
+
+What is visualized
+------------------
 - Boat hull and mast as basic geometry
 - Rudder position indicator
-- Sail position indicator  
+- Sail position indicator
 - Wind vector arrow
 - GPS velocity vector
 - Boat heading arrow
-- Roll/pitch indicators
+- Roll/pitch indicators derived from accelerometer data
 
-Published Topics:
+Published Topics
+----------------
 - /visualization_marker (visualization_msgs/Marker): Individual markers
 - /visualization_marker_array (visualization_msgs/MarkerArray): All markers together
 
-Subscribed Topics:
+Subscribed Topics
+-----------------
 - /pose (geometry_msgs/Vector3): Boat heading (z-component)
 - /accel (geometry_msgs/Vector3): IMU accelerometer for roll/pitch
 - /rudder_sail_cmd (geometry_msgs/Vector3): Rudder and sail commands
@@ -24,7 +33,8 @@ Subscribed Topics:
 - /gps_velocity (geometry_msgs/Vector3): GPS velocity vector
 - /fix (sensor_msgs/NavSatFix): GPS position
 
-Coordinate Frame:
+Coordinate Frame
+----------------
 All markers are published in the 'map' frame for consistent 3D visualization.
 """
 
@@ -36,6 +46,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Header
 import math
 import numpy as np
+
+UPDATE_RATE = 1  # Hz
 
 class ArgoBoatVisualization(Node):
     def __init__(self):
@@ -69,7 +81,7 @@ class ArgoBoatVisualization(Node):
         self.gps_lon = 0.0
         
         # Timer for publishing markers
-        self.timer = self.create_timer(0.1, self.publish_markers)  # 10 Hz
+        self.timer = self.create_timer(1/UPDATE_RATE, self.publish_markers)  #  Hz
         
         self.get_logger().info("Argo boat visualization started")
     

@@ -114,6 +114,30 @@ sudo systemctl enable argo-web-dashboard.service
 sudo systemctl start argo-web-dashboard.service
 ```
 
+### About the "development server" warning
+
+When the dashboard starts, you may see this warning in the logs:
+
+```
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+```
+
+**What it means**
+- The dashboard uses Flask's built-in development server via `app.run(...)`. It's lightweight and convenient, but not intended for internet-facing production use.
+- On a trusted local network (LAN) or when accessed through SSH port forwarding, this is acceptable.
+
+**Safe ways to use it**
+- **Local/LAN use**: Access from the same network (as shown above) is fine.
+- **SSH port forwarding (recommended remotely)**: Keep the server as-is and tunnel with SSH; no public internet exposure.
+
+**Hardening options (optional)**
+- Bind only to localhost and use SSH port forwarding:
+  - Change binding to `127.0.0.1` (instead of `0.0.0.0`) and connect via SSH port forwarding.
+- Restrict access with a firewall: Allow port 8081 only from your management IP/network.
+- Put a reverse proxy (e.g., nginx) in front for basic auth and TLS if you must expose beyond LAN.
+
+Note: Migrating to a production WSGI server like `gunicorn` would require refactoring to expose a module-level Flask `app` separate from the ROS2 node. The current architecture embeds Flask inside a ROS2 node class for tight integration, so external WSGI runners cannot import `app` directly without that change.
+
 ---
 
 ## Features
@@ -164,6 +188,27 @@ The web dashboard integrates with existing Argo infrastructure:
 - `/argo/recording/start` - Start recording (record node)
 - `/argo/recording/stop` - Stop recording (record node)
 - `/controller_node/switch_controller` - Switch controller type (NEW in controller.py)
+
+### 3D Boat Visualization (optional but recommended)
+The project includes a lightweight ROS2 node that publishes 3D visualization markers for the boat state. This is useful alongside the web dashboard for situational awareness during testing and can be viewed in both RViz and Foxglove's 3D panel.
+
+**Node:** `nodes/argo_boat_visualization.py`
+
+**What it shows:**
+- Boat hull and mast orientation (using `/pose` and IMU-derived roll/pitch)
+- Rudder and sail indicators (from `/rudder_sail_cmd`)
+- Wind vector (from `/anem_speed_angle_temp`)
+- GPS velocity vector (from `/gps_velocity`)
+- Heading arrow and basic pose cues
+
+**How to run:**
+```bash
+python3 nodes/argo_boat_visualization.py
+```
+
+The node publishes to `/visualization_marker` and `/visualization_marker_array`. View in:
+- **RViz**: Add Marker and MarkerArray displays and subscribe to the above topics; set fixed frame to `map`.
+- **Foxglove**: Add a 3D panel and subscribe to the same topics to see geometry in the scene.
 
 ### Resource Usage
 - **RAM**: ~40 MB

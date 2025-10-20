@@ -39,6 +39,7 @@ from flask_cors import CORS
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'launch'))
 from argo_node_utils import ArgoNodeManager
 
+UPDATE_RATE = 1  # Hz
 
 class ArgoWebDashboard(Node):
     """ROS2 node providing web-based monitoring and control interface."""
@@ -125,7 +126,7 @@ class ArgoWebDashboard(Node):
         self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
         
         # Timer for periodic status updates
-        self.create_timer(2.0, self.update_system_status)
+        self.create_timer(1/UPDATE_RATE, self.update_system_status)
         
         # Flask app setup
         self.app = Flask(__name__, 
