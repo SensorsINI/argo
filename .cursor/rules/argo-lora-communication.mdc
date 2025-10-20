@@ -37,31 +37,40 @@ Pin 31       | 271       | PI15      | LORA_OUT (DIO0/IRQ)
 #### Key Libraries
 ```python
 import spidev      # Hardware SPI communication
-import OPi.GPIO    # GPIO control for CS/RST/IRQ pins
-# OR
-import RPi.GPIO    # Alternative GPIO library
+import gpiod       # Modern GPIO control for CS/RST/IRQ pins (libgpiod)
 ```
 
 **Install on Orange Pi:**
 ```bash
-pip3 install spidev OPi.GPIO
+pip3 install spidev gpiod
 ```
+
+**Why `gpiod`?**
+- Modern libgpiod interface (replaces deprecated sysfs GPIO)
+- Works without root permissions (with proper udev rules)
+- Consistent with other Argo nodes (battery_water.py)
+- Better performance and stability than OPi.GPIO
 
 #### SPI Communication Pattern
 ```python
+# Initialize GPIO lines
+self.gpio_chip = gpiod.Chip("/dev/gpiochip0")
+self.lora_sel_line = self.gpio_chip.get_line(LORA_SEL_LINE)
+self.lora_sel_line.request(consumer="lora_node", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[1])
+
 # Register write
 def spi_write_register(self, address: int, value: int):
     with self.rx_lock:
-        GPIO.output(27, GPIO.LOW)   # CS low
+        self.lora_sel_line.set_value(0)  # CS low
         self.spi.xfer2([address | 0x80, value])  # MSB=1 for write
-        GPIO.output(27, GPIO.HIGH)  # CS high
+        self.lora_sel_line.set_value(1)  # CS high
 
 # Register read
 def spi_read_register(self, address: int) -> int:
     with self.rx_lock:
-        GPIO.output(27, GPIO.LOW)
+        self.lora_sel_line.set_value(0)  # CS low
         result = self.spi.xfer2([address & 0x7F, 0x00])  # MSB=0 for read
-        GPIO.output(27, GPIO.HIGH)
+        self.lora_sel_line.set_value(1)  # CS high
         return result[1]
 ```
 
@@ -82,7 +91,10 @@ def spi_read_register(self, address: int) -> int:
 #### Interrupt-Driven Reception
 ```python
 # GPIO interrupt on DIO0 pin (rising edge)
-GPIO.add_event_detect(31, GPIO.RISING, callback=self.on_dio0_interrupt)
+# Using gpiod event monitoring (TODO: implement in lora.py)
+self.lora_irq_line = self.gpio_chip.get_line(LORA_IRQ_LINE)
+self.lora_irq_line.request(consumer="lora_node", type=gpiod.LINE_REQ_DIR_IN)
+# Note: gpiod.LINE_REQ_EV_RISING_EDGE for event detection
 
 def on_dio0_interrupt(self, channel):
     irq_flags = self.spi_read_register(REG_IRQ_FLAGS)
@@ -321,24 +333,94 @@ Remove `'lora'` from the `excluded_nodes` list on line 90.
 
 **GPIO Libraries:**
 - `spidev` - **Required** for hardware SPI protocol
-- `OPi.GPIO` or `RPi.GPIO` - For control pins (CS, RST, IRQ)
-- `gpiod` (used in battery_water.py) - Only for simple digital I/O
+- `gpiod` - **Required** for GPIO control (CS, RST, IRQ pins)
+  - Uses libgpiod kernel interface
+  - Works without root (with proper udev rules)
+  - Consistent with other Argo nodes
 
 ## Testing and Debugging
 
-### Verify SPI Communication
+### Hardware Diagnostics (Critical for New Installations)
+
+#### SPI Communication Test
 ```python
 # Read version register (should be 0x12 for SX1276)
 version = self.spi_read_register(0x42)
 print(f"Chip version: 0x{version:02X}")
+
+# Expected results:
+# - Version = 0x12 ✅ (SX1276 chip)
+# - OpMode = 0x09 (Sleep mode after reset)
+# - If reading 0x00 or 0xFF: Check wiring and power
 ```
 
-### Monitor RSSI
+#### Oscilloscope Verification
+When debugging SPI communication, use a scope to verify:
+1. **SCLK (Pin 23)**: Should show clock pulses during transactions
+2. **MOSI (Pin 19)**: Should show data from OPi to module
+3. **MISO (Pin 21)**: Should show data from module to OPi
+4. **CS (Pin 27)**: Should go LOW during each transaction
+5. **RST (Pin 29)**: Should show LOW pulse (10ms) followed by 100ms stabilization
+
+**Critical Timing:**
+- Reset pulse: 10ms LOW minimum
+- Crystal stabilization: 100ms after reset release
+- SPI clock: 100-500 kHz for initial testing (can go up to 10 MHz)
+
+#### Common Hardware Issues
+
+**1. MISO Low Amplitude (~500mV instead of 3.3V)**
+- **Cause**: MISO pin wired to wrong OPi pin (likely an OUTPUT pin)
+- **Symptom**: Module is driving MISO but fighting against an OPi output
+- **Fix**: Verify continuity with multimeter:
+  ```
+  RA-01 Pin 15 (MISO) ←→ Orange Pi Pin 21 (should beep)
+  RA-01 Pin 15 (MISO) ←→ Orange Pi Pin 27/29/33/37 (should NOT beep)
+  ```
+
+**2. No MISO Activity**
+- **Cause**: Module not powered, wrong pin, or inverted header wiring
+- **Fix**: 
+  - Check VDD = 3.3V (should be 3.3-3.5V)
+  - Verify GND connections
+  - Check for inverted pin ordering on adapters/headers
+  - Probe directly at Orange Pi Pin 21 to bypass adapters
+
+**3. Version Register Reads 0x00**
+- **Cause**: No communication, module not responding
+- **Fix**:
+  - Verify SPI enabled: `ls -l /dev/spidev1.0` (should exist)
+  - Check permissions: Should be `crw-rw----` with group `gpio`
+  - Verify CS pin is toggling LOW during transactions
+  - Increase reset delay to 100ms for crystal stabilization
+
+**4. Adapter/Wiring Issues**
+- **Critical**: Some 8-pin headers have inverted pin ordering on one side
+- **Symptom**: Correct signals at OPi but wrong pins at module
+- **Solution**: Build correction adapter or verify pinout carefully
+- **Test**: Use multimeter continuity mode to verify each connection
+
+#### SPI Permission Setup
+```bash
+# Check SPI device exists
+ls -l /dev/spidev1.0
+
+# If permissions denied, create udev rule
+echo 'SUBSYSTEM=="spidev", GROUP="gpio", MODE="0660"' | sudo tee /etc/udev/rules.d/99-argo-spi.rules
+
+# Reload rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+### ROS2 Topic Monitoring
+
+#### Monitor RSSI
 ```bash
 ros2 topic echo /lora_signal_strength
 ```
 
-### Test Command Sending
+#### Test Command Sending
 ```bash
 # On shore side
 ros2 topic pub --once /argo/remote_command std_msgs/String "data: 'return_home'"
@@ -347,7 +429,7 @@ ros2 topic pub --once /argo/remote_command std_msgs/String "data: 'return_home'"
 ros2 topic echo /lora_remote_command
 ```
 
-### Check Connection Status
+#### Check Connection Status
 ```bash
 ros2 topic echo /lora_connection_status
 ```
