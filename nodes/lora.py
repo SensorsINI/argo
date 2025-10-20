@@ -506,6 +506,12 @@ class LoRaNode(Node):
             self.get_logger().debug(
                 f"Packet received: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
 
+            # Strip Waveshare stream mode header if present
+            # Expected header: [0x00, 0x00, 0x12, 0x11]
+            if len(payload) >= 4 and payload[0:4] == bytes([0x00, 0x00, 0x12, 0x11]):
+                self.get_logger().debug("Detected Waveshare header, stripping 4 bytes")
+                payload = payload[4:]  # Remove header
+
             # Process received data
             self.last_rx_time = time.time()
             data_str = payload.decode('ascii', errors='ignore').strip()
@@ -580,14 +586,21 @@ class LoRaNode(Node):
         return json.dumps(packet, separators=(',', ':'))
 
     def transmit_packet(self, data: bytes) -> bool:
-        """Transmit a packet via LoRa SPI"""
+        """Transmit a packet via LoRa SPI with Waveshare-compatible header"""
         try:
             if not self.spi:
                 return False
 
-            if len(data) > self.max_packet_size:
+            if len(data) > self.max_packet_size - 4:  # Reserve 4 bytes for header
                 self.get_logger().warn(f"Packet too large: {len(data)} bytes")
                 return False
+
+            # Prepend Waveshare stream mode header:
+            # Byte 0-1: Address (0x0000 = device address 0)
+            # Byte 2: Channel/Network ID (0x12 = 18)
+            # Byte 3: Unknown flag (0x11, observed in Waveshare transmissions)
+            waveshare_header = bytes([0x00, 0x00, 0x12, 0x11])
+            packet_with_header = waveshare_header + data
 
             # Enter standby mode
             self.set_mode(SX1276Registers.MODE_STDBY)
@@ -595,17 +608,17 @@ class LoRaNode(Node):
             # Set FIFO address pointer to TX base
             self.spi_write_register(SX1276Registers.REG_FIFO_ADDR_PTR, 0x00)
 
-            # Write payload to FIFO
-            self.spi_write_fifo(data)
+            # Write payload to FIFO (with header)
+            self.spi_write_fifo(packet_with_header)
 
-            # Set payload length
+            # Set payload length (including header)
             self.spi_write_register(
-                SX1276Registers.REG_PAYLOAD_LENGTH, len(data))
+                SX1276Registers.REG_PAYLOAD_LENGTH, len(packet_with_header))
 
             # Enter TX mode (DIO0 will trigger interrupt when done)
             self.set_mode(SX1276Registers.MODE_TX)
 
-            self.get_logger().debug(f"Transmitted {len(data)} bytes via LoRa")
+            self.get_logger().debug(f"Transmitted {len(packet_with_header)} bytes via LoRa (payload: {len(data)}, header: 4)")
             return True
 
         except Exception as e:
