@@ -17,6 +17,7 @@ Dependencies:
 """
 
 import sys
+import os
 import json
 import time
 import threading
@@ -34,15 +35,34 @@ except ImportError as e:
     print("ERROR: ROS2 (rclpy) not found!")
     print("=" * 70)
     print()
-    print("This node requires ROS2 Humble to be installed.")
-    print()
-    print("Quick fix:")
-    print("  1. Source ROS2 environment:")
-    print("     source /opt/ros/humble/setup.bash")
-    print()
-    print("  2. Or install ROS2 Humble:")
-    print("     sudo apt install ros-humble-ros-base")
-    print()
+    
+    # Check if in conda environment
+    if 'CONDA_DEFAULT_ENV' in os.environ or 'CONDA_PREFIX' in os.environ:
+        conda_env = os.environ.get('CONDA_DEFAULT_ENV', 'unknown')
+        print(f"⚠️  WARNING: You are in a conda environment: ({conda_env})")
+        print()
+        print("Conda Python interferes with ROS2. Please deactivate conda first:")
+        print()
+        print("  conda deactivate")
+        print("  source /opt/ros/humble/setup.bash")
+        print("  python3 lora_shore.py")
+        print()
+        print("Or create a shell script that handles this:")
+        print("  #!/bin/bash")
+        print("  source /opt/ros/humble/setup.bash")
+        print("  exec python3 \"$@\"")
+        print()
+    else:
+        print("This node requires ROS2 Humble to be installed.")
+        print()
+        print("Quick fix:")
+        print("  1. Source ROS2 environment:")
+        print("     source /opt/ros/humble/setup.bash")
+        print()
+        print("  2. Or install ROS2 Humble:")
+        print("     sudo apt install ros-humble-ros-base")
+        print()
+    
     print("See shore/INSTALL.md for detailed installation instructions.")
     print()
     print("=" * 70)

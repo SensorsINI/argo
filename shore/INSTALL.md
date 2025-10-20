@@ -212,6 +212,41 @@ source /opt/ros/humble/setup.bash
 echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 ```
 
+### Error: ROS2 not found (but you're in a conda environment)
+
+**Cause**: Conda's Python interferes with ROS2's Python packages.
+
+**Symptoms**:
+- You see `(base)` or another conda environment in your prompt
+- `ros2` command works but Python can't import `rclpy`
+
+**Solution 1 - Use launcher script (recommended)**:
+```bash
+# Use the provided launcher that handles conda automatically
+./run_lora_shore.sh
+```
+
+**Solution 2 - Manually deactivate conda**:
+```bash
+# Deactivate conda
+conda deactivate
+
+# Source ROS2
+source /opt/ros/humble/setup.bash
+
+# Run node
+python3 lora_shore.py
+```
+
+**Solution 3 - Prevent conda auto-activation**:
+```bash
+# Disable conda auto-activation
+conda config --set auto_activate_base false
+
+# Restart terminal, then source ROS2
+source /opt/ros/humble/setup.bash
+```
+
 ### Error: "ModuleNotFoundError: No module named 'serial'"
 
 **Cause**: pyserial not installed.

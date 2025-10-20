@@ -20,14 +20,25 @@ sudo apt install ros-humble-ros-base
 # 2. Install Python dependencies
 pip3 install -r requirements.txt
 
-# 3. Source ROS2 environment
+# 3. Run shore node using launcher (handles conda/ROS2 automatically)
+./run_lora_shore.sh
+```
+
+**Or manually:**
+```bash
+# If in conda: deactivate it first
+conda deactivate
+
+# Source ROS2 environment
 source /opt/ros/humble/setup.bash
 
-# 4. Run shore node
+# Run shore node
 python3 lora_shore.py
 ```
 
 **👉 For detailed installation instructions, see [INSTALL.md](INSTALL.md)**
+
+**⚠️ Conda Users**: If you use conda, either use `run_lora_shore.sh` or deactivate conda before running. See [INSTALL.md](INSTALL.md#error-ros2-not-found-but-youre-in-a-conda-environment) for details.
 
 ## Components
 
