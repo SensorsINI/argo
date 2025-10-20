@@ -101,9 +101,8 @@ class ArgoLifecycleManager:
         discovered_nodes = self.node_manager.discover_nodes(exclude_simulation_only=True)
 
         # Nodes to exclude (running as independent services)
-        # - lora: LoRa hardware not installed yet
         # - battery_water: Runs as independent service for critical battery monitoring
-        self.excluded_nodes = ['lora', 'battery_water']
+        self.excluded_nodes = ['battery_water']
         
         # Convert to .py format for process matching and handle special nodes
         self.expected_nodes = []
@@ -1842,7 +1841,6 @@ PAUSE TOGGLING:
 
 NODE MANAGEMENT:
   Excluded Nodes (Hardware Not Ready):
-    - lora: LoRa radio hardware not installed
     - battery_water: Runs as independent systemd service for critical monitoring
   
   Critical Nodes (Essential for Operation):
