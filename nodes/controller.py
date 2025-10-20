@@ -1,7 +1,102 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
-# High-level autonomous controller for Argo sailboat
-# Subscribes to sensor data and publishes control commands to rudder_sail_radio.py
+#
+# controller.py - High-Level Autonomous Controller for Argo Sailboat
+# ====================================================================
+#
+# ARCHITECTURE OVERVIEW:
+#   This node implements a modular, swappable controller architecture for autonomous
+#   sailboat control. It aggregates all sensor data into a unified BoatState, runs
+#   the active controller algorithm, and publishes control commands to the rudder/sail
+#   control system.
+#
+# CONTROL FLOW:
+#   1. Sensor callbacks update BoatState (GPS, IMU, wind, compass, battery, LoRa)
+#   2. During human control: Target heading tracks current heading for smooth handoff
+#   3. During autonomous control: Active controller generates commands via generate_control()
+#   4. Commands published to /rudder_sail_cmd for execution by rudder_sail_radio.py
+#   5. Control arbitration in rudder_sail_radio.py decides human vs robot authority
+#
+# PAUSE MODE:
+#   - When paused (via /controller_node/toggle_pause service or single button tap):
+#     * No autonomous commands are published
+#     * rudder_sail_radio.py automatically defaults to human control (stale auto commands)
+#     * Controller resumes from current heading when unpaused
+#
+# AVAILABLE CONTROLLERS:
+#   1. ProportionalHeadingController (DEFAULT):
+#      - Simple proportional rudder control to maintain heading
+#      - Target heading = last human-controlled heading at handoff
+#      - Rudder command proportional to heading error (target - current)
+#      - Sail command passes through from radio input
+#      - Good for: Basic autonomous heading hold, testing, development
+#
+#   2. WindAwareController:
+#      - Enhanced proportional heading control with wind-based sail control
+#      - Automatically adjusts sail position based on apparent wind angle
+#      - Rudder control same as proportional controller
+#      - Good for: More realistic sailing behavior, wind-relative control
+#
+#   3. ReturnToHomeController:
+#      - GPS-based navigation to return to starting position
+#      - Activates on shore connection loss or explicit LoRa command
+#      - Calculates bearing to home and steers toward it
+#      - Wind-aware sail control for efficient return
+#      - Good for: Emergency return, lost connection scenarios, automated return
+#
+# CONTROLLER SWITCHING:
+#   - Via parameter: Set 'controller_type' in argo.yaml ('proportional', 'wind_aware', 'return_to_home')
+#   - Via service: Call /controller_node/switch_controller (Trigger service)
+#   - Automatic: RTH controller activates on connection loss timeout
+#   - Hot-reload: Parameter file changes detected and applied automatically
+#
+# TARGET HEADING BEHAVIOR:
+#   - During human control: target_heading continuously updated to current compass heading
+#   - On handoff to autonomous: target_heading frozen at handoff value
+#   - Robot steers to maintain this target heading using active controller
+#   - This provides smooth, predictable handoff behavior
+#
+# DATA COLLECTION:
+#   - Optional training data collection during human control
+#   - Records state-action pairs for machine learning
+#   - Enable via 'data_collection_enabled' parameter
+#   - Saved to ~/argo_data/training_data/
+#
+# KEY TOPICS:
+#   Published:
+#     /rudder_sail_cmd (Vector3) - Autonomous control commands (-1 to +1)
+#     /controller_state (String) - Current controller name for monitoring
+#
+#   Subscribed:
+#     /human_controlled (Bool) - Control authority from rudder_sail_radio.py
+#     /rudder_sail_radio (Vector3) - Radio input for reference
+#     /pose (Vector3) - Compass heading (z component)
+#     /gps_cog, /gps_sog, /gps_velocity - GPS navigation data
+#     /accel, /gyro, /magnetometer - IMU sensor data
+#     /anem_speed_angle_temp (Vector3) - Wind sensor data
+#     /battery_voltage, /battery_low_alert - Battery monitoring
+#     /lora_connection_status, /lora_remote_command - LoRa connectivity
+#     /fix (NavSatFix) - GPS position for home tracking
+#
+# PARAMETERS:
+#   controller_type: 'proportional' (default), 'wind_aware', 'return_to_home'
+#   rudder_gain: Proportional gain for rudder control (default: 1.0)
+#   rudder_full_scale_deg: Heading error for full rudder deflection (default: 60.0°)
+#   data_collection_enabled: Enable training data recording (default: false)
+#   enable_param_reload: Hot-reload parameter file changes (default: true)
+#
+# EXTENDING THE CONTROLLER:
+#   To add a new controller:
+#   1. Create a new class inheriting from BaseController
+#   2. Implement generate_control(state: BoatState) -> ControlCommand
+#   3. Add initialization case in _initialize_controller()
+#   4. Add controller_type string to parameter handling
+#
+# CURRENT DEFAULT CONTROLLER: ProportionalHeadingController
+#   - Proportional rudder control to steer back to last human-controlled heading
+#   - Formula: rudder_cmd = rudder_gain * (target_heading - current_heading) / rudder_full_scale_deg
+#   - Clamped to [-1, +1] range
+#   - Target heading set during human control, maintained during autonomous control
 
 import sys
 import os
@@ -805,8 +900,11 @@ class ControllerNode(Node):
 
     def timer_callback(self):
         """Main control loop - generates autonomous control commands."""
-        # Check if node is paused
+        # Check if node is paused - when paused, unconditionally default to human control
         if self.pause_service.is_paused():
+            # When paused, no autonomous commands are published, which causes
+            # rudder_sail_radio.py to default to human control due to stale auto commands.
+            # This effectively hands control back to the human operator immediately.
             return  # Skip processing when paused
 
         self.boat_state.timestamp = time.time()

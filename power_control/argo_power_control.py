@@ -29,8 +29,9 @@
 #   Software shutdown sends HIGH pulse to POW_OFF → RESET coil deactivates relay
 #
 # POWER BUTTON BEHAVIOR (Rev3 PCB - Active HIGH):
-#   - Double tap: Toggle Argo service
-#   - Triple tap: Toggle recording
+#   - Single tap: Toggle controller pause mode
+#   - Double tap: Toggle recording
+#   - Quadruple tap: Restart Argo launch service
 #   - Long press (>= threshold DEFAULT_SHUTDOWN_THRESHOLD_S): Initiate shutdown sequence
 #   - Button press at boot activates SET coil; by software start, button is already released
 #
@@ -770,6 +771,123 @@ class PowerController:
             logger.error(f"Error stopping Argo service: {e}")
             return False
 
+    def toggle_controller_pause(self):
+        """Toggle controller pause mode via ROS2 service call"""
+        try:
+            # Check if Argo service is running (required for controller node)
+            if not self.check_argo_service_status():
+                logger.warning("Single tap detected but Argo service is not running")
+                self.send_desktop_notification(
+                    "Controller Pause Unavailable",
+                    "Argo service must be running to toggle pause mode",
+                    "warning"
+                )
+                return
+            
+            logger.info("Single tap detected - toggling controller pause mode")
+            self.send_desktop_notification(
+                "Controller Pause Control",
+                "Toggling controller pause mode...",
+                "normal"
+            )
+            
+            success, message = self._call_trigger_service(
+                '/controller_node/toggle_pause', timeout_sec=5.0)
+            
+            if success:
+                # The service response message should indicate the new state
+                logger.info(f"✅ Controller pause toggled: {message}")
+                self.send_desktop_notification(
+                    "Controller Pause Toggled",
+                    message,
+                    "normal"
+                )
+            else:
+                logger.error(f"❌ Failed to toggle controller pause: {message}")
+                self.send_desktop_notification(
+                    "Controller Pause Error",
+                    f"Failed to toggle pause mode: {message}",
+                    "critical"
+                )
+        except Exception as e:
+            logger.error(f"Error toggling controller pause: {e}")
+            self.send_desktop_notification(
+                "Controller Pause Error",
+                f"Error toggling pause mode: {e}",
+                "critical"
+            )
+
+    def restart_argo_service(self):
+        """Restart the Argo launch service"""
+        try:
+            logger.info("Quadruple tap detected - restarting Argo launch service")
+            self.send_desktop_notification(
+                "Argo Service Control",
+                "Restarting Argo nodes...",
+                "normal"
+            )
+            
+            if self.test_mode:
+                logger.info("TEST MODE: Would restart Argo launch service")
+                self.send_desktop_notification(
+                    "Argo Service Restarted",
+                    "Argo nodes restarted by quadruple tap (test mode)",
+                    "normal"
+                )
+                return True
+            
+            # Stop service first
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'stop', 'argo_launch.service'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                logger.error(f"❌ Failed to stop Argo service: {result.stderr}")
+                self.send_desktop_notification(
+                    "Argo Service Error",
+                    "Failed to stop Argo nodes for restart",
+                    "critical"
+                )
+                return False
+            
+            # Wait a moment for clean shutdown
+            time.sleep(2)
+            
+            # Start service
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'start', 'argo_launch.service'],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                logger.info("✅ Argo launch service restarted")
+                self.argo_service_running = True
+                self.send_desktop_notification(
+                    "Argo Service Restarted",
+                    "Argo nodes restarted by quadruple tap",
+                    "normal"
+                )
+                # Wait for recording service to initialize
+                time.sleep(7)
+                self.check_recording_service_availability()
+                return True
+            else:
+                logger.error(f"❌ Failed to start Argo service after restart: {result.stderr}")
+                self.argo_service_running = False
+                self.send_desktop_notification(
+                    "Argo Service Error",
+                    "Failed to start Argo nodes after restart",
+                    "critical"
+                )
+                return False
+        except Exception as e:
+            logger.error(f"Error restarting Argo service: {e}")
+            self.send_desktop_notification(
+                "Argo Service Error",
+                f"Error restarting Argo nodes: {e}",
+                "critical"
+            )
+            return False
+
     def toggle_argo_service(self):
         """Toggle the Argo launch service on/off with immediate feedback"""
         try:
@@ -1470,9 +1588,9 @@ class PowerController:
         # Process tap sequence based on count
         tap_count = len(self.tap_times)
 
-        if tap_count < 2:
-            # Not enough taps - ignore
-            logger.info(f"Not enough taps ({tap_count}) - ignoring")
+        if tap_count < 1:
+            # No taps - ignore
+            logger.info(f"No taps detected - ignoring")
             self.tap_times.clear()
             return
 
@@ -1483,33 +1601,32 @@ class PowerController:
             return
 
         # Check if all taps are within the time window
-        if tap_count >= 2:
+        if tap_count >= 1:
             oldest_tap = min(self.tap_times)
             newest_tap = max(self.tap_times)
             duration = newest_tap - oldest_tap
 
-            if duration <= MULTI_TAP_MAX_DURATION_S + 0.01:
+            # For single tap, duration is 0 - always valid
+            if tap_count == 1 or duration <= MULTI_TAP_MAX_DURATION_S + 0.01:
                 # Valid tap sequence detected
-                if tap_count == 2:
+                if tap_count == 1:
+                    logger.info("Single tap detected!")
+                    self.tap_times.clear()
+                    self.toggle_controller_pause()
+                elif tap_count == 2:
                     logger.info(
                         f"Double tap detected! ({duration:.2f}s duration)")
-                    self.tap_times.clear()
-                    self.toggle_argo_service()
-                elif tap_count == 3:
-                    logger.info(
-                        f"Triple tap detected! ({duration:.2f}s duration)")
                     self.tap_times.clear()
                     self.toggle_recording()
                 elif tap_count == 4:
                     logger.info(
                         f"Quadruple tap detected! ({duration:.2f}s duration)")
                     self.tap_times.clear()
-                    # Future: could be used for another command
-                elif tap_count == 5:
+                    self.restart_argo_service()
+                elif tap_count == 3 or tap_count == 5:
                     logger.info(
-                        f"Quintuple tap detected! ({duration:.2f}s duration)")
+                        f"{tap_count} taps detected - no action assigned")
                     self.tap_times.clear()
-                    # Future: could be used for another command
             else:
                 logger.info(
                     f"Tap sequence too slow: {duration:.3f}s > {MULTI_TAP_MAX_DURATION_S}s")
@@ -2654,8 +2771,9 @@ HARDWARE CONFIGURATION (Rev3 PCB):
   - LEDs: Active LOW control (GPIO LOW = ON, GPIO HIGH = OFF)
 
 POWER BUTTON BEHAVIOR (Active HIGH):
-  - Double tap (2 quick taps): Toggle Argo launch service (start/stop all nodes)
-  - Triple tap (3 quick taps): Toggle recording on/off
+  - Single tap: Toggle controller pause mode
+  - Double tap (2 quick taps): Toggle recording on/off
+  - Quadruple tap (4 quick taps): Restart Argo launch service
   - Long press (>= threshold): Initiate shutdown sequence
   - Button press at boot activates SET coil; software always sees button released
 
@@ -2677,8 +2795,9 @@ OPTIONS:
   --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
   --test-notification, -n  Test desktop notification functionality and exit (safe for testing)
   --test-led-patterns, -d  Test shutdown countdown LED pattern and exit (safe for testing)
-  --simulate-double-tap          Simulate a double tap to toggle Argo service
-  --simulate-triple-tap          Simulate a triple tap to toggle recording
+  --simulate-single-tap          Simulate a single tap to toggle controller pause mode
+  --simulate-double-tap          Simulate a double tap to toggle recording
+  --simulate-quadruple-tap       Simulate a quadruple tap to restart Argo service
   --simulate-critical-battery    Simulate critical battery condition for testing
   --simulate-low-battery         Simulate low battery condition (SOS LED pattern) for testing
   --simulate-wifi-loss           Simulate WiFi connectivity loss (alternating red/green LED pattern) for testing
@@ -2694,8 +2813,9 @@ EXAMPLES:
   ./argo_power_control.py -n                      # Test desktop notification (short form)
   ./argo_power_control.py --test-led-patterns # Test countdown LED pattern (safe)
   ./argo_power_control.py -d                      # Test countdown LED pattern (short form)
-  ./argo_power_control.py --simulate-double-tap   # Simulate double tap (Argo service toggle)
-  ./argo_power_control.py --simulate-triple-tap   # Simulate triple tap (recording toggle)
+  ./argo_power_control.py --simulate-single-tap   # Simulate single tap (controller pause toggle)
+  ./argo_power_control.py --simulate-double-tap   # Simulate double tap (recording toggle)
+  ./argo_power_control.py --simulate-quadruple-tap # Simulate quadruple tap (restart Argo service)
   ./argo_power_control.py --simulate-critical-battery  # Test critical battery halt sequence
   ./argo_power_control.py --simulate-low-battery   # Test low battery SOS LED pattern
   ./argo_power_control.py --simulate-wifi-loss     # Test WiFi loss alternating red/green LED pattern
@@ -2741,10 +2861,12 @@ def main():
                         help='Test desktop notification functionality and exit (safe for testing)')
     parser.add_argument('--test-led-patterns',  action='store_true',
                         help='Test shutdown countdown LED pattern and exit (safe for testing)')
+    parser.add_argument('--simulate-single-tap', action='store_true',
+                        help='Simulate a single tap to toggle controller pause mode')
     parser.add_argument('--simulate-double-tap', action='store_true',
-                        help='Simulate a double tap to toggle Argo service')
-    parser.add_argument('--simulate-triple-tap', action='store_true',
-                        help='Simulate a triple tap to toggle recording')
+                        help='Simulate a double tap to toggle recording')
+    parser.add_argument('--simulate-quadruple-tap', action='store_true',
+                        help='Simulate a quadruple tap to restart Argo service')
     parser.add_argument('--simulate-critical-battery', action='store_true',
                         help='Simulate critical battery condition for testing')
     parser.add_argument('--simulate-low-battery', action='store_true',
@@ -2861,33 +2983,45 @@ def main():
             sys.exit(1)
         sys.exit(0)
 
-    # Handle simulate double tap (Argo service toggle)
-    if args.simulate_double_tap:
-        print("Simulating double tap - Toggle Argo service")
+    # Handle simulate single tap (Controller pause toggle)
+    if args.simulate_single_tap:
+        print("Simulating single tap - Toggle controller pause mode")
         try:
             # Create a temporary power controller instance for testing
             controller = PowerController(
                 test_mode=True, threshold=args.threshold)
-            # Manually check and set service availability for test mode
-            controller.check_recording_service_availability()
-            controller.toggle_argo_service()
+            controller.toggle_controller_pause()
+            print("✅ Single tap simulation completed")
+        except Exception as e:
+            print(f"Error simulating single tap: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    # Handle simulate double tap (Recording toggle)
+    if args.simulate_double_tap:
+        print("Simulating double tap - Toggle recording")
+        try:
+            # Create a temporary power controller instance for testing
+            controller = PowerController(
+                test_mode=True, threshold=args.threshold)
+            controller.toggle_recording()
             print("✅ Double tap simulation completed")
         except Exception as e:
             print(f"Error simulating double tap: {e}")
             sys.exit(1)
         sys.exit(0)
 
-    # Handle simulate triple tap (Recording toggle)
-    if args.simulate_triple_tap:
-        print("Simulating triple tap - Toggle recording")
+    # Handle simulate quadruple tap (Restart Argo service)
+    if args.simulate_quadruple_tap:
+        print("Simulating quadruple tap - Restart Argo service")
         try:
             # Create a temporary power controller instance for testing
             controller = PowerController(
                 test_mode=True, threshold=args.threshold)
-            controller.toggle_recording()
-            print("✅ Triple tap simulation completed")
+            controller.restart_argo_service()
+            print("✅ Quadruple tap simulation completed")
         except Exception as e:
-            print(f"Error simulating triple tap: {e}")
+            print(f"Error simulating quadruple tap: {e}")
             sys.exit(1)
         sys.exit(0)
 
@@ -3005,17 +3139,21 @@ def main():
         print("  - Desktop notifications will be sent")
         print("  - Button presses and actions will be reported")
         print(
-            f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}s) toggles Argo service")
+            f"  - Single tap toggles controller pause mode")
         print(
-            f"  - Triple tap (3 quick taps within {MULTI_TAP_MAX_DURATION_S}s) toggles recording")
+            f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}s) toggles recording")
+        print(
+            f"  - Quadruple tap (4 quick taps within {MULTI_TAP_MAX_DURATION_S}s) restarts Argo service")
     else:
         print("Starting power control system in NORMAL MODE")
         print("  - Full power control enabled")
         print("  - System will shutdown and cut power on long button press")
         print(
-            f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles Argo service")
+            f"  - Single tap toggles controller pause mode")
         print(
-            f"  - Triple tap (3 quick taps within {MULTI_TAP_MAX_DURATION_S}) toggles recording")
+            f"  - Double tap (2 quick taps within {MULTI_TAP_MAX_DURATION_S}s) toggles recording")
+        print(
+            f"  - Quadruple tap (4 quick taps within {MULTI_TAP_MAX_DURATION_S}s) restarts Argo service")
 
     print(f"  - Button press threshold: {args.threshold} seconds")
     print(f"  - Button detection mode: Hardware interrupts (efficient)")
