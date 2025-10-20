@@ -797,18 +797,18 @@ class BatteryWaterNode(Node):
             if charging:
                 # Time to BATTERY_FULLY_CHARGED_THRESHOLD_V
                 target_voltage = BATTERY_FULLY_CHARGED_THRESHOLD_V
+                if voltage >= target_voltage:
+                    return 0.0  # Already at target - check this FIRST
                 if slope_v_per_s <= 1e-6:  # Not charging or charging too slowly
                     return None
-                if voltage >= target_voltage:
-                    return 0.0  # Already at target
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             else:
                 # Time to 0% (approximate as 6.0V for 2S LiPo, empty)
                 target_voltage = 6.0  # Conservative empty voltage
+                if voltage <= target_voltage:
+                    return 0.0  # Already depleted - check this FIRST
                 if slope_v_per_s >= -1e-6:  # Not discharging or discharging too slowly
                     return None
-                if voltage <= target_voltage:
-                    return 0.0  # Already depleted
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             
             # Convert to hours and clamp to reasonable range
