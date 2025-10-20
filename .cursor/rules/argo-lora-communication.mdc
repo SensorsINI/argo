@@ -457,13 +457,56 @@ EMERGENCY_COMMANDS = {
 }
 ```
 
+## Hardware Compatibility Warnings
+
+### SX1276 ↔ SX1262 Incompatibility (CRITICAL)
+
+**Tested October 20, 2025**: Argo's **SX1276 module cannot communicate with Waveshare USB-TO-LoRa SX1262** module despite matching all user-configurable parameters.
+
+#### Issue Details
+The Waveshare SX1262 firmware does **not expose** critical physical layer settings:
+- **CRC Mode**: SX1276 has CRC enabled, SX1262 setting unknown/fixed
+- **Header Mode**: SX1276 uses explicit header, SX1262 setting unknown
+- **Preamble Length**: SX1276 uses 8 symbols, SX1262 setting unknown
+
+Even with all these parameters matching:
+- ✅ Frequency: 433 MHz
+- ✅ Spreading Factor: SF7
+- ✅ Bandwidth: 125 kHz
+- ✅ Code Rate: 4/5
+- ✅ Sync Word/Network ID: 18 (0x12)
+- ✅ Encryption: Disabled
+- ✅ Operating Mode: Stream
+
+**Result**: Zero communication. Argo transmits successfully, but SX1262 receives nothing.
+
+#### Recommended Shore-Side Hardware
+For guaranteed compatibility with Argo's SX1276:
+- **SX1276/SX1278-based USB modules** (same chip generation)
+- **Raspberry Pi + SX1276 HAT** (e.g., Dragino LoRa/GPS HAT)
+- **RFM95W/RFM96W modules** (SX1276-based) with USB adapter
+
+#### Detailed Documentation
+See `nodes/README-LORA-TO-WAVESHARE.md` for:
+- Complete test results
+- AT command configuration attempts
+- Oscilloscope verification data
+- Alternative solutions
+
+### Shore-Side Module Requirements
+When purchasing shore-side LoRa hardware:
+1. **Must use SX1276 or SX1278 chip** (same generation as Argo)
+2. Verify firmware allows configuration of CRC, header mode, preamble
+3. Test with known-working SX1276 modules before deployment
+4. Avoid "simplified" firmware that hides low-level settings
+
 ## Future Enhancements
 
 ### Potential Additions
 1. **GPS position transmission** - Add lat/lon to status packets
 2. **Acknowledgment system** - Confirm command receipt
 3. **Data compression** - Further reduce packet size
-4. **Encryption** - Secure command/control
+4. **Encryption** - Secure command/control (after testing compatibility)
 5. **Mesh networking** - Multi-boat communication
 6. **Adaptive data rate** - Adjust SF based on RSSI
 7. **Store-and-forward** - Queue packets when out of range
@@ -478,21 +521,23 @@ With compression: ~40-50 bytes
 ```
 argo/
 ├── nodes/
-│   ├── lora.py                      # Onboard LoRa (SPI/SX1276)
-│   └── remote_command_handler.py    # Command processor (to be created)
-├── shore/                           # Shore-side components (to be created)
-│   ├── lora_shore.py               # Shore LoRa (USB serial)
-│   ├── argo_command_gui.py         # GUI for sending commands
+│   ├── lora.py                        # Onboard LoRa (SPI/SX1276) ✅ WORKING
+│   ├── README-LORA-TO-WAVESHARE.md   # Hardware compatibility findings
+│   └── remote_command_handler.py      # Command processor (to be created)
+├── shore/                             # Shore-side components (to be created)
+│   ├── lora_shore.py                 # Shore LoRa (USB serial, needs SX1276)
+│   ├── argo_command_gui.py           # GUI for sending commands
 │   └── foxglove/
-│       └── argo_lora_layout.json   # Foxglove visualization
+│       └── argo_lora_layout.json     # Foxglove visualization
 ├── .cursor/rules/
-│   └── argo-lora-communication.mdc # This documentation
-└── requirements.txt                 # Updated with spidev, OPi.GPIO
+│   └── argo-lora-communication.mdc   # This documentation
+└── requirements.txt                   # Updated with spidev, gpiod
 ```
 
 ## References
 
 - **SX1276 Datasheet**: https://aithinker-static.oss-cn-shenzhen.aliyuncs.com/docs/_media_old/sx1276_77_78_79.pdf
 - **Hardware**: [nodes/lora.py](mdc:nodes/lora.py) header comments
+- **Hardware Compatibility**: [nodes/README-LORA-TO-WAVESHARE.md](mdc:nodes/README-LORA-TO-WAVESHARE.md)
 - **Requirements**: [requirements.txt](mdc:requirements.txt)
 - **Lifecycle Manager**: [launch/argo_lifecycle_manager.py](mdc:launch/argo_lifecycle_manager.py)
