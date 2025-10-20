@@ -197,6 +197,7 @@ MAIN_LOOP_SLEEP_S = 1
 LOW_BATTERY_THRESHOLD_V = 7.6      # Low battery warning threshold (SOS LED pattern)
 CRITICAL_BATTERY_THRESHOLD_V = 7.2  # Critical battery voltage threshold (halt system)
 BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage interval (seconds)
+BATTERY_LOG_THRESHOLD_V = 0.05     # Only log battery voltage if it changes by more than 50mV
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 
@@ -311,6 +312,7 @@ class PowerController:
         self.last_battery_check_time = 0.0
         self.battery_monitoring_active = False
         self.sos_led_active = False
+        self.last_logged_battery_voltage = None  # Track last logged voltage for throttling
 
         # WiFi monitoring state
         self.wifi_connected = True  # Assume connected at startup
@@ -1994,23 +1996,43 @@ class PowerController:
                     # Valid reading - reset invalid counter
                     consecutive_invalid_readings = 0
                     
-                    # Log battery status with charging information
-                    charging_str = ""
-                    if charging_status is not None or ac_power_present is not None:
-                        charging_parts = []
-                        if ac_power_present is not None:
-                            charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
-                        if charging_status is not None:
-                            charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
-                        charging_str = f", {', '.join(charging_parts)}"
+                    # Check if voltage has changed significantly since last log
+                    should_log_voltage = True
+                    if self.last_logged_battery_voltage is not None:
+                        voltage_change = abs(battery_voltage - self.last_logged_battery_voltage)
+                        should_log_voltage = voltage_change >= BATTERY_LOG_THRESHOLD_V
                     
-                    logger.info(
-                        f"Battery voltage check: {battery_voltage:.3f}V "
-                        f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
+                    # Log battery status with charging information (only if voltage changed significantly)
+                    if should_log_voltage:
+                        charging_str = ""
+                        if charging_status is not None or ac_power_present is not None:
+                            charging_parts = []
+                            if ac_power_present is not None:
+                                charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
+                            if charging_status is not None:
+                                charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
+                            charging_str = f", {', '.join(charging_parts)}"
+                        
+                        logger.info(
+                            f"Battery voltage check: {battery_voltage:.3f}V "
+                            f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
+                        
+                        # Update the last logged voltage
+                        self.last_logged_battery_voltage = battery_voltage
 
                     # Check for critical battery first (highest priority)
                     if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
                         if not self.critical_battery_detected:
+                            # Always log critical battery events regardless of voltage change threshold
+                            charging_str = ""
+                            if charging_status is not None or ac_power_present is not None:
+                                charging_parts = []
+                                if ac_power_present is not None:
+                                    charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
+                                if charging_status is not None:
+                                    charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
+                                charging_str = f", {', '.join(charging_parts)}"
+                            
                             logger.critical(
                                 f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
                             self.critical_battery_detected = True
@@ -2024,6 +2046,7 @@ class PowerController:
                     # Check for low battery (SOS warning)
                     elif battery_voltage < LOW_BATTERY_THRESHOLD_V:
                         if not self.low_battery_detected:
+                            # Always log low battery events regardless of voltage change threshold
                             logger.warning(
                                 f"LOW BATTERY DETECTED: {battery_voltage:.3f}V < {LOW_BATTERY_THRESHOLD_V}V - Starting SOS LED pattern")
                             self.low_battery_detected = True
@@ -2042,6 +2065,7 @@ class PowerController:
                     else:
                         # Check if we were in low battery state
                         if self.low_battery_detected:
+                            # Always log battery recovery events regardless of voltage change threshold
                             logger.info(
                                 f"Battery voltage recovered from low: {battery_voltage:.3f}V >= {LOW_BATTERY_THRESHOLD_V}V")
                             self.low_battery_detected = False
@@ -2056,10 +2080,18 @@ class PowerController:
                         
                         # Check if we were in critical battery state
                         if self.critical_battery_detected:
+                            # Always log critical battery recovery events regardless of voltage change threshold
                             logger.info(
                                 f"Battery voltage recovered from critical: {battery_voltage:.3f}V >= {CRITICAL_BATTERY_THRESHOLD_V}V")
                             self.critical_battery_detected = False
                             self._clear_critical_battery_flag()
+                    
+                    # Log debug message when voltage change is too small to log normally
+                    if not should_log_voltage and self.last_logged_battery_voltage is not None:
+                        voltage_change = abs(battery_voltage - self.last_logged_battery_voltage)
+                        logger.debug(
+                            f"Battery voltage change too small to log: {voltage_change*1000:.1f}mV < {BATTERY_LOG_THRESHOLD_V*1000:.0f}mV "
+                            f"(current: {battery_voltage:.3f}V, last logged: {self.last_logged_battery_voltage:.3f}V)")
                 else:
                     # Service unavailable - handle based on startup state
                     time_since_startup = time.time() - startup_time
@@ -2839,6 +2871,7 @@ DEVELOPMENT CONFIGURATION:
     * True: Use shutdown to cut power completely (useful for development)
   - This flag controls behavior when battery voltage drops below {CRITICAL_BATTERY_THRESHOLD_V}V
   - Setting is logged at startup and when critical battery condition occurs
+  - Battery voltage logging is throttled to only log when voltage changes by more than {BATTERY_LOG_THRESHOLD_V*1000:.0f}mV
 """
     print(help_text)
 
@@ -3165,6 +3198,7 @@ def main():
         critical_mode = "halt (PRESERVES POWER) - PRODUCTION MODE"
     print(
         f"  - Battery monitoring: Low warning {LOW_BATTERY_THRESHOLD_V}V (SOS LED), Critical {CRITICAL_BATTERY_THRESHOLD_V}V ({critical_mode})")
+    print(f"  - Battery logging: Throttled to log only when voltage changes by >{BATTERY_LOG_THRESHOLD_V*1000:.0f}mV")
     print(f"  - WiFi monitoring: Check every {WIFI_MONITORING_INTERVAL_S}s, alternating red/green LED when lost")
     print("  - Press Ctrl+C to stop")
     print()
