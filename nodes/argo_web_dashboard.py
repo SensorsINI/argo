@@ -11,6 +11,8 @@ Features:
 - System control (start/stop, pause, recording)
 - Optimized for phone screens with large touch targets
 
+# For complete usage, setup, and troubleshooting, see docs/WEB_DASHBOARD_README.md
+
 Access: http://ORANGEPI_IP:8080
 """
 
