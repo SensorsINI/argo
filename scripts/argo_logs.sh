@@ -19,6 +19,7 @@ GREP_PATTERN=""
 COLOR_ARGO_LAUNCH='\e[0;96m'      # Cyan for argo-launch
 COLOR_BATTERY='\e[0;93m'           # Yellow for battery_water
 COLOR_POWER='\e[0;92m'             # Green for power_control
+COLOR_IMU='\e[0;95m'               # Magenta for BNO085 IMU
 COLOR_TIMESTAMP='\e[0;90m'         # Gray for timestamps
 RESET='\e[0m'
 
@@ -26,6 +27,7 @@ RESET='\e[0m'
 SERVICE_ARGO="argo-launch.service"
 SERVICE_BATTERY="battery_water.service"
 SERVICE_POWER="argo_power_control.service"
+SERVICE_IMU="argo_bno085.service"
 
 # Parse command line options
 while getopts "n:fh" opt; do
@@ -53,6 +55,7 @@ while getopts "n:fh" opt; do
             echo "  - argo-launch.service      (cyan)"
             echo "  - battery_water.service    (yellow)"
             echo "  - argo_power_control.service (green)"
+            echo "  - argo_bno085.service      (magenta)"
             echo ""
             echo "Examples:"
             echo "  argo_logs.sh                    # Show all logs"
@@ -90,6 +93,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo -e "${COLOR_ARGO_LAUNCH}●${RESET} argo-launch.service (cyan)"
 echo -e "${COLOR_BATTERY}●${RESET} battery_water.service (yellow)"
 echo -e "${COLOR_POWER}●${RESET} argo_power_control.service (green)"
+echo -e "${COLOR_IMU}●${RESET} argo_bno085.service (magenta)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -100,6 +104,7 @@ if [ "$FOLLOW" = true ]; then
         -u "$SERVICE_ARGO" \
         -u "$SERVICE_BATTERY" \
         -u "$SERVICE_POWER" \
+        -u "$SERVICE_IMU" \
         --output=short-iso-precise \
         2>/dev/null | \
     (if [ -n "$GREP_PATTERN" ]; then grep --line-buffered "$GREP_PATTERN"; else cat; fi) | \
@@ -114,6 +119,9 @@ if [ "$FOLLOW" = true ]; then
         elif echo "$line" | grep -q "argo_power_control"; then
             # Color the entire line green for power_control
             echo -e "${COLOR_POWER}${line}${RESET}"
+        elif echo "$line" | grep -q "bno08x_driver\|argo_bno085"; then
+            # Color the entire line magenta for BNO085 IMU
+            echo -e "${COLOR_IMU}${line}${RESET}"
         else
             # Default: no color (fallback)
             echo "$line"
@@ -151,6 +159,17 @@ else
     else
         journalctl -u "$SERVICE_POWER" -n "$LINES" --no-pager 2>/dev/null | \
             sed "s/^/${COLOR_POWER}/" | sed "s/$/${RESET}/"
+    fi
+    echo ""
+    
+    echo -e "${COLOR_IMU}=== argo_bno085.service ===${RESET}"
+    if [ -n "$GREP_PATTERN" ]; then
+        journalctl -u "$SERVICE_IMU" -n "$LINES" --no-pager 2>/dev/null | \
+            grep "$GREP_PATTERN" | \
+            sed "s/^/${COLOR_IMU}/" | sed "s/$/${RESET}/"
+    else
+        journalctl -u "$SERVICE_IMU" -n "$LINES" --no-pager 2>/dev/null | \
+            sed "s/^/${COLOR_IMU}/" | sed "s/$/${RESET}/"
     fi
 fi
 
