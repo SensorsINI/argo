@@ -1,4 +1,4 @@
-bno08x_driver:
+bno08x_ros:
   ros__parameters:
 
     frame_id: "imu_link"  # Frame ID for Argo sailboat IMU
@@ -13,8 +13,8 @@ bno08x_driver:
     publish:
       magnetic_field: 
         enabled: true
-        rate: 10   # 10 Hz for magnetic field (compass heading)
+        rate: 1   # Hz for magnetic field (compass heading)
       imu:
         enabled: true
-        rate: 10   # 10 Hz for IMU data (accel, gyro, orientation)
+        rate: 5   #  Hz for IMU data (accel, gyro, orientation)
 

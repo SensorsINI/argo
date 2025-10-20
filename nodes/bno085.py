@@ -420,6 +420,33 @@ class BNO085Bridge(Node):
             self.get_logger().error("Driver restart command timed out")
         except Exception as e:
             self.get_logger().error(f"Failed to restart driver: {e}")
+    
+    def _debug_parameters(self):
+        """Debug function to check driver parameters."""
+        try:
+            result = subprocess.run([
+                'bash', '-c', 
+                'source /opt/ros/humble/setup.bash && source /home/orangepi/argo/nodes/argo_bno08x_driver_workspace/install/setup.bash && ros2 param get /bno08x_ros publish.imu.rate'
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                self.get_logger().info(f"DEBUG: Driver IMU rate parameter: {result.stdout.strip()}")
+            else:
+                self.get_logger().warn(f"DEBUG: Failed to get IMU rate parameter: {result.stderr}")
+                
+            # Also check magnetic field rate
+            result2 = subprocess.run([
+                'bash', '-c', 
+                'source /opt/ros/humble/setup.bash && source /home/orangepi/argo/nodes/argo_bno08x_driver_workspace/install/setup.bash && ros2 param get /bno08x_ros publish.magnetic_field.rate'
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result2.returncode == 0:
+                self.get_logger().info(f"DEBUG: Driver magnetic field rate parameter: {result2.stdout.strip()}")
+            else:
+                self.get_logger().warn(f"DEBUG: Failed to get magnetic field rate parameter: {result2.stderr}")
+                
+        except Exception as e:
+            self.get_logger().error(f"DEBUG: Error checking parameters: {e}")
 
 
 # ============================================================================

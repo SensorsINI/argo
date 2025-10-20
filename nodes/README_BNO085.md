@@ -216,7 +216,7 @@ eval "$(register-python-argcomplete bno085.py)"
 **Manual verification:**
 ```bash
 # Check if patch is needed
-grep 'bus:' nodes/vendor/bno08x_driver/config/bno085_i2c.yaml
+grep 'bus:' vendor/bno08x_driver/config/bno085_i2c.yaml
 # Should show: bus: "/dev/i2c-0"
 
 # If it shows i2c-7, run:
@@ -237,7 +237,7 @@ The BNO08x C++ driver is configured via `nodes/vendor/bno08x_driver_argo.yaml`. 
 
 **Current Configuration:**
 ```yaml
-bno08x_driver:
+bno08x_ros:  # ⚠️ IMPORTANT: Namespace must match node name (not bno08x_driver)
   ros__parameters:
 
     frame_id: "imu_link"  # Frame ID for Argo sailboat IMU
@@ -252,26 +252,49 @@ bno08x_driver:
     publish:
       magnetic_field: 
         enabled: true
-        rate: 10   # 10 Hz for magnetic field (compass heading)
+        rate: 1    # 1 Hz for magnetic field (compass heading)
       imu:
         enabled: true
-        rate: 10   # 10 Hz for IMU data (accel, gyro, orientation)
+        rate: 5    # 5 Hz for IMU data (accel, gyro, orientation)
+                   # Sailboat dynamics are slow - 5Hz is sufficient
 ```
 
 **Configuration Options:**
 - **`frame_id`**: ROS2 frame ID for the IMU (default: "imu_link")
 - **`i2c.bus`**: I2C device path (default: "/dev/i2c-0" for Orange Pi Zero 2W)
 - **`i2c.address`**: BNO085 I2C address (default: "0x4A")
-- **`publish.magnetic_field.rate`**: Magnetometer publish rate in Hz (1-400)
-- **`publish.imu.rate`**: IMU data publish rate in Hz (1-400)
+- **`publish.magnetic_field.rate`**: Magnetometer publish rate in Hz (1-100, default: 1)
+- **`publish.imu.rate`**: IMU data publish rate in Hz (1-400, default: 5)
+
+**⚠️ CRITICAL: YAML Namespace Configuration**
+
+The YAML file **must** use `bno08x_ros:` as the top-level namespace, **not** `bno08x_driver:`. This is because the ROS2 node name is `bno08x_ros` (defined in the C++ source).
+
+```yaml
+# ✅ CORRECT
+bno08x_ros:
+  ros__parameters:
+    ...
+
+# ❌ WRONG - Parameters will be ignored!
+bno08x_driver:
+  ros__parameters:
+    ...
+```
+
+If the wrong namespace is used, the driver will ignore your configuration and use default values (100Hz for both rates).
 
 **Usage:**
 This configuration file is automatically loaded by:
 - Makefile targets (`bno08x-launch`, `bno08x-launch-full`)
+- Systemd service (`argo_bno085.service`)
 - Direct `ros2 run` commands with `--params-file` argument
 
 **Customization:**
-To change publish rates or other settings, edit this file directly. The changes take effect on the next launch.
+To change publish rates or other settings:
+1. Edit `vendor/bno08x_driver_argo.yaml` (ensure `bno08x_ros:` namespace)
+2. Restart the service: `make bno085-service-restart`
+3. Verify rates in logs: Look for "IMU Rate: 5" and "Magnetic Field Rate: 1"
 
 ## Data Format
 
@@ -528,6 +551,92 @@ Unlike other Argo sensor nodes, the BNO085 **requires** systemd service manageme
 | Complexity | Low | Medium |
 | Reliability | Good | Excellent (systemd supervision) |
 
+## Debugging
+
+### Enabling Driver Debug Output
+
+The BNO08x C++ driver includes comprehensive debug logging that can be enabled for troubleshooting I2C communication and sensor data issues.
+
+#### How to Enable Debug Mode
+
+1. **Edit the logger configuration:**
+   ```bash
+   nano nodes/vendor/bno08x_driver/include/bno08x_driver/logger.h
+   ```
+
+2. **Uncomment the debug enable line:**
+   ```cpp
+   // Change this line:
+   // #define DEBUG_LOG_ENABLED
+   
+   // To this:
+   #define DEBUG_LOG_ENABLED
+   ```
+
+3. **Rebuild the driver:**
+   ```bash
+   cd nodes
+   make bno08x-build
+   ```
+
+4. **Restart the service:**
+   ```bash
+   make bno085-service-restart
+   ```
+
+#### Debug Output Examples
+
+When debug mode is enabled, you'll see detailed output like:
+```
+DEBUG: BNO08x - I2C Interface Created
+Bus: /dev/i2c-0
+Address: 0x4a
+DEBUG: BNO08x - Sending soft reset packet to the sensor
+DEBUG: BNO08x - I2C Comm Opened and Soft Reset Sent
+DEBUG: BNO08x - Packet size: 276
+DEBUG BUFFER: 14 1 0 0 
+DEBUG: BNO08x - Packet size: 5
+DEBUG BUFFER: 5 0 1 0 
+DEBUG: BNO08x - Packet size: 20
+DEBUG BUFFER: 14 0 2 0 
+```
+
+#### Debug Information Provided
+
+- **I2C Communication**: Bus initialization, address configuration
+- **Packet Processing**: SH-2 protocol packet sizes and content
+- **Sensor Callbacks**: When sensor data is received
+- **Error Details**: Detailed I2C read/write operations
+- **Buffer Contents**: Raw data being transmitted
+
+#### When to Use Debug Mode
+
+- **I2C Communication Issues**: When sensor is not detected or data is corrupted
+- **Protocol Problems**: SH-2 protocol communication failures
+- **Performance Analysis**: Understanding data flow and timing
+- **Development**: Adding new features or troubleshooting custom modifications
+
+#### Disabling Debug Mode
+
+To disable debug output and improve performance:
+
+1. **Comment out the debug enable line:**
+   ```cpp
+   // #define DEBUG_LOG_ENABLED
+   ```
+
+2. **Rebuild and restart:**
+   ```bash
+   make bno08x-build
+   make bno085-service-restart
+   ```
+
+#### Performance Impact
+
+- **Debug Enabled**: ~10-20% CPU overhead, verbose output
+- **Debug Disabled**: Minimal overhead, clean logs
+- **Production Use**: Always disable debug mode for production
+
 ## Troubleshooting
 
 ### Common Issues
@@ -590,11 +699,12 @@ ros2 node info /bno08x_driver
 
 ## Performance
 
-- **Update Rate**: 10Hz (configurable up to 400Hz)
+- **Update Rate**: 5Hz for IMU, 1Hz for magnetometer (configurable 1-400Hz)
 - **Latency**: <10ms (C++ driver + Python bridge)
-- **CPU Usage**: Minimal (fusion done on BNO085 chip)
-- **Memory**: ~5MB for driver + bridge
+- **CPU Usage**: ~10-15% combined (C++ driver + Python bridge at 5Hz)
+- **Memory**: ~60MB for driver + bridge
 - **Accuracy**: ±1° heading accuracy with proper calibration
+- **Sample Rate Optimization**: 5Hz is sufficient for sailboat dynamics (slow compared to drones/cars)
 
 ## File Structure
 
@@ -605,7 +715,7 @@ nodes/
 │   ├── bno08x_driver/                  ← C++ driver (git submodule)
 │   └── bno08x_driver_argo.yaml         ← Driver configuration (ACTIVE)
 ├── Makefile                            ← Build and launch shortcuts
-└── BNO085_README.md                    ← This file
+└── README_BNO085.md                    ← This file
 ```
 
 **Key Files:**

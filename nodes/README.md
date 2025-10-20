@@ -63,7 +63,7 @@ ros2 run argo gps.py --debug
 #### 2. `bno085.py` - Inertial Measurement Unit Node
 **Purpose**: Interfaces with [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU for sensor fusion and motion data
 
-**⚠️ IMPORTANT**: The BNO085 uses a **unique two-process architecture** (C++ driver + Python bridge) that requires systemd service management, unlike other sensor nodes. See **[BNO085_README.md](BNO085_README.md)** for complete documentation.
+**⚠️ IMPORTANT**: The BNO085 uses a **unique two-process architecture** (C++ driver + Python bridge) that requires systemd service management, unlike other sensor nodes. See **[README_BNO085.md](README_BNO085.md)** for complete documentation.
 
 **Hardware**: I2C0 address 0x4a (via C++ `bno08x_driver` with Python bridge)
 
@@ -88,7 +88,7 @@ ros2 run argo gps.py --debug
 - **I2C Error Recovery**: Automatic systemd service restart on failures
 - **Multiple Modes**: Bridge, calibration, verification, and status checking
 
-**Quick Start** (see [BNO085_README.md](BNO085_README.md) for details):
+**Quick Start** (see [README_BNO085.md](README_BNO085.md) for details):
 ```bash
 # Install systemd service (first time)
 cd /home/orangepi/argo/nodes
@@ -107,7 +107,7 @@ python3 bno085.py verify
 python3 bno085.py status
 ```
 
-**Documentation**: See **[BNO085_README.md](BNO085_README.md)** for:
+**Documentation**: See **[README_BNO085.md](README_BNO085.md)** for:
 - Systemd service architecture and setup
 - I2C error recovery mechanisms
 - Calibration procedures

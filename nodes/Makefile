@@ -133,8 +133,13 @@ logs-follow:
 # BNO08x Driver (C++ ROS2 driver for BNO085 IMU)
 # ============================================================================
 
+# BNO08x driver paths and configuration
+# - BNO08X_SUBMODULE_DIR: where the bno08x_driver source submodule is located
+# - BNO08X_BUILD_DIR: where the bno08x_driver build workspace is located  
+# - BNO08X_CONFIG: where the bno08x_driver configuration file is located, important for the I2C bus configuration
+# Note: see also the build target and BNO85_README.md for more details about patch applied to the source code
 BNO08X_SUBMODULE_DIR := vendor/bno08x_driver
-BNO08X_BUILD_DIR := $(HOME)/argo_bno08x_ws
+BNO08X_BUILD_DIR := argo_bno08x_driver_workspace
 BNO08X_CONFIG := vendor/bno08x_driver_argo.yaml
 
 .PHONY: bno08x-help bno08x-init bno08x-build bno08x-test bno08x-launch bno08x-calibrate bno08x-clean
@@ -146,7 +151,7 @@ bno08x-help:
 	@echo "Targets:"
 	@echo "  bno08x-init        - Initialize BNO08x submodule (if not already done)"
 	@echo "  bno08x-build       - Build the BNO08x ROS2 driver with colcon"
-	@echo "  bno08x-test        - Test if BNO085 hardware is detected"
+	@echo "  bno08x-i2c-test    - Test if BNO085 hardware is detected"
 	@echo "  bno08x-launch      - Launch the BNO08x C++ driver only"
 	@echo "  bno08x-launch-full - Launch complete system (C++ driver + Python bridge)"
 	@echo "  bno08x-calibrate   - Run interactive calibration tool (requires driver running)"
@@ -160,6 +165,10 @@ bno08x-help:
 	@echo ""
 	@echo "For calibration (with driver already running):"
 	@echo "  make bno08x-calibrate"
+	@echo ""
+	@echo "Debugging:"
+	@echo "  To enable debug output, edit vendor/bno08x_driver/include/bno08x_driver/logger.h"
+	@echo "  Uncomment '#define DEBUG_LOG_ENABLED' and run 'make bno08x-build'"
 	@echo ""
 
 bno08x-init:
@@ -182,11 +191,18 @@ bno08x-build: bno08x-init
 	fi
 	@echo "Applying Argo-specific configuration (I2C bus fix)..."
 	@if grep -q '"/dev/i2c-7"' $(BNO08X_SUBMODULE_DIR)/config/bno085_i2c.yaml 2>/dev/null; then \
-		echo "⚠️  Patching I2C bus from i2c-7 to i2c-0 for Orange Pi Zero 2W..."; \
+		echo "⚠️  Patching YAML config: I2C bus i2c-7 → i2c-0..."; \
 		sed -i 's|bus: "/dev/i2c-7"|bus: "/dev/i2c-0"|g' $(BNO08X_SUBMODULE_DIR)/config/bno085_i2c.yaml; \
-		echo "✅ I2C bus configuration patched"; \
+		echo "✅ YAML config patched"; \
 	else \
-		echo "✅ I2C bus already configured correctly"; \
+		echo "✅ YAML config already patched"; \
+	fi
+	@if grep -q '"/dev/i2c-7"' $(BNO08X_SUBMODULE_DIR)/src/bno08x_ros.cpp 2>/dev/null; then \
+		echo "⚠️  Patching C++ source: I2C bus default i2c-7 → i2c-0..."; \
+		sed -i 's|"/dev/i2c-7"|"/dev/i2c-0"|g' $(BNO08X_SUBMODULE_DIR)/src/bno08x_ros.cpp; \
+		echo "✅ C++ source patched"; \
+	else \
+		echo "✅ C++ source already patched"; \
 	fi
 	@echo "Sourcing ROS2 environment..."
 	@bash -c "source /opt/ros/humble/setup.bash && \
@@ -198,7 +214,7 @@ bno08x-build: bno08x-init
 	@echo "To use the driver, source the workspace:"
 	@echo "  source $(BNO08X_BUILD_DIR)/install/setup.bash"
 
-bno08x-test:
+bno08x-i2c-test:
 	@echo "Testing BNO085 I2C connection..."
 	@echo "Checking if i2c-0 exists..."
 	@if [ ! -e "/dev/i2c-0" ]; then \
@@ -263,26 +279,10 @@ bno085-service-install: bno08x-build
 		echo "⏸️  Stopping existing service..."; \
 		sudo systemctl stop argo_bno085.service; \
 	fi
-	@echo "📝 Installing service file..."
-	@sudo cp $(BNO085_SERVICE_FILE) $(BNO085_SERVICE_DEST)
-	@sudo chmod 644 $(BNO085_SERVICE_DEST)
+	@echo "📝 Installing service file with symbolic link to source file..."
+	@sudo ln -sf $(PWD)/$(BNO085_SERVICE_FILE) $(BNO085_SERVICE_DEST)
 	@sudo systemctl daemon-reload
-	@echo "▶️  Starting service..."
-	@sudo systemctl enable argo_bno085.service
-	@sudo systemctl start argo_bno085.service
-	@sleep 2
-	@echo ""
 	@echo "✅ Argo BNO085 service installed successfully"
-	@echo ""
-	@if systemctl is-active --quiet argo_bno085.service; then \
-		echo "🟢 Service is RUNNING"; \
-		echo ""; \
-		echo "Check status: make bno085-service-status"; \
-		echo "Check logs: sudo journalctl -u argo_bno085.service -n 20"; \
-	else \
-		echo "⚠️  Service failed to start - check logs:"; \
-		echo "   sudo journalctl -u argo_bno085.service -n 20"; \
-	fi
 
 bno085-service-uninstall:
 	@echo "Uninstalling argo_bno085 service..."
