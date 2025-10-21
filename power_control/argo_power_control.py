@@ -287,6 +287,7 @@ MULTI_TAP_MAX_DURATION_S = 3
 
 # LED Heartbeat Configuration
 LED_HEARTBEAT_HZ = 1.0                  # Green LED heartbeat frequency (1 Hz)
+LED_PAUSED_HEARTBEAT_HZ = 0.5           # Slower heartbeat when controller is paused (0.5 Hz)
 
 # Button Press Pattern Configuration
 LED_PRESS_START_FREQUENCY_HZ = 2.0      # Starting flash frequency (2 Hz)
@@ -353,7 +354,7 @@ POWER_OFF_PULSE_STATE = 1
 # Configure logging
 
 
-def setup_logging():
+def setup_logging(debug=False):
     """Setup logging configuration"""
     handlers = [logging.StreamHandler()]
 
@@ -371,14 +372,17 @@ def setup_logging():
         except (PermissionError, OSError):
             pass  # No file logging if we can't write anywhere
 
+    # Set logging level based on debug flag
+    log_level = logging.DEBUG if debug else logging.INFO
+    
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=handlers
     )
 
 
-setup_logging()
+# setup_logging() will be called in main() after parsing arguments
 logger = logging.getLogger('argo_power_control')
 
 
@@ -413,7 +417,7 @@ class PowerController:
         # Tap detection for various commands
         self.tap_times = []  # List to store tap timestamps
         self.tap_timeout_timer = None  # Timer for tap detection timeout
-        self.tap_timeout_duration = 0.5  # Wait 500ms after last tap before processing
+        self.tap_timeout_duration = 1.0  # Wait 1 second after last tap before processing
 
         # Argo service status tracking
         self.argo_service_running = False
@@ -494,6 +498,13 @@ class PowerController:
         
         # Throttled logging for recording service availability
         self.last_logged_recording_service_state = None
+        
+        # Throttling for frequent checks
+        self.last_recording_check_time = 0.0
+        self.last_logged_system_state = None
+        
+        # Controller pause state tracking
+        self.controller_pause_state = False
 
         # Check if Argo service is already running at startup
         logger.info("Checking if Argo service is already running...")
@@ -838,26 +849,69 @@ class PowerController:
 
     def is_argo_system_running(self):
         """Check if the Argo system is running using simple flag approach"""
-        # Check recording service availability if Argo service is running
-        if self.argo_service_running:
+        # Only check recording service availability if we haven't checked recently
+        # This reduces frequent service calls
+        current_time = time.time()
+        if (self.argo_service_running and 
+            (current_time - self.last_recording_check_time) > 10.0):  # Check every 10 seconds max
             self.check_recording_service_availability()
+            self.last_recording_check_time = current_time
 
-        logger.info(
-            f"Argo service running: {self.argo_service_running}, Recording service available: {self.recording_service_available}")
-        return self.argo_service_running and self.recording_service_available
+        # Only log when state changes to reduce log spam
+        current_state = self.argo_service_running and self.recording_service_available
+        if current_state != self.last_logged_system_state:
+            logger.info(
+                f"Argo system state: {'RUNNING' if current_state else 'STOPPED'} "
+                f"(service: {self.argo_service_running}, recording: {self.recording_service_available})")
+            self.last_logged_system_state = current_state
+            
+        return current_state
 
     def check_argo_service_status(self):
-        """Check if the Argo launch service is running"""
+        """Check if the Argo launch service is running via ROS2 service call"""
         try:
+            # Use ROS2 service call instead of systemctl for better integration
+            if self.ros2_node:
+                success, message = self._call_trigger_service('/argo/lifecycle/status', timeout_sec=1.0)
+                if success:
+                    # Parse the status response to determine if system is running
+                    import json
+                    try:
+                        status_data = json.loads(message)
+                        running_count = status_data.get('running_count', 0)
+                        total_count = status_data.get('total_count', 0)
+                        # Consider system running if at least 3 nodes are active
+                        is_running = running_count >= 3
+                        
+                        if is_running != self.argo_service_running:
+                            self.argo_service_running = is_running
+                            logger.info(
+                                f"Argo service status changed: {'RUNNING' if is_running else 'STOPPED'} ({running_count}/{total_count} nodes)")
+                            # Update LED heartbeat when Argo service state changes
+                            self._update_led_heartbeat_for_pause_state()
+
+                            # When Argo service stops, recording service is not available
+                            if not is_running:
+                                self.recording_service_available = False
+                                logger.info("Recording service marked as unavailable")
+                        
+                        return is_running
+                    except (json.JSONDecodeError, KeyError):
+                        # Fallback to systemctl if ROS2 service fails
+                        pass
+            
+            # Fallback to systemctl check (less frequent, shorter timeout)
             result = subprocess.run(
                 ['sudo', 'systemctl', 'is-active', 'argo_launch.service'],
-                capture_output=True, text=True, timeout=4
+                capture_output=True, text=True, timeout=2
             )
             is_running = result.returncode == 0 and result.stdout.strip() == 'active'
             if is_running != self.argo_service_running:
                 self.argo_service_running = is_running
                 logger.info(
                     f"Argo service status changed: {'RUNNING' if is_running else 'STOPPED'}")
+                # Update LED heartbeat when Argo service state changes
+                self._update_led_heartbeat_for_pause_state()
 
                 # When Argo service stops, recording service is not available
                 if not is_running:
@@ -885,6 +939,8 @@ class PowerController:
                     "✅ Argo launch service started, waiting for recording service to initialize...")
                 # Set Argo service flag, but recording service needs time to initialize
                 self.argo_service_running = True
+                # Update LED heartbeat when Argo service starts
+                self._update_led_heartbeat_for_pause_state()
                 # pause to allow record.py to start
                 time.sleep(7)
                 # check recording service availability in loop until it is available
@@ -922,6 +978,8 @@ class PowerController:
                 # Set flags to indicate Argo system is stopped
                 self.argo_service_running = False
                 self.recording_service_available = False
+                # Update LED heartbeat when Argo service stops
+                self._update_led_heartbeat_for_pause_state()
                 return True
             else:
                 logger.error(
@@ -975,6 +1033,9 @@ class PowerController:
                     message,
                     "normal"
                 )
+                
+                # Update LED heartbeat frequency based on new pause state
+                self._update_led_heartbeat_for_pause_state()
             else:
                 logger.error(f"❌ Failed to toggle controller pause: {message}")
                 self.send_desktop_notification(
@@ -991,37 +1052,11 @@ class PowerController:
             )
 
     def _get_controller_pause_state(self) -> bool:
-        """Get current controller pause state via service call."""
+        """Get current controller pause state from cached topic data."""
         try:
-            if not self.ros2_node:
-                return False
-            
-            # Create service client for controller pause service
-            pause_client = self.ros2_node.create_client(SetBool, '/controller_node/pause')
-            
-            if not pause_client.wait_for_service(timeout_sec=2.0):
-                logger.warning("Controller pause service not available")
-                return False
-            
-            # Call service with None to get current state
-            request = SetBool.Request()
-            request.data = None  # None means return current state
-            
-            future = pause_client.call_async(request)
-            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=3.0)
-            
-            if future.done():
-                response = future.result()
-                if response.success:
-                    # Parse the message to determine current state
-                    message = response.message.lower()
-                    return 'paused' in message
-                else:
-                    logger.warning(f"Failed to get controller pause state: {response.message}")
-                    return False
-            else:
-                logger.warning("Controller pause state query timed out")
-                return False
+            # Use the cached pause state from the topic subscription
+            # This is more reliable than trying to query the service
+            return getattr(self, 'controller_pause_state', False)
                 
         except Exception as e:
             logger.error(f"Error getting controller pause state: {e}")
@@ -1416,13 +1451,8 @@ class PowerController:
 
             else:
 
-                # Determine heartbeat frequency based on Argo service status
-                if self.argo_service_running:
-                    # Argo running: 2X faster heartbeat (2Hz)
-                    self.heartbeat_frequency_hz = LED_HEARTBEAT_HZ * 2.0
-                else:
-                    # Argo stopped: normal heartbeat (1Hz)
-                    self.heartbeat_frequency_hz = LED_HEARTBEAT_HZ
+                # Use the current heartbeat frequency (set by _update_led_heartbeat_for_pause_state)
+                # This allows for pause state to control the frequency
 
                 heartbeat_interval = 1.0 / self.heartbeat_frequency_hz
                 half_period = heartbeat_interval / 2.0
@@ -1599,7 +1629,7 @@ class PowerController:
         Args:
             action_type: Type of action ('single', 'double', 'quadruple')
         """
-        logger.info(f"Starting immediate feedback pattern for {action_type} tap")
+        logger.debug(f"Starting immediate feedback pattern for {action_type} tap")
         
         # Define patterns for each action type
         patterns = {
@@ -1644,11 +1674,11 @@ class PowerController:
         
         # Ensure LED is off at the end
         self.set_green_led(False)
-        logger.info(f"Immediate feedback pattern for {action_type} tap completed")
+        logger.debug(f"Immediate feedback pattern for {action_type} tap completed")
 
     def service_wait_pattern(self):
         """R+G alternating flash pattern during service calls"""
-        logger.info("Starting service wait pattern (R+G alternating)")
+        logger.debug("Starting service wait pattern (R+G alternating)")
         
         # Calculate timing for alternating pattern
         period = 1.0 / LED_SERVICE_WAIT_FREQUENCY_HZ
@@ -1676,12 +1706,12 @@ class PowerController:
         # Turn off both LEDs when done
         self.set_red_led(False)
         self.set_green_led(False)
-        logger.info("Service wait pattern completed")
+        logger.debug("Service wait pattern completed")
 
     def gradual_frequency_pattern(self):
         """Gradual frequency increase LED pattern during button press - 2Hz to 20Hz over threshold time"""
         start_time = time.time()
-        logger.info(
+        logger.debug(
             f"Starting gradual frequency pattern for {self.SHUTDOWN_THRESHOLD}s threshold")
 
         while self.running and self.power_button_pressed and not self.shutdown_initiated:
@@ -1757,7 +1787,7 @@ class PowerController:
                             self.power_button_pressed = True
                             # Reset warning flag for new button press
                             self.warning_notification_sent = False
-                            logger.info(
+                            logger.debug(
                                 "Power button pressed (hardware interrupt)")
 
                             # Start gradual frequency LED pattern
@@ -1800,7 +1830,7 @@ class PowerController:
                 # Check for button release (active-high button: released = low)
                 if current_state == BUTTON_RELEASED_STATE:  # Button released
                     press_duration = time.time() - self.button_press_start_time
-                    logger.info(
+                    logger.debug(
                         f"Power button released after {press_duration:.2f} seconds (interrupt + polling)")
 
                     if press_duration >= self.SHUTDOWN_THRESHOLD:
@@ -1887,12 +1917,12 @@ class PowerController:
             if self.tap_timeout_timer:
                 self.tap_timeout_timer.cancel()
                 self.tap_timeout_timer = None
-            logger.info("Long press detected - clearing tap history")
+            logger.debug("Long press detected - clearing tap history")
             return
 
         # Add this tap to the history
         self.tap_times.append(current_time)
-        logger.info(
+        logger.debug(
             f"Tap {len(self.tap_times)} detected (duration: {press_duration:.2f}s)")
 
         # Cancel any existing timeout timer
@@ -1919,7 +1949,7 @@ class PowerController:
         self.tap_times = [t for t in self.tap_times if t > cutoff_time]
 
         if old_count != len(self.tap_times):
-            logger.info(
+            logger.debug(
                 f"Cleaned up {old_count - len(self.tap_times)} old taps")
 
         # Process tap sequence based on count
@@ -1927,13 +1957,13 @@ class PowerController:
 
         if tap_count < 1:
             # No taps - ignore
-            logger.info(f"No taps detected - ignoring")
+            logger.debug(f"No taps detected - ignoring")
             self.tap_times.clear()
             return
 
         if tap_count > 5:
             # Too many taps - ignore
-            logger.info(f"Too many taps ({tap_count}) - ignoring")
+            logger.warning(f"Too many taps ({tap_count}) - ignoring")
             self.tap_times.clear()
             return
 
@@ -1998,7 +2028,7 @@ class PowerController:
                         f"{tap_count} taps detected - no action assigned")
                     self.tap_times.clear()
             else:
-                logger.info(
+                logger.warning(
                     f"Tap sequence too slow: {duration:.3f}s > {MULTI_TAP_MAX_DURATION_S}s")
                 self.tap_times.clear()
 
@@ -2024,8 +2054,6 @@ class PowerController:
             logger.info("Double tap detected - requesting to stop recording")
             self.send_desktop_notification(
                 "Recording Control", "Requesting to stop recording...", "normal")
-            # Immediately update state for LED pattern
-            self.recording_active = False
 
             # Start service wait pattern for delayed service call
             self.service_wait_active = True
@@ -2043,14 +2071,10 @@ class PowerController:
             if not success:
                 self.send_desktop_notification(
                     "Recording Error", "Failed to stop recording", "critical")
-                # Revert state on failure
-                self.recording_active = True
         else:
             logger.info("Double tap detected - requesting to start recording")
             self.send_desktop_notification(
                 "Recording Control", "Requesting to start recording...", "normal")
-            # Immediately update state for LED pattern
-            self.recording_active = True
 
             # Start service wait pattern for delayed service call
             self.service_wait_active = True
@@ -2068,8 +2092,6 @@ class PowerController:
             if not success:
                 self.send_desktop_notification(
                     "Recording Error", "Failed to start recording", "critical")
-                # Revert state on failure
-                self.recording_active = False
 
     def send_desktop_notification(self, title, message, urgency="normal", expire_time_ms=None):
         """Send desktop notification using notify-send with proper environment for systemd"""
@@ -2292,6 +2314,11 @@ class PowerController:
             self.button_event_publisher = self.ros2_node.create_publisher(
                 String, '/argo/power/button_events', 10)
             
+            # Create subscription to controller pause state
+            from std_msgs.msg import Bool
+            self.controller_pause_sub = self.ros2_node.create_subscription(
+                Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
+            
             self.power_services_created = True
             logger.info("Power control ROS2 services created:")
             logger.info("  - /argo/power/start_recording")
@@ -2301,6 +2328,7 @@ class PowerController:
             logger.info("  - /argo/power/toggle_argo")
             logger.info("  - /argo/power/status (topic)")
             logger.info("  - /argo/power/button_events (topic)")
+            logger.info("  - /controller_pause_state (subscription)")
         except Exception as e:
             logger.error(f"Failed to create power services: {e}")
     
@@ -2382,6 +2410,19 @@ class PowerController:
             except Exception as e:
                 logger.debug(f"Failed to publish button event: {e}")
     
+    def _controller_pause_state_callback(self, msg):
+        """Receive controller pause state updates from topic"""
+        old_state = self.controller_pause_state
+        self.controller_pause_state = msg.data
+        
+        # Log state change
+        if old_state != msg.data:
+            logger.info(f"Controller pause state changed: {'PAUSED' if msg.data else 'UNPAUSED'}")
+            # Update LED heartbeat frequency when pause state changes
+            self._update_led_heartbeat_for_pause_state()
+        else:
+            logger.debug(f"Controller pause state: {'PAUSED' if msg.data else 'UNPAUSED'}")
+    
     def run(self):
         """Main control loop"""
         logger.info("Power controller starting...")
@@ -2402,6 +2443,9 @@ class PowerController:
         heartbeat_thread = threading.Thread(
             target=self.green_led_heartbeat, daemon=True)
         heartbeat_thread.start()
+        
+        # Set initial LED heartbeat frequency based on current state
+        self._update_led_heartbeat_for_pause_state()
 
         # Start critical battery monitoring in separate thread
         logger.info("Starting critical battery monitoring thread")
@@ -3206,6 +3250,29 @@ If you take no action within 30 seconds, the system will automatically
             self.heartbeat_frequency_hz = frequency_hz
         else:
             logger.warning(f"Invalid heartbeat frequency: {frequency_hz}")
+    
+    def _update_led_heartbeat_for_pause_state(self):
+        """Update LED heartbeat frequency based on controller pause state and Argo service state"""
+        try:
+            # Only update if Argo service is running (controller is available)
+            if not self.argo_service_running:
+                # Argo not running - use normal heartbeat
+                self.set_heartbeat_frequency(LED_HEARTBEAT_HZ)
+                logger.info("LED heartbeat: Normal (1Hz) - Argo service not running")
+                return
+            
+            # Argo is running - check controller pause state
+            if self.controller_pause_state:
+                # Controller is paused - use slow heartbeat
+                self.set_heartbeat_frequency(LED_PAUSED_HEARTBEAT_HZ)
+                logger.info("LED heartbeat: Slow (0.5Hz) - Controller is PAUSED")
+            else:
+                # Controller is running - use fast heartbeat
+                self.set_heartbeat_frequency(LED_HEARTBEAT_HZ * 2.0)
+                logger.info("LED heartbeat: Fast (2Hz) - Controller is RUNNING")
+                
+        except Exception as e:
+            logger.error(f"Error updating LED heartbeat for pause state: {e}")
 
     def _cleanup_ros2(self):
         """Clean up ROS2 resources"""
@@ -3420,6 +3487,8 @@ def main():
                         help='Show help message and exit')
     parser.add_argument('--test-mode',  action='store_true',
                         help='Run in test mode (disable actual shutdown and power control)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug logging (verbose output)')
     parser.add_argument('--threshold',  type=float, default=DEFAULT_SHUTDOWN_THRESHOLD_S,
                         help=f'Set button press threshold for shutdown in seconds (default: {DEFAULT_SHUTDOWN_THRESHOLD_S})')
     parser.add_argument('--test-wall-message',  action='store_true',
@@ -3444,6 +3513,9 @@ def main():
     # Enable bash completion for command-line arguments
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
+
+    # Setup logging with debug level if requested
+    setup_logging(debug=args.debug)
 
     # Handle help
     if args.help:
