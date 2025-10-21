@@ -106,6 +106,7 @@ class LoRaShoreNode(Node):
         self.connection_attempts = 0
         self.last_connection_attempt = 0
         self.reconnect_interval = 1.0  # 1 Hz retry rate
+        self.shutting_down = False  # Flag to prevent logging during shutdown
         
         # Initialize serial connection
         self.connect_serial()
@@ -155,6 +156,9 @@ class LoRaShoreNode(Node):
     
     def connect_serial(self):
         """Connect or reconnect to serial port with throttled retry"""
+        if self.shutting_down:
+            return False  # Don't attempt connection during shutdown
+            
         current_time = time.time()
         
         # Throttle connection attempts to 1 Hz
@@ -174,17 +178,19 @@ class LoRaShoreNode(Node):
         # Attempt to open serial port
         try:
             self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.1)
-            self.get_logger().info(
-                f"Connected to Waveshare LoRa on {self.serial_port} at {self.baud_rate} baud "
-                f"(attempt #{self.connection_attempts})"
-            )
+            if not self.shutting_down:
+                self.get_logger().info(
+                    f"Connected to Waveshare LoRa on {self.serial_port} at {self.baud_rate} baud "
+                    f"(attempt #{self.connection_attempts})"
+                )
             self.connection_attempts = 0  # Reset counter on success
             return True
         except serial.SerialException as e:
-            self.get_logger().warn(
-                f"Connection attempt #{self.connection_attempts} failed: {e}. "
-                f"Retrying in {self.reconnect_interval}s..."
-            )
+            if not self.shutting_down:
+                self.get_logger().warn(
+                    f"Connection attempt #{self.connection_attempts} failed: {e}. "
+                    f"Retrying in {self.reconnect_interval}s..."
+                )
             self.ser = None
             return False
     
@@ -234,7 +240,8 @@ class LoRaShoreNode(Node):
                 
             except (serial.SerialException, OSError) as e:
                 # Connection lost - log once and trigger reconnection
-                self.get_logger().error(f"Serial connection lost: {e}")
+                if not self.shutting_down:
+                    self.get_logger().error(f"Serial connection lost: {e}")
                 if self.ser:
                     try:
                         self.ser.close()
@@ -244,11 +251,15 @@ class LoRaShoreNode(Node):
                 buffer = ""  # Clear buffer on disconnect
                 
             except Exception as e:
-                self.get_logger().error(f"Unexpected error in serial reader: {e}")
+                if not self.shutting_down:
+                    self.get_logger().error(f"Unexpected error in serial reader: {e}")
                 time.sleep(0.1)
     
     def process_argo_packet(self, packet: dict, raw_json: str):
         """Process received packet from Argo and publish to ROS2 topics"""
+        if self.shutting_down:
+            return  # Don't process packets during shutdown
+            
         try:
             self.packet_count += 1
             self.last_packet_time = time.time()
@@ -291,15 +302,20 @@ class LoRaShoreNode(Node):
             # Would need separate parsing if needed
             
         except Exception as e:
-            self.get_logger().error(f"Error processing Argo packet: {e}")
+            if not self.shutting_down:
+                self.get_logger().error(f"Error processing Argo packet: {e}")
     
     def remote_command_callback(self, msg):
         """Receive command from ROS2 and send to Argo via LoRa"""
+        if self.shutting_down:
+            return  # Don't send commands during shutdown
+            
         try:
             command = msg.data
             
             if not self.ser or not self.ser.is_open:
-                self.get_logger().error("Serial port not connected, cannot send command. Waiting for reconnection...")
+                if not self.shutting_down:
+                    self.get_logger().error("Serial port not connected, cannot send command. Waiting for reconnection...")
                 return
             
             self.command_count += 1
@@ -313,7 +329,8 @@ class LoRaShoreNode(Node):
             self.get_logger().info(f"Command sent: {command} ({len(command)} bytes)")
             
         except (serial.SerialException, OSError) as e:
-            self.get_logger().error(f"Error sending command (connection lost): {e}")
+            if not self.shutting_down:
+                self.get_logger().error(f"Error sending command (connection lost): {e}")
             # Mark connection as lost to trigger reconnection
             if self.ser:
                 try:
@@ -322,10 +339,14 @@ class LoRaShoreNode(Node):
                     pass
                 self.ser = None
         except Exception as e:
-            self.get_logger().error(f"Unexpected error sending command: {e}")
+            if not self.shutting_down:
+                self.get_logger().error(f"Unexpected error sending command: {e}")
     
     def publish_status(self):
         """Publish shore-side status"""
+        if self.shutting_down:
+            return  # Don't publish or log during shutdown
+            
         try:
             is_connected = self.ser is not None and self.ser.is_open
             
@@ -354,16 +375,38 @@ class LoRaShoreNode(Node):
                 self.get_logger().warn(f"No packets from Argo for {int(time.time() - self.last_packet_time)}s")
         
         except Exception as e:
-            self.get_logger().error(f"Error publishing status: {e}")
+            if not self.shutting_down:
+                self.get_logger().error(f"Error publishing status: {e}")
     
     def destroy_node(self):
         """Cleanup on shutdown"""
-        self.get_logger().info("Shutting down shore-side LoRa node...")
+        # Only log if we're not already shutting down (to prevent context errors)
+        if not self.shutting_down:
+            try:
+                self.get_logger().info("Shutting down shore-side LoRa node...")
+            except:
+                pass  # Context may already be invalid
+        
+        # Set shutdown flag to prevent any further logging from threads/timers
+        self.shutting_down = True
+        
+        # Stop reader thread first
         self.running = False
         if self.reader_thread.is_alive():
-            self.reader_thread.join(timeout=1.0)
+            self.reader_thread.join(timeout=2.0)  # Give more time for clean exit
+        
+        # Close serial port
         if self.ser and self.ser.is_open:
-            self.ser.close()
+            try:
+                self.ser.close()
+            except:
+                pass
+        
+        # Destroy timers explicitly before destroying node
+        if hasattr(self, 'status_timer'):
+            self.status_timer.cancel()
+        
+        # Now destroy the node and invalidate ROS context
         super().destroy_node()
 
 def main(args=None):
@@ -376,10 +419,16 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     except Exception as e:
+        # Don't try to log here - ROS context may be shutting down
+        # Set shutdown flag to prevent any further logging attempts
         if node:
-            node.get_logger().error(f"Unexpected error: {e}")
+            node.shutting_down = True
+        import sys
+        print(f"Unexpected error: {e}", file=sys.stderr)
     finally:
         if node:
+            # Set shutdown flag BEFORE calling destroy_node to prevent race conditions
+            node.shutting_down = True
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
