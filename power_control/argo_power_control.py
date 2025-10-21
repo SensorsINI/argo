@@ -2815,8 +2815,8 @@ class PowerController:
         """Check WiFi connectivity using multiple methods
         
         Returns:
-            True if WiFi is connected and has internet access
-            False if WiFi is disconnected or no internet access
+            True if WiFi is connected and functional (has IP address)
+            False if WiFi is disconnected or no valid connection
         """
         try:
             # Method 1: Check if WiFi interface is up and has an IP address
@@ -2831,17 +2831,44 @@ class PowerController:
             
             # Check if wlan0 has an IP address (not 127.0.0.1)
             if 'inet ' in result.stdout and '127.0.0.1' not in result.stdout:
-                # Method 2: Test internet connectivity with a simple ping
-                ping_result = subprocess.run(
-                    ['ping', '-c', '1', '-W', '3', '8.8.8.8'], 
+                # Extract the connection name to check if it's a known functional network
+                nm_result = subprocess.run(
+                    ['nmcli', '-t', '-f', 'NAME', 'connection', 'show', '--active'], 
                     capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
                 )
                 
-                if ping_result.returncode == 0:
-                    logger.debug("WiFi connectivity confirmed: interface up and internet accessible")
-                    return True
+                if nm_result.returncode == 0:
+                    active_connection = nm_result.stdout.strip()
+                    logger.debug(f"Active WiFi connection: {active_connection}")
+                    
+                    # For networks without internet access (like uzh-iot), check DNS resolution instead
+                    if active_connection == 'uzh-iot':
+                        # Test DNS resolution instead of internet ping for uzh-iot
+                        dns_result = subprocess.run(
+                            ['nslookup', 'google.com'], 
+                            capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
+                        )
+                        if dns_result.returncode == 0:
+                            logger.debug("WiFi connectivity confirmed: uzh-iot connected with DNS access")
+                            return True
+                        else:
+                            logger.debug("WiFi interface up but uzh-iot DNS not working")
+                            return False
+                    else:
+                        # For other networks (like tobi-wlan), test internet connectivity
+                        ping_result = subprocess.run(
+                            ['ping', '-c', '1', '-W', '3', '8.8.8.8'], 
+                            capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
+                        )
+                        
+                        if ping_result.returncode == 0:
+                            logger.debug("WiFi connectivity confirmed: interface up and internet accessible")
+                            return True
+                        else:
+                            logger.debug("WiFi interface up but no internet connectivity")
+                            return False
                 else:
-                    logger.debug("WiFi interface up but no internet connectivity")
+                    logger.debug("Could not determine active connection name")
                     return False
             else:
                 logger.debug("WiFi interface wlan0 has no valid IP address")
