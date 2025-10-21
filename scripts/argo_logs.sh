@@ -23,6 +23,10 @@ COLOR_IMU='\e[0;95m'               # Magenta for BNO085 IMU
 COLOR_TIMESTAMP='\e[0;90m'         # Gray for timestamps
 RESET='\e[0m'
 
+# Priority color codes (unconditional highlighting)
+COLOR_ERROR='\e[1;91m'             # Bold bright red for ERROR
+COLOR_WARN='\e[1;33m'              # Bold dark yellow for WARN
+
 # Service names
 SERVICE_ARGO="argo-launch.service"
 SERVICE_BATTERY="battery_water.service"
@@ -57,6 +61,10 @@ while getopts "n:fh" opt; do
             echo "  - argo_power_control.service (green)"
             echo "  - argo_bno085.service      (magenta)"
             echo ""
+            echo "Priority highlighting:"
+            echo "  - ERROR lines              (bold bright red)"
+            echo "  - WARN lines               (bold dark yellow)"
+            echo ""
             echo "Examples:"
             echo "  argo_logs.sh                    # Show all logs"
             echo "  argo_logs.sh controller         # Filter for 'controller'"
@@ -85,6 +93,21 @@ check_service() {
     return 0
 }
 
+# Apply ERROR and WARN highlighting to a line
+highlight_priority() {
+    local line="$1"
+    
+    # Check for ERROR first (higher priority)
+    if echo "$line" | grep -qi "ERROR"; then
+        echo -e "${COLOR_ERROR}${line}${RESET}"
+    # Then check for WARN
+    elif echo "$line" | grep -qi "WARN"; then
+        echo -e "${COLOR_WARN}${line}${RESET}"
+    else
+        echo "$line"
+    fi
+}
+
 echo "📋 Argo Multi-Service Logs"
 if [ -n "$GREP_PATTERN" ]; then
     echo "🔍 Filter: $GREP_PATTERN"
@@ -94,6 +117,8 @@ echo -e "${COLOR_ARGO_LAUNCH}●${RESET} argo-launch.service (cyan)"
 echo -e "${COLOR_BATTERY}●${RESET} battery_water.service (yellow)"
 echo -e "${COLOR_POWER}●${RESET} argo_power_control.service (green)"
 echo -e "${COLOR_IMU}●${RESET} argo_bno085.service (magenta)"
+echo -e "${COLOR_ERROR}●${RESET} ERROR lines (bold bright red)"
+echo -e "${COLOR_WARN}●${RESET} WARN lines (bold dark yellow)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -109,8 +134,13 @@ if [ "$FOLLOW" = true ]; then
         2>/dev/null | \
     (if [ -n "$GREP_PATTERN" ]; then grep --line-buffered "$GREP_PATTERN"; else cat; fi) | \
     while IFS= read -r line; do
-        # Check for service names in the log line (they appear in different formats)
-        if echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
+        # First check for ERROR/WARN (highest priority)
+        if echo "$line" | grep -qi "ERROR"; then
+            echo -e "${COLOR_ERROR}${line}${RESET}"
+        elif echo "$line" | grep -qi "WARN"; then
+            echo -e "${COLOR_WARN}${line}${RESET}"
+        # Then check for service names in the log line (they appear in different formats)
+        elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
             # Color the entire line cyan for argo-launch
             echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
         elif echo "$line" | grep -q "battery_water_node\|battery_water"; then
@@ -133,10 +163,28 @@ else
     if [ -n "$GREP_PATTERN" ]; then
         journalctl -u "$SERVICE_ARGO" -n "$LINES" --no-pager 2>/dev/null | \
             grep "$GREP_PATTERN" | \
-            sed "s/^/${COLOR_ARGO_LAUNCH}/" | sed "s/$/${RESET}/"
+            while IFS= read -r line; do
+                # Apply ERROR/WARN highlighting first, then service color if no priority
+                if echo "$line" | grep -qi "ERROR"; then
+                    echo -e "${COLOR_ERROR}${line}${RESET}"
+                elif echo "$line" | grep -qi "WARN"; then
+                    echo -e "${COLOR_WARN}${line}${RESET}"
+                else
+                    echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
+                fi
+            done
     else
         journalctl -u "$SERVICE_ARGO" -n "$LINES" --no-pager 2>/dev/null | \
-            sed "s/^/${COLOR_ARGO_LAUNCH}/" | sed "s/$/${RESET}/"
+            while IFS= read -r line; do
+                # Apply ERROR/WARN highlighting first, then service color if no priority
+                if echo "$line" | grep -qi "ERROR"; then
+                    echo -e "${COLOR_ERROR}${line}${RESET}"
+                elif echo "$line" | grep -qi "WARN"; then
+                    echo -e "${COLOR_WARN}${line}${RESET}"
+                else
+                    echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
+                fi
+            done
     fi
     echo ""
     
@@ -144,10 +192,28 @@ else
     if [ -n "$GREP_PATTERN" ]; then
         journalctl -u "$SERVICE_BATTERY" -n "$LINES" --no-pager 2>/dev/null | \
             grep "$GREP_PATTERN" | \
-            sed "s/^/${COLOR_BATTERY}/" | sed "s/$/${RESET}/"
+            while IFS= read -r line; do
+                # Apply ERROR/WARN highlighting first, then service color if no priority
+                if echo "$line" | grep -qi "ERROR"; then
+                    echo -e "${COLOR_ERROR}${line}${RESET}"
+                elif echo "$line" | grep -qi "WARN"; then
+                    echo -e "${COLOR_WARN}${line}${RESET}"
+                else
+                    echo -e "${COLOR_BATTERY}${line}${RESET}"
+                fi
+            done
     else
         journalctl -u "$SERVICE_BATTERY" -n "$LINES" --no-pager 2>/dev/null | \
-            sed "s/^/${COLOR_BATTERY}/" | sed "s/$/${RESET}/"
+            while IFS= read -r line; do
+                # Apply ERROR/WARN highlighting first, then service color if no priority
+                if echo "$line" | grep -qi "ERROR"; then
+                    echo -e "${COLOR_ERROR}${line}${RESET}"
+                elif echo "$line" | grep -qi "WARN"; then
+                    echo -e "${COLOR_WARN}${line}${RESET}"
+                else
+                    echo -e "${COLOR_BATTERY}${line}${RESET}"
+                fi
+            done
     fi
     echo ""
     
@@ -155,10 +221,28 @@ else
     if [ -n "$GREP_PATTERN" ]; then
         journalctl -u "$SERVICE_POWER" -n "$LINES" --no-pager 2>/dev/null | \
             grep "$GREP_PATTERN" | \
-            sed "s/^/${COLOR_POWER}/" | sed "s/$/${RESET}/"
+            while IFS= read -r line; do
+                # Apply ERROR/WARN highlighting first, then service color if no priority
+                if echo "$line" | grep -qi "ERROR"; then
+                    echo -e "${COLOR_ERROR}${line}${RESET}"
+                elif echo "$line" | grep -qi "WARN"; then
+                    echo -e "${COLOR_WARN}${line}${RESET}"
+                else
+                    echo -e "${COLOR_POWER}${line}${RESET}"
+                fi
+            done
     else
         journalctl -u "$SERVICE_POWER" -n "$LINES" --no-pager 2>/dev/null | \
-            sed "s/^/${COLOR_POWER}/" | sed "s/$/${RESET}/"
+            while IFS= read -r line; do
+                # Apply ERROR/WARN highlighting first, then service color if no priority
+                if echo "$line" | grep -qi "ERROR"; then
+                    echo -e "${COLOR_ERROR}${line}${RESET}"
+                elif echo "$line" | grep -qi "WARN"; then
+                    echo -e "${COLOR_WARN}${line}${RESET}"
+                else
+                    echo -e "${COLOR_POWER}${line}${RESET}"
+                fi
+            done
     fi
     echo ""
     
@@ -166,10 +250,28 @@ else
     if [ -n "$GREP_PATTERN" ]; then
         journalctl -u "$SERVICE_IMU" -n "$LINES" --no-pager 2>/dev/null | \
             grep "$GREP_PATTERN" | \
-            sed "s/^/${COLOR_IMU}/" | sed "s/$/${RESET}/"
+            while IFS= read -r line; do
+                # Apply ERROR/WARN highlighting first, then service color if no priority
+                if echo "$line" | grep -qi "ERROR"; then
+                    echo -e "${COLOR_ERROR}${line}${RESET}"
+                elif echo "$line" | grep -qi "WARN"; then
+                    echo -e "${COLOR_WARN}${line}${RESET}"
+                else
+                    echo -e "${COLOR_IMU}${line}${RESET}"
+                fi
+            done
     else
         journalctl -u "$SERVICE_IMU" -n "$LINES" --no-pager 2>/dev/null | \
-            sed "s/^/${COLOR_IMU}/" | sed "s/$/${RESET}/"
+            while IFS= read -r line; do
+                # Apply ERROR/WARN highlighting first, then service color if no priority
+                if echo "$line" | grep -qi "ERROR"; then
+                    echo -e "${COLOR_ERROR}${line}${RESET}"
+                elif echo "$line" | grep -qi "WARN"; then
+                    echo -e "${COLOR_WARN}${line}${RESET}"
+                else
+                    echo -e "${COLOR_IMU}${line}${RESET}"
+                fi
+            done
     fi
 fi
 

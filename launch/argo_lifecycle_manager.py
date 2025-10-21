@@ -726,7 +726,7 @@ class ArgoLifecycleManager:
         
         try:
             last_check_time = time.time()
-            check_interval = 30  # Check every 30 seconds
+            check_interval = 300  # Check every 5 minutes (much less frequent)
             
             while not self.shutdown_requested and (rclpy.ok() if self.ros2_node else True):
                 # Spin ROS2 node to process service requests (if available)
