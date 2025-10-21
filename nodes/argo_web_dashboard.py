@@ -31,7 +31,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Float64, Float32, String
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, SetBool
 
 # Flask web server
 from flask import Flask, render_template, jsonify, request
@@ -58,7 +58,7 @@ class ArgoWebDashboard(Node):
             'nodes_total': 0,
             'nodes_list': {},
             'system_running': False,
-            'system_paused': False,
+            'controller_paused': False,
             
             # Battery status
             'battery_voltage': None,
@@ -109,7 +109,9 @@ class ArgoWebDashboard(Node):
         self.node_manager = ArgoNodeManager(self.argo_dir)
         
         # ROS2 Service clients
-        self.toggle_pause_client = self.create_client(Trigger, '/toggle_pause')
+        self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
+        self.controller_pause_state_sub = self.create_subscription(
+            Bool, '/controller_pause_state', self.controller_pause_state_cb, 10)
         self.battery_status_client = self.create_client(Trigger, '/battery_status')
         self.recording_start_client = self.create_client(Trigger, '/argo/recording/start')
         self.recording_stop_client = self.create_client(Trigger, '/argo/recording/stop')
@@ -208,6 +210,10 @@ class ArgoWebDashboard(Node):
     def controller_state_cb(self, msg):
         with self.state_lock:
             self.state['controller_type'] = msg.data
+    
+    def controller_pause_state_cb(self, msg):
+        with self.state_lock:
+            self.state['controller_paused'] = msg.data
     
     # ==================== Utility Functions ====================
     
@@ -310,8 +316,35 @@ class ArgoWebDashboard(Node):
         
         @self.app.route('/api/toggle_pause', methods=['POST'])
         def toggle_pause():
-            """Toggle pause state of all nodes."""
-            return self._call_service(self.toggle_pause_client, '/toggle_pause')
+            """Toggle controller pause state."""
+            try:
+                # Get current pause state and toggle it
+                current_paused = self.state.get('controller_paused', False)
+                new_pause_state = not current_paused
+                
+                # Create request
+                request = SetBool.Request()
+                request.data = new_pause_state
+                
+                # Call service
+                if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
+                    return jsonify({'success': False, 'message': 'Controller pause service not available'})
+                
+                future = self.controller_pause_client.call_async(request)
+                rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+                
+                if future.done():
+                    response = future.result()
+                    return jsonify({
+                        'success': response.success,
+                        'message': response.message,
+                        'paused': new_pause_state
+                    })
+                else:
+                    return jsonify({'success': False, 'message': 'Service call timed out'})
+                    
+            except Exception as e:
+                return jsonify({'success': False, 'message': f'Error: {str(e)}'})
         
         @self.app.route('/api/controller/switch', methods=['POST'])
         def switch_controller():

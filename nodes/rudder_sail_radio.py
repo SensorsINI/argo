@@ -91,7 +91,7 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
-from toggle_pause_service import TogglePauseService
+# Removed toggle_pause_service import - rudder_sail_radio node doesn't need pause functionality
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float64
@@ -327,8 +327,7 @@ class RudderSailRadioNode(Node):
         super().__init__('rudder_sail_radio_node')
 
         # Initialize pause service with namespaced name
-        self.pause_service = TogglePauseService(
-            self, f'{self.get_name()}/toggle_pause')
+        # Removed pause service - rudder_sail_radio node doesn't need pause functionality
 
         self.get_logger().info(
             'Rudder/Sail Radio node starting with high impedance safety mode...')
@@ -623,9 +622,7 @@ class RudderSailRadioNode(Node):
 
     def timer_callback(self):
         """Main control arbitration and hardware interface loop."""
-        # Check if node is paused
-        if self.pause_service.is_paused():
-            return  # Skip processing when paused
+        # Removed pause functionality - rudder_sail_radio runs continuously
 
         # 1. Read radio inputs from hardware
         if not self.read_radio_inputs():

@@ -87,7 +87,7 @@ import argcomplete
 import numpy as np
 import time
 import smbus
-from toggle_pause_service import TogglePauseService
+# Removed toggle_pause_service import - anem node doesn't need pause functionality
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
@@ -308,8 +308,7 @@ class AnemNode(Node):
         super().__init__('anem_node')
 
         # Initialize pause service with namespaced name
-        self.pause_service = TogglePauseService(
-            self, f'{self.get_name()}/toggle_pause')
+        # Removed pause service - anem node doesn't need pause functionality
         # Track pause state to manage sensor sleep/wake transitions
         self._prev_paused = False
 
@@ -727,19 +726,7 @@ class AnemNode(Node):
 
     def publish_callback(self):
         """ROS2 timer callback - reads multiple sensor samples and publishes averaged data at PUBLISHING_RATE"""
-        # Handle pause/unpause transitions for sensor power management
-        paused = self.pause_service.is_paused()
-        if paused != self._prev_paused:
-            if paused:
-                self._enter_sleep_mode()
-            else:
-                # On unpause, fully re-initialize continuous measurement
-                self._exit_pause_mode()
-            self._prev_paused = paused
-
-        # Skip processing while paused
-        if paused:
-            return
+        # Removed pause functionality - anem node runs continuously
 
         try:
             # Read multiple samples and accumulate for averaging

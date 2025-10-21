@@ -18,10 +18,11 @@
 #   5. Control arbitration in rudder_sail_radio.py decides human vs robot authority
 #
 # PAUSE MODE:
-#   - When paused (via /controller_node/toggle_pause service or single button tap):
+#   - When paused (via /controller_node/pause service or single button tap):
 #     * No autonomous commands are published
 #     * rudder_sail_radio.py automatically defaults to human control (stale auto commands)
 #     * Controller resumes from current heading when unpaused
+#     * Pause state published to /controller_pause_state topic for monitoring
 #
 # AVAILABLE CONTROLLERS:
 #   1. ProportionalHeadingController (DEFAULT):
@@ -66,6 +67,7 @@
 #   Published:
 #     /rudder_sail_cmd (Vector3) - Autonomous control commands (-1 to +1)
 #     /controller_state (String) - Current controller name for monitoring
+#     /controller_pause_state (Bool) - Current pause state for system monitoring
 #
 #   Subscribed:
 #     /human_controlled (Bool) - Control authority from rudder_sail_radio.py
@@ -85,6 +87,10 @@
 #   data_collection_enabled: Enable training data recording (default: false)
 #   enable_param_reload: Hot-reload parameter file changes (default: true)
 #
+# SERVICES:
+#   /controller_node/pause (SetBool) - Pause/unpause controller (True=pause, False=unpause, None=query)
+#   /controller_node/switch_controller (Trigger) - Switch to return-to-home controller
+#
 # EXTENDING THE CONTROLLER:
 #   To add a new controller:
 #   1. Create a new class inheriting from BaseController
@@ -97,14 +103,24 @@
 #   - Formula: rudder_cmd = rudder_gain * (target_heading - current_heading) / rudder_full_scale_deg
 #   - Clamped to [-1, +1] range
 #   - Target heading set during human control, maintained during autonomous control
+#
+# SAFE PUBLISHING:
+#   - Uses safe_publish utility to prevent "publisher's context is invalid" errors
+#   - Validates ROS2 context before all publishing operations
+#   - Graceful shutdown with proper timer cancellation
+#   - Context validation in all timer callbacks
 
 import sys
 import os
 
-# Import the shared pause service
-sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
+# Remove old pause service import - implementing new boolean pause service directly
 import psutil
+
+# Import safe publishing utilities
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'support'))
+from safe_publish import safe_publish, safe_log, is_context_valid
 import threading
 import json
 from typing import Optional, Dict, Any, List
@@ -123,7 +139,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Float64, Float32, String
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, SetBool
 from rclpy.parameter import Parameter
 
 
@@ -545,9 +561,18 @@ class ControllerNode(Node):
         super().__init__('controller_node')
         self.get_logger().info('Controller node starting...')
 
-        # Initialize pause service with absolute namespaced name
-        self.pause_service = TogglePauseService(
-            self, f'{self.get_name()}/toggle_pause')
+        # Initialize boolean pause service
+        self._is_paused = False
+        self.pause_service = self.create_service(
+            SetBool,
+            f'{self.get_name()}/pause',
+            self._handle_pause_service
+        )
+        
+        # Publish pause state for other nodes to monitor
+        self.pause_state_pub = self.create_publisher(
+            Bool, '/controller_pause_state', 10
+        )
 
         # Service for controller switching (for web dashboard)
         self.switch_controller_service = self.create_service(
@@ -595,6 +620,12 @@ class ControllerNode(Node):
 
         # Initialize controller
         self._initialize_controller()
+        
+        # Publish initial pause state
+        self._publish_pause_state()
+        
+        # Create timer to publish pause state periodically (every 5 seconds)
+        self.pause_state_timer = self.create_timer(5.0, self._publish_pause_state)
 
         # --- Publishers ---
         # Real-time control commands (use default QoS)
@@ -740,6 +771,66 @@ class ControllerNode(Node):
         
         return response
 
+    def _handle_pause_service(self, request, response):
+        """
+        Handle boolean pause service requests.
+        
+        Args:
+            request.data: True = pause, False = unpause, None = return current state
+            request.success: Not used in SetBool service
+        
+        Returns:
+            response.success: True if operation succeeded
+            response.message: Status message
+        """
+        try:
+            if request.data is True:
+                # Pause requested
+                if not self._is_paused:
+                    self._is_paused = True
+                    self.get_logger().info("Controller PAUSED - human control takes over")
+                    response.success = True
+                    response.message = "Controller paused successfully"
+                else:
+                    response.success = True
+                    response.message = "Controller already paused"
+            elif request.data is False:
+                # Unpause requested
+                if self._is_paused:
+                    self._is_paused = False
+                    self.get_logger().info("Controller UNPAUSED - autonomous control resumed")
+                    response.success = True
+                    response.message = "Controller unpaused successfully"
+                else:
+                    response.success = True
+                    response.message = "Controller already unpaused"
+            else:
+                # None - return current state
+                response.success = True
+                response.message = f"Controller is {'paused' if self._is_paused else 'unpaused'}"
+            
+            # Publish current pause state
+            self._publish_pause_state()
+            
+        except Exception as e:
+            self.get_logger().error(f"Error handling pause service: {e}")
+            response.success = False
+            response.message = f"Error: {str(e)}"
+        
+        return response
+
+    def _publish_pause_state(self, timer=None):
+        """Publish current pause state for other nodes to monitor."""
+        pause_msg = Bool()
+        pause_msg.data = self._is_paused
+        
+        if safe_publish(self.pause_state_pub, pause_msg, self):
+            safe_log(self, 'debug', f"Published pause state: {self._is_paused}")
+
+    def is_paused(self) -> bool:
+        """Check if the controller is currently paused."""
+        return self._is_paused
+
     # --- Sensor Callbacks ---
     def human_control_callback(self, msg):
         """Receive control authority status from rudder_sail_radio.py."""
@@ -767,42 +858,42 @@ class ControllerNode(Node):
         self.boat_state.radio_sail = msg.y
 
     def pose_callback(self, msg):
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         self.boat_state.compass_heading = msg.z
 
     def gps_cog_callback(self, msg):
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         self.boat_state.gps_cog = msg.data
 
     def gps_sog_callback(self, msg):
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         self.boat_state.gps_sog = msg.data
 
     def gps_velocity_callback(self, msg):
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         self.boat_state.gps_velocity = msg
 
     def accel_callback(self, msg):
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         self.boat_state.accel = msg
 
     def gyro_callback(self, msg):
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         self.boat_state.gyro = msg
 
     def compass_callback(self, msg):
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         self.boat_state.compass_raw = msg
 
     def wind_callback(self, msg):
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         self.boat_state.wind_speed = msg.x
         self.boat_state.wind_angle = msg.y
@@ -882,7 +973,7 @@ class ControllerNode(Node):
 
     def gps_position_callback(self, msg):
         """Receive GPS position from gps node"""
-        if self.pause_service.is_paused():
+        if self.is_paused():
             return
         
         # Update current position
@@ -900,8 +991,12 @@ class ControllerNode(Node):
 
     def timer_callback(self):
         """Main control loop - generates autonomous control commands."""
+        # Check if ROS2 context is still valid before processing
+        if not is_context_valid(self):
+            return
+            
         # Check if node is paused - when paused, unconditionally default to human control
-        if self.pause_service.is_paused():
+        if self.is_paused():
             # When paused, no autonomous commands are published, which causes
             # rudder_sail_radio.py to default to human control due to stale auto commands.
             # This effectively hands control back to the human operator immediately.
@@ -1007,19 +1102,18 @@ class ControllerNode(Node):
 
             # Publish control command to rudder_sail_radio.py
             if control_command:
-                self.pub_rudder_sail_cmd.publish(control_command.to_vector3())
+                safe_publish(self.pub_rudder_sail_cmd, control_command.to_vector3(), self)
             
             # Publish current controller state for web dashboard
             if self.controller:
                 state_msg = String(data=self.controller.name)
-                self.pub_controller_state.publish(state_msg)
+                safe_publish(self.pub_controller_state, state_msg, self)
 
                 # Only format debug string if debug logging is enabled (CPU optimization)
                 if self.get_logger().get_effective_level() <= 10:  # DEBUG level
-                    self.get_logger().debug(
-                        f"Target: {self.boat_state.target_heading:.1f}, Current: {self.boat_state.compass_heading:.1f}, "
-                        f"Controller: {self.controller.name}, Rudder: {control_command.rudder:.2f}, Sail: {control_command.sail:.2f}"
-                    )
+                    debug_msg = (f"Target: {self.boat_state.target_heading:.1f}, Current: {self.boat_state.compass_heading:.1f}, "
+                                f"Controller: {self.controller.name}, Rudder: {control_command.rudder:.2f}, Sail: {control_command.sail:.2f}")
+                    safe_log(self, 'debug', debug_msg)
 
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""
@@ -1121,16 +1215,26 @@ CONTROL FLOW:
     except rclpy.executors.ExternalShutdownException:
         print("External shutdown signal received, exiting gracefully.")
     finally:
+        # Graceful shutdown sequence
         try:
             if controller_node and hasattr(controller_node, 'data_collector'):
                 controller_node.data_collector.stop_session()
         except Exception:
             pass  # Ignore errors during shutdown
+        
         try:
             if controller_node:
+                # Cancel all timers before destroying node
+                if hasattr(controller_node, 'timer'):
+                    controller_node.timer.cancel()
+                if hasattr(controller_node, 'pause_state_timer'):
+                    controller_node.pause_state_timer.cancel()
+                if hasattr(controller_node, 'param_timer') and controller_node.param_timer:
+                    controller_node.param_timer.cancel()
                 controller_node.destroy_node()
         except Exception:
             pass  # Ignore errors during shutdown
+        
         try:
             if rclpy.ok():
                 rclpy.shutdown()

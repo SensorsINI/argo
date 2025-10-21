@@ -225,7 +225,7 @@ from typing import Optional, Dict, Any
 try:
     import rclpy
     from rclpy.node import Node
-    from std_srvs.srv import Trigger
+    from std_srvs.srv import Trigger, SetBool
     ROS2_AVAILABLE = True
 except ImportError:
     rclpy = None
@@ -956,8 +956,10 @@ class PowerController:
             )
             service_wait_thread.start()
             
-            success, message = self._call_trigger_service(
-                '/controller_node/toggle_pause', timeout_sec=2.0)
+            # Get current pause state and toggle it
+            current_pause_state = self._get_controller_pause_state()
+            new_pause_state = not current_pause_state
+            success, message = self._call_controller_pause_service(new_pause_state)
             
             # Stop service wait pattern
             self.service_wait_active = False
@@ -984,6 +986,72 @@ class PowerController:
                 f"Error toggling pause mode: {e}",
                 "critical"
             )
+
+    def _get_controller_pause_state(self) -> bool:
+        """Get current controller pause state via service call."""
+        try:
+            if not self.ros2_node:
+                return False
+            
+            # Create service client for controller pause service
+            pause_client = self.ros2_node.create_client(SetBool, '/controller_node/pause')
+            
+            if not pause_client.wait_for_service(timeout_sec=2.0):
+                logger.warning("Controller pause service not available")
+                return False
+            
+            # Call service with None to get current state
+            request = SetBool.Request()
+            request.data = None  # None means return current state
+            
+            future = pause_client.call_async(request)
+            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=3.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    # Parse the message to determine current state
+                    message = response.message.lower()
+                    return 'paused' in message
+                else:
+                    logger.warning(f"Failed to get controller pause state: {response.message}")
+                    return False
+            else:
+                logger.warning("Controller pause state query timed out")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error getting controller pause state: {e}")
+            return False
+
+    def _call_controller_pause_service(self, pause_state: bool) -> tuple[bool, str]:
+        """Call the controller pause service with the specified state."""
+        try:
+            if not self.ros2_node:
+                return False, "ROS2 node not available"
+            
+            # Create service client for controller pause service
+            pause_client = self.ros2_node.create_client(SetBool, '/controller_node/pause')
+            
+            if not pause_client.wait_for_service(timeout_sec=2.0):
+                return False, "Controller pause service not available"
+            
+            # Create request
+            request = SetBool.Request()
+            request.data = pause_state
+            
+            # Call service
+            future = pause_client.call_async(request)
+            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=5.0)
+            
+            if future.done():
+                response = future.result()
+                return response.success, response.message
+            else:
+                return False, "Service call timed out"
+                
+        except Exception as e:
+            return False, f"Error calling controller pause service: {e}"
 
     def restart_argo_service(self):
         """Restart the Argo launch service"""

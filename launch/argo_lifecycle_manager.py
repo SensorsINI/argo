@@ -39,7 +39,8 @@ import psutil
 try:
     import rclpy
     from rclpy.node import Node
-    from std_srvs.srv import Trigger
+    from std_srvs.srv import Trigger, SetBool
+    from std_msgs.msg import Bool
     ROS2_AVAILABLE = True
 except ImportError:
     ROS2_AVAILABLE = False
@@ -71,7 +72,8 @@ class ArgoLifecycleManager:
         # Initialize ROS2 for service client if available
         self.ros2_node = None
         self.battery_service_client = None
-        self.toggle_pause_service = None
+        self.controller_pause_client = None
+        self.controller_pause_state = False
         if ROS2_AVAILABLE:
             try:
                 if not rclpy.ok():
@@ -80,22 +82,31 @@ class ArgoLifecycleManager:
                 self.battery_service_client = self.ros2_node.create_client(
                     Trigger, '/battery_status')
 
-                # Create toggle_pause service for managing node pause state
-                self.toggle_pause_service = self.ros2_node.create_service(
-                    Trigger,
-                    'toggle_pause',
-                    self._handle_toggle_pause
-                )
+                # Create controller pause service client
+                self.controller_pause_client = self.ros2_node.create_client(
+                    SetBool, '/controller_node/pause')
+                
+                # Subscribe to controller pause state
+                self.controller_pause_sub = self.ros2_node.create_subscription(
+                    Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
             except Exception as e:
                 if not quiet:
                     print(
                         f"Warning: Could not initialize ROS2 service client: {e}")
                 self.ros2_node = None
                 self.battery_service_client = None
-                self.toggle_pause_service = None
+                self.controller_pause_client = None
         
         # Initialize node manager for discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
+        
+        # Query initial controller pause state after a brief delay to allow ROS2 to initialize
+        if self.controller_pause_client:
+            import threading
+            def query_initial_pause_state():
+                time.sleep(2.0)  # Wait for ROS2 to initialize
+                self._query_controller_pause_state()
+            threading.Thread(target=query_initial_pause_state, daemon=True).start()
         
         # Discover expected nodes dynamically (exclude simulation-only nodes for normal operation)
         discovered_nodes = self.node_manager.discover_nodes(exclude_simulation_only=True)
@@ -128,8 +139,7 @@ class ArgoLifecycleManager:
         # Define critical nodes (essential for boat operation)
         self.critical_nodes = ['pwm.py', 'controller.py']
 
-        # Define nodes that should NOT be paused (critical for safety/monitoring)
-        self.no_pause_nodes = ['battery_water.py', 'temp_monitor.py']
+        # Remove old pause node definitions - only controller supports pausing now
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -157,64 +167,62 @@ class ArgoLifecycleManager:
             except Exception:
                 pass
 
-    def _handle_toggle_pause(self, request, response):
-        """Handle toggle_pause service requests to pause/unpause all managed nodes."""
-        try:
-            # Get current node status to determine which nodes are running
-            node_status = self._get_node_status()
-            running_nodes = [
-                node for node, status in node_status.items() if "RUNNING" in status]
+    def _controller_pause_state_callback(self, msg):
+        """Receive controller pause state updates."""
+        self.controller_pause_state = msg.data
 
-            if not running_nodes:
+    def _query_controller_pause_state(self):
+        """Query the current controller pause state via service call."""
+        try:
+            if not self.controller_pause_client:
+                return
+            
+            # Wait for service to be available
+            if not self.controller_pause_client.wait_for_service(timeout_sec=3.0):
+                return
+            
+            # Create request with None to get current state
+            request = SetBool.Request()
+            request.data = None  # None means return current state
+            
+            # Call service
+            future = self.controller_pause_client.call_async(request)
+            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=3.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    # Parse the message to determine current state
+                    message = response.message.lower()
+                    self.controller_pause_state = 'paused' in message
+                else:
+                    # Default to unpaused if we can't determine state
+                    self.controller_pause_state = False
+                    
+        except Exception as e:
+            # Default to unpaused if query fails
+            self.controller_pause_state = False
+
+    def _handle_toggle_pause(self, request, response):
+        """Handle toggle_pause service requests - now delegates to controller pause service."""
+        try:
+            # Check if controller is running
+            node_status = self._get_node_status()
+            if 'controller.py' not in node_status or "STOPPED" in node_status['controller.py']:
                 response.success = False
-                response.message = "No nodes are currently running"
+                response.message = "Controller node is not running"
                 return response
 
-            # Determine if we should pause or unpause based on current state
-            # We'll check a few nodes to determine the current pause state
-            should_pause = self._should_pause_nodes(running_nodes)
-
-            # Filter out nodes that should not be paused
-            nodes_to_control = [
-                node for node in running_nodes if node not in self.no_pause_nodes]
-            no_pause_list = [
-                node for node in running_nodes if node in self.no_pause_nodes]
-
-            action = "pause" if should_pause else "unpause"
-            print(f"🔄 {action.upper()}ING {len(nodes_to_control)} nodes...")
-
-            if no_pause_list:
-                print(
-                    f"⚠️  Skipping {len(no_pause_list)} critical nodes: {', '.join(no_pause_list)}")
-
-            # Call toggle_pause service on each node
-            success_count = 0
-            failed_nodes = []
-
-            for node in nodes_to_control:
-                if self._call_node_toggle_pause(node):
-                    success_count += 1
-                else:
-                    failed_nodes.append(node)
-
-            # Prepare response
-            if success_count == len(nodes_to_control):
+            # Toggle controller pause state
+            new_pause_state = not self.controller_pause_state
+            success, message = self._call_controller_pause_service(new_pause_state)
+            
+            if success:
                 response.success = True
-                response.message = f"Successfully {action}d {success_count} nodes"
-                if no_pause_list:
-                    response.message += f" (skipped {len(no_pause_list)} critical nodes)"
-            elif success_count > 0:
-                response.success = True
-                response.message = f"Partially successful: {action}d {success_count}/{len(nodes_to_control)} nodes"
-                if failed_nodes:
-                    response.message += f" (failed: {', '.join(failed_nodes)})"
+                response.message = f"Controller {'paused' if new_pause_state else 'unpaused'} successfully"
             else:
                 response.success = False
-                response.message = f"Failed to {action} any nodes"
-                if failed_nodes:
-                    response.message += f" (failed: {', '.join(failed_nodes)})"
-
-            print(f"✅ Toggle pause result: {response.message}")
+                response.message = f"Failed to toggle controller pause: {message}"
 
         except Exception as e:
             print(f"❌ Error in toggle_pause handler: {e}")
@@ -223,78 +231,34 @@ class ArgoLifecycleManager:
 
         return response
 
-    def _should_pause_nodes(self, running_nodes):
-        """Determine if we should pause nodes based on current state."""
-        # Check a few nodes to see if they're currently paused
-        # We'll use the health topics to determine pause state
-        paused_count = 0
-        checked_count = 0
-
-        for node in running_nodes[:3]:  # Check first 3 nodes
-            if node in self.no_pause_nodes:
-                continue
-
-            try:
-                # Check health topic to see if node is paused
-                health_topic = f'/{node.replace(".py", "")}_health'
-                result = subprocess.run([
-                    'ros2', 'topic', 'echo', health_topic, '--once'
-                ], capture_output=True, text=True, timeout=2)
-
-                if result.returncode == 0 and result.stdout.strip():
-                    lines = result.stdout.strip().split('\n')
-                    for line in lines:
-                        if line.startswith('data:'):
-                            data_str = line.split(':', 1)[1].strip()
-                            is_healthy = data_str.lower() == 'true'
-                            if not is_healthy:  # False health means paused
-                                paused_count += 1
-                            checked_count += 1
-                            break
-            except Exception:
-                pass
-
-        # If we couldn't check any nodes, default to pause
-        if checked_count == 0:
-            return True
-
-        # If more than half are paused, unpause; otherwise pause
-        return paused_count < (checked_count / 2)
-
-    def _call_node_toggle_pause(self, node_name):
-        """Call the toggle_pause service on a specific node."""
+    def _call_controller_pause_service(self, pause_state: bool) -> tuple[bool, str]:
+        """Call the controller pause service with the specified state."""
         try:
-            # Convert node name to service name
-            # Map .py filenames to actual ROS2 node names
-            node_mapping = {
-                'controller.py': 'controller_node',
-                'anem.py': 'anem_node',
-                'bno085.py': 'bno085_bridge',
-                'record.py': 'record',
-                'rudder_sail_radio.py': 'rudder_sail_radio_node',
-                'sailing_area_publisher.py': 'sailing_area_publisher',
-                'temp_monitor.py': 'temp_monitor_node',
-                'foxglove_bridge': 'foxglove_bridge'
-            }
+            if not self.controller_pause_client:
+                return False, "Controller pause service client not available"
 
-            ros2_node_name = node_mapping.get(
-                node_name, node_name.replace(".py", ""))
-            service_name = f'/{ros2_node_name}/toggle_pause'
+            # Wait for service to be available
+            if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
+                return False, "Controller pause service not available"
 
-            # Use centralized Trigger service call
-            success, message = self._call_trigger_service(
-                service_name, timeout_sec=5.0, debug=False)
+            # Create request
+            request = SetBool.Request()
+            request.data = pause_state
 
-            if success:
-                return True
+            # Call service
+            future = self.controller_pause_client.call_async(request)
+            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=5.0)
+
+            if future.done():
+                response = future.result()
+                return response.success, response.message
             else:
-                print(
-                    f"⚠️  Failed to call toggle_pause on {node_name}: {message}")
-                return False
+                return False, "Service call timed out"
 
         except Exception as e:
-            print(f"⚠️  Error calling toggle_pause on {node_name}: {e}")
-            return False
+            return False, f"Error calling controller pause service: {e}"
+
+    # Removed old pause methods - now using centralized controller pause service
     
     def _get_ros2_processes(self) -> List[psutil.Process]:
         """Get all ROS2 processes related to Argo using node manager"""
@@ -1045,6 +1009,15 @@ class ArgoLifecycleManager:
             1 for status in node_status.values() if "RUNNING" in status)
         total_count = len(node_status)
         print(f"🤖 ROS NODES: [{running_count}/{total_count}]")
+        
+        # Show controller pause state
+        if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
+            # Query current pause state to ensure we have the latest
+            self._query_controller_pause_state()
+            pause_status = "⏸️ PAUSED" if self.controller_pause_state else "▶️ RUNNING"
+            print(f"🎮 CONTROLLER: {pause_status}")
+        else:
+            print(f"🎮 CONTROLLER: 🔴 STOPPED")
         stopped_nodes = []
         for node, status in node_status.items():
             if "STOPPED" in status and node in node_fatal_messages:
@@ -1331,6 +1304,13 @@ class ArgoLifecycleManager:
             
             # Build condensed status line
             status_line = f"🚢 ARGO: [{running_count}/{total_count}] | 🖥️ {cpu_percent:.1f}%"
+            
+            # Add controller pause state
+            if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
+                # Query current pause state to ensure we have the latest
+                self._query_controller_pause_state()
+                pause_indicator = "⏸️" if self.controller_pause_state else "▶️"
+                status_line += f" | 🎮 {pause_indicator}"
             
             # Always show battery status (use ??? if unavailable)
             battery_display = battery_summary if battery_summary else "???"
@@ -1645,15 +1625,15 @@ class ArgoLifecycleManager:
             return False, error_msg
 
     def toggle_pause_nodes(self, debug: bool = False) -> bool:
-        """Toggle pause state of all pausable nodes via ROS2 service call."""
-        print("🔄 Toggling pause state of all pausable nodes...")
+        """Toggle pause state of controller node via ROS2 service call."""
+        print("🔄 Toggling controller pause state...")
 
-        # Use centralized Trigger service call
-        success, message = self._call_trigger_service(
-            '/toggle_pause', timeout_sec=1.0, debug=debug)
+        # Toggle controller pause state
+        new_pause_state = not self.controller_pause_state
+        success, message = self._call_controller_pause_service(new_pause_state)
 
         if success:
-            print(f"✅ {message}")
+            print(f"✅ Controller {'paused' if new_pause_state else 'unpaused'} successfully")
             return True
         else:
             print(f"❌ Toggle pause failed: {message}")
