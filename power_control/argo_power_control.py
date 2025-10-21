@@ -2106,7 +2106,7 @@ class PowerController:
             test_title = f"[TEST] {title}" if self.test_mode else title
             test_message = f"{message}\n\n(This is a test notification)" if self.test_mode else message
             if self.test_mode:
-                logger.info(
+                logger.debug(
                     f"TEST MODE: Sending notification - {title}: {message}")
 
             # Use custom expire time or default
@@ -2165,7 +2165,7 @@ class PowerController:
                             ]
                             subprocess.run(
                                 cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                            logger.info(f"Desktop notification sent: {title}")
+                            logger.debug(f"Desktop notification sent: {title}")
                             return
                         else:
                             logger.warning(
@@ -2188,7 +2188,7 @@ class PowerController:
                 ]
                 subprocess.run(
                     cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                logger.info(f"Desktop notification sent (fallback): {title}")
+                logger.debug(f"Desktop notification sent (fallback): {title}")
                 return
 
             else:
@@ -2200,7 +2200,7 @@ class PowerController:
                 ]
                 subprocess.run(
                     cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                logger.info(f"Desktop notification sent (user): {title}")
+                logger.debug(f"Desktop notification sent (user): {title}")
 
         except subprocess.TimeoutExpired:
             logger.warning("Desktop notification timed out")
@@ -2283,7 +2283,7 @@ class PowerController:
             time.sleep(TEST_MODE_SHUTDOWN_DELAY_S)
             self.running = False  # Stop running after LED pattern demonstration
         else:
-            logger.info("Executing shutdown command: shutdown -h now")
+            logger.critical("Executing shutdown command: shutdown -h now")
             subprocess.run(['shutdown', '-h', 'now'], check=True)
             logger.info("Shutdown command executed successfully")
             # Don't set self.running = False here - let the system shutdown
