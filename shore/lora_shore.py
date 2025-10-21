@@ -101,14 +101,14 @@ class LoRaShoreNode(Node):
         self.baud_rate = self.get_parameter('baud_rate').get_parameter_value().integer_value
         self.debug = self.get_parameter('enable_debug').get_parameter_value().bool_value
         
+        # Serial connection state
+        self.ser = None
+        self.connection_attempts = 0
+        self.last_connection_attempt = 0
+        self.reconnect_interval = 1.0  # 1 Hz retry rate
+        
         # Initialize serial connection
-        try:
-            self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.1)
-            self.get_logger().info(f"Connected to Waveshare LoRa on {self.serial_port} at {self.baud_rate} baud")
-        except serial.SerialException as e:
-            self.get_logger().error(f"Failed to open serial port: {e}")
-            self.ser = None
-            return
+        self.connect_serial()
         
         # Standard QoS for real-time data
         self.standard_qos = 10
@@ -153,11 +153,54 @@ class LoRaShoreNode(Node):
         
         self.get_logger().info("Shore-side LoRa node ready. Listening for Argo packets...")
     
+    def connect_serial(self):
+        """Connect or reconnect to serial port with throttled retry"""
+        current_time = time.time()
+        
+        # Throttle connection attempts to 1 Hz
+        if current_time - self.last_connection_attempt < self.reconnect_interval:
+            return False
+        
+        self.last_connection_attempt = current_time
+        self.connection_attempts += 1
+        
+        # Close existing connection if any
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.close()
+            except:
+                pass
+        
+        # Attempt to open serial port
+        try:
+            self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.1)
+            self.get_logger().info(
+                f"Connected to Waveshare LoRa on {self.serial_port} at {self.baud_rate} baud "
+                f"(attempt #{self.connection_attempts})"
+            )
+            self.connection_attempts = 0  # Reset counter on success
+            return True
+        except serial.SerialException as e:
+            self.get_logger().warn(
+                f"Connection attempt #{self.connection_attempts} failed: {e}. "
+                f"Retrying in {self.reconnect_interval}s..."
+            )
+            self.ser = None
+            return False
+    
     def serial_reader_loop(self):
         """Background thread that reads from serial port and processes packets"""
         buffer = ""
         
-        while self.running and self.ser and self.ser.is_open:
+        while self.running:
+            # Check if we need to (re)connect
+            if not self.ser or not self.ser.is_open:
+                if self.connect_serial():
+                    buffer = ""  # Clear buffer on new connection
+                else:
+                    time.sleep(0.1)  # Wait before checking connection again
+                    continue
+            
             try:
                 if self.ser.in_waiting > 0:
                     data = self.ser.read(self.ser.in_waiting)
@@ -189,8 +232,19 @@ class LoRaShoreNode(Node):
                 
                 time.sleep(0.01)  # 100 Hz check rate
                 
+            except (serial.SerialException, OSError) as e:
+                # Connection lost - log once and trigger reconnection
+                self.get_logger().error(f"Serial connection lost: {e}")
+                if self.ser:
+                    try:
+                        self.ser.close()
+                    except:
+                        pass
+                    self.ser = None
+                buffer = ""  # Clear buffer on disconnect
+                
             except Exception as e:
-                self.get_logger().error(f"Error in serial reader: {e}")
+                self.get_logger().error(f"Unexpected error in serial reader: {e}")
                 time.sleep(0.1)
     
     def process_argo_packet(self, packet: dict, raw_json: str):
@@ -243,13 +297,13 @@ class LoRaShoreNode(Node):
         """Receive command from ROS2 and send to Argo via LoRa"""
         try:
             command = msg.data
-            self.command_count += 1
-            
-            self.get_logger().info(f"Sending command to Argo: {command}")
             
             if not self.ser or not self.ser.is_open:
-                self.get_logger().error("Serial port not open, cannot send command")
+                self.get_logger().error("Serial port not connected, cannot send command. Waiting for reconnection...")
                 return
+            
+            self.command_count += 1
+            self.get_logger().info(f"Sending command to Argo: {command}")
             
             # Send command as plain text (Waveshare transparent mode)
             # Argo will receive it with Waveshare header already stripped by firmware
@@ -258,16 +312,28 @@ class LoRaShoreNode(Node):
             
             self.get_logger().info(f"Command sent: {command} ({len(command)} bytes)")
             
+        except (serial.SerialException, OSError) as e:
+            self.get_logger().error(f"Error sending command (connection lost): {e}")
+            # Mark connection as lost to trigger reconnection
+            if self.ser:
+                try:
+                    self.ser.close()
+                except:
+                    pass
+                self.ser = None
         except Exception as e:
-            self.get_logger().error(f"Error sending command: {e}")
+            self.get_logger().error(f"Unexpected error sending command: {e}")
     
     def publish_status(self):
         """Publish shore-side status"""
         try:
+            is_connected = self.ser is not None and self.ser.is_open
+            
             status = {
                 'port': self.serial_port,
                 'baud': self.baud_rate,
-                'connected': self.ser is not None and self.ser.is_open,
+                'connected': is_connected,
+                'connection_attempts': self.connection_attempts,
                 'packets_received': self.packet_count,
                 'commands_sent': self.command_count,
                 'time_since_last_packet': time.time() - self.last_packet_time if self.last_packet_time else None
@@ -277,8 +343,14 @@ class LoRaShoreNode(Node):
             msg.data = json.dumps(status)
             self.pub_shore_status.publish(msg)
             
+            # Warn if not connected
+            if not is_connected:
+                self.get_logger().warn(
+                    f"LoRa not connected to {self.serial_port}. "
+                    f"Attempting reconnection (attempt #{self.connection_attempts})..."
+                )
             # Warn if no packets received recently
-            if self.last_packet_time and (time.time() - self.last_packet_time) > 30:
+            elif self.last_packet_time and (time.time() - self.last_packet_time) > 30:
                 self.get_logger().warn(f"No packets from Argo for {int(time.time() - self.last_packet_time)}s")
         
         except Exception as e:
