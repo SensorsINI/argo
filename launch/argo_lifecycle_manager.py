@@ -40,7 +40,7 @@ try:
     import rclpy
     from rclpy.node import Node
     from std_srvs.srv import Trigger, SetBool
-    from std_msgs.msg import Bool
+    from std_msgs.msg import Bool, String
     ROS2_AVAILABLE = True
 except ImportError:
     ROS2_AVAILABLE = False
@@ -68,12 +68,15 @@ class ArgoLifecycleManager:
         self.journal_since = 'today'
         self.remote_simulator_proc = None
         self.remote_tunnel_proc = None
+        self.shutdown_requested = False  # Flag to coordinate shutdown
 
         # Initialize ROS2 for service client if available
         self.ros2_node = None
         self.battery_service_client = None
         self.controller_pause_client = None
         self.controller_pause_state = False
+        self.status_publisher = None
+        self.lifecycle_services_created = False
         if ROS2_AVAILABLE:
             try:
                 if not rclpy.ok():
@@ -147,24 +150,33 @@ class ArgoLifecycleManager:
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
+        if self.shutdown_requested:
+            return  # Already shutting down
+        
+        self.shutdown_requested = True
         print(
             f"\n🛑 argo_lifecycle_manager: Received signal {signum}, shutting down...")
-        self._cleanup_ros2()
-        self.stop()
-        sys.exit(0)
+        
+        # Don't call stop() here - let the main loop handle it
+        # Just set the flag and let continuous() exit cleanly
     
     def _cleanup_ros2(self):
-        """Clean up ROS2 resources"""
+        """Clean up ROS2 resources - only call this once at final shutdown"""
         if self.ros2_node:
             try:
+                # Destroy node first
                 self.ros2_node.destroy_node()
-            except Exception:
+            except Exception as e:
+                # Silently fail - context may already be shutdown
                 pass
             self.ros2_node = None
-        if rclpy.ok():
+        
+        # Only shutdown context if it's still valid
+        if ROS2_AVAILABLE and rclpy.ok():
             try:
                 rclpy.shutdown()
-            except Exception:
+            except Exception as e:
+                # Silently fail - may already be shutdown
                 pass
 
     def _controller_pause_state_callback(self, msg):
@@ -407,6 +419,116 @@ class ArgoLifecycleManager:
     # Removed _should_restart_node method - nodes are not restarted automatically
     # Node failures are preserved for debugging purposes
     
+    def _create_lifecycle_services(self):
+        """Create ROS2 services for lifecycle management (only in continuous mode)"""
+        if not self.ros2_node or self.lifecycle_services_created:
+            return
+        
+        try:
+            # Create lifecycle management services
+            self.start_service = self.ros2_node.create_service(
+                Trigger, '/argo/lifecycle/start', self._handle_start_service)
+            self.stop_service = self.ros2_node.create_service(
+                Trigger, '/argo/lifecycle/stop', self._handle_stop_service)
+            self.restart_service = self.ros2_node.create_service(
+                Trigger, '/argo/lifecycle/restart', self._handle_restart_service)
+            self.status_service = self.ros2_node.create_service(
+                Trigger, '/argo/lifecycle/status', self._handle_status_service)
+            
+            # Create status publisher
+            self.status_publisher = self.ros2_node.create_publisher(
+                String, '/argo/lifecycle/status', 10)
+            
+            self.lifecycle_services_created = True
+            print("✅ Lifecycle management ROS2 services created:")
+            print("   - /argo/lifecycle/start")
+            print("   - /argo/lifecycle/stop")
+            print("   - /argo/lifecycle/restart")
+            print("   - /argo/lifecycle/status")
+            print("   - /argo/lifecycle/status (topic)")
+        except Exception as e:
+            print(f"⚠️  Failed to create lifecycle services: {e}")
+    
+    def _handle_start_service(self, request, response):
+        """Handle /argo/lifecycle/start service request"""
+        try:
+            if self._is_launch_running():
+                response.success = False
+                response.message = "Argo nodes are already running"
+            else:
+                # Start nodes in background thread to avoid blocking service call
+                import threading
+                threading.Thread(target=self._launch_nodes_directly, daemon=True).start()
+                response.success = True
+                response.message = "Argo nodes starting..."
+        except Exception as e:
+            response.success = False
+            response.message = f"Error starting nodes: {e}"
+        return response
+    
+    def _handle_stop_service(self, request, response):
+        """Handle /argo/lifecycle/stop service request"""
+        try:
+            if not self._is_launch_running():
+                response.success = False
+                response.message = "Argo nodes are not running"
+            else:
+                success = self.stop()
+                response.success = success
+                response.message = "Argo nodes stopped" if success else "Failed to stop some nodes"
+        except Exception as e:
+            response.success = False
+            response.message = f"Error stopping nodes: {e}"
+        return response
+    
+    def _handle_restart_service(self, request, response):
+        """Handle /argo/lifecycle/restart service request"""
+        try:
+            # Restart in background thread to avoid blocking service call
+            import threading
+            def do_restart():
+                self.stop()
+                time.sleep(2)
+                self._launch_nodes_directly()
+            threading.Thread(target=do_restart, daemon=True).start()
+            response.success = True
+            response.message = "Argo nodes restarting..."
+        except Exception as e:
+            response.success = False
+            response.message = f"Error restarting nodes: {e}"
+        return response
+    
+    def _handle_status_service(self, request, response):
+        """Handle /argo/lifecycle/status service request"""
+        try:
+            node_status = self._get_node_status()
+            running_count = sum(1 for status in node_status.values() if "RUNNING" in status)
+            total_count = len(node_status)
+            
+            status_dict = {
+                'running_count': running_count,
+                'total_count': total_count,
+                'nodes': node_status
+            }
+            
+            response.success = True
+            response.message = json.dumps(status_dict)
+        except Exception as e:
+            response.success = False
+            response.message = f"Error getting status: {e}"
+        return response
+    
+    def _publish_status_update(self, message: str):
+        """Publish a status update to /argo/lifecycle/status topic"""
+        if self.status_publisher:
+            try:
+                msg = String()
+                msg.data = message
+                self.status_publisher.publish(msg)
+            except Exception as e:
+                # Silently fail - status updates are not critical
+                pass
+    
     def continuous(self) -> bool:
         """Start Argo and keep it running with fault tolerance"""
         print("🚀 Starting Argo ROS2 nodes...")
@@ -591,57 +713,97 @@ class ArgoLifecycleManager:
             print(f"❌ Error starting Argo: {e}")
             return False
         
-        print("🔄 Starting continuous monitoring...")
+        # Create ROS2 services for lifecycle management
+        self._create_lifecycle_services()
+        
+        print("🔄 Starting continuous monitoring with ROS2 integration...")
         print("   Press Ctrl+C to stop")
         print("   NOTE: Node failures will be logged but NOT restarted for debugging")
+        print("   ROS2 services available for remote control")
+        
+        # Publish initial status
+        self._publish_status_update("Argo lifecycle manager running")
         
         try:
-            while True:
-                time.sleep(30)  # Check every 30 seconds (less frequent)
+            last_check_time = time.time()
+            check_interval = 30  # Check every 30 seconds
+            
+            while not self.shutdown_requested and (rclpy.ok() if self.ros2_node else True):
+                # Spin ROS2 node to process service requests (if available)
+                if self.ros2_node:
+                    try:
+                        rclpy.spin_once(self.ros2_node, timeout_sec=0.1)
+                    except Exception:
+                        # Context may be shutting down
+                        if self.shutdown_requested:
+                            break
+                else:
+                    time.sleep(0.1)
                 
-                # Check node status
-                node_status = self._get_node_status()
-                running_nodes = [
-                    node for node, status in node_status.items() if "RUNNING" in status]
-                stopped_nodes = [
-                    node for node, status in node_status.items() if "STOPPED" in status]
-                
-                if stopped_nodes:
-                    # Log stopped nodes but do NOT restart them
-                    print(
-                        f"⚠️  {len(stopped_nodes)} nodes stopped: {', '.join(stopped_nodes)}")
+                # Periodic status check
+                current_time = time.time()
+                if current_time - last_check_time >= check_interval:
+                    last_check_time = current_time
                     
-                    # Check if critical nodes are still running
-                    critical_running = [
-                        n for n in self.critical_nodes if n in running_nodes]
-                    critical_stopped = [
-                        n for n in self.critical_nodes if n in stopped_nodes]
+                    # Check node status
+                    node_status = self._get_node_status()
+                    running_nodes = [
+                        node for node, status in node_status.items() if "RUNNING" in status]
+                    stopped_nodes = [
+                        node for node, status in node_status.items() if "STOPPED" in status]
                     
-                    if critical_stopped:
-                        print(
-                            f"❌ CRITICAL NODES STOPPED: {', '.join(critical_stopped)}")
-                        print(
-                            f"   System will continue with remaining nodes for debugging")
-                        print(f"   Check systemd journal for error details")
-                    else:
-                        print(
-                            f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                    # Publish status update
+                    status_msg = f"Running: {len(running_nodes)}/{len(self.all_expected_nodes)}"
+                    self._publish_status_update(status_msg)
                     
-                    # Show system status
-                    if len(running_nodes) >= 3:
+                    if stopped_nodes:
+                        # Log stopped nodes but do NOT restart them
                         print(
-                            f"✅ System operational with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
-                    else:
-                        print(
-                            f"⚠️  Low node count: {len(running_nodes)}/{len(self.all_expected_nodes)} nodes running")
+                            f"⚠️  {len(stopped_nodes)} nodes stopped: {', '.join(stopped_nodes)}")
+                        
+                        # Check if critical nodes are still running
+                        critical_running = [
+                            n for n in self.critical_nodes if n in running_nodes]
+                        critical_stopped = [
+                            n for n in self.critical_nodes if n in stopped_nodes]
+                        
+                        if critical_stopped:
+                            print(
+                                f"❌ CRITICAL NODES STOPPED: {', '.join(critical_stopped)}")
+                            print(
+                                f"   System will continue with remaining nodes for debugging")
+                            print(f"   Check systemd journal for error details")
+                            self._publish_status_update(f"CRITICAL: {', '.join(critical_stopped)} stopped")
+                        else:
+                            print(
+                                f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                        
+                        # Show system status
+                        if len(running_nodes) >= 3:
+                            print(
+                                f"✅ System operational with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                        else:
+                            print(
+                                f"⚠️  Low node count: {len(running_nodes)}/{len(self.all_expected_nodes)} nodes running")
                 
         except KeyboardInterrupt:
             print("\n🛑 Stopping continuous monitoring...")
-            self.stop()
-            return True
+            self.shutdown_requested = True
         except Exception as e:
             print(f"❌ Error in continuous mode: {e}")
-            return False
+            self._publish_status_update(f"Error: {e}")
+            self.shutdown_requested = True
+        finally:
+            # Publish final status before cleanup
+            self._publish_status_update("Argo lifecycle manager stopping")
+            
+            # Stop all nodes first
+            self.stop()
+            
+            # Clean up ROS2 last
+            self._cleanup_ros2()
+            
+            return not self.shutdown_requested or True  # Always return True for clean exit
     
     def stop(self) -> bool:
         """Stop the Argo launch process and all related nodes"""
@@ -1889,32 +2051,42 @@ EXAMPLES:
     try:
         # Execute the command first (if provided)
         if args.command == 'run':
+            # continuous() handles its own cleanup
             success = manager.continuous()
             sys.exit(0 if success else 1)
         elif args.command == 'stop':
             success = manager.stop()
+            # Clean up ROS2 for non-continuous commands
+            manager._cleanup_ros2()
             sys.exit(0 if success else 1)
         elif args.command == 'restart':
             success = manager.restart()
+            manager._cleanup_ros2()
             sys.exit(0 if success else 1)
         elif args.command == 'status':
             manager.status()
+            manager._cleanup_ros2()
         elif args.command == 'quick_status':
             manager.quick_status()
+            manager._cleanup_ros2()
         elif args.command == 'simulate_local':
             success = manager.simulate_local()
+            # simulate handles its own cleanup
             sys.exit(0 if success else 1)
         elif args.command == 'simulate_remote':
             success = manager.simulate_remote()
+            # simulate handles its own cleanup
             sys.exit(0 if success else 1)
 
         # Handle --toggle_pause option (after command execution or standalone)
         if args.toggle_pause:
             success = manager.toggle_pause_nodes(debug=args.debug)
+            manager._cleanup_ros2()
             sys.exit(0 if success else 1)
-    finally:
-        # Ensure ROS2 cleanup
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
         manager._cleanup_ros2()
+        sys.exit(1)
 
 
 if __name__ == '__main__':

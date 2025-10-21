@@ -248,7 +248,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import Bool, String
-from std_srvs.srv import Empty
+from std_srvs.srv import Empty, Trigger, SetBool
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 # Removed QoS imports - using default QoS only
 
@@ -466,16 +466,19 @@ class PowerController:
 
         # Initialize ROS2 for service clients (allow in test mode for service testing)
         self.ros2_node = None
+        self.power_services_created = False
+        self.power_status_publisher = None
+        self.button_event_publisher = None
         if ROS2_AVAILABLE:
             try:
                 if not rclpy.ok():
                     rclpy.init()
                 # Use a unique name to avoid conflicts if other nodes are on the same process
-                self.ros2_node = Node('argo_power_control_client', allow_undeclared_parameters=True,
+                self.ros2_node = Node('argo_power_control', allow_undeclared_parameters=True,
                                       automatically_declare_parameters_from_overrides=True)
-                logger.info("ROS2 client node initialized for service calls")
+                logger.info("ROS2 node initialized for power control")
             except Exception as e:
-                logger.error(f"Failed to initialize ROS2 client node: {e}")
+                logger.error(f"Failed to initialize ROS2 node: {e}")
                 self.ros2_node = None
         elif not ROS2_AVAILABLE:
             logger.warning("rclpy not found. ROS2 service calls will be disabled.")
@@ -1946,6 +1949,8 @@ class PowerController:
                 if tap_count == 1:
                     logger.info("Single tap detected!")
                     self.tap_times.clear()
+                    # Publish button event
+                    self._publish_button_event("single_tap")
                     # Immediate feedback for single tap
                     threading.Thread(
                         target=self.immediate_action_feedback_pattern,
@@ -1960,6 +1965,8 @@ class PowerController:
                     logger.info(
                         f"Double tap detected! ({duration:.2f}s duration)")
                     self.tap_times.clear()
+                    # Publish button event
+                    self._publish_button_event("double_tap")
                     # Immediate feedback for double tap
                     threading.Thread(
                         target=self.immediate_action_feedback_pattern,
@@ -1974,6 +1981,8 @@ class PowerController:
                     logger.info(
                         f"Quadruple tap detected! ({duration:.2f}s duration)")
                     self.tap_times.clear()
+                    # Publish button event
+                    self._publish_button_event("quadruple_tap")
                     # Immediate feedback for quadruple tap
                     threading.Thread(
                         target=self.immediate_action_feedback_pattern,
@@ -2221,6 +2230,9 @@ class PowerController:
         self.shutdown_initiated = True
 
         logger.info("Initiating shutdown sequence...")
+        
+        # Publish button event
+        self._publish_button_event("long_press_shutdown")
 
         # Start 1Hz LED pattern immediately to show shutdown initiated
         threading.Thread(
@@ -2255,6 +2267,121 @@ class PowerController:
             # Don't set self.running = False here - let the system shutdown
             # GPIO pins will automatically revert to input state on halt
 
+    def _create_power_services(self):
+        """Create ROS2 services for power control"""
+        if not self.ros2_node or self.power_services_created:
+            return
+        
+        try:
+            # Create power control services
+            from std_srvs.srv import Trigger
+            self.start_recording_service = self.ros2_node.create_service(
+                Trigger, '/argo/power/start_recording', self._handle_start_recording_service)
+            self.stop_recording_service = self.ros2_node.create_service(
+                Trigger, '/argo/power/stop_recording', self._handle_stop_recording_service)
+            self.toggle_recording_service = self.ros2_node.create_service(
+                Trigger, '/argo/power/toggle_recording', self._handle_toggle_recording_service)
+            self.shutdown_service = self.ros2_node.create_service(
+                Trigger, '/argo/power/shutdown', self._handle_shutdown_service)
+            self.toggle_argo_service = self.ros2_node.create_service(
+                Trigger, '/argo/power/toggle_argo', self._handle_toggle_argo_service)
+            
+            # Create publishers
+            self.power_status_publisher = self.ros2_node.create_publisher(
+                String, '/argo/power/status', 10)
+            self.button_event_publisher = self.ros2_node.create_publisher(
+                String, '/argo/power/button_events', 10)
+            
+            self.power_services_created = True
+            logger.info("Power control ROS2 services created:")
+            logger.info("  - /argo/power/start_recording")
+            logger.info("  - /argo/power/stop_recording")
+            logger.info("  - /argo/power/toggle_recording")
+            logger.info("  - /argo/power/shutdown")
+            logger.info("  - /argo/power/toggle_argo")
+            logger.info("  - /argo/power/status (topic)")
+            logger.info("  - /argo/power/button_events (topic)")
+        except Exception as e:
+            logger.error(f"Failed to create power services: {e}")
+    
+    def _handle_start_recording_service(self, request, response):
+        """Handle /argo/power/start_recording service request"""
+        try:
+            self.start_recording()
+            response.success = True
+            response.message = "Recording started"
+        except Exception as e:
+            response.success = False
+            response.message = f"Error starting recording: {e}"
+        return response
+    
+    def _handle_stop_recording_service(self, request, response):
+        """Handle /argo/power/stop_recording service request"""
+        try:
+            self.stop_recording()
+            response.success = True
+            response.message = "Recording stopped"
+        except Exception as e:
+            response.success = False
+            response.message = f"Error stopping recording: {e}"
+        return response
+    
+    def _handle_toggle_recording_service(self, request, response):
+        """Handle /argo/power/toggle_recording service request"""
+        try:
+            self.toggle_recording()
+            response.success = True
+            response.message = "Recording toggled"
+        except Exception as e:
+            response.success = False
+            response.message = f"Error toggling recording: {e}"
+        return response
+    
+    def _handle_shutdown_service(self, request, response):
+        """Handle /argo/power/shutdown service request"""
+        try:
+            # Initiate shutdown in background thread to allow response
+            import threading
+            threading.Thread(target=self.initiate_shutdown, daemon=True).start()
+            response.success = True
+            response.message = "Shutdown initiated"
+        except Exception as e:
+            response.success = False
+            response.message = f"Error initiating shutdown: {e}"
+        return response
+    
+    def _handle_toggle_argo_service(self, request, response):
+        """Handle /argo/power/toggle_argo service request"""
+        try:
+            self.toggle_argo_service()
+            response.success = True
+            response.message = "Argo service toggled"
+        except Exception as e:
+            response.success = False
+            response.message = f"Error toggling Argo service: {e}"
+        return response
+    
+    def _publish_power_status(self, message: str):
+        """Publish power status update"""
+        if self.power_status_publisher:
+            try:
+                msg = String()
+                msg.data = message
+                self.power_status_publisher.publish(msg)
+            except Exception:
+                pass  # Silently fail
+    
+    def _publish_button_event(self, event: str):
+        """Publish button event"""
+        if self.button_event_publisher:
+            try:
+                msg = String()
+                msg.data = event
+                self.button_event_publisher.publish(msg)
+                logger.info(f"Published button event: {event}")
+            except Exception as e:
+                logger.debug(f"Failed to publish button event: {e}")
+    
     def run(self):
         """Main control loop"""
         logger.info("Power controller starting...")
@@ -2288,15 +2415,29 @@ class PowerController:
             target=self.monitor_wifi_connectivity, daemon=True)
         wifi_thread.start()
 
+        # Create ROS2 services for remote control
+        self._create_power_services()
+        
+        # Publish initial status
+        self._publish_power_status("Power control system running")
+
         try:
-            # Main loop - just keep running while monitoring threads handle GPIO
+            # Main loop - ROS2 spin with monitoring
             last_sync_time = 0
             sync_interval = 60  # Sync every 60 seconds (more frequent for better sync)
             last_recording_sync_time = 0
             recording_sync_interval = 30  # Recording state sync every 30 seconds
+            last_status_publish_time = 0
+            status_publish_interval = 10  # Publish status every 10 seconds
 
-            while self.running:
+            while self.running and (rclpy.ok() if self.ros2_node else True):
                 current_time = time.time()
+                
+                # Spin ROS2 node to process service requests (if available)
+                if self.ros2_node:
+                    rclpy.spin_once(self.ros2_node, timeout_sec=0.1)
+                else:
+                    time.sleep(0.1)
 
                 # Periodic state synchronization
                 if current_time - last_sync_time >= sync_interval:
@@ -2313,18 +2454,19 @@ class PowerController:
                     logger.debug("Performing frequent recording state synchronization...")
                     self.query_current_recording_status()
                     last_recording_sync_time = current_time
-
-                # Sleep in smaller increments to be more responsive to shutdown signals
-                for _ in range(10):  # 10 * 0.1s = 1s total, but check running flag every 0.1s
-                    if not self.running:
-                        break
-                    time.sleep(0.1)
+                
+                # Periodic status publishing
+                if current_time - last_status_publish_time >= status_publish_interval:
+                    status_msg = f"Running | Argo: {'ON' if self.argo_service_running else 'OFF'} | Recording: {'ON' if self.recording_active else 'OFF'}"
+                    self._publish_power_status(status_msg)
+                    last_status_publish_time = current_time
 
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
             self.running = False
 
         finally:
+            self._publish_power_status("Power control system stopping")
             self.cleanup()
 
     def monitor_critical_battery(self):

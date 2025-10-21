@@ -33,3 +33,6 @@ alias rb='read -p "Reboot now? (y/N): " -n 1 -r; echo; if [[ $REPLY =~ ^[Yy]$ ]]
 
 # X11 forwarding setup for VSCode Remote-SSH
 alias ax11='source /home/orangepi/auto_detect_x11.sh'  # Auto-detect and setup X11 forwarding
+
+# vacuum logs and tmp to free up zram space
+alias vacuum='sudo journalctl --vacuum-size=10M ;sudo find /tmp -type f -atime +2 -delete 2>/dev/null && sudo find /tmp -type d -empty -delete 2>/dev/null && echo "Cleaned /tmp"'
