@@ -824,6 +824,41 @@ class LoRaNode(Node):
         if self.is_connected != was_connected:
             self.publish_connection_status()
 
+    def poll_rx_status(self):
+        """Poll RX status for packet reception (since interrupt mode not implemented)"""
+        if not self.is_connected or not self.spi:
+            return
+            
+        try:
+            # Check IRQ flags for RX done
+            irq_flags = self.spi_read_register(SX1276Registers.REG_IRQ_FLAGS)
+            
+            if irq_flags & SX1276Registers.IRQ_RX_DONE:
+                self.get_logger().debug(f"RX Done flag detected: 0x{irq_flags:02X}")
+                # Clear IRQ flags
+                self.spi_write_register(SX1276Registers.REG_IRQ_FLAGS, 0xFF)
+                # Handle the received packet
+                self.handle_packet_received()
+            elif irq_flags & SX1276Registers.IRQ_TX_DONE:
+                self.get_logger().debug(f"TX Done flag detected: 0x{irq_flags:02X}")
+                # Clear IRQ flags
+                self.spi_write_register(SX1276Registers.REG_IRQ_FLAGS, 0xFF)
+                # Return to RX mode
+                self.set_mode(SX1276Registers.MODE_RX_CONTINUOUS)
+            elif irq_flags & SX1276Registers.IRQ_PAYLOAD_CRC_ERROR:
+                self.get_logger().debug(f"CRC Error flag detected: 0x{irq_flags:02X}")
+                # Clear IRQ flags
+                self.spi_write_register(SX1276Registers.REG_IRQ_FLAGS, 0xFF)
+                # Return to RX mode
+                self.set_mode(SX1276Registers.MODE_RX_CONTINUOUS)
+            elif irq_flags != 0:
+                self.get_logger().debug(f"Other IRQ flags: 0x{irq_flags:02X}")
+                # Clear IRQ flags
+                self.spi_write_register(SX1276Registers.REG_IRQ_FLAGS, 0xFF)
+                
+        except Exception as e:
+            self.get_logger().error(f"Error polling RX status: {e}")
+
     def publish_connection_status(self):
         """Publish LoRa connection status"""
         status_msg = Bool()
