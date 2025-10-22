@@ -60,6 +60,7 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import String, Bool, Int32, Float64
 from geometry_msgs.msg import Vector3
+from sensor_msgs.msg import NavSatFix
 from std_srvs.srv import Trigger
 import time
 import json
@@ -218,6 +219,11 @@ class LoRaNode(Node):
             Float64, 'battery_voltage', self.battery_voltage_callback, 10)
         self.sub_human_controlled = self.create_subscription(
             Bool, 'human_controlled', self.human_controlled_callback, 10)
+        # Add GPS position and compass heading subscriptions
+        self.sub_gps_fix = self.create_subscription(
+            NavSatFix, 'fix', self.gps_fix_callback, 10)
+        self.sub_compass = self.create_subscription(
+            Vector3, 'pose', self.compass_callback, 10)
 
         # Services
         self.srv_send_command = self.create_service(
@@ -236,12 +242,28 @@ class LoRaNode(Node):
             'gps_cog': None,
             'battery_voltage': None,
             'human_controlled': None,
+            'gps_latitude': None,
+            'gps_longitude': None,
+            'compass_heading': None,
             'timestamp': None
         }
 
         # Communication timeout tracking
         self.last_rx_time = time.time()
         self.connection_timeout_sec = 60.0  # Consider disconnected after 60s no rx
+        
+        # Ping tracking for shore connection monitoring
+        self.last_ping_time = time.time()
+        self.ping_timeout_sec = 30.0  # Consider disconnected after 30s no pings
+        self.rth_on_ping_loss_enabled = False  # Configurable feature
+        self.declare_parameter('rth_on_ping_loss', False)
+        self.rth_on_ping_loss_enabled = self.get_parameter('rth_on_ping_loss').get_parameter_value().bool_value
+        
+        # Packet sequence tracking for link quality monitoring
+        self.tx_sequence = 0
+        self.rx_sequence = 0
+        self.packet_loss_count = 0
+        self.last_packet_loss_check = time.time()
 
         # Initialize SPI and GPIO
         self.spi = None
@@ -545,6 +567,15 @@ class LoRaNode(Node):
 
     def human_controlled_callback(self, msg):
         self.boat_state['human_controlled'] = msg.data
+    
+    def gps_fix_callback(self, msg):
+        """Receive GPS position from gps node"""
+        self.boat_state['gps_latitude'] = msg.latitude if msg.latitude != 0.0 else None
+        self.boat_state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
+    
+    def compass_callback(self, msg):
+        """Receive compass heading from pose/compass"""
+        self.boat_state['compass_heading'] = msg.z
 
     def tx_data_callback(self, msg):
         """Queue data for transmission"""
@@ -567,17 +598,28 @@ class LoRaNode(Node):
         return response
 
     def build_status_packet(self) -> str:
-        """Build compact status packet for LoRa transmission"""
+        """Build compact status packet for LoRa transmission with data validation"""
         # Use compact JSON format to minimize bandwidth
         self.boat_state['timestamp'] = int(time.time())
+        self.tx_sequence += 1
+
+        # Validate battery voltage (6-9V range)
+        battery_voltage = self.boat_state['battery_voltage']
+        if battery_voltage is not None and (battery_voltage < 6.0 or battery_voltage > 9.0):
+            self.get_logger().warn(f"Battery voltage out of range: {battery_voltage}V (expected 6-9V)")
+            battery_voltage = None  # Don't send invalid data
 
         # Create compact packet (abbreviate keys to save bytes)
         packet = {
             'ts': self.boat_state['timestamp'],  # timestamp
+            'seq': self.tx_sequence,  # sequence number for link quality monitoring
+            'lat': round(self.boat_state['gps_latitude'], 6) if self.boat_state['gps_latitude'] is not None else None,
+            'lon': round(self.boat_state['gps_longitude'], 6) if self.boat_state['gps_longitude'] is not None else None,
             'sog': round(self.boat_state['gps_sog'], 2) if self.boat_state['gps_sog'] is not None else None,
             'cog': round(self.boat_state['gps_cog'], 1) if self.boat_state['gps_cog'] is not None else None,
-            'bat': round(self.boat_state['battery_voltage'], 2) if self.boat_state['battery_voltage'] is not None else None,
-            'hum': self.boat_state['human_controlled']
+            'bat': round(battery_voltage, 2) if battery_voltage is not None else None,
+            'hum': self.boat_state['human_controlled'],
+            'hdg': round(self.boat_state['compass_heading'], 1) if self.boat_state['compass_heading'] is not None else None
         }
 
         # Remove None values to save bytes
@@ -631,14 +673,24 @@ class LoRaNode(Node):
             return False
 
     def transmit_status(self) -> bool:
-        """Transmit boat status via LoRa radio"""
+        """Transmit boat status via LoRa radio with bandwidth monitoring"""
         try:
             # Build status packet
             status_packet = self.build_status_packet()
-
-            # Convert to bytes
             packet_bytes = status_packet.encode('ascii')
-
+            
+            # Bandwidth check: ensure we don't exceed limits
+            packet_size = len(packet_bytes)
+            estimated_air_time = self._estimate_air_time(packet_size)
+            
+            if estimated_air_time > 2.0:  # Warn if packet takes >2 seconds
+                self.get_logger().warn(
+                    f"LoRa packet large: {packet_size} bytes, ~{estimated_air_time:.1f}s air time")
+            
+            # Log bandwidth usage
+            self.get_logger().debug(
+                f"LoRa TX: {packet_size} bytes, air time: ~{estimated_air_time:.2f}s, seq: {self.tx_sequence}")
+            
             # Transmit
             success = self.transmit_packet(packet_bytes)
             if success:
@@ -649,13 +701,38 @@ class LoRaNode(Node):
         except Exception as e:
             self.get_logger().error(f"Error transmitting status: {e}")
             return False
+    
+    def _estimate_air_time(self, packet_size_bytes: int) -> float:
+        """Estimate LoRa air time in seconds based on SF, BW, and packet size"""
+        # Simplified formula for SF7, BW=125kHz, CR=4/5
+        # Actual air time depends on preamble, header, payload, CRC
+        # Rough estimate: ~8-12 ms per byte at SF7, ~40-50 ms per byte at SF9
+        sf_multiplier = {7: 0.010, 8: 0.015, 9: 0.040, 10: 0.080, 11: 0.160, 12: 0.320}
+        multiplier = sf_multiplier.get(self.spreading_factor, 0.040)
+        return packet_size_bytes * multiplier
 
     def parse_received_data(self, data: str):
-        """Parse received LoRa data and extract commands"""
+        """Parse received LoRa data and extract commands with ping handling"""
         try:
             # Try to parse as JSON command
             try:
                 parsed = json.loads(data)
+                
+                # Handle ping messages
+                if parsed.get('cmd') == 'ping':
+                    self.last_ping_time = time.time()
+                    self.get_logger().debug(f"Received ping #{parsed.get('seq', '?')}")
+                    return
+                
+                # Handle sequence numbers for link quality monitoring
+                if 'seq' in parsed:
+                    expected_seq = self.rx_sequence + 1
+                    received_seq = parsed['seq']
+                    if received_seq != expected_seq:
+                        self.packet_loss_count += 1
+                        self.get_logger().debug(f"Packet loss detected: expected {expected_seq}, got {received_seq}")
+                    self.rx_sequence = received_seq
+                
                 if 'cmd' in parsed:
                     command = parsed['cmd']
                     self.get_logger().info(
@@ -687,20 +764,47 @@ class LoRaNode(Node):
             self.get_logger().debug(f"Could not parse received data: {e}")
 
     def check_connection_health(self):
-        """Check LoRa connection health and update status"""
+        """Check LoRa connection health and optionally trigger RTH"""
         current_time = time.time()
         was_connected = self.is_connected
 
-        # Check if we've received data recently
-        if current_time - self.last_rx_time > self.connection_timeout_sec:
+        # Check ping timeout for shore connection
+        time_since_ping = current_time - self.last_ping_time
+        if time_since_ping > self.ping_timeout_sec:
             self.is_connected = False
             if was_connected:
                 self.get_logger().warn(
-                    f"LoRa connection timeout - no data for {self.connection_timeout_sec}s")
+                    f"Shore ping timeout - no pings for {time_since_ping:.0f}s")
+                
+                # Optional: Trigger RTH on connection loss
+                if self.rth_on_ping_loss_enabled:
+                    self.get_logger().warn("Triggering RETURN TO HOME due to shore connection loss")
+                    cmd_msg = String()
+                    cmd_msg.data = 'return_home'
+                    self.pub_remote_command.publish(cmd_msg)
+        else:
+            if not self.is_connected and self.spi:
+                self.is_connected = True
+                self.get_logger().info("Shore connection restored")
+        
+        # Check if we've received data recently (fallback)
+        if current_time - self.last_rx_time > self.connection_timeout_sec:
+            if self.is_connected:  # Only warn if we thought we were connected
+                self.get_logger().warn(
+                    f"LoRa data timeout - no data for {self.connection_timeout_sec}s")
         else:
             if not self.is_connected and self.spi:
                 self.is_connected = True
                 self.get_logger().info("LoRa connection restored")
+
+        # Log packet loss statistics periodically
+        if current_time - self.last_packet_loss_check > 60.0:  # Every minute
+            if self.tx_sequence > 0:
+                loss_rate = (self.packet_loss_count / self.tx_sequence) * 100
+                self.get_logger().info(f"Packet loss rate: {loss_rate:.1f}% ({self.packet_loss_count}/{self.tx_sequence})")
+                if loss_rate > 10.0:
+                    self.get_logger().warn(f"High packet loss detected: {loss_rate:.1f}%")
+            self.last_packet_loss_check = current_time
 
         # Publish connection status if changed
         if self.is_connected != was_connected:

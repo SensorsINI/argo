@@ -100,9 +100,20 @@ class ArgoWebDashboard(Node):
             'distance_to_home': None,
             'bearing_to_home': None,
             
+            # Data source tracking
+            'data_source': 'WiFi',  # 'WiFi', 'LoRa', or 'Offline'
+            'wifi_data_age': None,  # seconds since last WiFi update
+            'lora_data_age': None,  # seconds since last LoRa update
+            'lora_signal_strength': None,  # RSSI in dBm
+            'lora_packet_loss_rate': None,  # percentage
+            
             # Timestamps
             'last_update': time.time()
         }
+        
+        # Timestamps for each data type
+        self.last_wifi_update = {}
+        self.last_lora_update = {}
         
         # Initialize ArgoNodeManager for system status
         self.argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -117,17 +128,29 @@ class ArgoWebDashboard(Node):
         self.recording_stop_client = self.create_client(Trigger, '/argo/recording/stop')
         self.controller_switch_client = self.create_client(Trigger, '/controller_node/switch_controller')
         
-        # ROS2 Subscriptions for real-time data
-        self.create_subscription(Bool, '/human_controlled', self.human_control_cb, 10)
-        self.create_subscription(Float32, '/battery_voltage', self.battery_voltage_cb, 10)
-        self.create_subscription(Float32, '/battery_remaining_pct', self.battery_pct_cb, 10)
-        self.create_subscription(Vector3, '/compass', self.compass_cb, 10)
-        self.create_subscription(Vector3, '/pose', self.pose_cb, 10)
-        self.create_subscription(Float64, '/gps_cog', self.gps_cog_cb, 10)
-        self.create_subscription(Float64, '/gps_sog', self.gps_sog_cb, 10)
-        self.create_subscription(Vector3, '/anem_speed_angle_temp', self.wind_cb, 10)
-        self.create_subscription(NavSatFix, '/fix', self.gps_fix_cb, 10)
+        # ROS2 Subscriptions for real-time data (WiFi sources)
+        self.create_subscription(Bool, '/human_controlled', lambda msg: self.human_control_cb(msg, 'wifi'), 10)
+        self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), 10)
+        self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), 10)
+        self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), 10)
+        self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), 10)
+        self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), 10)
+        self.create_subscription(Float64, '/gps_sog', lambda msg: self.gps_sog_cb(msg, 'wifi'), 10)
+        self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), 10)
+        self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), 10)
         self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
+        
+        # LoRa sources (fallback when WiFi unavailable)
+        self.create_subscription(Bool, 'lora/human_controlled', lambda msg: self.human_control_cb(msg, 'lora'), 10)
+        self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), 10)
+        self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), 10)
+        self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), 10)
+        self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), 10)
+        self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), 10)
+        
+        # LoRa-specific monitoring
+        self.create_subscription(Int32, 'lora/rssi', self.lora_rssi_cb, 10)
+        self.create_subscription(String, 'lora/last_contact', self.lora_contact_cb, 10)
         
         # Timer for periodic status updates
         self.create_timer(1/UPDATE_RATE, self.update_system_status)
@@ -148,45 +171,155 @@ class ArgoWebDashboard(Node):
     
     # ==================== ROS2 Callbacks ====================
     
-    def human_control_cb(self, msg):
+    def human_control_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['human_controlled'] = msg.data
+            # Always update if this is newer data or first data
+            if source == 'wifi':
+                self.last_wifi_update['human_controlled'] = now
+                self.state['human_controlled'] = msg.data
+                self.state['data_source'] = 'WiFi'
+            elif source == 'lora':
+                self.last_lora_update['human_controlled'] = now
+                # Only use LoRa data if WiFi is stale (>2 seconds old)
+                wifi_age = now - self.last_wifi_update.get('human_controlled', 0)
+                if wifi_age > 2.0:
+                    self.state['human_controlled'] = msg.data
+                    self.state['data_source'] = 'LoRa'
+            
+            self._update_data_age_indicators()
     
-    def battery_voltage_cb(self, msg):
+    def battery_voltage_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['battery_voltage'] = msg.data
+            if source == 'wifi':
+                self.last_wifi_update['battery_voltage'] = now
+                self.state['battery_voltage'] = msg.data
+                self.state['data_source'] = 'WiFi'
+            elif source == 'lora':
+                self.last_lora_update['battery_voltage'] = now
+                wifi_age = now - self.last_wifi_update.get('battery_voltage', 0)
+                if wifi_age > 2.0:
+                    self.state['battery_voltage'] = msg.data
+                    self.state['data_source'] = 'LoRa'
+            
+            self._update_data_age_indicators()
     
-    def battery_pct_cb(self, msg):
+    def battery_pct_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['battery_pct'] = msg.data
+            if source == 'wifi':
+                self.last_wifi_update['battery_pct'] = now
+                self.state['battery_pct'] = msg.data
+                self.state['data_source'] = 'WiFi'
+            
+            self._update_data_age_indicators()
     
-    def compass_cb(self, msg):
+    def compass_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['compass_heading'] = msg.z
+            if source == 'wifi':
+                self.last_wifi_update['compass_heading'] = now
+                self.state['compass_heading'] = msg.z
+                self.state['data_source'] = 'WiFi'
+            elif source == 'lora':
+                self.last_lora_update['compass_heading'] = now
+                wifi_age = now - self.last_wifi_update.get('compass_heading', 0)
+                if wifi_age > 2.0:
+                    self.state['compass_heading'] = msg.z
+                    self.state['data_source'] = 'LoRa'
+            
+            self._update_data_age_indicators()
     
-    def pose_cb(self, msg):
+    def pose_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['compass_heading'] = msg.z
+            if source == 'wifi':
+                self.last_wifi_update['compass_heading'] = now
+                self.state['compass_heading'] = msg.z
+                self.state['data_source'] = 'WiFi'
+            
+            self._update_data_age_indicators()
     
-    def gps_cog_cb(self, msg):
+    def gps_cog_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['gps_cog'] = msg.data
+            if source == 'wifi':
+                self.last_wifi_update['gps_cog'] = now
+                self.state['gps_cog'] = msg.data
+                self.state['data_source'] = 'WiFi'
+            elif source == 'lora':
+                self.last_lora_update['gps_cog'] = now
+                wifi_age = now - self.last_wifi_update.get('gps_cog', 0)
+                if wifi_age > 2.0:
+                    self.state['gps_cog'] = msg.data
+                    self.state['data_source'] = 'LoRa'
+            
+            self._update_data_age_indicators()
     
-    def gps_sog_cb(self, msg):
+    def gps_sog_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['gps_sog'] = msg.data
+            if source == 'wifi':
+                self.last_wifi_update['gps_sog'] = now
+                self.state['gps_sog'] = msg.data
+                self.state['data_source'] = 'WiFi'
+            elif source == 'lora':
+                self.last_lora_update['gps_sog'] = now
+                wifi_age = now - self.last_wifi_update.get('gps_sog', 0)
+                if wifi_age > 2.0:
+                    self.state['gps_sog'] = msg.data
+                    self.state['data_source'] = 'LoRa'
+            
+            self._update_data_age_indicators()
     
-    def wind_cb(self, msg):
+    def wind_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['wind_speed'] = msg.x
-            self.state['wind_angle'] = msg.y
-            self.state['wind_temp'] = msg.z
+            if source == 'wifi':
+                self.last_wifi_update['wind'] = now
+                self.state['wind_speed'] = msg.x
+                self.state['wind_angle'] = msg.y
+                self.state['wind_temp'] = msg.z
+                self.state['data_source'] = 'WiFi'
+            
+            self._update_data_age_indicators()
     
-    def gps_fix_cb(self, msg):
+    def gps_fix_cb(self, msg, source='wifi'):
+        """Unified callback that tracks source and timestamp"""
+        now = time.time()
+        
         with self.state_lock:
-            self.state['gps_locked'] = (msg.status.status >= 0)
-            self.state['gps_latitude'] = msg.latitude if msg.latitude != 0.0 else None
-            self.state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
+            if source == 'wifi':
+                self.last_wifi_update['gps_fix'] = now
+                self.state['gps_locked'] = (msg.status.status >= 0)
+                self.state['gps_latitude'] = msg.latitude if msg.latitude != 0.0 else None
+                self.state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
+                self.state['data_source'] = 'WiFi'
+            elif source == 'lora':
+                self.last_lora_update['gps_fix'] = now
+                wifi_age = now - self.last_wifi_update.get('gps_fix', 0)
+                if wifi_age > 2.0:
+                    self.state['gps_locked'] = (msg.status.status >= 0)
+                    self.state['gps_latitude'] = msg.latitude if msg.latitude != 0.0 else None
+                    self.state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
+                    self.state['data_source'] = 'LoRa'
             
             # Set home position on first valid fix
             if (self.state['home_latitude'] is None and 
@@ -206,6 +339,47 @@ class ArgoWebDashboard(Node):
                 self.state['bearing_to_home'] = self._calculate_bearing(
                     self.state['gps_latitude'], self.state['gps_longitude'],
                     self.state['home_latitude'], self.state['home_longitude'])
+            
+            self._update_data_age_indicators()
+    
+    def lora_rssi_cb(self, msg):
+        """Receive LoRa signal strength"""
+        with self.state_lock:
+            self.state['lora_signal_strength'] = msg.data
+    
+    def lora_contact_cb(self, msg):
+        """Receive LoRa last contact timestamp"""
+        with self.state_lock:
+            # Parse timestamp and calculate age
+            try:
+                contact_time = datetime.strptime(msg.data, "%Y-%m-%d %H:%M:%S").timestamp()
+                self.state['lora_data_age'] = time.time() - contact_time
+            except:
+                pass
+    
+    def _update_data_age_indicators(self):
+        """Update data age indicators for both WiFi and LoRa sources"""
+        now = time.time()
+        
+        # Calculate WiFi data age
+        if self.last_wifi_update:
+            self.state['wifi_data_age'] = now - max(self.last_wifi_update.values())
+        else:
+            self.state['wifi_data_age'] = None
+        
+        # Calculate LoRa data age
+        if self.last_lora_update:
+            self.state['lora_data_age'] = now - max(self.last_lora_update.values())
+        else:
+            self.state['lora_data_age'] = None
+        
+        # Determine overall data source status
+        if self.state['wifi_data_age'] is not None and self.state['wifi_data_age'] < 5.0:
+            self.state['data_source'] = 'WiFi'
+        elif self.state['lora_data_age'] is not None and self.state['lora_data_age'] < 15.0:
+            self.state['data_source'] = 'LoRa'
+        else:
+            self.state['data_source'] = 'Offline'
     
     def controller_state_cb(self, msg):
         with self.state_lock:

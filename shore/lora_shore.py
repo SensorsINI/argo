@@ -30,6 +30,7 @@ try:
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
     from std_msgs.msg import String, Float64, Bool, Int32
     from geometry_msgs.msg import Vector3
+    from sensor_msgs.msg import NavSatFix
 except ImportError as e:
     print("=" * 70)
     print("ERROR: ROS2 (rclpy) not found!")
@@ -121,14 +122,16 @@ class LoRaShoreNode(Node):
             depth=1
         )
         
-        # Publishers - Republish Argo data with 'argo/' prefix
-        self.pub_argo_gps_sog = self.create_publisher(Float64, 'argo/gps_sog', self.standard_qos)
-        self.pub_argo_gps_cog = self.create_publisher(Float64, 'argo/gps_cog', self.standard_qos)
-        self.pub_argo_battery = self.create_publisher(Float64, 'argo/battery_voltage', self.standard_qos)
-        self.pub_argo_human_controlled = self.create_publisher(Bool, 'argo/human_controlled', self.persistent_qos)
-        self.pub_argo_rssi = self.create_publisher(Int32, 'argo/lora_rssi', self.standard_qos)
-        self.pub_argo_last_contact = self.create_publisher(String, 'argo/last_contact', self.standard_qos)
-        self.pub_argo_raw_data = self.create_publisher(String, 'argo/lora_raw', self.standard_qos)
+        # Publishers - Republish Argo data with 'lora/' prefix
+        self.pub_argo_gps_sog = self.create_publisher(Float64, 'lora/gps_sog', self.standard_qos)
+        self.pub_argo_gps_cog = self.create_publisher(Float64, 'lora/gps_cog', self.standard_qos)
+        self.pub_argo_battery = self.create_publisher(Float64, 'lora/battery_voltage', self.standard_qos)
+        self.pub_argo_human_controlled = self.create_publisher(Bool, 'lora/human_controlled', self.persistent_qos)
+        self.pub_argo_gps_fix = self.create_publisher(NavSatFix, 'lora/fix', self.standard_qos)
+        self.pub_argo_compass = self.create_publisher(Vector3, 'lora/compass', self.standard_qos)
+        self.pub_argo_rssi = self.create_publisher(Int32, 'lora/rssi', self.standard_qos)
+        self.pub_argo_last_contact = self.create_publisher(String, 'lora/last_contact', self.standard_qos)
+        self.pub_argo_raw_data = self.create_publisher(String, 'lora/raw', self.standard_qos)
         self.pub_shore_status = self.create_publisher(String, 'shore/lora_status', self.persistent_qos)
         
         # Subscriber - Receive commands to send to Argo
@@ -143,6 +146,10 @@ class LoRaShoreNode(Node):
         self.last_packet_time = None
         self.packet_count = 0
         self.command_count = 0
+        
+        # Ping mechanism
+        self.ping_sequence = 0
+        self.ping_timer = self.create_timer(5.0, self.send_ping)
         
         # Start serial reader thread
         self.running = True
@@ -272,26 +279,41 @@ class LoRaShoreNode(Node):
             raw_msg.data = raw_json
             self.pub_argo_raw_data.publish(raw_msg)
             
-            # Extract and publish individual fields
-            if 'gps_sog' in packet:
+            # Parse abbreviated keys and publish to lora/ prefixed topics
+            if 'sog' in packet:
                 msg = Float64()
-                msg.data = float(packet['gps_sog'])
+                msg.data = float(packet['sog'])
                 self.pub_argo_gps_sog.publish(msg)
             
-            if 'gps_cog' in packet:
+            if 'cog' in packet:
                 msg = Float64()
-                msg.data = float(packet['gps_cog'])
+                msg.data = float(packet['cog'])
                 self.pub_argo_gps_cog.publish(msg)
             
-            if 'battery_voltage' in packet:
+            if 'bat' in packet:
                 msg = Float64()
-                msg.data = float(packet['battery_voltage'])
+                msg.data = float(packet['bat'])
                 self.pub_argo_battery.publish(msg)
             
-            if 'human_controlled' in packet:
+            if 'hum' in packet:
                 msg = Bool()
-                msg.data = bool(packet['human_controlled'])
+                msg.data = bool(packet['hum'])
                 self.pub_argo_human_controlled.publish(msg)
+            
+            # GPS position
+            if 'lat' in packet and 'lon' in packet:
+                fix_msg = NavSatFix()
+                fix_msg.latitude = float(packet['lat'])
+                fix_msg.longitude = float(packet['lon'])
+                fix_msg.header.stamp = self.get_clock().now().to_msg()
+                fix_msg.header.frame_id = 'map'
+                self.pub_argo_gps_fix.publish(fix_msg)
+            
+            # Compass heading
+            if 'hdg' in packet:
+                heading_msg = Vector3()
+                heading_msg.z = float(packet['hdg'])
+                self.pub_argo_compass.publish(heading_msg)
             
             # Publish last contact time
             contact_msg = String()
@@ -304,6 +326,20 @@ class LoRaShoreNode(Node):
         except Exception as e:
             if not self.shutting_down:
                 self.get_logger().error(f"Error processing Argo packet: {e}")
+    
+    def send_ping(self):
+        """Send periodic ping to Argo for connection monitoring"""
+        if not self.ser or not self.ser.is_open:
+            return
+        
+        try:
+            self.ping_sequence += 1
+            ping_msg = json.dumps({'cmd': 'ping', 'seq': self.ping_sequence}, separators=(',', ':'))
+            self.ser.write(ping_msg.encode('utf-8'))
+            self.ser.flush()
+            self.get_logger().debug(f"Sent ping #{self.ping_sequence}")
+        except Exception as e:
+            self.get_logger().debug(f"Error sending ping: {e}")
     
     def remote_command_callback(self, msg):
         """Receive command from ROS2 and send to Argo via LoRa"""
