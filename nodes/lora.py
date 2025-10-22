@@ -231,7 +231,7 @@ class LoRaNode(Node):
 
         # State tracking
         self.debug_mode = debug_mode
-        self.is_connected = False
+        self.is_connected = False  # Start disconnected until we receive data
         self.last_rssi = 0
         self.tx_queue = []  # Queue for outgoing messages
         self.rx_lock = threading.Lock()  # Lock for thread-safe operations
@@ -264,6 +264,15 @@ class LoRaNode(Node):
         self.rx_sequence = 0
         self.packet_loss_count = 0
         self.last_packet_loss_check = time.time()
+        
+        # Throttled reception logging for startup debugging
+        self.first_reception_logged = False
+        self.last_reception_log_time = 0.0
+        self.reception_log_interval = 60.0  # Log reception success once per minute
+        
+        # Connection status publishing
+        self.last_connection_status_publish = time.time()
+        self.connection_status_publish_interval = 120.0  # Publish status at least every 2 minutes
 
         # Initialize SPI and GPIO
         self.spi = None
@@ -306,7 +315,7 @@ class LoRaNode(Node):
 
             self.get_logger().info(
                 f"SPI initialized on bus {self.spi_bus}, device {self.spi_device}")
-            self.is_connected = True
+            # Note: is_connected remains False until we receive data from shore
 
         except Exception as e:
             import traceback
@@ -317,15 +326,15 @@ class LoRaNode(Node):
             self.is_connected = False
 
         # Initialize LoRa module
-        if self.is_connected:
+        if self.spi:  # Only if SPI is available
             if not self.initialize_lora_module():
-                self.is_connected = False
+                self.get_logger().error("LoRa module initialization failed")
 
         # Setup GPIO interrupt for packet reception
         # Note: gpiod interrupt handling requires event monitoring in a separate thread
         # For now, we rely on polling in the timer callback
         # TODO: Implement gpiod event monitoring for DIO0 interrupt (line 271)
-        if self.is_connected:
+        if self.spi:
             self.get_logger().info("LoRa using polling mode (interrupt mode not yet implemented with gpiod)")
 
         # Timers
@@ -536,6 +545,16 @@ class LoRaNode(Node):
 
             self.get_logger().debug(
                 f"Packet received: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
+
+            # Throttled reception success logging for startup debugging
+            current_time = time.time()
+            if not self.first_reception_logged:
+                self.get_logger().info(f"✅ FIRST PACKET RECEIVED: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
+                self.first_reception_logged = True
+                self.last_reception_log_time = current_time
+            elif current_time - self.last_reception_log_time >= self.reception_log_interval:
+                self.get_logger().info(f"📡 LoRa reception active: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
+                self.last_reception_log_time = current_time
 
             # Strip Waveshare stream mode header if present
             # Expected header: [0x00, 0x00, 0x12, 0x11]
@@ -781,6 +800,7 @@ class LoRaNode(Node):
         """Check LoRa connection health and optionally trigger RTH"""
         current_time = time.time()
         was_connected = self.is_connected
+        self.get_logger().debug(f"Health check: was_connected={was_connected}, current_time={current_time}")
 
         # Check ping timeout for shore connection
         time_since_ping = current_time - self.last_ping_time
@@ -799,7 +819,7 @@ class LoRaNode(Node):
         else:
             if not self.is_connected and self.spi:
                 self.is_connected = True
-                self.get_logger().info("Shore connection restored")
+                self.get_logger().info("Shore connection established")
         
         # Check if we've received data recently (fallback)
         if current_time - self.last_rx_time > self.connection_timeout_sec:
@@ -809,7 +829,7 @@ class LoRaNode(Node):
         else:
             if not self.is_connected and self.spi:
                 self.is_connected = True
-                self.get_logger().info("LoRa connection restored")
+                self.get_logger().info("LoRa connection established")
 
         # Log packet loss statistics periodically
         if current_time - self.last_packet_loss_check > 60.0:  # Every minute
@@ -820,13 +840,20 @@ class LoRaNode(Node):
                     self.get_logger().warn(f"High packet loss detected: {loss_rate:.1f}%")
             self.last_packet_loss_check = current_time
 
-        # Publish connection status if changed
-        if self.is_connected != was_connected:
+        # Publish connection status if changed or if enough time has passed
+        time_since_last_publish = current_time - self.last_connection_status_publish
+        self.get_logger().debug(f"Connection status check: time_since_last_publish={time_since_last_publish:.1f}s, interval={self.connection_status_publish_interval}s")
+        
+        if self.is_connected != was_connected or time_since_last_publish >= self.connection_status_publish_interval:
             self.publish_connection_status()
+            self.last_connection_status_publish = current_time
+            self.get_logger().info(f"Published connection status: {self.is_connected} (changed: {self.is_connected != was_connected}, periodic: {time_since_last_publish >= self.connection_status_publish_interval})")
+        else:
+            self.get_logger().debug(f"Connection status not published: no change and {time_since_last_publish:.1f}s < {self.connection_status_publish_interval}s")
 
     def poll_rx_status(self):
         """Poll RX status for packet reception (since interrupt mode not implemented)"""
-        if not self.is_connected or not self.spi:
+        if not self.spi:
             return
             
         try:

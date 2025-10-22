@@ -142,10 +142,6 @@ The Argo LoRa module hardware was verified working:
 - ✅ **Packet delivery**: 100% success rate in testing
 - ✅ **Bidirectional**: Full two-way communication achieved!
 
-### Alternative Options (Not Needed Now!)
-If Waveshare compatibility hadn't worked:
-- Get SX1276-based USB module for shore side
-- Or get second Waveshare for Argo side (SX1262 ↔ SX1262)
 
 **But we don't need these anymore - it works!** 🎉
 
@@ -204,17 +200,7 @@ ser.write(b"AT+EXIT\r\n")
 ser.close()
 ```
 
-## Lessons Learned
 
-1. **Chip compatibility matters**: Different LoRa chip generations (SX1276 vs SX1262) may not be compatible even with matching high-level parameters.
-
-2. **Firmware limitations**: Consumer-grade LoRa USB modules often have simplified firmware that doesn't expose all configuration options.
-
-3. **Hidden defaults**: Parameters like CRC mode, header type, and preamble length are critical but often hidden in firmware.
-
-4. **Hardware verification first**: Always verify hardware works with matching modules before attempting cross-chip-generation communication.
-
-5. **Documentation importance**: User guides may not explicitly mention chip-generation compatibility issues.
 
 ## Next Steps
 
@@ -226,15 +212,5 @@ When you're ready to implement shore-side LoRa reception:
 4. **Create** `nodes/remote_command_handler.py` for command processing
 5. **Integrate** with Foxglove for visualization and command sending
 
-## Contact Information
 
-If testing with matching hardware later:
-- Current Argo configuration is working and tested
-- All parameters are documented in `nodes/lora.py`
-- Configuration scripts are in `/tmp/` on tobidh87 (if still available)
-- Test date: October 20, 2025
-
----
-
-**Status**: ✅ **FULLY OPERATIONAL!** Both Argo SX1276 and Waveshare SX1262 working bidirectionally with stream mode header. Ready for shore-side ROS2 integration!
 
