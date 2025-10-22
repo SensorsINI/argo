@@ -77,7 +77,7 @@ The Waveshare module should be configured with:
 - **Mode**: Stream (1)
 - **Encryption**: Disabled (KEY=0)
 
-**See `../nodes/README-LORA-TO-WAVESHARE.md` for AT command configuration details.**
+**See `../nodes/README-LORA-TO-WAVESHARE.md` for AT command configuration details and critical Waveshare packet format requirements.**
 
 ### Serial Port Setup
 

@@ -333,6 +333,8 @@ class LoRaNode(Node):
             self.tx_interval, self.transmit_status)  # Periodic status
         self.health_timer = self.create_timer(
             5.0, self.check_connection_health)  # Health check
+        self.rx_poll_timer = self.create_timer(
+            1.0, self.poll_rx_status)  # Poll RX status every second
 
         self.get_logger().info("LoRa node ready. Monitoring radio communication...")
 
@@ -477,7 +479,9 @@ class LoRaNode(Node):
     def on_dio0_interrupt(self, channel):
         """GPIO interrupt callback for DIO0 (packet received/transmitted)"""
         try:
+            self.get_logger().debug("=== DIO0 INTERRUPT TRIGGERED ===")
             irq_flags = self.spi_read_register(SX1276Registers.REG_IRQ_FLAGS)
+            self.get_logger().debug(f"IRQ flags: 0x{irq_flags:02X}")
 
             # Clear IRQ flags
             self.spi_write_register(SX1276Registers.REG_IRQ_FLAGS, 0xFF)
@@ -497,6 +501,8 @@ class LoRaNode(Node):
     def handle_packet_received(self):
         """Handle received packet"""
         try:
+            self.get_logger().debug("=== PACKET RECEIVED ===")
+            
             # Read packet SNR and RSSI
             snr = self.spi_read_register(SX1276Registers.REG_PKT_SNR_VALUE)
             rssi_raw = self.spi_read_register(
@@ -513,10 +519,12 @@ class LoRaNode(Node):
             # Read received bytes count
             rx_nb_bytes = self.spi_read_register(
                 SX1276Registers.REG_RX_NB_BYTES)
+            self.get_logger().debug(f"RX bytes count: {rx_nb_bytes}")
 
             # Read current RX address
             fifo_rx_current_addr = self.spi_read_register(
                 SX1276Registers.REG_FIFO_RX_CURRENT_ADDR)
+            self.get_logger().debug(f"FIFO RX current addr: 0x{fifo_rx_current_addr:02X}")
 
             # Set FIFO address pointer
             self.spi_write_register(
@@ -524,6 +532,7 @@ class LoRaNode(Node):
 
             # Read payload
             payload = self.spi_read_fifo(rx_nb_bytes)
+            self.get_logger().debug(f"Payload raw bytes: {payload.hex()}")
 
             self.get_logger().debug(
                 f"Packet received: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
@@ -762,6 +771,11 @@ class LoRaNode(Node):
 
         except Exception as e:
             self.get_logger().debug(f"Could not parse received data: {e}")
+        
+        # Always publish received data for monitoring (regardless of parsing success)
+        rx_msg = String()
+        rx_msg.data = data
+        self.pub_rx_data.publish(rx_msg)
 
     def check_connection_health(self):
         """Check LoRa connection health and optionally trigger RTH"""

@@ -335,9 +335,14 @@ class LoRaShoreNode(Node):
         try:
             self.ping_sequence += 1
             ping_msg = json.dumps({'cmd': 'ping', 'seq': self.ping_sequence}, separators=(',', ':'))
-            self.ser.write(ping_msg.encode('utf-8'))
+            
+            # Add Waveshare stream mode header: [0x00, 0x00, 0x12, 0x11]
+            waveshare_header = bytes([0x00, 0x00, 0x12, 0x11])
+            packet_with_header = waveshare_header + ping_msg.encode('utf-8')
+            
+            self.ser.write(packet_with_header)
             self.ser.flush()
-            self.get_logger().debug(f"Sent ping #{self.ping_sequence}")
+            self.get_logger().debug(f"Sent ping #{self.ping_sequence} with Waveshare header")
         except Exception as e:
             self.get_logger().debug(f"Error sending ping: {e}")
     
@@ -357,9 +362,12 @@ class LoRaShoreNode(Node):
             self.command_count += 1
             self.get_logger().info(f"Sending command to Argo: {command}")
             
-            # Send command as plain text (Waveshare transparent mode)
-            # Argo will receive it with Waveshare header already stripped by firmware
-            self.ser.write(command.encode('utf-8'))
+            # Send command with Waveshare stream mode header
+            # Add Waveshare stream mode header: [0x00, 0x00, 0x12, 0x11]
+            waveshare_header = bytes([0x00, 0x00, 0x12, 0x11])
+            packet_with_header = waveshare_header + command.encode('utf-8')
+            
+            self.ser.write(packet_with_header)
             self.ser.flush()
             
             self.get_logger().info(f"Command sent: {command} ({len(command)} bytes)")
