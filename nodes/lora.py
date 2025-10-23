@@ -56,7 +56,6 @@ Key Features:
 """
 
 import rclpy
-from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import String, Bool, Int32, Float64
 from geometry_msgs.msg import Vector3
@@ -70,6 +69,10 @@ import sys
 import os
 from typing import Optional, Dict, Any
 import threading
+
+# Import ArgoBaseNode for standardized functionality
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from argo_base_node import ArgoBaseNode
 
 # Import safe publishing utilities for context validation
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'support'))
@@ -149,7 +152,7 @@ LORA_RST_LINE = 256   # PI0 (Pin 29) - Reset
 LORA_IRQ_LINE = 271   # PI15 (Pin 31) - Interrupt/DIO0
 
 
-class LoRaNode(Node):
+class LoRaNode(ArgoBaseNode):
     """
     ROS2 LoRa communication node for Argo autonomous sailboat.
 
@@ -206,8 +209,7 @@ class LoRaNode(Node):
         self.pub_rx_data = self.create_publisher(String, 'lora_rx_data', 10)
         self.pub_remote_command = self.create_publisher(
             String, 'lora_remote_command', 10)
-        self.pub_connection_status = self.create_publisher(
-            Bool, 'lora_connection_status', 10)
+        # Health status is now handled by ArgoBaseNode
         self.pub_signal_strength = self.create_publisher(
             Int32, 'lora_signal_strength', 10)
 
@@ -943,17 +945,11 @@ class LoRaNode(Node):
             self.get_logger().error(f"Error polling RX status: {e}")
 
     def publish_connection_status(self):
-        """Publish LoRa connection status"""
-        # Use cached context validity for performance
-        if self.context_valid:
-            status_msg = Bool()
-            status_msg.data = self.is_connected
-            safe_publish(self.pub_connection_status, status_msg, self)
-
+        """Update LoRa connection status using ArgoBaseNode health methods"""
         if self.is_connected:
-            safe_log(self, 'debug', "LoRa connection status: CONNECTED")
+            self.set_healthy("LoRa connected - receiving shore pings")
         else:
-            safe_log(self, 'debug', "LoRa connection status: DISCONNECTED")
+            self.set_unhealthy("LoRa disconnected - no shore communication")
 
     def destroy_node(self):
         """Cleanup on node shutdown"""
@@ -1010,11 +1006,9 @@ class LoRaNode(Node):
 
 
 def main(args=None):
-    """Main function"""
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(
-        description='LoRa Communication Node for Argo',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    """Main function using ArgoBaseNode standardized approach"""
+    parser = ArgoBaseNode.create_standard_parser(
+        'LoRa Communication Node for Argo',
         epilog="""
 This ROS2 node manages LoRa radio communication for the Argo autonomous sailboat:
 - Low-bandwidth bidirectional communication via SPI
@@ -1027,7 +1021,7 @@ Topics:
   Publishes:
     /lora_rx_data: String - Raw received data
     /lora_remote_command: String - Parsed commands
-    /lora_connection_status: Bool - Connection health
+    /lora_health: Bool - Connection health (ArgoBaseNode)
     /lora_signal_strength: Int32 - RSSI signal strength (dBm)
     
   Subscribes:
@@ -1039,6 +1033,7 @@ Topics:
 
 Services:
   /lora/send_command: Trigger - Send immediate status update
+  /lora_node/health: Trigger - Health status service endpoint
 
 Parameters:
   spi_bus: SPI bus number (default: 1 for SPI1)
@@ -1061,43 +1056,14 @@ Hardware:
     - IRQ:  Pin 31 (PI15/LORA_OUT/DIO0)
         """
     )
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable debug logging')
-
-    # Parse known args to allow ROS2 arguments to pass through
-    parsed_args, unknown_args = parser.parse_known_args(args)
-
-    # Initialize ROS2 with remaining arguments
-    rclpy.init(args=unknown_args)
-    node = None
-
+    
     try:
-        node = LoRaNode(debug_mode=parsed_args.debug)
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        if node:
-            safe_log(node, 'info', "LoRa node interrupted, shutting down gracefully...")
-    except ExternalShutdownException:
-        if node:
-            safe_log(node, 'info', "External shutdown received, exiting gracefully...")
+        ArgoBaseNode.run_node(LoRaNode, args, parser)
     except Exception as e:
-        if node:
-            safe_log(node, 'error', f"Unexpected error: {e}")
-        else:
-            print(f"Error before node creation: {e}")
-    finally:
-        # Clean shutdown
-        if node:
-            try:
-                node.destroy_node()
-            except Exception as e:
-                print(f"[ERROR] Error in destroy_node(): {e}")
-
-        try:
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            pass
+        # Handle LoRa-specific errors
+        print(f"CRITICAL: Failed to initialize LoRa node: {e}")
+        print("CRITICAL: Check SPI permissions and hardware connections.")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

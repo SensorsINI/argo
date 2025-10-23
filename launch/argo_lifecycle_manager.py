@@ -209,7 +209,7 @@ class ArgoLifecycleManager:
         # Also keep health topics for backward compatibility
         health_topics = {
             'gps.py': '/gps_health',
-            'lora.py': '/lora_connection_status', 
+            'lora.py': '/lora_health',  # Updated to use ArgoBaseNode health topic
             'anem.py': '/anem_health',
             'battery_water.py': '/battery_water_health',
             'rudder_sail_radio.py': '/rudder_sail_radio_health',
