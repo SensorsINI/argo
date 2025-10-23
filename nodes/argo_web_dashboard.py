@@ -22,6 +22,8 @@ import json
 import time
 import subprocess
 import threading
+import argparse
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -46,8 +48,9 @@ UPDATE_RATE = 1  # Hz
 class ArgoWebDashboard(Node):
     """ROS2 node providing web-based monitoring and control interface."""
     
-    def __init__(self):
+    def __init__(self, debug_mode=False):
         super().__init__('argo_web_dashboard')
+        self.debug_mode = debug_mode
         self.get_logger().info('Starting Argo Web Dashboard...')
         
         # Initialize state storage (thread-safe with lock)
@@ -161,6 +164,16 @@ class ArgoWebDashboard(Node):
                         static_folder=os.path.join(os.path.dirname(__file__), 'static'))
         CORS(self.app)
         self.setup_routes()
+        
+        # Configure Flask logging based on debug mode
+        if not self.debug_mode:
+            # Suppress Flask's default request logging to reduce journal clutter
+            log = logging.getLogger('werkzeug')
+            log.setLevel(logging.ERROR)
+            # Also suppress Flask's own logging
+            self.app.logger.setLevel(logging.ERROR)
+        else:
+            self.get_logger().info('🐛 Debug mode enabled - HTTP request logs will be shown')
         
         # Start Flask in separate thread
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
@@ -626,12 +639,18 @@ class ArgoWebDashboard(Node):
     
     def run_flask(self):
         """Run Flask server in separate thread."""
-        self.app.run(host='0.0.0.0', port=8081, debug=False, threaded=True, use_reloader=False)
+        self.app.run(host='0.0.0.0', port=8081, debug=self.debug_mode, threaded=True, use_reloader=False)
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = ArgoWebDashboard()
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Argo Web Dashboard')
+    parser.add_argument('--debug', action='store_true', 
+                       help='Enable debug mode (shows HTTP request logs)')
+    known_args, unknown_args = parser.parse_known_args(args)
+    
+    rclpy.init(args=unknown_args)
+    node = ArgoWebDashboard(debug_mode=known_args.debug)
     
     try:
         rclpy.spin(node)
