@@ -1,0 +1,8 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Argo footprint Library")(type "KiCad")(uri "${ARGO}/argo-v9-stable/Argo footprint Library.pretty")(options "")(descr ""))
+  (lib (name "sparkfun")(type "KiCad")(uri "${ARGO}/sparkfun")(options "")(descr ""))
+  (lib (name "orangepi-zero")(type "KiCad")(uri "${ARGO}/orange-pi/zero/Kicad/orangepi-zero.pretty")(options "")(descr ""))
+  (lib (name "SamacSys_Parts")(type "KiCad")(uri "${ARGO}/library_loader/SamacSys_Parts.pretty")(options "")(descr ""))
+  (lib (name "PRL3-5V-DC-1A")(type "KiCad")(uri "${ARGO}/snapeda/PRL3-5V-DC-1A/PRL3-5V-DC-1A.pretty")(options "")(descr "Relay PRL3-5V-DC-1A footprint"))
+)

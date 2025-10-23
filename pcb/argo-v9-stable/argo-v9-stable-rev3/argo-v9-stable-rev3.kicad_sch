@@ -8416,6 +8416,20 @@
 		)
 		(uuid "bae18f72-253b-4b7b-8f98-c89e08961a95")
 	)
+	(text "Add heartbeat (green) LED"
+		(exclude_from_sim no)
+		(at 110.49 166.624 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.254)
+				(bold yes)
+				(color 255 0 0 1)
+			)
+			(justify left)
+		)
+		(uuid "bcb1cd4c-8941-4651-b1c5-3f65b3feacdb")
+	)
 	(text "Test in 3.5% NaCl \nwater with 2mm wire spacing\nmeasured about 400kOhm\nRC=1MOhm * 100nF=0.1s"
 		(exclude_from_sim no)
 		(at 32.766 193.04 0)
