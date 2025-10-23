@@ -13,11 +13,11 @@
 #   handled by dedicated startup/shutdown hooks for safety.
 #
 # HARDWARE CONFIGURATION (Rev3 PCB):
-#   - PI3 (Pin 40): POW_OFF - Output for power relay control (active HIGH pulse to reset relay)
-#   - PI9 (Pin 28): POW_BUT - Input from power button (active HIGH when pressed)
-#   - PH4 (Pin 18): Green LED in power button (active LOW - cathode control)
-#   - PI1 (Pin 12): Blue LED in power button (active LOW - cathode control)
-#   - PI16 (Pin 37): Red LED: GPIO controlled (active LOW - cathode control) 
+#   - PI3 (Pin 40, wPi 27, GPIO 259): POW_OFF - Output for power relay control (active HIGH pulse to reset relay)
+#   - PI9 (Pin 28, wPi 18, GPIO 265): POW_BUT - Input from power button (active HIGH when pressed)
+#   - PH4 (Pin 18, wPi 10, GPIO 228): Green LED in power button (active LOW - cathode control)
+#   - PI1 (Pin 12, wPi 6, GPIO 257): Blue LED in power button (active LOW - cathode control)
+#   - PI16 (Pin 37, wPi 25, GPIO 272): Red LED: GPIO controlled (active LOW - cathode control) 
 #   - LEDs: Common anode RGB LED, GPIO controls cathode (LOW = ON, HIGH = OFF)
 #
 # POWER CIRCUIT DESIGN (Rev3 PCB):
@@ -141,7 +141,7 @@
 #           self.clients = {}
 #           self.last_used = {}
 #           self.max_age = 300  # 5 minutes
-#       
+#
 #       def get_client(self, service_name):
 #           now = time.time()
 #           if service_name in self.clients:
@@ -374,7 +374,7 @@ def setup_logging(debug=False):
 
     # Set logging level based on debug flag
     log_level = logging.DEBUG if debug else logging.INFO
-    
+
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -394,7 +394,7 @@ class PowerController:
         self.shutdown_initiated = False
         self.test_mode = test_mode
         self.gpio_available = False  # Will be set to True if GPIO initialization succeeds
-        
+
         # CRITICAL: Verify gpiod is available in production mode
         if not test_mode and not _HAS_GPIOD:
             logger.critical("FATAL: gpiod library not available - required for production mode!")
@@ -402,7 +402,7 @@ class PowerController:
             logger.critical("Install gpiod: sudo apt-get install python3-libgpiod")
             logger.critical("If testing remotely, use --test-mode flag")
             raise RuntimeError("gpiod library not available - cannot run in production mode without GPIO control")
-        
+
         if test_mode and not _HAS_GPIOD:
             logger.warning("TEST MODE: gpiod library not available - GPIO functionality will be simulated")
             logger.warning("This is OK for remote testing, but NOT for production deployment!")
@@ -495,14 +495,14 @@ class PowerController:
         # Simple state tracking - initialize these early for test mode compatibility
         self.recording_active = False
         self.recording_service_available = False
-        
+
         # Throttled logging for recording service availability
         self.last_logged_recording_service_state = None
-        
+
         # Throttling for frequent checks
         self.last_recording_check_time = 0.0
         self.last_logged_system_state = None
-        
+
         # Controller pause state tracking
         self.controller_pause_state = False
 
@@ -523,17 +523,17 @@ class PowerController:
 
         # Initialize desktop user detection and caching
         self._detect_and_cache_desktop_user()
-        
+
         # Initialize GPIO and configure button interrupts
         # Note: Button press activates SET coil which powers on the system,
         # so by the time software starts, button has already been released.
         # No need to check initial state - button detection is always active.
         self.init_gpio()
-        
+
         # Configure button line for interrupt-based monitoring
         if self.gpio_available:
             self.configure_button_for_interrupts()
-        
+
         self.button_detection_active = True
         logger.info("Button detection active - ready to detect presses")
 
@@ -660,7 +660,7 @@ class PowerController:
             else:
                 # Should never reach here due to check in __init__
                 raise RuntimeError("gpiod not available in production mode!")
-        
+
         try:
             logger.info(f"Attempting to open GPIO chip: {self.GPIO_CHIP}")
             self.chip = gpiod.Chip(self.GPIO_CHIP)
@@ -852,7 +852,7 @@ class PowerController:
         # Only check recording service availability if we haven't checked recently
         # This reduces frequent service calls
         current_time = time.time()
-        if (self.argo_service_running and 
+        if (self.argo_service_running and
             (current_time - self.last_recording_check_time) > 10.0):  # Check every 10 seconds max
             self.check_recording_service_availability()
             self.last_recording_check_time = current_time
@@ -864,7 +864,7 @@ class PowerController:
                 f"Argo system state: {'RUNNING' if current_state else 'STOPPED'} "
                 f"(service: {self.argo_service_running}, recording: {self.recording_service_available})")
             self.last_logged_system_state = current_state
-            
+
         return current_state
 
     def check_argo_service_status(self):
@@ -882,7 +882,7 @@ class PowerController:
                         total_count = status_data.get('total_count', 0)
                         # Consider system running if at least 3 nodes are active
                         is_running = running_count >= 3
-                        
+
                         if is_running != self.argo_service_running:
                             self.argo_service_running = is_running
                             logger.info(
@@ -894,12 +894,12 @@ class PowerController:
                             if not is_running:
                                 self.recording_service_available = False
                                 logger.info("Recording service marked as unavailable")
-                        
+
                         return is_running
                     except (json.JSONDecodeError, KeyError):
                         # Fallback to systemctl if ROS2 service fails
                         pass
-            
+
             # Fallback to systemctl check (less frequent, shorter timeout)
             result = subprocess.run(
                 ['sudo', 'systemctl', 'is-active', 'argo_launch.service'],
@@ -1001,14 +1001,14 @@ class PowerController:
                     "warning"
                 )
                 return
-            
+
             logger.info("Single tap detected - toggling controller pause mode")
             self.send_desktop_notification(
                 "Controller Pause Control",
                 "Toggling controller pause mode...",
                 "normal"
             )
-            
+
             # Start service wait pattern for delayed service call
             self.service_wait_active = True
             service_wait_thread = threading.Thread(
@@ -1016,15 +1016,15 @@ class PowerController:
                 daemon=True
             )
             service_wait_thread.start()
-            
+
             # Get current pause state and toggle it
             current_pause_state = self._get_controller_pause_state()
             new_pause_state = not current_pause_state
             success, message = self._call_controller_pause_service(new_pause_state)
-            
+
             # Stop service wait pattern
             self.service_wait_active = False
-            
+
             if success:
                 # The service response message should indicate the new state
                 logger.info(f"✅ Controller pause toggled: {message}")
@@ -1033,7 +1033,7 @@ class PowerController:
                     message,
                     "normal"
                 )
-                
+
                 # Update LED heartbeat frequency based on new pause state
                 self._update_led_heartbeat_for_pause_state()
             else:
@@ -1057,7 +1057,7 @@ class PowerController:
             # Use the cached pause state from the topic subscription
             # This is more reliable than trying to query the service
             return getattr(self, 'controller_pause_state', False)
-                
+
         except Exception as e:
             logger.error(f"Error getting controller pause state: {e}")
             return False
@@ -1067,27 +1067,27 @@ class PowerController:
         try:
             if not self.ros2_node:
                 return False, "ROS2 node not available"
-            
+
             # Create service client for controller pause service
             pause_client = self.ros2_node.create_client(SetBool, '/controller_node/pause')
-            
+
             if not pause_client.wait_for_service(timeout_sec=2.0):
                 return False, "Controller pause service not available"
-            
+
             # Create request
             request = SetBool.Request()
             request.data = pause_state
-            
+
             # Call service
             future = pause_client.call_async(request)
             rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=5.0)
-            
+
             if future.done():
                 response = future.result()
                 return response.success, response.message
             else:
                 return False, "Service call timed out"
-                
+
         except Exception as e:
             return False, f"Error calling controller pause service: {e}"
 
@@ -1100,7 +1100,7 @@ class PowerController:
                 "Restarting Argo nodes...",
                 "normal"
             )
-            
+
             if self.test_mode:
                 logger.info("TEST MODE: Would restart Argo launch service")
                 self.send_desktop_notification(
@@ -1109,7 +1109,7 @@ class PowerController:
                     "normal"
                 )
                 return True
-            
+
             # Start service wait pattern for delayed service restart
             self.service_wait_active = True
             service_wait_thread = threading.Thread(
@@ -1117,7 +1117,7 @@ class PowerController:
                 daemon=True
             )
             service_wait_thread.start()
-            
+
             # Stop service first
             result = subprocess.run(
                 ['sudo', 'systemctl', 'stop', 'argo_launch.service'],
@@ -1133,16 +1133,16 @@ class PowerController:
                 # Stop service wait pattern
                 self.service_wait_active = False
                 return False
-            
+
             # Wait a moment for clean shutdown
             time.sleep(2)
-            
+
             # Start service
             result = subprocess.run(
                 ['sudo', 'systemctl', 'start', 'argo_launch.service'],
                 capture_output=True, text=True, timeout=15
             )
-            
+
             # Stop service wait pattern
             self.service_wait_active = False
             if result.returncode == 0:
@@ -1287,6 +1287,37 @@ class PowerController:
                 type=gpiod.LINE_REQ_EV_RISING_EDGE,  # Detect POW_BUT going high (pressed)
                 flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE
             )
+
+            # Wait a moment for the GPIO line to stabilize after reconfiguration
+            time.sleep(0.1)
+
+            # Check initial state and clear any false events that might have been triggered
+            # during the reconfiguration
+            try:
+                initial_state = self.power_button_line.get_value()
+                logger.info(f"Initial button state after interrupt configuration: {initial_state} "
+                          f"({'PRESSED' if initial_state == BUTTON_PRESSED_STATE else 'RELEASED'})")
+
+                # If the button appears to be pressed initially, it's likely a false detection
+                # from the GPIO reconfiguration. Clear any pending events.
+                if initial_state == BUTTON_PRESSED_STATE:
+                    logger.warning("Button appears pressed after GPIO reconfiguration - "
+                                 "this is likely a false detection. Clearing any pending events.")
+                    # Try to clear any pending events by reading them
+                    try:
+                        # This will clear any events that were queued during reconfiguration
+                        while True:
+                            ready, _, _ = select.select([self.power_button_line.event_get_fd()], [], [], 0.0)
+                            if not ready:
+                                break
+                            event = self.power_button_line.event_read()
+                            logger.debug(f"Cleared false event during startup: {event.type}")
+                    except Exception as e:
+                        logger.debug(f"No events to clear: {e}")
+
+            except Exception as e:
+                logger.warning(f"Could not check initial button state: {e}")
+
             logger.info(
                 "Button line configured for rising edge interrupt monitoring (active-high)")
 
@@ -1471,7 +1502,7 @@ class PowerController:
     def _heartbeat_sleep(self, duration):
         """Sleep for heartbeat timing with responsive shutdown checking"""
         sleep_time = 0
-        increment = 0.05  # Check every 50ms for responsive shutdown
+        increment = 0.1  # Check every 100ms for responsive shutdown
         while sleep_time < duration and self.running:
             time.sleep(increment)
             sleep_time += increment
@@ -1491,7 +1522,7 @@ class PowerController:
             (0.2, False),  # Short off
             (0.2, True),   # Short on
             (0.6, False),  # Long pause between letters
-            
+
             # O: --- (long-long-long)
             (0.6, True),   # Long on
             (0.2, False),  # Short off
@@ -1499,7 +1530,7 @@ class PowerController:
             (0.2, False),  # Short off
             (0.6, True),   # Long on
             (0.6, False),  # Long pause between letters
-            
+
             # S: ... (short-short-short)
             (0.2, True),   # Short on
             (0.2, False),  # Short off
@@ -1514,10 +1545,10 @@ class PowerController:
                 for duration, led_state in sos_pattern:
                     if not self.running or not self.sos_led_active or not self.low_battery_detected or self.critical_battery_detected:
                         break
-                    
+
                     # Set red LED state for SOS warning
                     self.set_red_led(led_state)
-                    
+
                     # Sleep in small increments for responsive shutdown
                     sleep_time = 0
                     while sleep_time < duration and self.running and self.sos_led_active and self.low_battery_detected and not self.critical_battery_detected:
@@ -1548,7 +1579,7 @@ class PowerController:
                 # Red LED on, Green LED off
                 self.set_red_led(True)
                 self.set_green_led(False)
-                
+
                 # Sleep in small increments for responsive shutdown
                 sleep_time = 0
                 while sleep_time < led_duration and self.running and self.wifi_loss_led_active and self.wifi_loss_detected and not self.critical_battery_detected:
@@ -1561,7 +1592,7 @@ class PowerController:
                 # Green LED on, Red LED off
                 self.set_green_led(True)
                 self.set_red_led(False)
-                
+
                 # Sleep in small increments for responsive shutdown
                 sleep_time = 0
                 while sleep_time < led_duration and self.running and self.wifi_loss_led_active and self.wifi_loss_detected and not self.critical_battery_detected:
@@ -1625,12 +1656,12 @@ class PowerController:
 
     def immediate_action_feedback_pattern(self, action_type):
         """Immediate LED feedback pattern for button actions
-        
+
         Args:
             action_type: Type of action ('single', 'double', 'quadruple')
         """
         logger.debug(f"Starting immediate feedback pattern for {action_type} tap")
-        
+
         # Define patterns for each action type
         patterns = {
             'single': [  # Controller pause toggle - 1 quick flash
@@ -1658,20 +1689,20 @@ class PowerController:
                 (0.1, False),  # 100ms off
             ]
         }
-        
+
         if action_type not in patterns:
             logger.warning(f"Unknown action type: {action_type}")
             return
-            
+
         pattern = patterns[action_type]
-        
+
         # Execute the pattern
         for duration, led_state in pattern:
             if not self.running:
                 break
             self.set_green_led(led_state)
             time.sleep(duration)
-        
+
         # Ensure LED is off at the end
         self.set_green_led(False)
         logger.debug(f"Immediate feedback pattern for {action_type} tap completed")
@@ -1679,30 +1710,30 @@ class PowerController:
     def service_wait_pattern(self):
         """R+G alternating flash pattern during service calls"""
         logger.debug("Starting service wait pattern (R+G alternating)")
-        
+
         # Calculate timing for alternating pattern
         period = 1.0 / LED_SERVICE_WAIT_FREQUENCY_HZ
         half_period = period / 2.0
-        
+
         while self.running and hasattr(self, 'service_wait_active') and self.service_wait_active:
             try:
                 # Red LED on, Green LED off
                 self.set_red_led(True)
                 self.set_green_led(False)
                 time.sleep(half_period)
-                
+
                 if not self.running or not self.service_wait_active:
                     break
-                
+
                 # Green LED on, Red LED off
                 self.set_red_led(False)
                 self.set_green_led(True)
                 time.sleep(half_period)
-                
+
             except Exception as e:
                 logger.error(f"Error in service wait pattern: {e}")
                 break
-        
+
         # Turn off both LEDs when done
         self.set_red_led(False)
         self.set_green_led(False)
@@ -2064,10 +2095,10 @@ class PowerController:
             service_wait_thread.start()
 
             success = self.stop_recording()
-            
+
             # Stop service wait pattern
             self.service_wait_active = False
-            
+
             if not success:
                 self.send_desktop_notification(
                     "Recording Error", "Failed to stop recording", "critical")
@@ -2085,10 +2116,10 @@ class PowerController:
             service_wait_thread.start()
 
             success = self.start_recording()
-            
+
             # Stop service wait pattern
             self.service_wait_active = False
-            
+
             if not success:
                 self.send_desktop_notification(
                     "Recording Error", "Failed to start recording", "critical")
@@ -2122,28 +2153,28 @@ class PowerController:
                 session_pid = None
                 try:
                     # Try each desktop environment separately (fixed pgrep pattern)
-                    for process_name in ['gnome-shell', 'plasma-shell', 'xfce4-session', 
+                    for process_name in ['gnome-shell', 'plasma-shell', 'xfce4-session',
                                          'lxsession', 'i3', 'sway']:
                         pgrep_cmd = ['pgrep', '-u', self.cached_desktop_user, '-o', process_name]
                         result = subprocess.run(
                             pgrep_cmd, capture_output=True, text=True, timeout=2)
-                        
+
                         if result.returncode == 0:
                             session_pid = result.stdout.strip()
                             logger.debug(f"Found {process_name} session with PID: {session_pid}")
                             break
-                    
+
                     if session_pid:
                         # Get environment variables from the session process
                         # /proc/pid/environ uses null bytes as separators, not newlines
                         with open(f'/proc/{session_pid}/environ', 'r') as f:
                             environ_data = f.read()
                             env_vars = dict(
-                                line.split('=', 1) 
-                                for line in environ_data.split('\0') 
+                                line.split('=', 1)
+                                for line in environ_data.split('\0')
                                 if '=' in line
                             )
-                        
+
                         display = env_vars.get('DISPLAY')
                         dbus_address = env_vars.get('DBUS_SESSION_BUS_ADDRESS')
 
@@ -2252,7 +2283,7 @@ class PowerController:
         self.shutdown_initiated = True
 
         logger.info("Initiating shutdown sequence...")
-        
+
         # Publish button event
         self._publish_button_event("long_press_shutdown")
 
@@ -2293,7 +2324,7 @@ class PowerController:
         """Create ROS2 services for power control"""
         if not self.ros2_node or self.power_services_created:
             return
-        
+
         try:
             # Create power control services
             from std_srvs.srv import Trigger
@@ -2307,18 +2338,18 @@ class PowerController:
                 Trigger, '/argo/power/shutdown', self._handle_shutdown_service)
             self.toggle_argo_service = self.ros2_node.create_service(
                 Trigger, '/argo/power/toggle_argo', self._handle_toggle_argo_service)
-            
+
             # Create publishers
             self.power_status_publisher = self.ros2_node.create_publisher(
                 String, '/argo/power/status', 10)
             self.button_event_publisher = self.ros2_node.create_publisher(
                 String, '/argo/power/button_events', 10)
-            
+
             # Create subscription to controller pause state
             from std_msgs.msg import Bool
             self.controller_pause_sub = self.ros2_node.create_subscription(
                 Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
-            
+
             self.power_services_created = True
             logger.info("Power control ROS2 services created:")
             logger.info("  - /argo/power/start_recording")
@@ -2331,7 +2362,7 @@ class PowerController:
             logger.info("  - /controller_pause_state (subscription)")
         except Exception as e:
             logger.error(f"Failed to create power services: {e}")
-    
+
     def _handle_start_recording_service(self, request, response):
         """Handle /argo/power/start_recording service request"""
         try:
@@ -2342,7 +2373,7 @@ class PowerController:
             response.success = False
             response.message = f"Error starting recording: {e}"
         return response
-    
+
     def _handle_stop_recording_service(self, request, response):
         """Handle /argo/power/stop_recording service request"""
         try:
@@ -2353,7 +2384,7 @@ class PowerController:
             response.success = False
             response.message = f"Error stopping recording: {e}"
         return response
-    
+
     def _handle_toggle_recording_service(self, request, response):
         """Handle /argo/power/toggle_recording service request"""
         try:
@@ -2364,7 +2395,7 @@ class PowerController:
             response.success = False
             response.message = f"Error toggling recording: {e}"
         return response
-    
+
     def _handle_shutdown_service(self, request, response):
         """Handle /argo/power/shutdown service request"""
         try:
@@ -2377,7 +2408,7 @@ class PowerController:
             response.success = False
             response.message = f"Error initiating shutdown: {e}"
         return response
-    
+
     def _handle_toggle_argo_service(self, request, response):
         """Handle /argo/power/toggle_argo service request"""
         try:
@@ -2388,7 +2419,7 @@ class PowerController:
             response.success = False
             response.message = f"Error toggling Argo service: {e}"
         return response
-    
+
     def _publish_power_status(self, message: str):
         """Publish power status update"""
         if self.power_status_publisher:
@@ -2398,7 +2429,7 @@ class PowerController:
                 self.power_status_publisher.publish(msg)
             except Exception:
                 pass  # Silently fail
-    
+
     def _publish_button_event(self, event: str):
         """Publish button event"""
         if self.button_event_publisher:
@@ -2409,12 +2440,12 @@ class PowerController:
                 logger.info(f"Published button event: {event}")
             except Exception as e:
                 logger.debug(f"Failed to publish button event: {e}")
-    
+
     def _controller_pause_state_callback(self, msg):
         """Receive controller pause state updates from topic"""
         old_state = self.controller_pause_state
         self.controller_pause_state = msg.data
-        
+
         # Log state change
         if old_state != msg.data:
             logger.info(f"Controller pause state changed: {'PAUSED' if msg.data else 'UNPAUSED'}")
@@ -2422,7 +2453,7 @@ class PowerController:
             self._update_led_heartbeat_for_pause_state()
         else:
             logger.debug(f"Controller pause state: {'PAUSED' if msg.data else 'UNPAUSED'}")
-    
+
     def run(self):
         """Main control loop"""
         logger.info("Power controller starting...")
@@ -2443,7 +2474,7 @@ class PowerController:
         heartbeat_thread = threading.Thread(
             target=self.green_led_heartbeat, daemon=True)
         heartbeat_thread.start()
-        
+
         # Set initial LED heartbeat frequency based on current state
         self._update_led_heartbeat_for_pause_state()
 
@@ -2461,7 +2492,7 @@ class PowerController:
 
         # Create ROS2 services for remote control
         self._create_power_services()
-        
+
         # Publish initial status
         self._publish_power_status("Power control system running")
 
@@ -2476,7 +2507,7 @@ class PowerController:
 
             while self.running and (rclpy.ok() if self.ros2_node else True):
                 current_time = time.time()
-                
+
                 # Spin ROS2 node to process service requests (if available)
                 if self.ros2_node:
                     rclpy.spin_once(self.ros2_node, timeout_sec=0.1)
@@ -2492,13 +2523,13 @@ class PowerController:
                     last_sync_time = current_time
 
                 # More frequent recording state synchronization
-                if (current_time - last_recording_sync_time >= recording_sync_interval and 
+                if (current_time - last_recording_sync_time >= recording_sync_interval and
                     self.argo_service_running):
                     # Always try to sync recording state, even if service availability is unknown
                     logger.debug("Performing frequent recording state synchronization...")
                     self.query_current_recording_status()
                     last_recording_sync_time = current_time
-                
+
                 # Periodic status publishing
                 if current_time - last_status_publish_time >= status_publish_interval:
                     status_msg = f"Running | Argo: {'ON' if self.argo_service_running else 'OFF'} | Recording: {'ON' if self.recording_active else 'OFF'}"
@@ -2517,12 +2548,12 @@ class PowerController:
         """Monitor battery voltage every 30 seconds for critical low voltage"""
         logger.info("Starting critical battery monitoring thread")
         self.battery_monitoring_active = True
-        
+
         # Track consecutive failures for safety
         consecutive_service_failures = 0
         consecutive_invalid_readings = 0
         MAX_CONSECUTIVE_FAILURES = 3  # 90 seconds of failures = assume critical
-        
+
         # Startup grace period - don't count failures until battery service has been seen at least once
         # This prevents false critical alerts if argo_battery_water.service starts after power_control.service
         battery_service_ever_available = False
@@ -2539,16 +2570,16 @@ class PowerController:
                 if battery_data:
                     # Service call succeeded
                     consecutive_service_failures = 0
-                    
+
                     # Mark that we've seen the battery service available at least once
                     if not battery_service_ever_available:
                         battery_service_ever_available = True
                         logger.info("Battery service is now available - critical battery monitoring active")
-                    
+
                     battery_voltage = battery_data.get('battery_voltage', 0)
                     charging_status = battery_data.get('charging_status', None)
                     ac_power_present = battery_data.get('ac_power_present', None)
-                    
+
                     # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
                     # Invalid readings (0V, very low, or impossibly high) indicate sensor/communication errors
                     # NEVER halt on invalid readings - only on valid low voltage readings
@@ -2559,7 +2590,7 @@ class PowerController:
                             f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely sensor/I2C error")
                         logger.error(
                             f"⚠️  System will NOT halt on invalid readings - only on valid low voltage!")
-                        
+
                         # Do NOT halt on invalid readings - they indicate hardware/communication problems, not battery issues
                         # Just log the error and continue monitoring
                         if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
@@ -2570,16 +2601,16 @@ class PowerController:
                             logger.critical(
                                 f"System will continue running - check argo_battery_water.service status")
                         continue
-                    
+
                     # Valid reading - reset invalid counter
                     consecutive_invalid_readings = 0
-                    
+
                     # Check if voltage has changed significantly since last log
                     should_log_voltage = True
                     if self.last_logged_battery_voltage is not None:
                         voltage_change = abs(battery_voltage - self.last_logged_battery_voltage)
                         should_log_voltage = voltage_change >= BATTERY_LOG_THRESHOLD_V
-                    
+
                     # Log battery status with charging information (only if voltage changed significantly)
                     if should_log_voltage:
                         charging_str = ""
@@ -2590,11 +2621,11 @@ class PowerController:
                             if charging_status is not None:
                                 charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
                             charging_str = f", {', '.join(charging_parts)}"
-                        
+
                         logger.info(
                             f"Battery voltage check: {battery_voltage:.3f}V "
                             f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
-                        
+
                         # Update the last logged voltage
                         self.last_logged_battery_voltage = battery_voltage
 
@@ -2610,7 +2641,7 @@ class PowerController:
                                 if charging_status is not None:
                                     charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
                                 charging_str = f", {', '.join(charging_parts)}"
-                            
+
                             logger.critical(
                                 f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
                             self.critical_battery_detected = True
@@ -2620,7 +2651,7 @@ class PowerController:
                             if self.sos_led_active:
                                 self.sos_led_active = False
                             self.initiate_critical_battery_halt(battery_voltage)
-                    
+
                     # Check for low battery (SOS warning)
                     elif battery_voltage < LOW_BATTERY_THRESHOLD_V:
                         if not self.low_battery_detected:
@@ -2638,7 +2669,7 @@ class PowerController:
                                 f"Battery voltage low: {battery_voltage:.3f}V\nSOS LED pattern activated\nReturn to shore or charge battery",
                                 "critical"
                             )
-                    
+
                     # Battery voltage recovered above low threshold
                     else:
                         # Check if we were in low battery state
@@ -2655,7 +2686,7 @@ class PowerController:
                                 f"Battery voltage recovered: {battery_voltage:.3f}V\nSOS LED pattern stopped",
                                 "normal"
                             )
-                        
+
                         # Check if we were in critical battery state
                         if self.critical_battery_detected:
                             # Always log critical battery recovery events regardless of voltage change threshold
@@ -2663,7 +2694,7 @@ class PowerController:
                                 f"Battery voltage recovered from critical: {battery_voltage:.3f}V >= {CRITICAL_BATTERY_THRESHOLD_V}V")
                             self.critical_battery_detected = False
                             self._clear_critical_battery_flag()
-                    
+
                     # Log debug message when voltage change is too small to log normally
                     if not should_log_voltage and self.last_logged_battery_voltage is not None:
                         voltage_change = abs(battery_voltage - self.last_logged_battery_voltage)
@@ -2673,7 +2704,7 @@ class PowerController:
                 else:
                     # Service unavailable - handle based on startup state
                     time_since_startup = time.time() - startup_time
-                    
+
                     if not battery_service_ever_available and time_since_startup < STARTUP_GRACE_PERIOD_S:
                         # During startup grace period and service never seen - don't count failures yet
                         logger.info(
@@ -2697,7 +2728,7 @@ class PowerController:
                         logger.error(
                             f"Battery service failure - service was available but now unreachable "
                             f"(count: {consecutive_service_failures}/{MAX_CONSECUTIVE_FAILURES})")
-                        
+
                         # After multiple consecutive service failures, log critical error but DO NOT HALT
                         if consecutive_service_failures >= MAX_CONSECUTIVE_FAILURES:
                             logger.critical(
@@ -2727,22 +2758,22 @@ class PowerController:
         """Monitor WiFi connectivity every 10 seconds and update LED patterns"""
         logger.info("Starting WiFi connectivity monitoring thread")
         self.wifi_monitoring_active = True
-        
+
         # Track consecutive failures for stability
         consecutive_failures = 0
         consecutive_successes = 0
         MAX_CONSECUTIVE_FAILURES = 2  # Require 2 consecutive failures before declaring WiFi lost
         MAX_CONSECUTIVE_SUCCESSES = 2  # Require 2 consecutive successes before declaring WiFi restored
-        
+
         while self.running and self.wifi_monitoring_active:
             try:
                 # Check WiFi connectivity
                 wifi_connected = self.check_wifi_connectivity()
-                
+
                 if wifi_connected:
                     consecutive_successes += 1
                     consecutive_failures = 0
-                    
+
                     # Check if WiFi was previously lost and now restored
                     if self.wifi_loss_detected and consecutive_successes >= MAX_CONSECUTIVE_SUCCESSES:
                         logger.info("WiFi connectivity restored - stopping WiFi loss LED pattern")
@@ -2757,11 +2788,11 @@ class PowerController:
                             "normal"
                         )
                         consecutive_successes = 0  # Reset counter
-                        
+
                 else:
                     consecutive_failures += 1
                     consecutive_successes = 0
-                    
+
                     # Check if WiFi was previously connected and now lost
                     if not self.wifi_loss_detected and consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         logger.warning("WiFi connectivity lost - starting alternating red/green LED pattern")
@@ -2813,7 +2844,7 @@ class PowerController:
 
     def check_wifi_connectivity(self) -> bool:
         """Check WiFi connectivity using multiple methods
-        
+
         Returns:
             True if WiFi is connected and functional (has IP address)
             False if WiFi is disconnected or no valid connection
@@ -2821,31 +2852,31 @@ class PowerController:
         try:
             # Method 1: Check if WiFi interface is up and has an IP address
             result = subprocess.run(
-                ['ip', 'addr', 'show', 'wlan0'], 
+                ['ip', 'addr', 'show', 'wlan0'],
                 capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
             )
-            
+
             if result.returncode != 0:
                 logger.debug("WiFi interface wlan0 not found or not accessible")
                 return False
-            
+
             # Check if wlan0 has an IP address (not 127.0.0.1)
             if 'inet ' in result.stdout and '127.0.0.1' not in result.stdout:
                 # Extract the connection name to check if it's a known functional network
                 nm_result = subprocess.run(
-                    ['nmcli', '-t', '-f', 'NAME', 'connection', 'show', '--active'], 
+                    ['nmcli', '-t', '-f', 'NAME', 'connection', 'show', '--active'],
                     capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
                 )
-                
+
                 if nm_result.returncode == 0:
                     active_connection = nm_result.stdout.strip()
                     logger.debug(f"Active WiFi connection: {active_connection}")
-                    
+
                     # For networks without internet access (like uzh-iot), check DNS resolution instead
                     if active_connection == 'uzh-iot':
                         # Test DNS resolution instead of internet ping for uzh-iot
                         dns_result = subprocess.run(
-                            ['nslookup', 'google.com'], 
+                            ['nslookup', 'google.com'],
                             capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
                         )
                         if dns_result.returncode == 0:
@@ -2857,10 +2888,10 @@ class PowerController:
                     else:
                         # For other networks (like tobi-wlan), test internet connectivity
                         ping_result = subprocess.run(
-                            ['ping', '-c', '1', '-W', '3', '8.8.8.8'], 
+                            ['ping', '-c', '1', '-W', '3', '8.8.8.8'],
                             capture_output=True, text=True, timeout=WIFI_CONNECTIVITY_TIMEOUT_S
                         )
-                        
+
                         if ping_result.returncode == 0:
                             logger.debug("WiFi connectivity confirmed: interface up and internet accessible")
                             return True
@@ -2873,7 +2904,7 @@ class PowerController:
             else:
                 logger.debug("WiFi interface wlan0 has no valid IP address")
                 return False
-                
+
         except subprocess.TimeoutExpired:
             logger.debug("WiFi connectivity check timed out")
             return False
@@ -2886,11 +2917,11 @@ class PowerController:
 
     def show_critical_battery_confirmation_dialog(self, battery_voltage):
         """Show desktop confirmation dialog for critical battery shutdown
-        
+
         Returns:
             True: User actively CANCELLED the halt (clicked Cancel button)
             False: Proceed with halt (user clicked OK, or timeout occurred, or dialog failed)
-        
+
         CRITICAL: Timeout or dialog failure = return False (proceed with halt for safety)
         """
         try:
@@ -2914,11 +2945,11 @@ class PowerController:
                 '--width=600',
                 '--height=350'
             ]
-            
+
             logger.info("Showing critical battery confirmation dialog...")
             result = subprocess.run(
                 dialog_cmd, capture_output=True, text=True, timeout=60, env=env)
-            
+
             if result.returncode == 0:
                 # User clicked "Shutdown Now" - proceed with halt
                 logger.info("User confirmed critical battery shutdown")
@@ -2945,7 +2976,7 @@ class PowerController:
                 # Unexpected return code - default to shutdown for safety
                 logger.warning(f"Dialog returned unexpected code: {result.returncode} - defaulting to halt for safety")
                 return False  # False = proceed with halt
-                
+
         except subprocess.TimeoutExpired:
             # Subprocess timeout - proceed with halt (safe default)
             logger.info("Critical battery dialog timed out - proceeding with halt (safe default)")
@@ -2961,9 +2992,9 @@ class PowerController:
                     '--yes-label=Shutdown Now',
                     '--no-label=Cancel (I will plug in charger)'
                 ]
-                
+
                 result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35, env=env)
-                
+
                 if result.returncode == 0:
                     # User clicked "Yes" / "Shutdown Now"
                     logger.info("User confirmed critical battery shutdown (kdialog)")
@@ -2986,7 +3017,7 @@ class PowerController:
                             logger.info(
                                 "kdialog timeout or error - proceeding with halt (safe default)")
                             return False  # False = proceed with halt
-                    
+
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 logger.warning("kdialog also not available or timed out - trying yad...")
                 try:
@@ -3001,7 +3032,7 @@ class PowerController:
                         '--width=600',
                         '--height=350'
                     ]
-                    
+
                     result = subprocess.run(dialog_cmd, capture_output=True, text=True, timeout=35, env=env)
                     if result.returncode == 0:
                         return False  # Proceed with halt
@@ -3016,7 +3047,7 @@ class PowerController:
                             logger.error(
                                 "Proceeding with halt as a safety measure.")
                         return False  # Timeout or error = proceed with halt
-                    
+
                 except (FileNotFoundError, subprocess.TimeoutExpired):
                     logger.warning("No dialog tools available - proceeding with halt (safe default)")
                     return False  # False = proceed with halt
@@ -3047,12 +3078,12 @@ class PowerController:
 
     def initiate_critical_battery_halt(self, battery_voltage):
         """Initiate critical battery halt sequence with timeout-based confirmation
-        
+
         Shows a confirmation dialog with 30-second timeout:
         - If user clicks "Cancel": Halt is cancelled (allows intervention)
         - If user clicks "Shutdown Now": Immediate halt
         - If timeout (30s, no user action): Automatic halt proceeds (SAFE DEFAULT)
-        
+
         This provides:
         - Autonomous safety: Timeout = halt proceeds (not cancelled)
         - Developer control: Active cancellation stops halt if user intervenes
@@ -3072,7 +3103,7 @@ class PowerController:
             logger.critical(
                 "PRODUCTION MODE: Using halt to preserve power for manual sailing")
             shutdown_mode = "halt (power preserved)"
-        
+
         logger.critical(
             f"Showing confirmation dialog - timeout (no action) will proceed with {shutdown_mode}")
 
@@ -3102,7 +3133,7 @@ class PowerController:
             else:
                 action_desc = "HALT to preserve battery power"
                 mode_desc = "halt to preserve battery for manual sailing operation (PRODUCTION MODE)"
-            
+
             message = f"""CRITICAL BATTERY ALERT: {battery_voltage:.3f}V at {timestamp}
 
 ⚠️  System will {action_desc} in 30 seconds.
@@ -3123,7 +3154,7 @@ If you take no action within 30 seconds, the system will automatically
         # Only "Cancel" button stops the halt
         logger.info("Showing critical battery confirmation dialog (timeout = halt proceeds)...")
         user_cancelled = self.show_critical_battery_confirmation_dialog(battery_voltage)
-        
+
         if user_cancelled:
             # User ACTIVELY cancelled the halt/shutdown
             logger.warning(f"Critical battery {shutdown_mode} CANCELLED by user intervention")
@@ -3147,14 +3178,14 @@ If you take no action within 30 seconds, the system will automatically
         # 2. Dialog timed out (proceed automatically - SAFE DEFAULT)
         logger.critical(f"Proceeding with critical battery {shutdown_mode}")
         logger.critical("Either user confirmed OR timeout occurred (automatic action for safety)")
-        
+
         # Stop battery monitoring to prevent repeated alerts
         self.battery_monitoring_active = False
 
         # CRITICAL POWER CONSERVATION: Pause Argo system to put sensors in shutdown state
         logger.critical("Pausing Argo system to conserve battery power...")
         pause_success = self._pause_argo_system_for_power_conservation()
-        
+
         if pause_success:
             logger.info("Sensors paused - waiting 2 seconds for hardware shutdown...")
             time.sleep(2)  # Give sensors time to enter hardware shutdown state
@@ -3164,7 +3195,7 @@ If you take no action within 30 seconds, the system will automatically
         # Brief delay to allow final notifications
         logger.critical("Waiting 3 seconds for final notifications...")
         time.sleep(3)
-        
+
         # Execute command based on configuration flag
         if self.test_mode:
             if CRITICAL_BATTERY_USE_SHUTDOWN:
@@ -3277,7 +3308,7 @@ If you take no action within 30 seconds, the system will automatically
             self.heartbeat_frequency_hz = frequency_hz
         else:
             logger.warning(f"Invalid heartbeat frequency: {frequency_hz}")
-    
+
     def _update_led_heartbeat_for_pause_state(self):
         """Update LED heartbeat frequency based on controller pause state and Argo service state"""
         try:
@@ -3287,7 +3318,7 @@ If you take no action within 30 seconds, the system will automatically
                 self.set_heartbeat_frequency(LED_HEARTBEAT_HZ)
                 logger.info("LED heartbeat: Normal (1Hz) - Argo service not running")
                 return
-            
+
             # Argo is running - check controller pause state
             if self.controller_pause_state:
                 # Controller is paused - use slow heartbeat
@@ -3297,7 +3328,7 @@ If you take no action within 30 seconds, the system will automatically
                 # Controller is running - use fast heartbeat
                 self.set_heartbeat_frequency(LED_HEARTBEAT_HZ * 2.0)
                 logger.info("LED heartbeat: Fast (2Hz) - Controller is RUNNING")
-                
+
         except Exception as e:
             logger.error(f"Error updating LED heartbeat for pause state: {e}")
 
@@ -3823,7 +3854,7 @@ def main():
 
     print(f"  - Button press threshold: {args.threshold} seconds")
     print(f"  - Button detection mode: Hardware interrupts (efficient)")
-    
+
     # Show battery monitoring configuration
     if CRITICAL_BATTERY_USE_SHUTDOWN:
         critical_mode = "shutdown (CUTS POWER) - DEVELOPMENT MODE"

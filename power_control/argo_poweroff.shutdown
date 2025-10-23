@@ -32,7 +32,7 @@ MODE_LC="$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')"
 STARS="**************************************************"
 c_echo() {
     echo "$(date): argo_poweroff: $* $STARS" > /dev/console 2>/dev/null || true
-    sleep .2
+    sleep .1
 }
 
 # Announce invocation
@@ -91,18 +91,9 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 # Final notice and pause before asserting GPIO so operator can see console
-c_echo "╔════════════════════════════════════════════════════════════════╗"
-c_echo "║ NORMAL SHUTDOWN - CUTTING POWER RELAY                        ║"
-c_echo "╚════════════════════════════════════════════════════════════════╝"
-c_echo "Finalizing shutdown power cut in 3s..."
-
-# Log to kernel ring buffer for dmesg visibility
-echo "ARGO NORMAL SHUTDOWN: Cutting power relay in 3 seconds" > /dev/kmsg 2>/dev/null || true
-
-sleep 3
-
-# Log final message before power cut
-echo "ARGO SHUTDOWN: Asserting GPIO 259 to cut power NOW" > /dev/kmsg 2>/dev/null || true
+c_echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+c_echo "║ NORMAL SHUTDOWN - CUTTING POWER RELAY by Asserting GPIO 259 to cut power NOW ║"
+c_echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 
 if command -v python3 >/dev/null 2>&1; then
     c_echo "Using python3 method to assert GPIO 259 HIGH for 0.5s"

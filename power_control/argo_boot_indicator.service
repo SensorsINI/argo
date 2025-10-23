@@ -1,0 +1,34 @@
+[Unit]
+Description=Argo Boot Indicator - Early boot LED flash
+Documentation=file:///home/orangepi/argo/power_control/argo_boot_indicator.py
+DefaultDependencies=no
+# Run early in boot sequence, before most services
+Before=sysinit.target shutdown.target
+# Don't conflict with shutdown to allow clean exit
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+# Run as root for GPIO access
+User=root
+Group=root
+# Set working directory
+WorkingDirectory=/home/orangepi/argo/power_control
+# Execute the boot indicator script
+ExecStart=/usr/bin/python3 /home/orangepi/argo/power_control/argo_boot_indicator.py
+# Brief timeout - this should complete in under 2 seconds
+TimeoutStartSec=5
+# Standard output to journal
+StandardOutput=journal
+StandardError=journal
+# Restart policy - don't restart on failure (one-shot indicator)
+Restart=no
+# Success exit codes
+SuccessExitStatus=0 1
+
+[Install]
+# Install early in boot sequence
+WantedBy=sysinit.target
+
+
+
