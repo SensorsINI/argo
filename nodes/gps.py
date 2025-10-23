@@ -835,7 +835,7 @@ class GpsNode(Node):
                     if current_time - self.last_sentence_type_log_time >= 15.0:
                         if self.sentence_types_seen:
                             sentence_list = sorted(list(self.sentence_types_seen))
-                            self.get_logger().info(f"NMEA sentence types received: {', '.join(sentence_list)}")
+                            self.get_logger().debug(f"NMEA sentence types received: {', '.join(sentence_list)}")
                             has_gga = any('GGA' in s for s in self.sentence_types_seen)
                             if not has_gga:
                                 self.get_logger().warn("No GGA sentences received - satellite count unavailable")
