@@ -1,30 +1,30 @@
 [Unit]
-Description=Argo Boot Indicator - Early boot LED flash
+Description=Argo Boot Indicator - Early boot LED heartbeat
 Documentation=file:///home/orangepi/argo/power_control/argo_boot_indicator.py
 DefaultDependencies=no
 # Run early in boot sequence, before most services
-Before=sysinit.target shutdown.target
-# Don't conflict with shutdown to allow clean exit
-Conflicts=shutdown.target
+Before=sysinit.target shutdown.target argo_power_control.service
+# Stop when main power control starts (conflicts ensure clean handoff)
+Conflicts=shutdown.target argo_power_control.service
 
 [Service]
-Type=oneshot
-# Run as root for GPIO access
-User=root
-Group=root
+Type=simple
+# Run as orangepi user (same as main power control)
+User=orangepi
+Group=orangepi
 # Set working directory
 WorkingDirectory=/home/orangepi/argo/power_control
-# Execute the boot indicator script
+# Execute the boot indicator script (runs until terminated)
 ExecStart=/usr/bin/python3 /home/orangepi/argo/power_control/argo_boot_indicator.py
-# Brief timeout - this should complete in under 2 seconds
-TimeoutStartSec=5
+# Graceful termination - allow time for GPIO cleanup
+TimeoutStopSec=5
+KillMode=mixed
+KillSignal=SIGTERM
 # Standard output to journal
 StandardOutput=journal
 StandardError=journal
-# Restart policy - don't restart on failure (one-shot indicator)
+# Don't restart - will be replaced by main power control service
 Restart=no
-# Success exit codes
-SuccessExitStatus=0 1
 
 [Install]
 # Install early in boot sequence

@@ -17,7 +17,7 @@
 #   - PI9 (Pin 28, wPi 18, GPIO 265): POW_BUT - Input from power button (active HIGH when pressed)
 #   - PH4 (Pin 18, wPi 10, GPIO 228): Green LED in power button (active LOW - cathode control)
 #   - PI1 (Pin 12, wPi 6, GPIO 257): Blue LED in power button (active LOW - cathode control)
-#   - PI16 (Pin 37, wPi 25, GPIO 272): Red LED: GPIO controlled (active LOW - cathode control) 
+#   - PI16 (Pin 37, wPi 25, GPIO 272): Red LED: GPIO controlled (active LOW - cathode control)
 #   - LEDs: Common anode RGB LED, GPIO controls cathode (LOW = ON, HIGH = OFF)
 #
 # POWER CIRCUIT DESIGN (Rev3 PCB):
