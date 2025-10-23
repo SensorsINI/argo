@@ -3,9 +3,9 @@ Description=Argo Boot Indicator - Early boot LED heartbeat
 Documentation=file:///home/orangepi/argo/power_control/argo_boot_indicator.py
 DefaultDependencies=no
 # Run early in boot sequence, before most services
-Before=sysinit.target shutdown.target argo_power_control.service
+Before=sysinit.target shutdown.target
 # Stop when main power control starts (conflicts ensure clean handoff)
-Conflicts=shutdown.target argo_power_control.service
+Conflicts=argo_power_control.service
 
 [Service]
 Type=simple
@@ -29,6 +29,3 @@ Restart=no
 [Install]
 # Install early in boot sequence
 WantedBy=sysinit.target
-
-
-

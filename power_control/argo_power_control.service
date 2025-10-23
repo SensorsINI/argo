@@ -1,8 +1,8 @@
 [Unit]
 Description=Argo Power Control System
 Documentation=file://%h/argo/launch/ARGO_POWER_CONTROL_README.md
-After=basic.target sysinit.target battery_water.service argo_boot_indicator.service
-Wants=basic.target battery_water.service
+After=local-fs.target systemd-user-sessions.service argo_battery_water.service
+Wants=argo_battery_water.service
 Conflicts=argo_boot_indicator.service
 DefaultDependencies=no
 Before=shutdown.target
@@ -33,4 +33,4 @@ NoNewPrivileges=false
 PrivateTmp=false
 
 [Install]
-WantedBy=basic.target
+WantedBy=multi-user.target
