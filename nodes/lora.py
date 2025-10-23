@@ -67,8 +67,13 @@ import json
 import argparse
 import argcomplete
 import sys
+import os
 from typing import Optional, Dict, Any
 import threading
+
+# Import safe publishing utilities for context validation
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'support'))
+from safe_publish import safe_publish, safe_log, is_context_valid
 
 # SPI and GPIO libraries
 try:
@@ -235,6 +240,12 @@ class LoRaNode(Node):
         self.last_rssi = 0
         self.tx_queue = []  # Queue for outgoing messages
         self.rx_lock = threading.Lock()  # Lock for thread-safe operations
+        
+        # Shutdown coordination and context optimization
+        self.shutdown_requested = False  # Flag to coordinate shutdown
+        self.context_valid = True  # Cache context validity per timer cycle
+        self.last_context_check = 0.0  # Timestamp of last context check
+        self.context_check_interval = 0.1  # Check context every 100ms max
 
         # Boat state for status packets
         self.boat_state = {
@@ -349,6 +360,26 @@ class LoRaNode(Node):
 
         # Publish initial connection status
         self.publish_connection_status()
+
+    def _check_context_validity(self) -> bool:
+        """
+        Optimized context checking with caching.
+        Only checks context if enough time has passed since last check.
+        Returns cached result for performance.
+        """
+        current_time = time.time()
+        
+        # If shutdown requested, context is definitely invalid
+        if self.shutdown_requested:
+            self.context_valid = False
+            return False
+            
+        # Check if we need to update context validity
+        if current_time - self.last_context_check >= self.context_check_interval:
+            self.context_valid = is_context_valid(self)
+            self.last_context_check = current_time
+            
+        return self.context_valid
 
     def spi_write_register(self, address: int, value: int):
         """Write a single byte to a register"""
@@ -567,15 +598,16 @@ class LoRaNode(Node):
             data_str = payload.decode('ascii', errors='ignore').strip()
 
             if data_str:
-                # Publish raw received data
-                rx_msg = String()
-                rx_msg.data = data_str
-                self.pub_rx_data.publish(rx_msg)
+                # Publish raw received data (using cached context validity)
+                if self.context_valid:
+                    rx_msg = String()
+                    rx_msg.data = data_str
+                    safe_publish(self.pub_rx_data, rx_msg, self)
 
-                # Publish RSSI
-                rssi_msg = Int32()
-                rssi_msg.data = rssi
-                self.pub_signal_strength.publish(rssi_msg)
+                    # Publish RSSI
+                    rssi_msg = Int32()
+                    rssi_msg.data = rssi
+                    safe_publish(self.pub_signal_strength, rssi_msg, self)
 
                 # Parse and handle received data
                 self.parse_received_data(data_str)
@@ -702,6 +734,10 @@ class LoRaNode(Node):
 
     def transmit_status(self) -> bool:
         """Transmit boat status via LoRa radio with bandwidth monitoring"""
+        # Check context validity once per timer cycle
+        if not self._check_context_validity():
+            return False
+            
         try:
             # Build status packet
             status_packet = self.build_status_packet()
@@ -763,96 +799,108 @@ class LoRaNode(Node):
                 
                 if 'cmd' in parsed:
                     command = parsed['cmd']
-                    self.get_logger().info(
-                        f"Received remote command: {command}")
+                    safe_log(self, 'info', f"Received remote command: {command}")
 
-                    # Publish command
-                    cmd_msg = String()
-                    cmd_msg.data = command
-                    self.pub_remote_command.publish(cmd_msg)
+                    # Publish command (using cached context validity)
+                    if self.context_valid:
+                        cmd_msg = String()
+                        cmd_msg.data = command
+                        safe_publish(self.pub_remote_command, cmd_msg, self)
 
                 if 'rssi' in parsed:
-                    # Update signal strength
-                    rssi_msg = Int32()
-                    rssi_msg.data = int(parsed['rssi'])
-                    self.pub_signal_strength.publish(rssi_msg)
+                    # Update signal strength (using cached context validity)
+                    if self.context_valid:
+                        rssi_msg = Int32()
+                        rssi_msg.data = int(parsed['rssi'])
+                        safe_publish(self.pub_signal_strength, rssi_msg, self)
                     self.last_rssi = int(parsed['rssi'])
 
             except json.JSONDecodeError:
                 # Not JSON, treat as plain text command
                 if data.startswith('CMD:'):
                     command = data[4:].strip()
-                    self.get_logger().info(f"Received text command: {command}")
+                    safe_log(self, 'info', f"Received text command: {command}")
 
-                    cmd_msg = String()
-                    cmd_msg.data = command
-                    self.pub_remote_command.publish(cmd_msg)
+                    # Publish command (using cached context validity)
+                    if self.context_valid:
+                        cmd_msg = String()
+                        cmd_msg.data = command
+                        safe_publish(self.pub_remote_command, cmd_msg, self)
 
         except Exception as e:
             self.get_logger().debug(f"Could not parse received data: {e}")
         
         # Always publish received data for monitoring (regardless of parsing success)
-        rx_msg = String()
-        rx_msg.data = data
-        self.pub_rx_data.publish(rx_msg)
+        # Using cached context validity for performance
+        if self.context_valid:
+            rx_msg = String()
+            rx_msg.data = data
+            safe_publish(self.pub_rx_data, rx_msg, self)
 
     def check_connection_health(self):
         """Check LoRa connection health and optionally trigger RTH"""
+        # Check context validity once per timer cycle
+        if not self._check_context_validity():
+            return
+            
         current_time = time.time()
         was_connected = self.is_connected
-        self.get_logger().debug(f"Health check: was_connected={was_connected}, current_time={current_time}")
+        safe_log(self, 'debug', f"Health check: was_connected={was_connected}, current_time={current_time}")
 
         # Check ping timeout for shore connection
         time_since_ping = current_time - self.last_ping_time
         if time_since_ping > self.ping_timeout_sec:
             self.is_connected = False
             if was_connected:
-                self.get_logger().warn(
-                    f"Shore ping timeout - no pings for {time_since_ping:.0f}s")
+                safe_log(self, 'warn', f"Shore ping timeout - no pings for {time_since_ping:.0f}s")
                 
                 # Optional: Trigger RTH on connection loss
                 if self.rth_on_ping_loss_enabled:
-                    self.get_logger().warn("Triggering RETURN TO HOME due to shore connection loss")
-                    cmd_msg = String()
-                    cmd_msg.data = 'return_home'
-                    self.pub_remote_command.publish(cmd_msg)
+                    safe_log(self, 'warn', "Triggering RETURN TO HOME due to shore connection loss")
+                    if self.context_valid:
+                        cmd_msg = String()
+                        cmd_msg.data = 'return_home'
+                        safe_publish(self.pub_remote_command, cmd_msg, self)
         else:
             if not self.is_connected and self.spi:
                 self.is_connected = True
-                self.get_logger().info("Shore connection established")
+                safe_log(self, 'info', "Shore connection established")
         
         # Check if we've received data recently (fallback)
         if current_time - self.last_rx_time > self.connection_timeout_sec:
             if self.is_connected:  # Only warn if we thought we were connected
-                self.get_logger().warn(
-                    f"LoRa data timeout - no data for {self.connection_timeout_sec}s")
+                safe_log(self, 'warn', f"LoRa data timeout - no data for {self.connection_timeout_sec}s")
         else:
             if not self.is_connected and self.spi:
                 self.is_connected = True
-                self.get_logger().info("LoRa connection established")
+                safe_log(self, 'info', "LoRa connection established")
 
         # Log packet loss statistics periodically
         if current_time - self.last_packet_loss_check > 60.0:  # Every minute
             if self.tx_sequence > 0:
                 loss_rate = (self.packet_loss_count / self.tx_sequence) * 100
-                self.get_logger().info(f"Packet loss rate: {loss_rate:.1f}% ({self.packet_loss_count}/{self.tx_sequence})")
+                safe_log(self, 'info', f"Packet loss rate: {loss_rate:.1f}% ({self.packet_loss_count}/{self.tx_sequence})")
                 if loss_rate > 10.0:
-                    self.get_logger().warn(f"High packet loss detected: {loss_rate:.1f}%")
+                    safe_log(self, 'warn', f"High packet loss detected: {loss_rate:.1f}%")
             self.last_packet_loss_check = current_time
 
         # Publish connection status if changed or if enough time has passed
         time_since_last_publish = current_time - self.last_connection_status_publish
-        self.get_logger().debug(f"Connection status check: time_since_last_publish={time_since_last_publish:.1f}s, interval={self.connection_status_publish_interval}s")
+        safe_log(self, 'debug', f"Connection status check: time_since_last_publish={time_since_last_publish:.1f}s, interval={self.connection_status_publish_interval}s")
         
         if self.is_connected != was_connected or time_since_last_publish >= self.connection_status_publish_interval:
             self.publish_connection_status()
             self.last_connection_status_publish = current_time
-            self.get_logger().info(f"Published connection status: {self.is_connected} (changed: {self.is_connected != was_connected}, periodic: {time_since_last_publish >= self.connection_status_publish_interval})")
+            safe_log(self, 'info', f"Published connection status: {self.is_connected} (changed: {self.is_connected != was_connected}, periodic: {time_since_last_publish >= self.connection_status_publish_interval})")
         else:
-            self.get_logger().debug(f"Connection status not published: no change and {time_since_last_publish:.1f}s < {self.connection_status_publish_interval}s")
+            safe_log(self, 'debug', f"Connection status not published: no change and {time_since_last_publish:.1f}s < {self.connection_status_publish_interval}s")
 
     def poll_rx_status(self):
         """Poll RX status for packet reception (since interrupt mode not implemented)"""
+        # Check context validity once per timer cycle
+        if not self._check_context_validity():
+            return
+            
         if not self.spi:
             return
             
@@ -888,18 +936,37 @@ class LoRaNode(Node):
 
     def publish_connection_status(self):
         """Publish LoRa connection status"""
-        status_msg = Bool()
-        status_msg.data = self.is_connected
-        self.pub_connection_status.publish(status_msg)
+        # Use cached context validity for performance
+        if self.context_valid:
+            status_msg = Bool()
+            status_msg.data = self.is_connected
+            safe_publish(self.pub_connection_status, status_msg, self)
 
         if self.is_connected:
-            self.get_logger().debug("LoRa connection status: CONNECTED")
+            safe_log(self, 'debug', "LoRa connection status: CONNECTED")
         else:
-            self.get_logger().debug("LoRa connection status: DISCONNECTED")
+            safe_log(self, 'debug', "LoRa connection status: DISCONNECTED")
 
     def destroy_node(self):
         """Cleanup on node shutdown"""
-        self.get_logger().info("Shutting down LoRa node...")
+        # Set shutdown flag to prevent further operations
+        self.shutdown_requested = True
+        self.context_valid = False
+        
+        # Try to log shutdown message safely, with fallback
+        if not safe_log(self, 'info', "Shutting down LoRa node..."):
+            print("[INFO] [lora_node]: Shutting down LoRa node...")
+
+        # Cancel timers first to prevent callbacks during shutdown
+        try:
+            if hasattr(self, 'tx_timer'):
+                self.tx_timer.cancel()
+            if hasattr(self, 'health_timer'):
+                self.health_timer.cancel()
+            if hasattr(self, 'rx_poll_timer'):
+                self.rx_poll_timer.cancel()
+        except Exception:
+            pass  # Ignore errors during shutdown
 
         # Release GPIO lines
         try:
@@ -911,17 +978,25 @@ class LoRaNode(Node):
                 self.lora_irq_line.release()
             if self.gpio_chip:
                 self.gpio_chip.close()
-            self.get_logger().info("GPIO lines released")
+            if not safe_log(self, 'info', "GPIO lines released"):
+                print("[INFO] [lora_node]: GPIO lines released")
         except Exception as e:
-            self.get_logger().error(f"Error releasing GPIO: {e}")
+            if not safe_log(self, 'error', f"Error releasing GPIO: {e}"):
+                print(f"[ERROR] [lora_node]: Error releasing GPIO: {e}")
 
         # Close SPI
         if self.spi:
             try:
                 self.spi.close()
-                self.get_logger().info("SPI closed")
+                if not safe_log(self, 'info', "SPI closed"):
+                    print("[INFO] [lora_node]: SPI closed")
             except Exception as e:
-                self.get_logger().error(f"Error closing SPI: {e}")
+                if not safe_log(self, 'error', f"Error closing SPI: {e}"):
+                    print(f"[ERROR] [lora_node]: Error closing SPI: {e}")
+
+        # Final shutdown message - always print this even if context is invalid
+        if not safe_log(self, 'info', "LoRa node shutdown complete"):
+            print("[INFO] [lora_node]: LoRa node shutdown complete")
 
         super().destroy_node()
 
@@ -993,13 +1068,13 @@ Hardware:
         rclpy.spin(node)
     except KeyboardInterrupt:
         if node:
-            node.get_logger().info("LoRa node interrupted, shutting down gracefully...")
+            safe_log(node, 'info', "LoRa node interrupted, shutting down gracefully...")
     except ExternalShutdownException:
         if node:
-            node.get_logger().info("External shutdown received, exiting gracefully...")
+            safe_log(node, 'info', "External shutdown received, exiting gracefully...")
     except Exception as e:
         if node:
-            node.get_logger().error(f"Unexpected error: {e}")
+            safe_log(node, 'error', f"Unexpected error: {e}")
         else:
             print(f"Error before node creation: {e}")
     finally:
@@ -1007,8 +1082,8 @@ Hardware:
         if node:
             try:
                 node.destroy_node()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ERROR] Error in destroy_node(): {e}")
 
         try:
             if rclpy.ok():
