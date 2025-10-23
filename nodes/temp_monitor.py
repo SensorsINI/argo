@@ -25,9 +25,10 @@ import sys
 import os
 # Import the shared pause service
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+# Import ArgoBaseNode for standardized functionality
+from argo_base_node import ArgoBaseNode
 # Removed toggle_pause_service import - temp_monitor node doesn't need pause functionality
 import rclpy
-from rclpy.node import Node
 # Removed QoS imports - using default QoS only
 from std_msgs.msg import Float32, Bool
 import time
@@ -45,7 +46,7 @@ CRITICAL_TEMPERATURE_THRESHOLD_C = 100.0
 TEMPERATURE_HYSTERESIS_C = 2.0
 
 
-class TempMonitorNode(Node):
+class TempMonitorNode(ArgoBaseNode):
     def __init__(self):
         super().__init__('temp_monitor_node')
 
@@ -106,6 +107,9 @@ class TempMonitorNode(Node):
         # Timer: 1 Hz
         self.timer = self.create_timer(1.0, self.read_and_publish)
         self.get_logger().info('Temperature Monitor node initialized and reading at 1 Hz.')
+        
+        # Set initial health status as unhealthy (no temperature reading yet)
+        self.set_unhealthy("No temperature reading yet")
 
     def _find_thermal_zones(self):
         """Find available thermal zones for temperature monitoring"""
@@ -270,6 +274,9 @@ class TempMonitorNode(Node):
         # Read temperatures
         cpu_temperature = self._read_cpu_temperature()
         system_temperature = self._read_system_temperature()
+        
+        # Update health status based on temperature safety
+        self._update_health_status(cpu_temperature, system_temperature)
 
         # Determine if we should publish values
         should_publish = False
@@ -363,12 +370,23 @@ class TempMonitorNode(Node):
         # Update ASCII bars if enabled
         self._update_bars(cpu_temperature, system_temperature)
 
+    def _update_health_status(self, cpu_temperature, system_temperature):
+        """Update health status based on temperature safety"""
+        if cpu_temperature is None:
+            self.set_unhealthy("No temperature reading available")
+            return
+        
+        # Check if temperature is in safe range (below high threshold)
+        if cpu_temperature >= self.temp_high_threshold_c:
+            self.set_unhealthy(f"Temperature too high: {cpu_temperature:.1f}°C >= {self.temp_high_threshold_c:.1f}°C")
+        else:
+            self.set_healthy(f"Temperature in safe range: {cpu_temperature:.1f}°C")
+
 
 def main(args=None):
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(
-        description='System Temperature ROS2 Node - Monitors CPU and system temperature',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    """Main function using ArgoBaseNode standardized approach"""
+    parser = ArgoBaseNode.create_standard_parser(
+        'System Temperature ROS2 Node - Monitors CPU and system temperature',
         epilog="""
 This ROS2 node monitors system temperature on the Argo autonomous sailboat:
 - Reads CPU temperature from thermal zones
@@ -382,6 +400,10 @@ Topics:
     /system_temperature: Float32 - System temperature in Celsius
     /temperature_high_alert: Bool - High temperature alert
     /temperature_critical_alert: Bool - Critical temperature alert
+    /temp_monitor_health: Bool - Node health status (ArgoBaseNode)
+
+Services:
+  /temp_monitor_node/health: Trigger - Health status service endpoint
 
 Parameters:
   temperature_high_threshold_c: High temperature threshold in Celsius (default: 70.0)
@@ -395,56 +417,14 @@ Hardware:
   Reads from /sys/class/thermal/thermal_zone* for CPU temperature
         """
     )
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable ASCII terminal visualization of temperature values')
-
-    # Parse known args to allow ROS2 arguments to pass through
-    parsed_args, unknown_args = parser.parse_known_args(args)
-
-    # Initialize ROS2 with remaining arguments
-    rclpy.init(args=unknown_args)
-    node = TempMonitorNode()
-    if rclpy.ok():
-        try:
-            rclpy.spin(node)
-        except KeyboardInterrupt:
-            # Quiet shutdown to avoid traceback
-            try:
-                if hasattr(node, '_teardown_ascii_vis'):
-                    node._teardown_ascii_vis()
-            except Exception:
-                pass
-            try:
-                node.destroy_node()
-            except Exception:
-                pass
-            try:
-                rclpy.shutdown()
-            except Exception:
-                pass
-        except ExternalShutdownException:
-            try:
-                if hasattr(node, '_teardown_ascii_vis'):
-                    node._teardown_ascii_vis()
-            except Exception:
-                pass
-            try:
-                node.destroy_node()
-            except Exception:
-                pass
-            try:
-                rclpy.shutdown()
-            except Exception:
-                pass
-        else:
-            # Normal shutdown path
-            try:
-                if hasattr(node, '_teardown_ascii_vis'):
-                    node._teardown_ascii_vis()
-            except Exception:
-                pass
-            node.destroy_node()
-            rclpy.shutdown()
+    
+    try:
+        ArgoBaseNode.run_node(TempMonitorNode, args, parser)
+    except Exception as e:
+        # Handle temperature monitor specific errors
+        print(f"CRITICAL: Failed to initialize Temperature Monitor node: {e}")
+        print("CRITICAL: Check thermal zone access and permissions.")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

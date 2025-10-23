@@ -33,7 +33,6 @@
 # - GPIO Pins: PC12 (pin 36, line 76) !CHARGING, PH9 (pin 26, line 233) !ACOK from MP2672GD
 
 import rclpy
-from rclpy.node import Node
 from std_msgs.msg import Float32, Bool
 from std_srvs.srv import Trigger
 import time
@@ -44,6 +43,10 @@ import argcomplete
 import os
 import csv
 import json
+
+# Import ArgoBaseNode
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from argo_base_node import ArgoBaseNode
 from datetime import datetime
 from rclpy.executors import ExternalShutdownException
 from collections import deque
@@ -101,8 +104,8 @@ except Exception:
 _HAS_MPL = False
 
 
-class BatteryWaterNode(Node):
-    def __init__(self):
+class BatteryWaterNode(ArgoBaseNode):
+    def __init__(self, debug_mode=False):
         super().__init__('battery_water_node')
         self.get_logger().info('Initializing Battery/Water node...')
 
@@ -132,10 +135,8 @@ class BatteryWaterNode(Node):
         self.pub_humidity_alert = self.create_publisher(
             Bool, 'humidity_alert', 10)
 
-        # Health status publisher
-        self.pub_health = self.create_publisher(
-            Bool, 'battery_water_health', 10)
-        self.health_status = False  # Track current health status
+        # Initialize health as unhealthy until we get readings
+        self.set_unhealthy("No sensor readings yet")
         # Battery remaining percentage publisher
         self.pub_battery_remaining_pct = self.create_publisher(
             Float32, 'battery_remaining_pct', 10)
@@ -384,8 +385,7 @@ class BatteryWaterNode(Node):
                 f'Battery/Water node initialized - Sail current: {SAIL_CURRENT_RATE_HZ}Hz, '
                 f'GPIO status: 1Hz, Battery safety: {BATTERY_SAFETY_INTERVAL_S}s intervals')
 
-            # Publish initial health status as healthy
-            self._publish_health_status(True)
+            # Initial health status will be set after first sensor readings
             
             # Perform initial sensor readings for immediate status display
             self._perform_initial_readings()
@@ -445,18 +445,55 @@ class BatteryWaterNode(Node):
                 'timestamp': time.monotonic()
             })
 
-    def _publish_health_status(self, is_healthy: bool):
-        """Publish health status and update internal state"""
-        if self.health_status != is_healthy:
-            self.health_status = is_healthy
-            health_msg = Bool()
-            health_msg.data = is_healthy
-            self.pub_health.publish(health_msg)
+    def _update_health_status(self, battery_voltage: float, saltwater_detected: bool, humidity: float):
+        """Update health status based on specific criteria:
+        - Battery voltage above low threshold
+        - No saltwater intrusion detected
+        - Humidity below 70%
+        """
+        if battery_voltage is None:
+            self.set_unhealthy("No battery voltage reading")
+            return
+        
+        if saltwater_detected is None:
+            self.set_unhealthy("No saltwater detection reading")
+            return
+            
+        if humidity is None:
+            self.set_unhealthy("No humidity reading")
+            return
+        
+        # Check battery voltage (above low threshold)
+        if battery_voltage <= self.low_battery_voltage:
+            self.set_unhealthy(f"Battery voltage too low: {battery_voltage:.2f}V <= {self.low_battery_voltage:.2f}V")
+            return
+        
+        # Check saltwater intrusion
+        if saltwater_detected:
+            self.set_unhealthy("Saltwater intrusion detected")
+            return
+        
+        # Check humidity (below 70%)
+        if humidity >= 70.0:
+            self.set_unhealthy(f"Humidity too high: {humidity:.1f}% >= 70.0%")
+            return
+        
+        # All criteria met
+        self.set_healthy(f"Battery: {battery_voltage:.2f}V, No saltwater, Humidity: {humidity:.1f}%")
 
-            if is_healthy:
-                self.get_logger().info("Battery/Water health status: HEALTHY")
-            else:
-                self.get_logger().warn("Battery/Water health status: FAILED")
+    def _cleanup_on_exit(self):
+        """Battery/Water node specific cleanup on exit"""
+        # Cancel any remaining timers
+        if hasattr(self, 'sail_current_timer'):
+            try:
+                self.sail_current_timer.cancel()
+            except Exception:
+                pass
+        if hasattr(self, 'battery_safety_timer'):
+            try:
+                self.battery_safety_timer.cancel()
+            except Exception:
+                pass
 
     def _init_csv_logging(self):
         """Initialize CSV logging directory and file"""
@@ -1001,7 +1038,7 @@ class BatteryWaterNode(Node):
         # Mark node as unhealthy after first IO error
         if self.node_healthy:
             self.node_healthy = False
-            self._publish_health_status(False)
+            self.set_unhealthy(f"Sensor error: {sensor_name}")
             self.get_logger().warn(
                 f"Node health set to UNHEALTHY due to {sensor_name} errors. Switching to low-frequency retry mode.")
             # Switch to low-frequency retry mode
@@ -1077,7 +1114,7 @@ class BatteryWaterNode(Node):
             
             if self._reinitialize_sensors():
                 self.node_healthy = True
-                self._publish_health_status(True)
+                self.set_healthy("Sensors recovered")
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0  # Reset counter on success
                 self.get_logger().info(
@@ -1105,7 +1142,7 @@ class BatteryWaterNode(Node):
                 # Automatic recovery on successful read
                 if not self.node_healthy:
                     self.node_healthy = True
-                    self._publish_health_status(True)
+                    self.set_healthy("Automatic recovery successful")
                     self._switch_to_normal_mode()
                     self._recovery_attempt_count = 0
                     self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
@@ -1281,8 +1318,8 @@ class BatteryWaterNode(Node):
         """Request node shutdown due to critical sensor failure"""
         self._shutdown_requested = True
         self.get_logger().fatal("Node shutting down due to critical sensor failure")
-        # Publish health status as failed
-        self._publish_health_status(False)
+        # Set health status as failed
+        self.set_unhealthy("Critical sensor failure - shutting down")
         # Cancel timers to stop further execution
         if hasattr(self, 'sail_current_timer'):
             self.sail_current_timer.cancel()
@@ -1351,7 +1388,7 @@ class BatteryWaterNode(Node):
             # If we were unhealthy but now have successful reads, recover to normal mode
             if not self.node_healthy:
                 self.node_healthy = True
-                self._publish_health_status(True)
+                self.set_healthy("Automatic recovery successful")
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0
                 self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
@@ -1395,7 +1432,7 @@ class BatteryWaterNode(Node):
             # If we were unhealthy but now have successful reads, recover to normal mode
             if not self.node_healthy:
                 self.node_healthy = True
-                self._publish_health_status(True)
+                self.set_healthy("Automatic recovery successful")
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0
                 self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
@@ -1445,7 +1482,9 @@ class BatteryWaterNode(Node):
                     self.pub_temperature.publish(Float32(data=temperature))
                 if humidity is not None:
                     self.pub_humidity.publish(Float32(data=humidity))
-                self._publish_health_status(True)
+                
+                # Update health status based on sensor readings
+                self._update_health_status(battery_voltage, saltwater_detected, humidity)
             except Exception:
                 pass
 
@@ -1605,10 +1644,8 @@ class BatteryWaterNode(Node):
             self._last_log_time = current_time
 
 def main(args=None):
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(
-        description='Battery/Water ROS2 Node - Monitors battery, saltwater, and environmental sensors',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    parser = ArgoBaseNode.create_standard_parser(
+        'Battery/Water Monitoring Node for Argo',
         epilog="""
 This ROS2 node monitors various sensors on the Argo autonomous sailboat:
 - MAX11612 ADC: Battery voltage (via voltage divider), saltwater probe, sail winch current
@@ -1617,7 +1654,7 @@ This ROS2 node monitors various sensors on the Argo autonomous sailboat:
 - Publishes alerts for low battery, saltwater detection, and high humidity
 - Estimates time to full charge or depletion using linear regression
 
-Topics:
+TOPICS:
   Publishes:
     /battery_voltage: Float32 - Battery voltage in volts
     /saltwater_voltage: Float32 - Saltwater probe voltage in volts  
@@ -1629,60 +1666,28 @@ Topics:
     /battery_low_alert: Bool - Battery low voltage alert
     /saltwater_alert: Bool - Saltwater detection alert
     /humidity_alert: Bool - High humidity alert
+    /battery_water_health: Bool - Node health status (ArgoBaseNode)
 
-Parameters:
-  battery_low_threshold_v: Low battery threshold in volts (default: 7.2)
-  saltwater_alert_threshold_v: Saltwater detection threshold in volts (default: 1.0)
-  humidity_alert_threshold_pct: High humidity threshold percentage (default: 75.0)
-  battery_series_cells: Number of battery cells in series (default: 2)
-  soc_S, soc_V0, soc_A, soc_B: LiPo state-of-charge curve parameters
-  battery_lifetime_sample_window: Sample window size for lifetime estimation (default: 300)
-  battery_lifetime_min_samples: Minimum samples for estimation (default: 30)
+SERVICES:
+  /battery_water_node/health: Trigger - Health status service endpoint
 
-Options:
-  --debug: Enable ASCII terminal visualization of sensor values
-  --test-adc: Perform RC decay test on AIN3 and save plot (requires matplotlib)
-
-Hardware:
-  MAX11612 ADC at I2C address 0x34
-  SHT45 temperature/humidity sensor at I2C address 0x44
-  Battery voltage divider: 27k/18k (2.5x scaling)
+HARDWARE:
+  - I2C Bus: Uses I2C bus 0 (Orange Pi Zero 2W default)
+  - MAX11612 ADC at I2C address 0x34
+  - SHT45 sensor at I2C address 0x44
+  - GPIO Pins: PC12 (!CHARGING), PH9 (!ACOK)
+  - Battery voltage divider: 27k/18k (2.5x scaling)
         """
     )
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable ASCII terminal visualization of sensor values')
     parser.add_argument('--test-adc', action='store_true',
                         help='Perform RC decay test on AIN3 and save plot (requires matplotlib)')
-
-    # Parse known args to allow ROS2 arguments to pass through
-    parsed_args, unknown_args = parser.parse_known_args(args)
-
-    # Initialize ROS2 with remaining arguments
-    rclpy.init(args=unknown_args)
-    node = None
+    
     try:
-        node = BatteryWaterNode()
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    except rclpy.executors.ExternalShutdownException:
-        pass
-    finally:
-        if node:
-            try:
-                # Save battery slopes on shutdown
-                if hasattr(node, '_save_battery_slopes'):
-                    node._save_battery_slopes()
-            except Exception as e:
-                print(f"Error saving battery slopes: {e}")
-            try:
-                if hasattr(node, '_teardown_ascii_vis'):
-                    node._teardown_ascii_vis()
-            except Exception:
-                pass
-            node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        ArgoBaseNode.run_node(BatteryWaterNode, args, parser)
+    except Exception as e:
+        print(f"CRITICAL: Failed to initialize Battery/Water node: {e}")
+        print("CRITICAL: Check I2C permissions and hardware connections.")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

@@ -91,9 +91,11 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
+# Import ArgoBaseNode for standardized functionality
+from argo_base_node import ArgoBaseNode
+
 # Removed toggle_pause_service import - rudder_sail_radio node doesn't need pause functionality
 import rclpy
-from rclpy.node import Node
 from std_msgs.msg import Bool, Float64
 from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
@@ -309,7 +311,7 @@ def run_test_mode():
         print("Terminal settings restored.")
 
 
-class RudderSailRadioNode(Node):
+class RudderSailRadioNode(ArgoBaseNode):
     """
     Combined hardware interface and control arbitration node for rudder/sail control.
 
@@ -404,10 +406,7 @@ class RudderSailRadioNode(Node):
         self.pub_control_authority = self.create_publisher(
             Vector3, '/control_authority', 10)
 
-        # Health status publisher
-        self.pub_health = self.create_publisher(
-            Bool, '/rudder_sail_radio_health', 10)
-        self.health_status = False  # Track current health status
+        # Health status is now handled by ArgoBaseNode
 
         # --- Subscribers ---
         # From controller.py (autonomous commands)
@@ -419,8 +418,8 @@ class RudderSailRadioNode(Node):
         self.timer = self.create_timer(
             self.control_loop_period, self.timer_callback)
 
-        # Publish initial health status as healthy
-        self._publish_health_status(True)
+        # Set initial health status as unhealthy (no radio input yet)
+        self.set_unhealthy("No radio input detected yet")
 
 
         # Status publishing timer
@@ -514,7 +513,7 @@ class RudderSailRadioNode(Node):
                     f"Radio input validation failed: {failure_reason}")
                 self.last_outlier_warning_time = now
 
-            self._publish_health_status(False, failure_reason)
+            self.set_unhealthy(failure_reason)
             return False
 
         # The original script inverted the rudder command. Let's preserve that.
@@ -540,7 +539,7 @@ class RudderSailRadioNode(Node):
         self.prev_radio_sail = self.radio_sail
 
         # Set health status to healthy when radio inputs are valid
-        self._publish_health_status(True, "Radio inputs within valid range")
+        self.set_healthy("Radio inputs within valid range")
 
         return True
 
@@ -603,22 +602,7 @@ class RudderSailRadioNode(Node):
         sail = np.clip(sail, -self.safety_max_sail, self.safety_max_sail)
         return rudder, sail
 
-    def _publish_health_status(self, is_healthy: bool, reason: str = None):
-        """Publish health status and update internal state"""
-        if self.health_status != is_healthy:
-            self.health_status = is_healthy
-            health_msg = Bool()
-            health_msg.data = is_healthy
-            self.pub_health.publish(health_msg)
-
-            if is_healthy:
-                self.get_logger().info("Rudder/Sail Radio health status: HEALTHY")
-            else:
-                if reason:
-                    self.get_logger().warn(
-                        f"Rudder/Sail Radio health status: FAILED - {reason}")
-                else:
-                    self.get_logger().warn("Rudder/Sail Radio health status: FAILED")
+    # Health status publishing is now handled by ArgoBaseNode
 
     def timer_callback(self):
         """Main control arbitration and hardware interface loop."""
@@ -724,13 +708,9 @@ class RudderSailRadioNode(Node):
             else:
                 print(f"Error during safe exit: {e}", file=sys.stderr)
 
-    def destroy_node(self):
-        """Override destroy_node to ensure safe exit."""
-        # Publish health status as failed on shutdown
-        self._publish_health_status(False)
-
+    def _cleanup_on_exit(self):
+        """Rudder/sail radio specific cleanup on exit"""
         self._ensure_safe_exit()
-        super().destroy_node()
 
     def publish_status(self):
         """Publish control status for other nodes."""
@@ -755,9 +735,9 @@ class RudderSailRadioNode(Node):
 
 
 def main(args=None):
-    parser = argparse.ArgumentParser(
-        description='Rudder/Sail Control Node - Combined hardware interface and control arbitration with high impedance safety mode',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    """Main function using ArgoBaseNode standardized approach"""
+    parser = ArgoBaseNode.create_standard_parser(
+        'Rudder/Sail Control Node - Combined hardware interface and control arbitration with high impedance safety mode',
         epilog="""
 This ROS2 node provides unified rudder/sail control combining hardware interface
 with intelligent control arbitration between human and autonomous systems:
@@ -787,9 +767,13 @@ TOPICS:
     /rudder_sail_servo: Vector3 - Final commands sent to hardware
     /human_controlled: Bool - Current control authority status (default QoS)
     /control_authority: Vector3 - Detailed control status (authority, time_since_human, time_since_auto)
+    /rudder_sail_radio_health: Bool - Node health status (ArgoBaseNode)
 
   Subscribes:
     /rudder_sail_cmd: Vector3 - Autonomous commands from controller.py
+
+SERVICES:
+  /rudder_sail_radio_node/health: Trigger - Health status service endpoint
 
 PARAMETERS:
   human_override_timeout: Seconds after last human activity before robot can take control (default: 2.0)
@@ -819,7 +803,7 @@ TEST MODE:
 - Press spacebar to pause/resume, Ctrl+C to exit
         """
     )
-
+    
     parser.add_argument('--test', action='store_true',
                         help='Run in test mode: sweep servo outputs and display radio inputs (no ROS2)')
 
@@ -851,51 +835,22 @@ TEST MODE:
         run_test_mode()
         return
 
-    rclpy.init(args=unknown_args)
-    node = None
     try:
-        node = RudderSailRadioNode()
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        print("\nKeyboardInterrupt received. Initiating safe shutdown...")
-    except rclpy.executors.ExternalShutdownException:
-        print("External shutdown requested. Initiating safe shutdown...")
+        ArgoBaseNode.run_node(RudderSailRadioNode, args, parser)
     except Exception as e:
-        print(f"Unexpected error: {e}. Initiating emergency safe shutdown...")
-        # Ensure servos are in high impedance mode even on unexpected errors
-        try:
-            if SERVO_RUDDER_PATH.exists():
-                SERVO_RUDDER_PATH.write_text("0")
-            if SERVO_SAIL_PATH.exists():
-                SERVO_SAIL_PATH.write_text("0")
-            print(
-                "Emergency: Servos set to HIGH IMPEDANCE mode. Radio control is active.")
-        except Exception as emergency_e:
-            print(
-                f"CRITICAL: Could not set high impedance mode during emergency: {emergency_e}")
-    finally:
-        # Ensure proper cleanup in all cases
-        if node:
-            try:
-                node.destroy_node()
-            except Exception as e:
-                print(f"Error during node destruction: {e}")
-
-        if rclpy.ok():
-            try:
-                rclpy.shutdown()
-            except Exception as e:
-                print(f"Error during ROS2 shutdown: {e}")
-
+        # Handle rudder/sail radio specific errors
+        print(f"CRITICAL: Failed to initialize Rudder/Sail Radio node: {e}")
+        print("CRITICAL: Check kernel module and sysfs interface.")
         # Final safety check - ensure servos are in high impedance mode
         try:
             if SERVO_RUDDER_PATH.exists():
                 SERVO_RUDDER_PATH.write_text("0")
             if SERVO_SAIL_PATH.exists():
                 SERVO_SAIL_PATH.write_text("0")
-            print("Final safety check: Servos confirmed in HIGH IMPEDANCE mode.")
-        except Exception as e:
-            print(f"CRITICAL: Final safety check failed: {e}")
+            print("Emergency: Servos set to HIGH IMPEDANCE mode. Radio control is active.")
+        except Exception as emergency_e:
+            print(f"CRITICAL: Could not set high impedance mode during emergency: {emergency_e}")
+        sys.exit(1)
 
 
 if __name__ == '__main__':
