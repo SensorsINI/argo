@@ -50,8 +50,8 @@ INITIAL_FLASH_ON_TIME = 0.15  # LED on time (seconds)
 INITIAL_FLASH_OFF_TIME = 0.15 # LED off time (seconds)
 
 # Heartbeat pattern configuration
-HEARTBEAT_FREQUENCY_HZ = 1.0  # 1Hz heartbeat (same as normal power control)
-HEARTBEAT_DUTY_CYCLE = 0.5    # 50% duty cycle
+HEARTBEAT_FREQUENCY_HZ = 2.0  # Hz boot indicator heartbeat
+HEARTBEAT_DUTY_CYCLE = 0.2    # % duty cycle
 
 # Global flag for graceful shutdown
 running = True
@@ -112,7 +112,7 @@ def run_boot_indicator():
         while running:
             # LED ON
             green_led.set_value(LED_ON_STATE)
-            
+
             # Sleep in small increments for responsive shutdown
             elapsed = 0
             while elapsed < on_time and running:
@@ -124,7 +124,7 @@ def run_boot_indicator():
 
             # LED OFF
             green_led.set_value(LED_OFF_STATE)
-            
+
             # Sleep in small increments for responsive shutdown
             elapsed = 0
             while elapsed < off_time and running:
