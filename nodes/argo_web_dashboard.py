@@ -174,6 +174,8 @@ class ArgoWebDashboard(Node):
             self.app.logger.setLevel(logging.ERROR)
         else:
             self.get_logger().info('🐛 Debug mode enabled - HTTP request logs will be shown')
+            # Configure Flask to use our custom formatter with node name prefix
+            self._configure_flask_logging()
         
         # Start Flask in separate thread
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
@@ -181,6 +183,27 @@ class ArgoWebDashboard(Node):
         
         self.get_logger().info('🌐 Web dashboard started on http://0.0.0.0:8081')
         self.get_logger().info('   Access from phone: http://ORANGEPI_IP:8081')
+    
+    def _configure_flask_logging(self):
+        """Configure Flask logging to include node name prefix."""
+        # Use a simpler approach - just modify the format string
+        node_prefix_format = '[argo_web_dashboard] %(message)s'
+        
+        # Configure werkzeug logger (handles HTTP requests)
+        werkzeug_logger = logging.getLogger('werkzeug')
+        # Remove existing handlers and add our custom one
+        werkzeug_logger.handlers.clear()
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(node_prefix_format))
+        werkzeug_logger.addHandler(handler)
+        werkzeug_logger.setLevel(logging.INFO)
+        
+        # Configure Flask app logger
+        self.app.logger.handlers.clear()
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(node_prefix_format))
+        self.app.logger.addHandler(handler)
+        self.app.logger.setLevel(logging.INFO)
     
     # ==================== ROS2 Callbacks ====================
     
