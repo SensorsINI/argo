@@ -264,11 +264,15 @@ class LoRaNode(Node):
         self.connection_timeout_sec = 60.0  # Consider disconnected after 60s no rx
         
         # Ping tracking for shore connection monitoring
-        self.last_ping_time = time.time()
+        self.last_ping_time = None  # None until we receive first ping
         self.ping_timeout_sec = 30.0  # Consider disconnected after 30s no pings
         self.rth_on_ping_loss_enabled = False  # Configurable feature
         self.declare_parameter('rth_on_ping_loss', False)
         self.rth_on_ping_loss_enabled = self.get_parameter('rth_on_ping_loss').get_parameter_value().bool_value
+        
+        # Throttled logging for ping timeout warnings
+        self.last_ping_timeout_warning = 0.0
+        self.ping_timeout_warning_interval = 60.0  # Warn once per minute maximum
         
         # Packet sequence tracking for link quality monitoring
         self.tx_sequence = 0
@@ -589,7 +593,8 @@ class LoRaNode(Node):
 
             # Strip Waveshare stream mode header if present
             # Expected header: [0x00, 0x00, 0x12, 0x11]
-            if len(payload) >= 4 and payload[0:4] == bytes([0x00, 0x00, 0x12, 0x11]):
+            # Note: Some packets may have multiple headers due to transmission issues
+            while len(payload) >= 4 and payload[0:4] == bytes([0x00, 0x00, 0x12, 0x11]):
                 self.get_logger().debug("Detected Waveshare header, stripping 4 bytes")
                 payload = payload[4:]  # Remove header
 
@@ -848,32 +853,35 @@ class LoRaNode(Node):
         safe_log(self, 'debug', f"Health check: was_connected={was_connected}, current_time={current_time}")
 
         # Check ping timeout for shore connection
-        time_since_ping = current_time - self.last_ping_time
-        if time_since_ping > self.ping_timeout_sec:
-            self.is_connected = False
-            if was_connected:
-                safe_log(self, 'warn', f"Shore ping timeout - no pings for {time_since_ping:.0f}s")
-                
-                # Optional: Trigger RTH on connection loss
-                if self.rth_on_ping_loss_enabled:
-                    safe_log(self, 'warn', "Triggering RETURN TO HOME due to shore connection loss")
-                    if self.context_valid:
-                        cmd_msg = String()
-                        cmd_msg.data = 'return_home'
-                        safe_publish(self.pub_remote_command, cmd_msg, self)
+        if self.last_ping_time is not None:
+            time_since_ping = current_time - self.last_ping_time
+            if time_since_ping > self.ping_timeout_sec:
+                self.is_connected = False
+                if was_connected:
+                    # Connection lost - log warning with red cross icon
+                    safe_log(self, 'warn', f"❌ Shore connection lost - no pings for {time_since_ping:.0f}s")
+                    
+                    # Optional: Trigger RTH on connection loss
+                    if self.rth_on_ping_loss_enabled:
+                        safe_log(self, 'warn', "Triggering RETURN TO HOME due to shore connection loss")
+                        if self.context_valid:
+                            cmd_msg = String()
+                            cmd_msg.data = 'return_home'
+                            safe_publish(self.pub_remote_command, cmd_msg, self)
+            else:
+                # Only report connection established when we receive pings (not just any data)
+                if not self.is_connected and self.spi:
+                    self.is_connected = True
+                    safe_log(self, 'info', "✅ Shore connection established")
         else:
-            if not self.is_connected and self.spi:
-                self.is_connected = True
-                safe_log(self, 'info', "Shore connection established")
+            # No pings received yet - stay disconnected
+            self.is_connected = False
         
-        # Check if we've received data recently (fallback)
+        # Check if we've received data recently (fallback for general LoRa activity)
         if current_time - self.last_rx_time > self.connection_timeout_sec:
             if self.is_connected:  # Only warn if we thought we were connected
                 safe_log(self, 'warn', f"LoRa data timeout - no data for {self.connection_timeout_sec}s")
-        else:
-            if not self.is_connected and self.spi:
-                self.is_connected = True
-                safe_log(self, 'info', "LoRa connection established")
+        # Note: We don't set is_connected=True here anymore - only when receiving pings
 
         # Log packet loss statistics periodically
         if current_time - self.last_packet_loss_check > 60.0:  # Every minute
@@ -891,7 +899,7 @@ class LoRaNode(Node):
         if self.is_connected != was_connected or time_since_last_publish >= self.connection_status_publish_interval:
             self.publish_connection_status()
             self.last_connection_status_publish = current_time
-            safe_log(self, 'info', f"Published connection status: {self.is_connected} (changed: {self.is_connected != was_connected}, periodic: {time_since_last_publish >= self.connection_status_publish_interval})")
+            safe_log(self, 'debug', f"Published connection status: {self.is_connected} (changed: {self.is_connected != was_connected}, periodic: {time_since_last_publish >= self.connection_status_publish_interval})")
         else:
             safe_log(self, 'debug', f"Connection status not published: no change and {time_since_last_publish:.1f}s < {self.connection_status_publish_interval}s")
 
