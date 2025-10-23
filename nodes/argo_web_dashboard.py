@@ -28,7 +28,7 @@ from typing import Dict, Any, Optional
 # ROS2 imports
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float64, Float32, String
+from std_msgs.msg import Bool, Float64, Float32, String, Int32
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
 from std_srvs.srv import Trigger, SetBool
