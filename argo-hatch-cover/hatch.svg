@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="123.5mm"
+   height="75mm"
+   viewBox="0 0 123.5 75"
+   version="1.1"
+   xmlns="http://www.w3.org/2000/svg">
+  <g
+     id="hatch-layer"
+     fill="none"
+     stroke="#000000"
+     stroke-width="0.02">
+    <rect
+       id="hatch-body"
+       x="0"
+       y="0"
+       width="123.5"
+       height="75"
+       rx="9.5"
+       ry="9.5" />
+
+    <circle
+       id="hole-tl"
+       cx="5"
+       cy="10"
+       r="1.5" />
+       
+    <circle
+       id="hole-tr"
+       cx="118.5"
+       cy="10"
+       r="1.5" />
+       
+    <circle
+       id="hole-bl"
+       cx="5"
+       cy="65"
+       r="1.5" />
+       
+    <circle
+       id="hole-br"
+       cx="118.5"
+       cy="65"
+       r="1.5" />
+  </g>
+</svg>
