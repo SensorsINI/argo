@@ -174,8 +174,8 @@ class GpsNode(Node):
         self.timer = self.create_timer(0.1, self.read_and_publish)  # 10 Hz
         self.get_logger().info("GPS node ready. Listening for NMEA data on /gps_data topic...")
 
-        # Publish initial health status as healthy
-        self._publish_health_status(True)
+        # Publish initial health status as unhealthy (no GPS fix yet)
+        self._publish_health_status(False)
 
         # Timer to periodically publish satellite count (ensures zero is published when no fix)
         self.sat_timer = self.create_timer(1.0, self.publish_satellite_count)  # 1 Hz
@@ -517,9 +517,13 @@ class GpsNode(Node):
                     # Set NavSat status to indicate we have a fix
                     if self.navsat_status == NavSatStatus.STATUS_NO_FIX:
                         self.navsat_status = NavSatStatus.STATUS_FIX
+                        # Update health status when we get a fix
+                        self._publish_health_status(True)
                     return True
                 else:
                     # Invalid status - no GPS fix
+                    if self.gps_fix_valid:  # Only update health if fix status changed
+                        self._publish_health_status(False)
                     self.gps_fix_valid = False
                     self.navsat_status = NavSatStatus.STATUS_NO_FIX
                     # Clear navigation data when fix is lost
@@ -576,7 +580,7 @@ class GpsNode(Node):
                 alt_unit = parts[10]
 
                 # Always extract satellite count for GPS health monitoring, even without fix
-                if num_sats:
+                if num_sats is not None and num_sats != '':
                     self.satellites_used = int(num_sats)
 
                 if fix_quality and int(fix_quality) > 0 and latitude_raw and longitude_raw and num_sats:
@@ -604,6 +608,8 @@ class GpsNode(Node):
                                 f"Unexpected altitude unit: {alt_unit}")
 
                     # Update NavSat status and GPS fix validity based on fix quality
+                    if not self.gps_fix_valid:  # Only update health if fix status changed
+                        self._publish_health_status(True)
                     if int(fix_quality) == 1:
                         self.navsat_status = NavSatStatus.STATUS_FIX
                         self.gps_fix_valid = True
@@ -634,6 +640,8 @@ class GpsNode(Node):
                     return True
                 else:
                     # No valid fix - clear GPS fix status
+                    if self.gps_fix_valid:  # Only update health if fix status changed
+                        self._publish_health_status(False)
                     self.gps_fix_valid = False
                     self.navsat_status = NavSatStatus.STATUS_NO_FIX
                     # Clear navigation data when fix is lost

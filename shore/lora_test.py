@@ -201,3 +201,4 @@ if __name__ == '__main__':
     
     monitor = LoRaTestMonitor(args.port, args.baud, args.log_dir)
     monitor.run()
+

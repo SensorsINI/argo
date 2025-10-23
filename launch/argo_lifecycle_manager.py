@@ -77,6 +77,11 @@ class ArgoLifecycleManager:
         self.controller_pause_state = False
         self.status_publisher = None
         self.lifecycle_services_created = False
+        
+        # Health status monitoring
+        self.node_health_status = {}  # Track health status for each node
+        self.health_subscribers = {}  # ROS2 subscribers for health topics
+        
         if ROS2_AVAILABLE:
             try:
                 if not rclpy.ok():
@@ -92,6 +97,9 @@ class ArgoLifecycleManager:
                 # Subscribe to controller pause state
                 self.controller_pause_sub = self.ros2_node.create_subscription(
                     Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
+                
+                # Initialize health status monitoring
+                self._setup_health_monitoring()
             except Exception as e:
                 if not quiet:
                     print(
@@ -182,6 +190,55 @@ class ArgoLifecycleManager:
     def _controller_pause_state_callback(self, msg):
         """Receive controller pause state updates."""
         self.controller_pause_state = msg.data
+
+    def _setup_health_monitoring(self):
+        """Setup health status monitoring for nodes that publish health topics"""
+        if not self.ros2_node:
+            return
+            
+        # Define health topics for each node
+        health_topics = {
+            'gps.py': '/gps_health',
+            'lora.py': '/lora_connection_status', 
+            'anem.py': '/anem_health',
+            'battery_water.py': '/battery_water_health',
+            'rudder_sail_radio.py': '/rudder_sail_radio_health',
+            'temp_monitor.py': '/temp_monitor_health'
+        }
+        
+        # Create subscribers for health topics
+        for node_name, health_topic in health_topics.items():
+            try:
+                # Create callback function for this specific node
+                def create_health_callback(node):
+                    def health_callback(msg):
+                        self.node_health_status[node] = msg.data
+                    return health_callback
+                
+                callback = create_health_callback(node_name)
+                subscriber = self.ros2_node.create_subscription(
+                    Bool, health_topic, callback, 10)
+                self.health_subscribers[node_name] = subscriber
+                
+                # Initialize health status as unknown
+                self.node_health_status[node_name] = None
+                
+            except Exception as e:
+                if not self.quiet:
+                    print(f"Warning: Could not subscribe to health topic {health_topic}: {e}")
+
+    def _get_node_health_status(self, node_name: str) -> str:
+        """Get health status string for a node"""
+        if node_name not in self.node_health_status:
+            return "❓"
+        
+        health_status = self.node_health_status[node_name]
+        if health_status is None:
+            return "❓"
+        elif health_status:
+            return "🟢"
+        else:
+            return "🔴"
 
     def _query_controller_pause_state(self):
         """Query the current controller pause state via service call."""
@@ -1165,7 +1222,7 @@ class ArgoLifecycleManager:
         if service_running:
             node_fatal_messages = self._get_fatal_messages_for_nodes()
         
-        # Individual node status
+        # Individual node status - tabular format
         node_status = self._get_node_status()
         running_count = sum(
             1 for status in node_status.values() if "RUNNING" in status)
@@ -1180,14 +1237,36 @@ class ArgoLifecycleManager:
             print(f"🎮 CONTROLLER: {pause_status}")
         else:
             print(f"🎮 CONTROLLER: 🔴 STOPPED")
+        
+        # Display nodes in tabular format
+        print("\n📋 NODE STATUS TABLE:")
+        print("┌" + "─" * 25 + "┬" + "─" * 12 + "┬" + "─" * 12 + "┐")
+        print("│ " + "NODE NAME".ljust(23) + " │ " + "RUNNING".ljust(10) + " │ " + "HEALTH".ljust(10) + " │")
+        print("├" + "─" * 25 + "┼" + "─" * 12 + "┼" + "─" * 12 + "┤")
+        
         stopped_nodes = []
         for node, status in node_status.items():
-            if "STOPPED" in status and node in node_fatal_messages:
-                print(f"  {node}: {status} - {node_fatal_messages[node]}")
+            # Get health status for this node
+            health_status = self._get_node_health_status(node)
+            
+            # Format running status
+            if "RUNNING" in status:
+                running_display = "🟢 RUNNING"
             else:
-                print(f"  {node}: {status}")
-            if "STOPPED" in status:
+                running_display = "🔴 STOPPED"
                 stopped_nodes.append(node)
+            
+            # Format node name (remove .py extension for display)
+            display_name = node.replace('.py', '')
+            
+            # Add error message if available
+            error_suffix = ""
+            if "STOPPED" in status and node in node_fatal_messages:
+                error_suffix = f" - {node_fatal_messages[node]}"
+            
+            print(f"│ {display_name.ljust(23)} │ {running_display.ljust(10)} │ {health_status.ljust(10)} │")
+        
+        print("└" + "─" * 25 + "┴" + "─" * 12 + "┴" + "─" * 12 + "┘")
         
         # Show key error messages for stopped nodes
         if stopped_nodes:
@@ -1464,8 +1543,22 @@ class ArgoLifecycleManager:
             except Exception:
                 pass
             
+            # Count healthy nodes
+            healthy_count = 0
+            unhealthy_count = 0
+            for node in node_status.keys():
+                health_status = self.node_health_status.get(node)
+                if health_status is True:
+                    healthy_count += 1
+                elif health_status is False:
+                    unhealthy_count += 1
+            
             # Build condensed status line
             status_line = f"🚢 ARGO: [{running_count}/{total_count}] | 🖥️ {cpu_percent:.1f}%"
+            
+            # Add health summary if we have health data
+            if healthy_count > 0 or unhealthy_count > 0:
+                status_line += f" | 🏥 {healthy_count}H/{unhealthy_count}U"
             
             # Add controller pause state
             if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
