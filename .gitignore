@@ -157,3 +157,37 @@ nodes/bno085_old_launcher.py.backup
 BNO080_Datasheet_v1.3 selectable 2017.pdf
 Sensor-Hub-Transport-Protocol-v1.7.pdf
 SH-2-Reference-Manual-v1.2.pdf
+docs/USB To LoRa Data Transfer Module SX1262 Solution Suitable For Data Acquisition In Industry _ Agriculture.pdf
+docs/USB-TO-LoRa-xF - Waveshare Wiki.pdf
+docs/COMPLETION_QUICKSTART.md
+docs/Directional Wind Meter Using SDP3x _ Sensirion.html
+docs/Directional Wind Meter Using SDP3x _ Sensirion.pdf
+
+# Backup images (large binary files)
+backup-sd-card-images/
+*.img.gz
+
+# ROS2 bag recordings (data files)
+bags/
+*.db3
+
+# Log files  
+**/lora_logs/
+shore/lora_logs/
+
+# Build artifacts
+*_build/
+*_workspace/
+
+# Chat transcripts
+chats/
+pcb/datasheets/adafruit-9-dof-orientation-imu-fusion-breakout-bno085.pdf
+pcb/datasheets/Ai-Thinker RA-01 datasheet FCC report.pdf
+pcb/datasheets/Ai-Thinker RA-01 datasheet.pdf
+pcb/datasheets/BNO080_085-Datasheet Adafruit 9-DOF IMU.pdf
+pcb/datasheets/MP2672 lipo 2s battery charger chip.pdf
+pcb/datasheets/SHT45_DS_Datasheet_SHT4x_5.pdf
+pcb/datasheets/txs0102 i2c level shifter.pdf
+pcb/datasheets/USB To LoRa Data Transfer Module SX1262 Solution Suitable For Data Acquisition In Industry _ Agriculture.pdf
+pcb/datasheets/USB-TO-LoRa-xF - Waveshare Wiki.pdf
+pcb/orange-pi/xpowers_axp313a_apr22_xonlink_PMIC.pdf
