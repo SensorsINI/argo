@@ -21,6 +21,7 @@ import os
 import json
 import time
 import threading
+import argparse
 from datetime import datetime
 
 # Check for ROS2 before other imports
@@ -89,13 +90,13 @@ except ImportError:
     sys.exit(1)
 
 class LoRaShoreNode(Node):
-    def __init__(self):
+    def __init__(self, debug=False):
         super().__init__('lora_shore_node')
         
         # Declare parameters
         self.declare_parameter('serial_port', '/dev/ttyACM0')
         self.declare_parameter('baud_rate', 115200)
-        self.declare_parameter('enable_debug', False)
+        self.declare_parameter('enable_debug', debug)
         
         # Get parameters
         self.serial_port = self.get_parameter('serial_port').get_parameter_value().string_value
@@ -220,6 +221,11 @@ class LoRaShoreNode(Node):
                     text = data.decode('utf-8', errors='ignore')
                     buffer += text
                     
+                    if self.debug:
+                        self.get_logger().debug(f"Serial data received: {len(data)} bytes, buffer now: {len(buffer)} chars")
+                        if len(text) > 0:
+                            self.get_logger().debug(f"Raw text: {repr(text)}")
+                    
                     # Process complete JSON packets in buffer
                     while '{' in buffer and '}' in buffer:
                         json_start = buffer.index('{')
@@ -228,9 +234,15 @@ class LoRaShoreNode(Node):
                             json_str = buffer[json_start:json_end]
                             buffer = buffer[json_end:]  # Remove processed packet
                             
+                            if self.debug:
+                                self.get_logger().debug(f"Extracted JSON packet: {len(json_str)} chars")
+                            
                             # Strip trailing Waveshare status bytes (e.g., "30", "33")
                             # They appear after the closing brace
                             json_str = json_str.strip()
+                            
+                            if self.debug:
+                                self.get_logger().debug(f"Stripped JSON: {repr(json_str)}")
                             
                             # Try to parse JSON
                             try:
@@ -272,7 +284,11 @@ class LoRaShoreNode(Node):
             self.last_packet_time = time.time()
             
             if self.debug:
-                self.get_logger().info(f"Packet #{self.packet_count}: {packet}")
+                self.get_logger().info(f"=== PACKET #{self.packet_count} RECEIVED ===")
+                self.get_logger().info(f"Raw JSON: {raw_json}")
+                self.get_logger().info(f"Parsed packet: {packet}")
+                self.get_logger().info(f"Packet keys: {list(packet.keys())}")
+                self.get_logger().info(f"Timestamp: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
             
             # Publish raw data
             raw_msg = String()
@@ -320,6 +336,9 @@ class LoRaShoreNode(Node):
             contact_msg.data = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.pub_argo_last_contact.publish(contact_msg)
             
+            if self.debug:
+                self.get_logger().info(f"=== PACKET #{self.packet_count} PROCESSING COMPLETE ===")
+            
             # Note: RSSI is appended by Waveshare as trailing bytes, not in JSON
             # Would need separate parsing if needed
             
@@ -342,7 +361,12 @@ class LoRaShoreNode(Node):
             
             self.ser.write(packet_with_header)
             self.ser.flush()
-            self.get_logger().debug(f"Sent ping #{self.ping_sequence} with Waveshare header")
+            
+            if self.debug:
+                self.get_logger().debug(f"Sent ping #{self.ping_sequence}: {ping_msg}")
+                self.get_logger().debug(f"Packet with header: {len(packet_with_header)} bytes")
+            else:
+                self.get_logger().debug(f"Sent ping #{self.ping_sequence} with Waveshare header")
         except Exception as e:
             self.get_logger().debug(f"Error sending ping: {e}")
     
@@ -360,7 +384,11 @@ class LoRaShoreNode(Node):
                 return
             
             self.command_count += 1
-            self.get_logger().info(f"Sending command to Argo: {command}")
+            
+            if self.debug:
+                self.get_logger().info(f"=== SENDING COMMAND #{self.command_count} ===")
+                self.get_logger().info(f"Command: {command}")
+                self.get_logger().info(f"Command length: {len(command)} bytes")
             
             # Send command with Waveshare stream mode header
             # Add Waveshare stream mode header: [0x00, 0x00, 0x12, 0x11]
@@ -370,7 +398,11 @@ class LoRaShoreNode(Node):
             self.ser.write(packet_with_header)
             self.ser.flush()
             
-            self.get_logger().info(f"Command sent: {command} ({len(command)} bytes)")
+            if self.debug:
+                self.get_logger().info(f"Packet with header: {len(packet_with_header)} bytes")
+                self.get_logger().info(f"=== COMMAND #{self.command_count} SENT ===")
+            else:
+                self.get_logger().info(f"Command sent: {command} ({len(command)} bytes)")
             
         except (serial.SerialException, OSError) as e:
             if not self.shutting_down:
@@ -453,12 +485,118 @@ class LoRaShoreNode(Node):
         # Now destroy the node and invalidate ROS context
         super().destroy_node()
 
+def print_help():
+    """Print detailed help information"""
+    print("""
+Shore-Side LoRa Communication Node
+==================================
+
+This node interfaces with a Waveshare USB-TO-LoRa module to provide bidirectional
+communication with the Argo sailboat. It receives status packets from Argo and
+sends commands to Argo via LoRa radio.
+
+USAGE:
+    python3 lora_shore.py [OPTIONS]
+
+OPTIONS:
+    --help, -h          Show this help message and exit
+    --debug, -d         Enable verbose debug logging for packet reception
+    --port PORT         Serial port device (default: /dev/ttyACM0)
+    --baud RATE         Serial baud rate (default: 115200)
+
+EXAMPLES:
+    # Basic usage
+    python3 lora_shore.py
+
+    # Enable debug logging
+    python3 lora_shore.py --debug
+
+    # Use different serial port
+    python3 lora_shore.py --port /dev/ttyUSB0
+
+    # Debug with custom port
+    python3 lora_shore.py --debug --port /dev/ttyACM1
+
+HARDWARE REQUIREMENTS:
+    - Waveshare USB-TO-LoRa-LF-B (SX1262) module
+    - USB connection to computer
+    - Proper antenna connected to module
+
+ROS2 TOPICS:
+    Published:
+        lora/gps_sog          - GPS speed over ground (knots)
+        lora/gps_cog          - GPS course over ground (degrees)
+        lora/battery_voltage  - Battery voltage (volts)
+        lora/human_controlled - Human control status (boolean)
+        lora/fix              - GPS position (NavSatFix)
+        lora/compass          - Compass heading (degrees)
+        lora/rssi             - Signal strength (dBm)
+        lora/last_contact     - Last contact timestamp
+        lora/raw              - Raw received data
+        shore/lora_status     - Shore-side status information
+
+    Subscribed:
+        argo/remote_command   - Commands to send to Argo
+
+DEBUG MODE:
+    When --debug is enabled, the node provides detailed LoRa radio link logging:
+    - Raw serial data reception from Waveshare module
+    - JSON packet parsing and validation
+    - LoRa packet transmission details (pings and commands)
+    - Serial connection status and reconnection attempts
+    - Packet reception timing and sequence numbers
+
+TROUBLESHOOTING:
+    - Ensure Waveshare module is connected and recognized
+    - Check serial port permissions (may need to add user to dialout group)
+    - Verify module is in stream mode (MODE=1)
+    - Check network ID matches Argo (NETID=18)
+    - Ensure proper antenna is connected
+
+For more information, see shore/README.md and shore/INSTALL.md
+""")
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Shore-Side LoRa Communication Node for Argo Sailboat',
+        add_help=False  # We'll handle help manually
+    )
+    
+    parser.add_argument('--help', '-h', action='store_true',
+                       help='Show help message and exit')
+    parser.add_argument('--debug', '-d', action='store_true',
+                       help='Enable verbose debug logging for packet reception')
+    parser.add_argument('--port', '-p', default='/dev/ttyACM0',
+                       help='Serial port device (default: /dev/ttyACM0)')
+    parser.add_argument('--baud', '-b', type=int, default=115200,
+                       help='Serial baud rate (default: 115200)')
+    
+    return parser.parse_args()
+
 def main(args=None):
-    rclpy.init(args=args)
+    # Parse command line arguments
+    cli_args = parse_arguments()
+    
+    # Handle help
+    if cli_args.help:
+        print_help()
+        return
+    
+    # Initialize ROS2 with our arguments
+    ros_args = []
+    if cli_args.debug:
+        ros_args.extend(['--ros-args', '-p', 'enable_debug:=true'])
+    if cli_args.port != '/dev/ttyACM0':
+        ros_args.extend(['--ros-args', '-p', f'serial_port:={cli_args.port}'])
+    if cli_args.baud != 115200:
+        ros_args.extend(['--ros-args', '-p', f'baud_rate:={cli_args.baud}'])
+    
+    rclpy.init(args=ros_args)
     node = None
     
     try:
-        node = LoRaShoreNode()
+        node = LoRaShoreNode(debug=cli_args.debug)
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
