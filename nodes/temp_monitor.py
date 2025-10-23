@@ -41,13 +41,13 @@ from rclpy.executors import ExternalShutdownException
 
 
 # constants for high and critical temperatures
-HIGH_TEMPERATURE_THRESHOLD_C = 85.0
+HIGH_TEMPERATURE_THRESHOLD_C = 85.0  # makes node unhealthy
 CRITICAL_TEMPERATURE_THRESHOLD_C = 100.0
 TEMPERATURE_HYSTERESIS_C = 2.0
 
 
 class TempMonitorNode(ArgoBaseNode):
-    def __init__(self):
+    def __init__(self, debug_mode=False):
         super().__init__('temp_monitor_node')
 
         # Initialize pause service with namespaced name
@@ -276,7 +276,7 @@ class TempMonitorNode(ArgoBaseNode):
         system_temperature = self._read_system_temperature()
         
         # Update health status based on temperature safety
-        self._update_health_status(cpu_temperature, system_temperature)
+        self._update_temp_health_status(cpu_temperature, system_temperature)
 
         # Determine if we should publish values
         should_publish = False
@@ -370,15 +370,15 @@ class TempMonitorNode(ArgoBaseNode):
         # Update ASCII bars if enabled
         self._update_bars(cpu_temperature, system_temperature)
 
-    def _update_health_status(self, cpu_temperature, system_temperature):
+    def _update_temp_health_status(self, cpu_temperature, system_temperature):
         """Update health status based on temperature safety"""
         if cpu_temperature is None:
             self.set_unhealthy("No temperature reading available")
             return
         
         # Check if temperature is in safe range (below high threshold)
-        if cpu_temperature >= self.temp_high_threshold_c:
-            self.set_unhealthy(f"Temperature too high: {cpu_temperature:.1f}°C >= {self.temp_high_threshold_c:.1f}°C")
+        if cpu_temperature >= HIGH_TEMPERATURE_THRESHOLD_C:
+            self.set_unhealthy(f"Temperature too high: {cpu_temperature:.1f}°C >= {HIGH_TEMPERATURE_THRESHOLD_C:.1f}°C")
         else:
             self.set_healthy(f"Temperature in safe range: {cpu_temperature:.1f}°C")
 
