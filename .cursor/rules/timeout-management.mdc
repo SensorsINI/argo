@@ -1,0 +1,194 @@
+---
+alwaysApply: true
+description: "Timeout management patterns for long-running commands and operations"
+---
+
+# Timeout Management for Long-Running Commands
+
+## Default Timeout Patterns
+
+### Command Execution Timeouts
+Always use reasonable timeouts for long-running commands to prevent indefinite hanging:
+
+```bash
+# Good: Commands with appropriate timeouts
+timeout 30 python3 nodes/lora.py                    # 30s for node startup testing
+timeout 10 ros2 topic echo /topic_name --once       # 10s for topic testing
+timeout 60 ros2 topic hz /topic_name                # 60s for rate monitoring
+timeout 15 ros2 service call /service_name          # 15s for service calls
+timeout 5 ros2 node info /node_name                 # 5s for node info
+```
+
+### Timeout Guidelines by Command Type
+
+#### ROS2 Topic Operations
+- **Topic echo (single message)**: `timeout 10` - Should receive data quickly
+- **Topic echo (continuous)**: `timeout 30` - Allow time for multiple messages
+- **Topic hz (rate monitoring)**: `timeout 60` - Need time to calculate averages
+- **Topic list**: `timeout 5` - Should be immediate
+
+#### ROS2 Service Operations
+- **Service calls**: `timeout 15` - Services should respond within seconds
+- **Service list**: `timeout 5` - Should be immediate
+
+#### ROS2 Node Operations
+- **Node list**: `timeout 5` - Should be immediate
+- **Node info**: `timeout 5` - Should be immediate
+
+#### Python Script Execution
+- **Node startup testing**: `timeout 30` - Allow initialization time
+- **Quick tests**: `timeout 10` - For simple validation
+- **Long tests**: `timeout 120` - For comprehensive testing
+
+#### System Operations
+- **Process management**: `timeout 10` - Kill/start operations
+- **File operations**: `timeout 5` - Should be immediate
+- **Network operations**: `timeout 30` - Allow for network delays
+
+## Exception Patterns
+
+### Commands That Should NOT Have Timeouts
+- **Background processes**: Use `&` for background execution
+- **Interactive commands**: User-controlled termination
+- **System services**: Managed by systemd
+- **Long-running daemons**: Intended to run indefinitely
+
+### Examples of No-Timeout Commands
+```bash
+# Background processes (use & instead of timeout)
+python3 nodes/lora.py &
+ros2 run package_name node_name &
+
+# Interactive commands (user controls termination)
+ros2 topic echo /topic_name
+ros2 bag play bagfile.bag
+
+# System services (managed by systemd)
+sudo systemctl start argo-launch.service
+sudo systemctl status argo-launch.service
+```
+
+## Timeout Best Practices
+
+### 1. Choose Appropriate Timeouts
+- **Too short**: Commands fail unnecessarily
+- **Too long**: User waits too long for failures
+- **Just right**: Balance between reliability and responsiveness
+
+### 2. Document Timeout Reasoning
+```bash
+# Good: Explain why this timeout is appropriate
+timeout 30 python3 nodes/lora.py  # Allow time for SPI initialization and first packet
+
+# Better: Add comment explaining the timeout
+timeout 30 python3 nodes/lora.py  # 30s allows for SPI init + first packet reception
+```
+
+### 3. Handle Timeout Exit Codes
+```bash
+# Check timeout exit code (124 = timeout)
+if [ $? -eq 124 ]; then
+    echo "Command timed out after 30 seconds"
+else
+    echo "Command completed normally"
+fi
+```
+
+### 4. Progressive Timeout Strategy
+```bash
+# Start with shorter timeout, increase if needed
+timeout 10 ros2 topic echo /topic_name --once || timeout 30 ros2 topic echo /topic_name --once
+```
+
+## Common Timeout Patterns in Argo Project
+
+### LoRa Communication Testing
+```bash
+# Test LoRa node startup
+timeout 30 python3 nodes/lora.py
+
+# Test topic reception
+timeout 10 ros2 topic echo /lora_rx_data --once
+
+# Monitor signal strength
+timeout 60 ros2 topic hz /lora_signal_strength
+```
+
+### System Service Testing
+```bash
+# Test service startup
+timeout 15 sudo systemctl start argo-launch.service
+
+# Check service status
+timeout 5 sudo systemctl is-active argo-launch.service
+```
+
+### Hardware Testing
+```bash
+# Test PWM module
+timeout 10 sudo python3 nodes/pwm.py --test
+
+# Test GPS reception
+timeout 30 python3 nodes/gps.py
+```
+
+## Error Handling with Timeouts
+
+### Graceful Timeout Handling
+```bash
+# Use timeout with error handling
+if timeout 30 python3 nodes/lora.py; then
+    echo "LoRa node started successfully"
+else
+    exit_code=$?
+    if [ $exit_code -eq 124 ]; then
+        echo "LoRa node startup timed out"
+    else
+        echo "LoRa node failed with exit code $exit_code"
+    fi
+fi
+```
+
+### Timeout with Cleanup
+```bash
+# Start process with timeout and cleanup
+timeout 60 python3 nodes/lora.py &
+LORA_PID=$!
+
+# Cleanup function
+cleanup() {
+    if kill -0 $LORA_PID 2>/dev/null; then
+        kill $LORA_PID
+        echo "Cleaned up LoRa process"
+    fi
+}
+
+# Set trap for cleanup
+trap cleanup EXIT
+```
+
+## Integration with Existing Patterns
+
+This timeout management rule works alongside:
+- **Argo lifecycle management** - Timeouts for node startup testing
+- **Power control testing** - Timeouts for hardware operations
+- **Recording service testing** - Timeouts for service calls
+- **Systemd service testing** - Timeouts for service operations
+
+## Quick Reference
+
+### Essential Timeout Commands
+```bash
+timeout 30 python3 nodes/lora.py           # Node startup
+timeout 10 ros2 topic echo /topic --once   # Single message
+timeout 60 ros2 topic hz /topic            # Rate monitoring
+timeout 15 ros2 service call /service      # Service call
+timeout 5 ros2 node list                   # Node listing
+```
+
+### No Timeout Needed
+```bash
+python3 nodes/lora.py &                    # Background process
+ros2 topic echo /topic_name                # Interactive
+sudo systemctl start service               # System service
+```

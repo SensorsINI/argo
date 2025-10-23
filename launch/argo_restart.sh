@@ -9,8 +9,8 @@ if [ $? -eq 0 ]; then
     echo "📊 Monitoring service status..."
     
     # Wait for service to start and nodes to initialize
-    echo "⏳ Waiting for nodes to initialize..."
-    sleep 5
+    echo "⏳ Waiting 15s for nodes to initialize..."
+    sleep 15
     
     # Check if service is running
     if systemctl is-active --quiet argo_launch.service; then

@@ -25,7 +25,7 @@ import sys
 import os
 # Import the shared pause service
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
+# Removed toggle_pause_service import - temp_monitor node doesn't need pause functionality
 import rclpy
 from rclpy.node import Node
 # Removed QoS imports - using default QoS only
@@ -50,8 +50,7 @@ class TempMonitorNode(Node):
         super().__init__('temp_monitor_node')
 
         # Initialize pause service with namespaced name
-        self.pause_service = TogglePauseService(
-            self, f'{self.get_name()}/toggle_pause')
+        # Removed pause service - temp_monitor node doesn't need pause functionality
 
         self.get_logger().info('Initializing Temperature Monitor node...')
 
@@ -261,9 +260,7 @@ class TempMonitorNode(Node):
 
     def read_and_publish(self):
         """Main read and publish function"""
-        # Check if node is paused
-        if self.pause_service.is_paused():
-            return  # Skip processing when paused
+        # Removed pause functionality - temp_monitor runs continuously
 
         current_time = time.monotonic()
         time_since_startup = current_time - self._startup_time

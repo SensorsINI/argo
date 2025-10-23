@@ -30,6 +30,22 @@ Manages the power control daemon lifecycle:
 - Restarts automatically on failure
 - Sources ROS2 environment for service calls
 
+### 4. **argo_boot_indicator.py** - Early Boot LED Indicator (Optional)
+One-shot systemd service that provides early visual feedback during boot:
+- **Runs at sysinit.target**: Very early in boot sequence (~15 seconds after power-on)
+- **Brief GREEN LED flashing**: 5 quick flashes to indicate boot is proceeding
+- **Releases GPIO immediately**: Ensures power control service can claim GPIO cleanly
+- **Purpose**: Provides visual feedback during the ~30-45 second boot delay before main heartbeat starts
+
+## Boot Timing Observations
+
+On Orange Pi Zero 2W, the boot sequence timing is:
+1. **~15 seconds**: System initialization, boot indicator flashes GREEN LED (if enabled)
+2. **~30-45 seconds additional delay**: ROS2 services and dependencies starting
+3. **~45 seconds total**: Main power control heartbeat becomes visible
+
+The boot indicator service provides early feedback during this long boot sequence, reassuring users that the system is booting properly even though the main heartbeat takes nearly a minute to appear.
+
 ## Hardware Configuration (Rev3 PCB)
 
 ### GPIO Pin Assignments

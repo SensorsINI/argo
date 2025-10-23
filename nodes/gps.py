@@ -6,7 +6,7 @@
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-from toggle_pause_service import TogglePauseService
+# Removed toggle_pause_service import - GPS node doesn't need pause functionality
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
@@ -66,9 +66,7 @@ class GpsNode(Node):
     def __init__(self, debug_mode=False):
         super().__init__('gps_node')
 
-        # Initialize pause service with namespaced name
-        self.pause_service = TogglePauseService(
-            self, f'{self.get_name()}/toggle_pause')
+        # Removed pause service - GPS node doesn't need pause functionality
 
         # Set logger level to DEBUG if debug mode is enabled
         if debug_mode:
@@ -778,18 +776,9 @@ class GpsNode(Node):
 
     def read_and_publish(self):
         """Reads data from the serial port and publishes it."""
-        # Handle pause/unpause transitions
-        paused = self.pause_service.is_paused()
-        if paused != getattr(self, '_prev_paused', False):
-            if paused:
-                self._enter_power_save_mode()
-            else:
-                self._exit_pause_mode()
-            self._prev_paused = paused
+        # Removed pause functionality - GPS node runs continuously
 
-        # Skip processing while paused
-        if paused:
-            return
+        # GPS node runs continuously without pause functionality
 
         # Check for GPS communication timeout
         current_time = time.time()
@@ -846,7 +835,7 @@ class GpsNode(Node):
                     if current_time - self.last_sentence_type_log_time >= 15.0:
                         if self.sentence_types_seen:
                             sentence_list = sorted(list(self.sentence_types_seen))
-                            self.get_logger().info(f"NMEA sentence types received: {', '.join(sentence_list)}")
+                            self.get_logger().debug(f"NMEA sentence types received: {', '.join(sentence_list)}")
                             has_gga = any('GGA' in s for s in self.sentence_types_seen)
                             if not has_gga:
                                 self.get_logger().warn("No GGA sentences received - satellite count unavailable")

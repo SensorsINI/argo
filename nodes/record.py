@@ -48,7 +48,7 @@ class ArgoRecordingNode(Node):
         self._setup_file_logging()
 
         # Configuration
-        self.bagfiles_dir = os.path.join(os.path.expanduser('~'), 'bagfiles')
+        self.bagfiles_dir = os.path.join(os.path.expanduser('~'), 'argo', 'bags')
         self.current_bag_name = None
         self.bag_path = None
         self.recording_process = None
@@ -128,7 +128,7 @@ class ArgoRecordingNode(Node):
         """Service callback to get current recording status."""
         response.success = self.is_recording
         if self.is_recording:
-            response.message = f"Recording is active: {self.current_bag_name}"
+            response.message = f"Recording is active: ~/argo/bags/{self.current_bag_name}"
         else:
             response.message = "Recording is not active"
         self._log_info(
@@ -195,6 +195,7 @@ class ArgoRecordingNode(Node):
         """Handle shutdown signals gracefully"""
         self._log_info(f"🛑 Received signal {signum}, shutting down...")
         self.stop_recording()
+        self._cleanup_resources()
         rclpy.shutdown()
         sys.exit(0)
 
@@ -223,7 +224,7 @@ class ArgoRecordingNode(Node):
 
         if success:
             response.success = True
-            response.message = f"Recording started successfully - {self.current_bag_name}"
+            response.message = f"Recording started successfully - ~/argo/bags/{self.current_bag_name}"
             self._log_info("✅ Recording started successfully")
         else:
             response.success = False
@@ -249,7 +250,7 @@ class ArgoRecordingNode(Node):
 
         if success:
             response.success = True
-            response.message = f"Recording stopped successfully - {self.stopped_bag_name}"
+            response.message = f"Recording stopped successfully - ~/argo/bags/{self.stopped_bag_name}"
             self._log_info("✅ Recording stopped successfully")
         else:
             response.success = False
@@ -286,12 +287,27 @@ class ArgoRecordingNode(Node):
             self._log_debug(f"Generated bag name: {self.current_bag_name}")
             self._log_debug(f"Bag path: {self.bag_path}")
 
-            self._log_info(f"🚀 Starting recording: {self.bag_path}")
-            self._log_info(f"📁 Bag path: {self.bag_path}")
+            bag_path_display = f"~/argo/bags/{self.current_bag_name}"
+            self._log_info(f"🚀 Starting recording: {bag_path_display}")
+            self._log_info(f"📁 Bag path: {bag_path_display}")
             self._log_info(f"🕐 Start time: {datetime.now()}")
+            
+            # Log available topics before recording starts
+            try:
+                topics_cmd = ['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 topic list']
+                topics_result = subprocess.run(topics_cmd, capture_output=True, text=True, timeout=5)
+                if topics_result.returncode == 0:
+                    topic_count = len([line for line in topics_result.stdout.strip().split('\n') if line.strip()])
+                    self._log_info(f"📡 Found {topic_count} topics available for recording")
+                    self._log_debug(f"Available topics: {topics_result.stdout.strip()}")
+                else:
+                    self._log_warn("⚠️  Could not list available topics")
+            except Exception as e:
+                self._log_warn(f"⚠️  Error listing topics: {e}")
 
-            # Start rosbag recording process
-            cmd = ['ros2', 'bag', 'record', '-a', '-o', self.current_bag_name]
+            # Start rosbag recording process with proper ROS2 environment
+            # Use --include-hidden-topics to ensure all topics are recorded
+            cmd = ['bash', '-c', f'source /opt/ros/humble/setup.bash && ros2 bag record -a --include-hidden-topics -o {self.current_bag_name}']
             self._log_debug(f"Rosbag command: {' '.join(cmd)}")
             self._log_debug("Creating subprocess for rosbag recording...")
             self.recording_process = subprocess.Popen(
@@ -310,7 +326,7 @@ class ArgoRecordingNode(Node):
 
             # Publish status updates
             self.publish_status()
-            self.publish_info(f"Recording started - {self.current_bag_name}")
+            self.publish_info(f"Recording started - ~/argo/bags/{self.current_bag_name}")
             self._log_debug("Published initial status and info")
 
             # Start monitoring thread
@@ -327,6 +343,22 @@ class ArgoRecordingNode(Node):
         except Exception as e:
             self._log_error(f"❌ Error starting recording: {e}")
             return False
+
+    def _cleanup_resources(self):
+        """Clean up any remaining resources"""
+        try:
+            if self.recording_process:
+                self._log_info("🧹 Cleaning up recording process...")
+                if self.recording_process.poll() is None:  # Process still running
+                    self.recording_process.terminate()
+                    try:
+                        self.recording_process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self.recording_process.kill()
+                        self.recording_process.wait()
+                self.recording_process = None
+        except Exception as e:
+            self._log_warn(f"⚠️  Error during cleanup: {e}")
 
     def stop_recording(self) -> bool:
         """Stop rosbag recording"""
@@ -362,8 +394,9 @@ class ArgoRecordingNode(Node):
                         bag_size = size_result.stdout.split(
                         )[0] if size_result.returncode == 0 else "Unknown"
 
+                        bag_path_display = f"~/argo/bags/{self.current_bag_name}"
                         self._log_info(
-                            f"📦 Final bag location: {self.bag_path}")
+                            f"📦 Final bag location: {bag_path_display}")
                         self._log_info(f"💾 Bag size: {bag_size}")
 
                         # List bag contents
@@ -402,7 +435,7 @@ class ArgoRecordingNode(Node):
                         )[0] if size_result.returncode == 0 else "Unknown"
 
                         # Publish detailed info with bag path and size
-                        detailed_info = f"Recording stopped - Bag: {self.stopped_bag_name} ({bag_size})"
+                        detailed_info = f"Recording stopped - Bag: ~/argo/bags/{self.stopped_bag_name} ({bag_size})"
                         self.publish_info(detailed_info)
                     except Exception as e:
                         self._log_warn(
@@ -487,6 +520,7 @@ def main(args=None):
     finally:
         try:
             if node:
+                node._cleanup_resources()
                 node.destroy_node()
         except Exception:
             pass  # Ignore errors during shutdown

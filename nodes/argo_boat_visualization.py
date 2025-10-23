@@ -401,9 +401,16 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except rclpy.executors.ExternalShutdownException:
+        pass  # Context already shutdown
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # Only shutdown if context is still valid
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except:
+                pass  # Already shutdown
 
 if __name__ == '__main__':
     main()

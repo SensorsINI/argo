@@ -91,14 +91,13 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 
-from toggle_pause_service import TogglePauseService
+# Removed toggle_pause_service import - rudder_sail_radio node doesn't need pause functionality
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float64
 from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
 
-import yaml
 import argparse
 import argcomplete
 from pathlib import Path
@@ -129,6 +128,15 @@ OUTLIER_LOG_THROTTLE_S = 60.0
 
 # Human control timeout - seconds after last human activity before robot can take control
 HUMAN_CONTROL_TIMEOUT_S = 2.0
+
+# Default parameter values
+DEFAULT_DEADBAND_THRESHOLD = 0.18 # servo command threshold away from zero rudder on scale -1 to +1 for human control to take over (5σ measured)
+DEFAULT_SAFETY_MAX_RUDDER = 1.0 # limit rudder comamnd to this magnitude in case of mechanical constraints
+DEFAULT_SAFETY_MAX_SAIL = 1.0 # limit sail comamnd to this magnitude in case of mechanical constraints
+
+# Control loop timing constants
+DEFAULT_CONTROL_LOOP_PERIOD = 0.05  # 20 Hz for responsive control
+DEFAULT_STATUS_PERIOD = 0.1  # 10 Hz status updates
 
 # Test mode configuration
 TEST_MIN_PW = 900
@@ -319,8 +327,7 @@ class RudderSailRadioNode(Node):
         super().__init__('rudder_sail_radio_node')
 
         # Initialize pause service with namespaced name
-        self.pause_service = TogglePauseService(
-            self, f'{self.get_name()}/toggle_pause')
+        # Removed pause service - rudder_sail_radio node doesn't need pause functionality
 
         self.get_logger().info(
             'Rudder/Sail Radio node starting with high impedance safety mode...')
@@ -333,22 +340,14 @@ class RudderSailRadioNode(Node):
             return
 
         # --- Parameters ---
-        self.declare_parameter('param_file_path', 'argo.yaml')
         self.declare_parameter('human_override_timeout',
                                HUMAN_CONTROL_TIMEOUT_S)  # seconds
         # ignore small radio movements
-        self.declare_parameter('deadband_threshold', 0.05)
-        self.declare_parameter('safety_max_rudder', 1.0)       # safety limits
-        self.declare_parameter('safety_max_sail', 1.0)
+        self.declare_parameter('deadband_threshold', DEFAULT_DEADBAND_THRESHOLD)
+        self.declare_parameter('safety_max_rudder', DEFAULT_SAFETY_MAX_RUDDER)       # safety limits
+        self.declare_parameter('safety_max_sail', DEFAULT_SAFETY_MAX_SAIL)
 
-        self.param_file = Path(self.get_parameter(
-            'param_file_path').get_parameter_value().string_value)
-        self._last_param_mtime = 0
-
-        # Load initial parameters
-        self.check_and_reload_params(is_initial=True)
-
-        # Initialize parameter values for immediate use
+        # Load parameter values
         self.human_override_timeout = self.get_parameter(
             'human_override_timeout').get_parameter_value().double_value
         self.deadband_threshold = self.get_parameter(
@@ -375,7 +374,7 @@ class RudderSailRadioNode(Node):
 
         # Control arbitration state
         self.human_controlled = True  # Start in human control for safety
-        self.last_human_activity = time.time()
+        self.last_human_activity = 0.0  # Initialize to 0, will be set when actual radio activity is detected
         self.last_logged_control_mode = None
 
         # Track previous radio values for human activity detection
@@ -416,19 +415,16 @@ class RudderSailRadioNode(Node):
             Vector3, '/rudder_sail_cmd', self.auto_control_callback, 10)
 
         # --- Timers ---
-        self.control_loop_period = 0.05  # 20 Hz for responsive control
+        self.control_loop_period = DEFAULT_CONTROL_LOOP_PERIOD  # 20 Hz for responsive control
         self.timer = self.create_timer(
             self.control_loop_period, self.timer_callback)
 
         # Publish initial health status as healthy
         self._publish_health_status(True)
 
-        self.param_reload_check_period = 3.0
-        self.param_timer = self.create_timer(
-            self.param_reload_check_period, self.check_and_reload_params)
 
         # Status publishing timer
-        self.status_period = 0.1  # 10 Hz status updates
+        self.status_period = DEFAULT_STATUS_PERIOD  # 10 Hz status updates
         self.status_timer = self.create_timer(
             self.status_period, self.publish_status)
 
@@ -440,52 +436,6 @@ class RudderSailRadioNode(Node):
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
         atexit.register(self._ensure_safe_exit)
-
-    def check_and_reload_params(self, is_initial=False):
-        """Checks if the param file has changed and reloads it."""
-        try:
-            if not self.param_file.is_file():
-                if self._last_param_mtime != 0:
-                    self.get_logger().warn(
-                        f"Parameter file '{self.param_file}' not found.")
-                self._last_param_mtime = 0
-                return
-
-            mtime = self.param_file.stat().st_mtime
-            if mtime > self._last_param_mtime:
-                self.get_logger().info(
-                    f"Parameter file '{self.param_file}' changed, reloading...")
-                self._last_param_mtime = mtime
-
-                with open(self.param_file, 'r') as f:
-                    data = yaml.safe_load(f)
-
-                node_name = self.get_name()
-                if node_name in data and 'ros__parameters' in data[node_name]:
-                    params_to_set = []
-                    new_params = data[node_name]['ros__parameters']
-                    for name, value in new_params.items():
-                        if self.has_parameter(name):
-                            params_to_set.append(Parameter(name, value=value))
-
-                    if params_to_set:
-                        self.set_parameters(params_to_set)
-                else:
-                    self.get_logger().warn(
-                        f"Could not find parameters for node '{node_name}' in '{self.param_file}'.")
-
-                # Update internal variables from parameters
-                self.human_override_timeout = self.get_parameter(
-                    'human_override_timeout').get_parameter_value().double_value
-                self.deadband_threshold = self.get_parameter(
-                    'deadband_threshold').get_parameter_value().double_value
-                self.safety_max_rudder = self.get_parameter(
-                    'safety_max_rudder').get_parameter_value().double_value
-                self.safety_max_sail = self.get_parameter(
-                    'safety_max_sail').get_parameter_value().double_value
-
-        except Exception as e:
-            self.get_logger().error(f"Error reloading parameters: {e}")
 
     def read_sysfs_pw(self, path: Path) -> float:
         """Reads a pulse width from a sysfs file."""
@@ -619,8 +569,13 @@ class RudderSailRadioNode(Node):
         current_time = time.time()
 
         # Check for recent human activity
+        if self.last_human_activity == 0.0:
+            # No human activity detected yet, robot can take control immediately
+            reason = "no_human_activity_detected_yet"
+            return False, reason  # Robot control
+        
         time_since_human_activity = current_time - self.last_human_activity
-
+        
         # Human has control if there's been recent activity
         if time_since_human_activity < self.human_override_timeout:
             reason = f"human_activity_within_{self.human_override_timeout:.1f}s (last_activity: {time_since_human_activity:.1f}s ago)"
@@ -667,9 +622,7 @@ class RudderSailRadioNode(Node):
 
     def timer_callback(self):
         """Main control arbitration and hardware interface loop."""
-        # Check if node is paused
-        if self.pause_service.is_paused():
-            return  # Skip processing when paused
+        # Removed pause functionality - rudder_sail_radio runs continuously
 
         # 1. Read radio inputs from hardware
         if not self.read_radio_inputs():

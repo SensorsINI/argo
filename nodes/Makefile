@@ -1,50 +1,97 @@
-# Makefile for Argo Battery Water Service Installation
-# This manages the independent battery_water.service for critical battery monitoring
+# ============================================================================
+# Argo Nodes Makefile
+# ============================================================================
+# This Makefile manages multiple Argo robot services and components:
+#
+# Main Services Handled:
+#   • Battery Water Service - Critical battery monitoring and water detection
+#   • BNO08x IMU Driver - C++ ROS2 driver for BNO085 IMU sensor
+#   • BNO085 Service - Systemd integration for IMU service management
+#
+# Service Management:
+#   • Systemd service installation, configuration, and lifecycle management
+#   • Hardware driver compilation and installation
+#   • ROS2 workspace building and configuration
+#   • Service status monitoring and debugging
+#
+# ============================================================================
 
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 SYSTEMD_SYSTEM_DIR := /etc/systemd/system
-SERVICE_FILE := argo_battery_water.service
-SCRIPT_FILE := battery_water.py
+BATTERY_WATER_SERVICE_FILE := argo_battery_water.service
+BATTERY_WATER_SCRIPT_FILE := battery_water.py
 
-.PHONY: help install uninstall status enable disable restart start stop logs check
+.PHONY: help battery-water-install battery-water-uninstall battery-water-status battery-water-enable battery-water-disable battery-water-restart battery-water-start battery-water-stop battery-water-logs battery-water-logs-follow battery-water-check bno08x-help bno08x-init bno08x-build bno08x-test bno08x-launch bno08x-calibrate bno08x-clean bno085-service-install bno085-service-uninstall bno085-service-enable bno085-service-disable bno085-service-start bno085-service-stop bno085-service-restart bno085-service-status bno085-service-logs
+
+# Default target - show help
+.DEFAULT_GOAL := help
 
 help:
-	@echo "Argo Battery Water Service Installation"
-	@echo "========================================"
+	@echo "Argo Nodes Service Management"
+	@echo "============================="
 	@echo ""
-	@echo "Available targets:"
-	@echo "  install  - Install battery_water service (requires sudo)"
-	@echo "  uninstall - Remove battery_water service (requires sudo)"
-	@echo "  enable   - Enable service to start on boot"
-	@echo "  disable  - Disable service from starting on boot"
-	@echo "  start    - Start the battery service"
-	@echo "  stop     - Stop the battery service"
-	@echo "  restart  - Restart the battery service"
-	@echo "  status   - Show service status"
-	@echo "  logs     - Show service logs"
-	@echo "  check    - Verify dependencies"
+	@echo "This Makefile manages multiple Argo robot services and components."
 	@echo ""
-	@echo "Quick start:"
-	@echo "  sudo make install enable start"
+	@echo "BATTERY WATER SERVICE (Critical Battery Monitoring):"
+	@echo "  battery-water-install  - Install battery_water service (requires sudo)"
+	@echo "  battery-water-uninstall - Remove battery_water service (requires sudo)"
+	@echo "  battery-water-enable   - Enable service to start on boot"
+	@echo "  battery-water-disable  - Disable service from starting on boot"
+	@echo "  battery-water-start    - Start the battery service"
+	@echo "  battery-water-stop     - Stop the battery service"
+	@echo "  battery-water-restart  - Restart the battery service"
+	@echo "  battery-water-status   - Show service status"
+	@echo "  battery-water-logs     - Show service logs"
+	@echo "  battery-water-check    - Verify dependencies"
+	@echo ""
+	@echo "BNO08x IMU DRIVER (C++ ROS2 Driver for BNO085 IMU):"
+	@echo "  bno08x-help        - Show BNO08x driver help"
+	@echo "  bno08x-init        - Initialize BNO08x submodule"
+	@echo "  bno08x-build       - Build the BNO08x ROS2 driver"
+	@echo "  bno08x-i2c-test    - Test if BNO085 hardware is detected"
+	@echo "  bno08x-launch      - Launch the BNO08x C++ driver only"
+	@echo "  bno08x-launch-full - Launch complete system (C++ driver + Python bridge)"
+	@echo "  bno08x-calibrate   - Run interactive calibration tool"
+	@echo "  bno08x-clean       - Clean build artifacts"
+	@echo ""
+	@echo "BNO085 SERVICE (Systemd Integration):"
+	@echo "  bno085-service-install   - Install BNO085 systemd service"
+	@echo "  bno085-service-uninstall - Remove BNO085 systemd service"
+	@echo "  bno085-service-enable    - Enable BNO085 service on boot"
+	@echo "  bno085-service-disable   - Disable BNO085 service on boot"
+	@echo "  bno085-service-start     - Start BNO085 service"
+	@echo "  bno085-service-stop      - Stop BNO085 service"
+	@echo "  bno085-service-restart   - Restart BNO085 service"
+	@echo "  bno085-service-status    - Show BNO085 service status"
+	@echo "  bno085-service-logs      - Show BNO085 service logs"
+	@echo ""
+	@echo "Quick start examples:"
+	@echo "  sudo make battery-water-install battery-water-enable battery-water-start"
+	@echo "  make bno08x-build bno08x-test bno08x-launch-full"
+	@echo "  make bno085-service-install bno085-service-enable bno085-service-start"
 
-check:
+# ============================================================================
+# Battery Water Service Management (Critical Battery Monitoring)
+# ============================================================================
+
+battery-water-check:
 	@echo "Checking basic dependencies..."
 	@command -v python3 >/dev/null 2>&1 || { echo "❌ python3 not found"; exit 1; }
 	@command -v systemctl >/dev/null 2>&1 || { echo "❌ systemctl not found"; exit 1; }
-	@test -f $(SCRIPT_FILE) || { echo "❌ $(SCRIPT_FILE) not found"; exit 1; }
-	@test -f $(SERVICE_FILE) || { echo "❌ $(SERVICE_FILE) not found"; exit 1; }
+	@test -f $(BATTERY_WATER_SCRIPT_FILE) || { echo "❌ $(BATTERY_WATER_SCRIPT_FILE) not found"; exit 1; }
+	@test -f $(BATTERY_WATER_SERVICE_FILE) || { echo "❌ $(BATTERY_WATER_SERVICE_FILE) not found"; exit 1; }
 	@echo "✅ Basic dependencies met"
 	@echo "ℹ️  Python package dependencies will be checked when service starts"
 
-install:
+battery-water-install:
 	@echo "Installing argo_battery_water service..."
 	@if systemctl is-active --quiet argo_battery_water.service; then \
 		echo "⚠️  Service is currently running. Stopping it..."; \
 		sudo systemctl stop argo_battery_water.service; \
 	fi
 	@echo "📝 Installing service file..."
-	@sudo cp $(SERVICE_FILE) $(SYSTEMD_SYSTEM_DIR)/$(SERVICE_FILE)
-	@sudo chmod 644 $(SYSTEMD_SYSTEM_DIR)/$(SERVICE_FILE)
+	@sudo cp $(BATTERY_WATER_SERVICE_FILE) $(SYSTEMD_SYSTEM_DIR)/$(BATTERY_WATER_SERVICE_FILE)
+	@sudo chmod 644 $(SYSTEMD_SYSTEM_DIR)/$(BATTERY_WATER_SERVICE_FILE)
 	@echo "🔄 Reloading systemd daemon..."
 	@sudo systemctl daemon-reload
 	@echo "🚀 Enabling and starting service..."
@@ -64,9 +111,9 @@ install:
 	fi
 	@echo ""
 	@echo "Quick status check:"
-	@$(MAKE) status
+	@$(MAKE) battery-water-status
 
-uninstall:
+battery-water-uninstall:
 	@echo "Uninstalling argo_battery_water service..."
 	@if systemctl is-active --quiet argo_battery_water.service; then \
 		echo "⚠️  Stopping service..."; \
@@ -76,42 +123,42 @@ uninstall:
 		echo "⚠️  Disabling service..."; \
 		sudo systemctl disable argo_battery_water.service; \
 	fi
-	@if [ -f $(SYSTEMD_SYSTEM_DIR)/$(SERVICE_FILE) ]; then \
+	@if [ -f $(SYSTEMD_SYSTEM_DIR)/$(BATTERY_WATER_SERVICE_FILE) ]; then \
 		echo "🗑️  Removing service file..."; \
-		sudo rm -f $(SYSTEMD_SYSTEM_DIR)/$(SERVICE_FILE); \
+		sudo rm -f $(SYSTEMD_SYSTEM_DIR)/$(BATTERY_WATER_SERVICE_FILE); \
 	fi
 	@sudo systemctl daemon-reload
 	@echo "✅ Argo battery water service uninstalled"
 
-enable:
+battery-water-enable:
 	@echo "Enabling argo_battery_water service..."
 	@sudo systemctl enable argo_battery_water.service
 	@echo "✅ Service will start automatically on boot"
 
-disable:
+battery-water-disable:
 	@echo "Disabling argo_battery_water service..."
 	@sudo systemctl disable argo_battery_water.service
 	@echo "✅ Service will not start on boot"
 
-start:
+battery-water-start:
 	@echo "Starting argo_battery_water service..."
 	@sudo systemctl start argo_battery_water.service
 	@sleep 2
-	@$(MAKE) status
+	@$(MAKE) battery-water-status
 
-stop:
+battery-water-stop:
 	@echo "Stopping argo_battery_water service..."
 	@sudo systemctl stop argo_battery_water.service
 	@sleep 1
-	@$(MAKE) status
+	@$(MAKE) battery-water-status
 
-restart:
+battery-water-restart:
 	@echo "Restarting argo_battery_water service..."
 	@sudo systemctl restart argo_battery_water.service
 	@sleep 2
-	@$(MAKE) status
+	@$(MAKE) battery-water-status
 
-status:
+battery-water-status:
 	@echo "Argo Battery Water Service Status:"
 	@echo "==================================="
 	@sudo systemctl status argo_battery_water.service --no-pager -l || true
@@ -120,12 +167,12 @@ status:
 	@systemctl is-active argo_battery_water.service >/dev/null 2>&1 && echo "🟢 Service is RUNNING" || echo "🔴 Service is STOPPED"
 	@systemctl is-enabled argo_battery_water.service >/dev/null 2>&1 && echo "✅ Auto-start ENABLED" || echo "⚠️  Auto-start DISABLED"
 
-logs:
+battery-water-logs:
 	@echo "Argo Battery Water Service Logs (last 50 lines):"
 	@echo "================================================="
 	@sudo journalctl -u argo_battery_water.service -n 50 --no-pager
 
-logs-follow:
+battery-water-logs-follow:
 	@echo "Following argo_battery_water service logs (Ctrl+C to stop):"
 	@sudo journalctl -u argo_battery_water.service -f --no-pager
 

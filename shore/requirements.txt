@@ -1,0 +1,9 @@
+# Shore-Side LoRa Communication Node Dependencies
+# Python packages required for shore/lora_shore.py
+
+# Serial communication with Waveshare LoRa module
+pyserial>=3.5
+
+# Note: ROS2 Humble is required but cannot be installed via pip
+# See INSTALL.md for ROS2 installation instructions
+

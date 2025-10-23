@@ -31,8 +31,8 @@ COLOR_ERROR='\e[1;91m'             # Bold bright red for ERROR
 COLOR_WARN='\e[1;33m'              # Bold dark yellow for WARN
 
 # Service names
-SERVICE_ARGO="argo-launch.service"
-SERVICE_BATTERY="battery_water.service"
+SERVICE_ARGO="argo_launch.service"
+SERVICE_BATTERY="argo_battery_water.service"
 SERVICE_POWER="argo_power_control.service"
 SERVICE_IMU="argo_bno085.service"
 
@@ -66,8 +66,8 @@ while getopts "n:feh" opt; do
             echo "  PATTERN Optional grep pattern to filter logs (scans ALL logs)"
             echo ""
             echo "Services monitored:"
-            echo "  - argo-launch.service      (cyan)"
-            echo "  - battery_water.service    (yellow)"
+            echo "  - argo_launch.service      (cyan)"
+            echo "  - argo_battery_water.service (yellow)"
             echo "  - argo_power_control.service (green)"
             echo "  - argo_bno085.service      (magenta)"
             echo ""
@@ -162,6 +162,38 @@ if [ "$ERROR_CHECK" = true ]; then
             2>/dev/null | \
         grep -i "$ERROR_PATTERN" | \
         grep "$GREP_PATTERN" | \
+        awk '
+        {
+            # Extract the core message (remove timestamps, process info, and variable numbers)
+            core_msg = $0
+            gsub(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+[+-][0-9]{4} [^:]+: /, "", core_msg)
+            gsub(/\[[0-9]+\.[0-9]+\]/, "", core_msg)
+            gsub(/\[[0-9]+\]/, "", core_msg)
+            # Remove variable timeout numbers (e.g., "for 46015s" -> "for XXXs")
+            gsub(/for [0-9]+s/, "for XXXs", core_msg)
+            # Remove variable channel numbers (e.g., "channels 0.0us" -> "channels X.Xus")
+            gsub(/channels [0-9]+\.[0-9]+us/, "channels X.Xus", core_msg)
+            # Remove any remaining numbers that might vary
+            gsub(/[0-9]+/, "X", core_msg)
+            
+            # Count occurrences of each core message
+            count[core_msg]++
+            if (count[core_msg] == 1) {
+                # Store the first occurrence for display
+                first_occurrence[core_msg] = $0
+            }
+        }
+        END {
+            # Display throttled results
+            for (msg in count) {
+                if (count[msg] == 1) {
+                    print first_occurrence[msg]
+                } else {
+                    # Show count for repeated messages
+                    print first_occurrence[msg] " " "\033[0;90m(+" count[msg]-1 " more)\033[0m"
+                }
+            }
+        }' | \
         while IFS= read -r line; do
             # Apply color based on error level and service
             if echo "$line" | grep -qi "ERROR"; then
@@ -190,6 +222,38 @@ if [ "$ERROR_CHECK" = true ]; then
             --output=short-iso-precise \
             2>/dev/null | \
         grep -i "$ERROR_PATTERN" | \
+        awk '
+        {
+            # Extract the core message (remove timestamps, process info, and variable numbers)
+            core_msg = $0
+            gsub(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+[+-][0-9]{4} [^:]+: /, "", core_msg)
+            gsub(/\[[0-9]+\.[0-9]+\]/, "", core_msg)
+            gsub(/\[[0-9]+\]/, "", core_msg)
+            # Remove variable timeout numbers (e.g., "for 46015s" -> "for XXXs")
+            gsub(/for [0-9]+s/, "for XXXs", core_msg)
+            # Remove variable channel numbers (e.g., "channels 0.0us" -> "channels X.Xus")
+            gsub(/channels [0-9]+\.[0-9]+us/, "channels X.Xus", core_msg)
+            # Remove any remaining numbers that might vary
+            gsub(/[0-9]+/, "X", core_msg)
+            
+            # Count occurrences of each core message
+            count[core_msg]++
+            if (count[core_msg] == 1) {
+                # Store the first occurrence for display
+                first_occurrence[core_msg] = $0
+            }
+        }
+        END {
+            # Display throttled results
+            for (msg in count) {
+                if (count[msg] == 1) {
+                    print first_occurrence[msg]
+                } else {
+                    # Show count for repeated messages
+                    print first_occurrence[msg] " " "\033[0;90m(+" count[msg]-1 " more)\033[0m"
+                }
+            }
+        }' | \
         while IFS= read -r line; do
             # Apply color based on error level and service
             if echo "$line" | grep -qi "ERROR"; then

@@ -173,7 +173,7 @@ class SailingAreaPublisher(Node):
         marker_id = 0
         
         for area_name, geojson_data in self.sailing_areas.items():
-            self.get_logger().info(f"Publishing markers for {area_name}")
+            self.get_logger().debug(f"Publishing markers for {area_name}")
             
             for feature in geojson_data.get('features', []):
                 geom_type = feature['geometry']['type']
@@ -202,7 +202,7 @@ class SailingAreaPublisher(Node):
         self.boundary_pub.publish(boundary_markers)
         self.hazard_pub.publish(hazard_markers)
         
-        self.get_logger().info(f"Published {len(waypoint_markers.markers)} waypoints, "
+        self.get_logger().debug(f"Published {len(waypoint_markers.markers)} waypoints, "
                               f"{len(boundary_markers.markers)} boundaries, "
                               f"{len(hazard_markers.markers)} hazards")
 
@@ -215,9 +215,16 @@ def main(args=None):
         rclpy.spin(publisher)
     except KeyboardInterrupt:
         pass
+    except rclpy.executors.ExternalShutdownException:
+        pass  # Context already shutdown
     finally:
         publisher.destroy_node()
-        rclpy.shutdown()
+        # Only shutdown if context is still valid
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except:
+                pass  # Already shutdown
 
 if __name__ == '__main__':
     main()

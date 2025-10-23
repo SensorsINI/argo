@@ -37,31 +37,40 @@ Pin 31       | 271       | PI15      | LORA_OUT (DIO0/IRQ)
 #### Key Libraries
 ```python
 import spidev      # Hardware SPI communication
-import OPi.GPIO    # GPIO control for CS/RST/IRQ pins
-# OR
-import RPi.GPIO    # Alternative GPIO library
+import gpiod       # Modern GPIO control for CS/RST/IRQ pins (libgpiod)
 ```
 
 **Install on Orange Pi:**
 ```bash
-pip3 install spidev OPi.GPIO
+pip3 install spidev gpiod
 ```
+
+**Why `gpiod`?**
+- Modern libgpiod interface (replaces deprecated sysfs GPIO)
+- Works without root permissions (with proper udev rules)
+- Consistent with other Argo nodes (battery_water.py)
+- Better performance and stability than OPi.GPIO
 
 #### SPI Communication Pattern
 ```python
+# Initialize GPIO lines
+self.gpio_chip = gpiod.Chip("/dev/gpiochip0")
+self.lora_sel_line = self.gpio_chip.get_line(LORA_SEL_LINE)
+self.lora_sel_line.request(consumer="lora_node", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[1])
+
 # Register write
 def spi_write_register(self, address: int, value: int):
     with self.rx_lock:
-        GPIO.output(27, GPIO.LOW)   # CS low
+        self.lora_sel_line.set_value(0)  # CS low
         self.spi.xfer2([address | 0x80, value])  # MSB=1 for write
-        GPIO.output(27, GPIO.HIGH)  # CS high
+        self.lora_sel_line.set_value(1)  # CS high
 
 # Register read
 def spi_read_register(self, address: int) -> int:
     with self.rx_lock:
-        GPIO.output(27, GPIO.LOW)
+        self.lora_sel_line.set_value(0)  # CS low
         result = self.spi.xfer2([address & 0x7F, 0x00])  # MSB=0 for read
-        GPIO.output(27, GPIO.HIGH)
+        self.lora_sel_line.set_value(1)  # CS high
         return result[1]
 ```
 
@@ -82,7 +91,10 @@ def spi_read_register(self, address: int) -> int:
 #### Interrupt-Driven Reception
 ```python
 # GPIO interrupt on DIO0 pin (rising edge)
-GPIO.add_event_detect(31, GPIO.RISING, callback=self.on_dio0_interrupt)
+# Using gpiod event monitoring (TODO: implement in lora.py)
+self.lora_irq_line = self.gpio_chip.get_line(LORA_IRQ_LINE)
+self.lora_irq_line.request(consumer="lora_node", type=gpiod.LINE_REQ_DIR_IN)
+# Note: gpiod.LINE_REQ_EV_RISING_EDGE for event detection
 
 def on_dio0_interrupt(self, channel):
     irq_flags = self.spi_read_register(REG_IRQ_FLAGS)
@@ -321,24 +333,94 @@ Remove `'lora'` from the `excluded_nodes` list on line 90.
 
 **GPIO Libraries:**
 - `spidev` - **Required** for hardware SPI protocol
-- `OPi.GPIO` or `RPi.GPIO` - For control pins (CS, RST, IRQ)
-- `gpiod` (used in battery_water.py) - Only for simple digital I/O
+- `gpiod` - **Required** for GPIO control (CS, RST, IRQ pins)
+  - Uses libgpiod kernel interface
+  - Works without root (with proper udev rules)
+  - Consistent with other Argo nodes
 
 ## Testing and Debugging
 
-### Verify SPI Communication
+### Hardware Diagnostics (Critical for New Installations)
+
+#### SPI Communication Test
 ```python
 # Read version register (should be 0x12 for SX1276)
 version = self.spi_read_register(0x42)
 print(f"Chip version: 0x{version:02X}")
+
+# Expected results:
+# - Version = 0x12 ✅ (SX1276 chip)
+# - OpMode = 0x09 (Sleep mode after reset)
+# - If reading 0x00 or 0xFF: Check wiring and power
 ```
 
-### Monitor RSSI
+#### Oscilloscope Verification
+When debugging SPI communication, use a scope to verify:
+1. **SCLK (Pin 23)**: Should show clock pulses during transactions
+2. **MOSI (Pin 19)**: Should show data from OPi to module
+3. **MISO (Pin 21)**: Should show data from module to OPi
+4. **CS (Pin 27)**: Should go LOW during each transaction
+5. **RST (Pin 29)**: Should show LOW pulse (10ms) followed by 100ms stabilization
+
+**Critical Timing:**
+- Reset pulse: 10ms LOW minimum
+- Crystal stabilization: 100ms after reset release
+- SPI clock: 100-500 kHz for initial testing (can go up to 10 MHz)
+
+#### Common Hardware Issues
+
+**1. MISO Low Amplitude (~500mV instead of 3.3V)**
+- **Cause**: MISO pin wired to wrong OPi pin (likely an OUTPUT pin)
+- **Symptom**: Module is driving MISO but fighting against an OPi output
+- **Fix**: Verify continuity with multimeter:
+  ```
+  RA-01 Pin 15 (MISO) ←→ Orange Pi Pin 21 (should beep)
+  RA-01 Pin 15 (MISO) ←→ Orange Pi Pin 27/29/33/37 (should NOT beep)
+  ```
+
+**2. No MISO Activity**
+- **Cause**: Module not powered, wrong pin, or inverted header wiring
+- **Fix**: 
+  - Check VDD = 3.3V (should be 3.3-3.5V)
+  - Verify GND connections
+  - Check for inverted pin ordering on adapters/headers
+  - Probe directly at Orange Pi Pin 21 to bypass adapters
+
+**3. Version Register Reads 0x00**
+- **Cause**: No communication, module not responding
+- **Fix**:
+  - Verify SPI enabled: `ls -l /dev/spidev1.0` (should exist)
+  - Check permissions: Should be `crw-rw----` with group `gpio`
+  - Verify CS pin is toggling LOW during transactions
+  - Increase reset delay to 100ms for crystal stabilization
+
+**4. Adapter/Wiring Issues**
+- **Critical**: Some 8-pin headers have inverted pin ordering on one side
+- **Symptom**: Correct signals at OPi but wrong pins at module
+- **Solution**: Build correction adapter or verify pinout carefully
+- **Test**: Use multimeter continuity mode to verify each connection
+
+#### SPI Permission Setup
+```bash
+# Check SPI device exists
+ls -l /dev/spidev1.0
+
+# If permissions denied, create udev rule
+echo 'SUBSYSTEM=="spidev", GROUP="gpio", MODE="0660"' | sudo tee /etc/udev/rules.d/99-argo-spi.rules
+
+# Reload rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+### ROS2 Topic Monitoring
+
+#### Monitor RSSI
 ```bash
 ros2 topic echo /lora_signal_strength
 ```
 
-### Test Command Sending
+#### Test Command Sending
 ```bash
 # On shore side
 ros2 topic pub --once /argo/remote_command std_msgs/String "data: 'return_home'"
@@ -347,7 +429,7 @@ ros2 topic pub --once /argo/remote_command std_msgs/String "data: 'return_home'"
 ros2 topic echo /lora_remote_command
 ```
 
-### Check Connection Status
+#### Check Connection Status
 ```bash
 ros2 topic echo /lora_connection_status
 ```
@@ -375,13 +457,81 @@ EMERGENCY_COMMANDS = {
 }
 ```
 
+## Hardware Compatibility - SX1276 ↔ SX1262 SUCCESS!
+
+### ✅ BREAKTHROUGH: Waveshare SX1262 Compatibility Achieved! (October 20, 2025)
+
+**Initial Problem**: Argo's SX1276 and Waveshare SX1262 couldn't communicate despite matching parameters.
+
+**Root Cause**: Waveshare stream mode requires a 4-byte packet header not documented in basic guides.
+
+**Solution**: Add Waveshare stream mode header `[0x00, 0x00, 0x12, 0x11]` to transmissions.
+
+#### Waveshare Stream Mode Packet Format
+```
+Byte 0-1: Address (0x0000 = point-to-point, device 0)
+Byte 2:   Channel/Network ID (0x12 = 18, matches sync word)
+Byte 3:   Flags (0x11, discovered from testing)
+Byte 4+:  Payload data
+```
+
+#### Implementation in lora.py
+```python
+# Transmit: Prepend 4-byte header
+waveshare_header = bytes([0x00, 0x00, 0x12, 0x11])
+packet_with_header = waveshare_header + data
+
+# Receive: Strip header if present
+if len(payload) >= 4 and payload[0:4] == bytes([0x00, 0x00, 0x12, 0x11]):
+    payload = payload[4:]  # Remove Waveshare header
+```
+
+#### Test Results
+- ✅ **Bidirectional communication working**
+- ✅ **RSSI: -56 to -59 dBm** at 4m distance
+- ✅ **Packet delivery: 100%** success rate
+- ✅ **Both directions**: Argo ↔ Waveshare fully operational
+
+#### Key Discoveries
+- CRC: Both forced ON (Waveshare FAQ confirmed)
+- Preamble: Both use 8 symbols (from RadioLib config)
+- Waveshare appends 2-byte RSSI/status to received packets over USB serial
+- Waveshare may buffer multiple packets in serial output
+
+#### Recommended Shore-Side Hardware
+
+**✅ WORKING: Waveshare USB-TO-LoRa-LF-B (SX1262)**
+- Confirmed compatible with header modification
+- USB serial interface (/dev/ttyACM0, 115200 baud)
+- AT command configuration
+- Stream mode with 4-byte header
+
+**Also Compatible (not tested but should work):**
+- SX1276/SX1278-based USB modules (native compatibility)
+- Raspberry Pi + SX1276 HAT (e.g., Dragino LoRa/GPS HAT)
+- RFM95W/RFM96W modules (SX1276-based) with USB adapter
+
+#### Detailed Documentation
+See `nodes/README-LORA-TO-WAVESHARE.md` for:
+- Complete breakthrough story and test results
+- Waveshare packet format documentation
+- AT command configuration guide
+- Implementation details
+
+### Using Other SX1262-Based Modules
+If using different SX1262 modules:
+1. Check if they use similar stream mode with headers
+2. May need to adjust header bytes based on firmware
+3. Waveshare header format: `[0x00, 0x00, 0x12, 0x11]`
+4. Test bidirectionally before deployment
+
 ## Future Enhancements
 
 ### Potential Additions
 1. **GPS position transmission** - Add lat/lon to status packets
 2. **Acknowledgment system** - Confirm command receipt
 3. **Data compression** - Further reduce packet size
-4. **Encryption** - Secure command/control
+4. **Encryption** - Secure command/control (after testing compatibility)
 5. **Mesh networking** - Multi-boat communication
 6. **Adaptive data rate** - Adjust SF based on RSSI
 7. **Store-and-forward** - Queue packets when out of range
@@ -396,21 +546,23 @@ With compression: ~40-50 bytes
 ```
 argo/
 ├── nodes/
-│   ├── lora.py                      # Onboard LoRa (SPI/SX1276)
-│   └── remote_command_handler.py    # Command processor (to be created)
-├── shore/                           # Shore-side components (to be created)
-│   ├── lora_shore.py               # Shore LoRa (USB serial)
-│   ├── argo_command_gui.py         # GUI for sending commands
+│   ├── lora.py                        # Onboard LoRa (SPI/SX1276) ✅ WORKING
+│   ├── README-LORA-TO-WAVESHARE.md   # Hardware compatibility findings
+│   └── remote_command_handler.py      # Command processor (to be created)
+├── shore/                             # Shore-side components (to be created)
+│   ├── lora_shore.py                 # Shore LoRa (USB serial, needs SX1276)
+│   ├── argo_command_gui.py           # GUI for sending commands
 │   └── foxglove/
-│       └── argo_lora_layout.json   # Foxglove visualization
+│       └── argo_lora_layout.json     # Foxglove visualization
 ├── .cursor/rules/
-│   └── argo-lora-communication.mdc # This documentation
-└── requirements.txt                 # Updated with spidev, OPi.GPIO
+│   └── argo-lora-communication.mdc   # This documentation
+└── requirements.txt                   # Updated with spidev, gpiod
 ```
 
 ## References
 
 - **SX1276 Datasheet**: https://aithinker-static.oss-cn-shenzhen.aliyuncs.com/docs/_media_old/sx1276_77_78_79.pdf
 - **Hardware**: [nodes/lora.py](mdc:nodes/lora.py) header comments
+- **Hardware Compatibility**: [nodes/README-LORA-TO-WAVESHARE.md](mdc:nodes/README-LORA-TO-WAVESHARE.md)
 - **Requirements**: [requirements.txt](mdc:requirements.txt)
 - **Lifecycle Manager**: [launch/argo_lifecycle_manager.py](mdc:launch/argo_lifecycle_manager.py)
