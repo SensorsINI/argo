@@ -69,7 +69,7 @@ BATTERY_SAFETY_INTERVAL_S = 10.0  # seconds for battery/saltwater/humidity (safe
 THRESHOLD_CHANGE_PCT = 0.1  # Reduced from 1.0 to 0.1% for more frequent publishing
 
 # Battery monitoring thresholds
-BATTERY_LOW_THRESHOLD_V = 7.5       # V, ~20% for 2S LiPo, triggers warning
+BATTERY_LOW_THRESHOLD_V = 7.5       # V, ~20% for 2S LiPo, triggers warning, makes node unhealthy
 BATTERY_CRITICAL_THRESHOLD_V = 6.8  # V, ~10% for 2S LiPo, may trigger shutdown
 BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with USB charging pluugged in under full laod (sans servos)
 
@@ -77,6 +77,12 @@ BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with
 BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression 
 BATTERY_LIFETIME_MIN_SAMPLES = 5     # Minimum samples required for estimation
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
+
+# Humidity alert threshold
+HUMIDITY_ALERT_THRESHOLD_PCT = 75.0  # %, triggers warning, makes node unhealthy
+
+# Saltwater alert threshold
+SALTWATER_ALERT_THRESHOLD_V = 1.0  # V, triggers warning, makes node unhealthy
 
 try:
     import smbus2 as smbus2
@@ -445,7 +451,7 @@ class BatteryWaterNode(ArgoBaseNode):
                 'timestamp': time.monotonic()
             })
 
-    def _update_health_status(self, battery_voltage: float, saltwater_detected: bool, humidity: float):
+    def _update_battery_water_health(self, battery_voltage: float, saltwater_detected: bool, humidity: float):
         """Update health status based on specific criteria:
         - Battery voltage above low threshold
         - No saltwater intrusion detected
@@ -464,8 +470,8 @@ class BatteryWaterNode(ArgoBaseNode):
             return
         
         # Check battery voltage (above low threshold)
-        if battery_voltage <= self.low_battery_voltage:
-            self.set_unhealthy(f"Battery voltage too low: {battery_voltage:.2f}V <= {self.low_battery_voltage:.2f}V")
+        if battery_voltage <= BATTERY_LOW_THRESHOLD_V:
+            self.set_unhealthy(f"Battery voltage too low: {battery_voltage:.2f}V <= {BATTERY_LOW_THRESHOLD_V:.2f}V")
             return
         
         # Check saltwater intrusion
@@ -473,9 +479,9 @@ class BatteryWaterNode(ArgoBaseNode):
             self.set_unhealthy("Saltwater intrusion detected")
             return
         
-        # Check humidity (below 70%)
-        if humidity >= 70.0:
-            self.set_unhealthy(f"Humidity too high: {humidity:.1f}% >= 70.0%")
+        # Check humidity (below threshold)
+        if humidity >= HUMIDITY_ALERT_THRESHOLD_PCT:
+            self.set_unhealthy(f"Humidity too high: {humidity:.1f}% >= {HUMIDITY_ALERT_THRESHOLD_PCT:.1f}%")
             return
         
         # All criteria met
@@ -1484,7 +1490,8 @@ class BatteryWaterNode(ArgoBaseNode):
                     self.pub_humidity.publish(Float32(data=humidity))
                 
                 # Update health status based on sensor readings
-                self._update_health_status(battery_voltage, saltwater_detected, humidity)
+                saltwater_detected = saltwater_voltage >= SALTWATER_ALERT_THRESHOLD_V
+                self._update_battery_water_health(battery_voltage, saltwater_detected, humidity)
             except Exception:
                 pass
 
