@@ -32,6 +32,12 @@ The VNC server is configured to run on display `:2` with Xfce4 desktop environme
 - **VNC startup**: `/home/orangepi/.vnc/xstartup`
 - **Password file**: `/home/orangepi/.vnc/passwd`
 
+**Desktop Components:**
+- **Window Manager**: xfwm4 (Xfce4 window manager)
+- **Panel**: xfce4-panel (taskbar and applications menu)
+- **Desktop**: xfdesktop (desktop background and icons)
+- **Terminal**: xfce4-terminal (command line access)
+
 ### Starting VNC Server
 ```bash
 # Start VNC server with Xfce4
@@ -150,6 +156,47 @@ Ensure the firewall allows VNC connections:
 sudo ufw allow 5902/tcp
 ```
 
+## Working VNC Configuration
+
+The VNC server is configured to work without a physical monitor connected. The current working setup includes:
+
+### VNC Startup Script (`/home/orangepi/.vnc/xstartup`)
+```bash
+#!/bin/sh
+
+[ -x /etc/vnc/xstartup ] && exec /etc/vnc/xstartup
+[ -r $HOME/.Xresources ] && xrdb $HOME/.Xresources
+xsetroot -solid grey
+
+# Fix to make GNOME work
+export XKL_XMODMAP_DISABLE=1
+
+# Set up environment for VNC
+unset SESSION_MANAGER
+export XDG_CURRENT_DESKTOP="XFCE"
+export XDG_MENU_PREFIX="xfce-"
+export XDG_SESSION_DESKTOP="xfce"
+
+# Start a simple desktop environment for VNC
+xfwm4 &
+sleep 2
+xfce4-panel &
+sleep 1
+xfdesktop &
+sleep 1
+
+# Start a terminal for testing
+xfce4-terminal &
+```
+
+### Expected Desktop Components
+When VNC is working correctly, you should see:
+- **Gray desktop background** (xsetroot)
+- **Xfce4 panel** at the bottom with applications menu
+- **Desktop icons and wallpaper** (xfdesktop)
+- **Terminal window** open for immediate access
+- **Window management** (xfwm4) for resizing, minimizing windows
+
 ## Troubleshooting
 
 ### Common Issues
@@ -164,10 +211,16 @@ sudo ufw allow 5902/tcp
 - Check password file permissions: `ls -la ~/.vnc/passwd`
 - Reset password if needed: `vncpasswd`
 
-#### Desktop Not Loading
+#### Desktop Not Loading / Blank Gray Screen
 - Check VNC log: `tail -f ~/.vnc/orangepizero2w:2.log`
 - Verify Xfce4 is installed: `dpkg -l | grep xfce4`
 - Restart VNC server: `vncserver -kill :2 && ./scripts/start_vnc_xfce.sh`
+- If you see only a terminal window, manually start desktop components:
+  ```bash
+  DISPLAY=:2 xfdesktop &
+  DISPLAY=:2 pkill xfce4-panel && DISPLAY=:2 xfce4-panel &
+  ```
+- Check if components are running: `DISPLAY=:2 ps aux | grep -E "(xfce|xfwm)"`
 
 #### Performance Issues
 - Reduce color depth: `vncserver :2 -depth 16`
@@ -195,6 +248,16 @@ tail -f ~/.vnc/orangepizero2w:2.log
 
 # Test local connection
 vncviewer localhost:5902
+
+# Check desktop components on VNC display
+DISPLAY=:2 ps aux | grep -E "(xfce|xfwm)"
+
+# Test Xfce4 terminal on VNC display
+DISPLAY=:2 xfce4-terminal --version
+
+# Manually start desktop components if needed
+DISPLAY=:2 xfdesktop &
+DISPLAY=:2 xfce4-panel &
 ```
 
 ## Security Considerations
@@ -220,10 +283,18 @@ vncviewer localhost:5902
 ### Development Workflow
 1. Start VNC server on Argo: `./scripts/start_vnc_xfce.sh`
 2. Connect from local machine: `vncviewer <argo-ip>:5902`
-3. Open terminal in VNC session
-4. Run Argo commands: `al`, `as`, `ar`, etc.
-5. Use file manager for file operations
-6. Run GUI applications as needed
+3. You should see:
+   - Xfce4 desktop with panel at bottom
+   - Terminal window open
+   - Desktop background and icons
+4. If you see only a terminal, manually start desktop:
+   ```bash
+   DISPLAY=:2 xfdesktop &
+   DISPLAY=:2 pkill xfce4-panel && DISPLAY=:2 xfce4-panel &
+   ```
+5. Run Argo commands: `al`, `as`, `ar`, etc.
+6. Use file manager for file operations
+7. Run GUI applications as needed
 
 ### Monitoring and Control
 1. Connect to VNC desktop
