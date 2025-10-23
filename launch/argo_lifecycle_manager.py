@@ -26,9 +26,9 @@ import subprocess
 import threading
 import argparse
 import argcomplete
+import json
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-import json
 import select
 
 # Import centralized node utilities
@@ -196,7 +196,17 @@ class ArgoLifecycleManager:
         if not self.ros2_node:
             return
             
-        # Define health topics for each node
+        # Define health services for each node (new ArgoBaseNode approach)
+        health_services = {
+            'gps.py': '/gps_node/health',
+            'lora.py': '/lora_node/health', 
+            'anem.py': '/anemometer_node/health',
+            'battery_water.py': '/battery_water_node/health',
+            'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
+            'temp_monitor.py': '/temp_monitor_node/health'
+        }
+        
+        # Also keep health topics for backward compatibility
         health_topics = {
             'gps.py': '/gps_health',
             'lora.py': '/lora_connection_status', 
@@ -227,8 +237,63 @@ class ArgoLifecycleManager:
                 if not self.quiet:
                     print(f"Warning: Could not subscribe to health topic {health_topic}: {e}")
 
-    def _get_node_health_status(self, node_name: str) -> str:
+    def _query_node_health_services(self) -> Dict[str, Dict]:
+        """Query health status from all nodes via services"""
+        health_data = {}
+        
+        # Define health services for each node
+        health_services = {
+            'gps.py': '/gps_node/health',
+            'lora.py': '/lora_node/health', 
+            'anem.py': '/anemometer_node/health',
+            'battery_water.py': '/battery_water_node/health',
+            'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
+            'temp_monitor.py': '/temp_monitor_node/health'
+        }
+        
+        for node_name, service_name in health_services.items():
+            try:
+                # Create temporary service client
+                client = self.ros2_node.create_client(Trigger, service_name)
+                
+                # Wait for service with short timeout
+                if client.wait_for_service(timeout_sec=1.0):
+                    request = Trigger.Request()
+                    future = client.call_async(request)
+                    rclpy.spin_until_future_complete(
+                        self.ros2_node, future, timeout_sec=2.0)
+                    
+                    if future.done():
+                        response = future.result()
+                        if response.success:
+                            health_info = json.loads(response.message)
+                            health_data[node_name] = health_info
+                        else:
+                            health_data[node_name] = {'healthy': False, 'error': response.message}
+                    else:
+                        health_data[node_name] = {'healthy': None, 'error': 'timeout'}
+                else:
+                    health_data[node_name] = {'healthy': None, 'error': 'service unavailable'}
+                    
+            except Exception as e:
+                health_data[node_name] = {'healthy': None, 'error': str(e)}
+        
+        return health_data
+
+    def _get_node_health_status(self, node_name: str, health_data: Dict = None) -> str:
         """Get health status string for a node"""
+        # Try service data first if provided
+        if health_data and node_name in health_data:
+            node_health = health_data[node_name]
+            if 'healthy' in node_health:
+                if node_health['healthy'] is None:
+                    return "❓"
+                elif node_health['healthy']:
+                    return "🟢"
+                else:
+                    return "🔴"
+        
+        # Fallback to topic data
         if node_name not in self.node_health_status:
             return "❓"
         
@@ -1238,6 +1303,9 @@ class ArgoLifecycleManager:
         else:
             print(f"🎮 CONTROLLER: 🔴 STOPPED")
         
+        # Query health status from all nodes via services
+        health_data = self._query_node_health_services()
+        
         # Display nodes in tabular format
         print("\n📋 NODE STATUS TABLE:")
         print("┌" + "─" * 25 + "┬" + "─" * 12 + "┬" + "─" * 12 + "┐")
@@ -1246,8 +1314,8 @@ class ArgoLifecycleManager:
         
         stopped_nodes = []
         for node, status in node_status.items():
-            # Get health status for this node
-            health_status = self._get_node_health_status(node)
+            # Get health status for this node (prefer service data)
+            health_status = self._get_node_health_status(node, health_data)
             
             # Format running status
             if "RUNNING" in status:

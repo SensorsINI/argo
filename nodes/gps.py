@@ -6,9 +6,9 @@
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
-# Removed toggle_pause_service import - GPS node doesn't need pause functionality
+# Import ArgoBaseNode for standardized functionality
+from argo_base_node import ArgoBaseNode
 import rclpy
-from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import String, Float64, UInt8, Bool
 from geometry_msgs.msg import Vector3
@@ -25,7 +25,7 @@ import pynmea2
 
 
 
-class GpsNode(Node):
+class GpsNode(ArgoBaseNode):
     """
     ROS2 GPS node for Argo autonomous sailboat navigation and 3D visualization.
 
@@ -65,8 +65,6 @@ class GpsNode(Node):
 
     def __init__(self, debug_mode=False):
         super().__init__('gps_node')
-
-        # Removed pause service - GPS node doesn't need pause functionality
 
         # Set logger level to DEBUG if debug mode is enabled
         if debug_mode:
@@ -108,9 +106,7 @@ class GpsNode(Node):
         self.pub_navsat = self.create_publisher(
             NavSatFix, 'fix', 10)  # Standard GPS fix for mapping
 
-        # Health status publisher
-        self.pub_health = self.create_publisher(Bool, 'gps_health', 10)
-        self.health_status = False  # Track current health status
+        # Health status is now handled by ArgoBaseNode
 
         # Navigation data storage
         self.current_sog = None  # Speed in knots
@@ -152,7 +148,7 @@ class GpsNode(Node):
             self.get_logger().error(
                 f"CRITICAL: Failed to open serial port {self.serial_port_name}: {e}")
             self.get_logger().error("CRITICAL: GPS device not accessible. Exiting.")
-            self._publish_health_status(False)
+            self.set_unhealthy("GPS device not accessible")
             import sys
             sys.exit(1)
 
@@ -174,8 +170,8 @@ class GpsNode(Node):
         self.timer = self.create_timer(0.1, self.read_and_publish)  # 10 Hz
         self.get_logger().info("GPS node ready. Listening for NMEA data on /gps_data topic...")
 
-        # Publish initial health status as unhealthy (no GPS fix yet)
-        self._publish_health_status(False)
+        # Set initial health status as unhealthy (no GPS fix yet)
+        self.set_unhealthy("No GPS fix yet")
 
         # Timer to periodically publish satellite count (ensures zero is published when no fix)
         self.sat_timer = self.create_timer(1.0, self.publish_satellite_count)  # 1 Hz
@@ -255,18 +251,7 @@ class GpsNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Failed to restore GPS continuous mode: {e}")
 
-    def _publish_health_status(self, is_healthy: bool):
-        """Publish health status and update internal state"""
-        if self.health_status != is_healthy:
-            self.health_status = is_healthy
-            health_msg = Bool()
-            health_msg.data = is_healthy
-            self.pub_health.publish(health_msg)
-
-            if is_healthy:
-                self.get_logger().info("GPS health status: HEALTHY")
-            else:
-                self.get_logger().warn("GPS health status: FAILED")
+    # Health status publishing is now handled by ArgoBaseNode
 
     def checksum(self, sentence: str) -> int:
         """Calculates the NMEA checksum for a sentence."""
@@ -383,7 +368,7 @@ class GpsNode(Node):
         else:
             self.get_logger().error("CRITICAL: GPS communication test failed - no responses received")
             self.get_logger().error("CRITICAL: GPS device is not communicating properly. Exiting.")
-            self._publish_health_status(False)
+            self.set_unhealthy("GPS device not accessible")
             import sys
             sys.exit(1)
 
@@ -518,12 +503,12 @@ class GpsNode(Node):
                     if self.navsat_status == NavSatStatus.STATUS_NO_FIX:
                         self.navsat_status = NavSatStatus.STATUS_FIX
                         # Update health status when we get a fix
-                        self._publish_health_status(True)
+                        self.set_healthy(f"GPS fix valid - {self.satellites_used} satellites")
                     return True
                 else:
                     # Invalid status - no GPS fix
                     if self.gps_fix_valid:  # Only update health if fix status changed
-                        self._publish_health_status(False)
+                        self.set_unhealthy("GPS fix lost")
                     self.gps_fix_valid = False
                     self.navsat_status = NavSatStatus.STATUS_NO_FIX
                     # Clear navigation data when fix is lost
@@ -609,7 +594,7 @@ class GpsNode(Node):
 
                     # Update NavSat status and GPS fix validity based on fix quality
                     if not self.gps_fix_valid:  # Only update health if fix status changed
-                        self._publish_health_status(True)
+                        self.set_healthy(f"GPS fix valid - {self.satellites_used} satellites")
                     if int(fix_quality) == 1:
                         self.navsat_status = NavSatStatus.STATUS_FIX
                         self.gps_fix_valid = True
@@ -641,7 +626,7 @@ class GpsNode(Node):
                 else:
                     # No valid fix - clear GPS fix status
                     if self.gps_fix_valid:  # Only update health if fix status changed
-                        self._publish_health_status(False)
+                        self.set_unhealthy("GPS fix lost")
                     self.gps_fix_valid = False
                     self.navsat_status = NavSatStatus.STATUS_NO_FIX
                     # Clear navigation data when fix is lost
@@ -795,7 +780,7 @@ class GpsNode(Node):
                 f"CRITICAL: GPS communication timeout - no data received for {self.gps_timeout_seconds} seconds")
             self.get_logger().error(
                 "CRITICAL: GPS device appears to have stopped communicating. Exiting.")
-            self._publish_health_status(False)
+            self.set_unhealthy("GPS device not accessible")
             import sys
             sys.exit(1)
 
@@ -878,7 +863,7 @@ class GpsNode(Node):
             except serial.SerialException as e:
                 self.get_logger().error(f'CRITICAL: Serial port error: {e}')
                 self.get_logger().error('CRITICAL: GPS device communication lost. Exiting.')
-                self._publish_health_status(False)
+                self.set_unhealthy("GPS device not accessible")
                 import sys
                 sys.exit(1)
             except Exception as e:
@@ -888,66 +873,43 @@ class GpsNode(Node):
                     f'Unexpected error in GPS processing: {e}', throttle_duration_sec=5.0)
                 # Don't exit - continue operation and try to recover
 
-    def destroy_node(self):
-        """Gracefully shutdown the node and the GPS device."""
-        self.get_logger().info("Shutting down GPS node.")
-
-        # Publish health status as failed on shutdown
-        self._publish_health_status(False)
-
-        if self.serial_port and self.serial_port.is_open:
-            # For u-blox modules, we don't need special shutdown commands
-            # Just close the serial port cleanly
+    def _cleanup_on_exit(self):
+        """GPS-specific cleanup on exit"""
+        if hasattr(self, 'serial_port') and self.serial_port and self.serial_port.is_open:
             self.get_logger().debug("Closing serial connection to GPS")
             self.serial_port.close()
             self.get_logger().info("Serial port closed.")
-        super().destroy_node()
 
 
 def main(args=None):
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='GPS Node for ROS2')
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable debug logging')
+    """Main function using ArgoBaseNode standardized approach"""
+    parser = ArgoBaseNode.create_standard_parser(
+        'GPS Node for ROS2',
+        epilog="""
+This ROS2 node interfaces with u-blox NEO-M9N GPS module via UART5 (/dev/ttyS5) 
+and publishes comprehensive navigation data for both autonomous control and Foxglove 3D mapping.
 
-    # Parse known args to allow ROS2 arguments to pass through
-    parsed_args, unknown_args = parser.parse_known_args()
+Published Topics:
+- /gps_data (std_msgs/String): Raw NMEA sentences from GPS module
+- /gps_sog (std_msgs/Float64): Speed over ground in knots
+- /gps_cog (std_msgs/Float64): Course over ground in degrees true (0-360°)
+- /gps_velocity (geometry_msgs/Vector3): Velocity vector (x=north, y=east, z=speed)
+- /gps_num_satellites (std_msgs/UInt8): Number of satellites used in GPS fix
+- /fix (sensor_msgs/NavSatFix): Standard GPS fix for mapping applications
+- /gps_health (std_msgs/Bool): Node health status (true=healthy, false=failed)
 
-    # Initialize ROS2 with remaining arguments
-    rclpy.init(args=unknown_args)
-    node = None
+Services:
+- /gps_node/health: Health status service endpoint
+        """
+    )
+    
     try:
-        node = GpsNode(debug_mode=parsed_args.debug)
-        rclpy.spin(node)
+        ArgoBaseNode.run_node(GpsNode, args, parser)
     except serial.SerialException as e:
-        # This will catch the exception raised from the constructor if the port fails to open.
-        rclpy.logging.get_logger('gps_main').fatal(
-            f"Failed to initialize GPS node: {e}")
-    except (KeyboardInterrupt, ExternalShutdownException):
-        # This handles Ctrl+C or external shutdown requests gracefully.
-        if node:
-            node.get_logger().info("GPS node interrupted, shutting down gracefully...")
-    except Exception as e:
-        # Handle any other unexpected exceptions
-        if node:
-            node.get_logger().error(f"Unexpected error: {e}")
-        else:
-            print(f"Error before node creation: {e}")
-    finally:
-        # Clean shutdown
-        if node:
-            try:
-                node.destroy_node()
-            except Exception:
-                pass  # Suppress any errors during node destruction
-
-        try:
-            # Check if ROS is still initialized before shutdown
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            # Suppress ROS shutdown errors (like "already called" errors)
-            pass
+        # Handle GPS-specific serial port errors
+        print(f"CRITICAL: Failed to initialize GPS node: {e}")
+        print("CRITICAL: GPS device not accessible. Check serial port and permissions.")
+        sys.exit(1)
 
 
 if __name__ == '__main__':
