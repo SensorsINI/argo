@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results
 
 help:
 	@echo "Argo Robot Services Management"
@@ -40,6 +40,11 @@ help:
 	@echo "  fix-orangepi-ramlog  - Fix orangepi-ramlog to preserve persistent logs"
 	@echo "  setup-wifi-networks  - Configure WiFi networks with proper priority order"
 	@echo "  install-network-improvements - Install WiFi reconnection system and NetworkManager optimizations"
+	@echo ""
+	@echo "Network Testing:"
+	@echo "  test-wifi-reconnection - Start WiFi reconnection test (3min, background)"
+	@echo "  wifi-test-status      - Check WiFi test status and progress"
+	@echo "  wifi-test-results     - Show WiFi test results and logs"
 	@echo ""
 	@echo "MOTD Customization:"
 	@echo "  install-motd    - Install Argo shutdown status MOTD script"
@@ -466,5 +471,33 @@ install-network-improvements:
 	else \
 		echo "❌ Error: network/install/install_network_improvements.sh not found!"; \
 		echo "   Make sure you're running this from the Argo project root directory."; \
+		exit 1; \
+	fi
+
+test-wifi-reconnection:
+	@echo "Starting WiFi reconnection test..."
+	@if [ -f network/scripts/run_wifi_test.sh ]; then \
+		./network/scripts/run_wifi_test.sh start; \
+	else \
+		echo "❌ Error: network/scripts/run_wifi_test.sh not found!"; \
+		echo "   Make sure you're running this from the Argo project root directory."; \
+		exit 1; \
+	fi
+
+wifi-test-status:
+	@echo "Checking WiFi test status..."
+	@if [ -f network/scripts/run_wifi_test.sh ]; then \
+		./network/scripts/run_wifi_test.sh status; \
+	else \
+		echo "❌ Error: network/scripts/run_wifi_test.sh not found!"; \
+		exit 1; \
+	fi
+
+wifi-test-results:
+	@echo "Showing WiFi test results..."
+	@if [ -f network/scripts/run_wifi_test.sh ]; then \
+		./network/scripts/run_wifi_test.sh results; \
+	else \
+		echo "❌ Error: network/scripts/run_wifi_test.sh not found!"; \
 		exit 1; \
 	fi
