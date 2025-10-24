@@ -46,11 +46,10 @@ check_root() {
 install_wifi_script() {
     log "Installing WiFi reconnection script..."
     
-    # Copy script to system location
-    cp "$NETWORK_DIR/scripts/wifi_reconnect.sh" /usr/local/bin/
-    chmod +x /usr/local/bin/wifi_reconnect.sh
+    # Make script executable in repo (no copy needed - systemd runs from repo)
+    chmod +x "$NETWORK_DIR/scripts/wifi_reconnect.sh"
     
-    log_success "WiFi reconnection script installed to /usr/local/bin/wifi_reconnect.sh"
+    log_success "WiFi reconnection script made executable in repo: $NETWORK_DIR/scripts/wifi_reconnect.sh"
 }
 
 # Install NetworkManager configuration
@@ -108,7 +107,7 @@ restart_networkmanager() {
 test_installation() {
     log "Testing WiFi reconnection script..."
     
-    if /usr/local/bin/wifi_reconnect.sh; then
+    if "$NETWORK_DIR/scripts/wifi_reconnect.sh"; then
         log_success "WiFi reconnection script test passed"
     else
         log_warning "WiFi reconnection script test had issues (this may be normal if no preferred networks are available)"
@@ -130,9 +129,10 @@ show_summary() {
     log_success "Argo Network Improvements Installation Complete!"
     echo
     echo "Installed components:"
-    echo "  • WiFi reconnection script: /usr/local/bin/wifi_reconnect.sh"
+    echo "  • WiFi reconnection script: $NETWORK_DIR/scripts/wifi_reconnect.sh (runs from repo)"
     echo "  • NetworkManager config: /etc/NetworkManager/conf.d/argo_wifi_scan.conf"
-    echo "  • Systemd timer: argo_wifi_reconnect.timer (runs every 2 minutes)"
+    echo "  • Systemd service: argo_wifi_reconnect.service"
+    echo "  • Systemd timer: argo_wifi_reconnect.timer (runs every 5 minutes)"
     echo "  • Log file: /var/log.hdd/persistent/wifi-reconnect.log"
     echo
     echo "Network priorities:"

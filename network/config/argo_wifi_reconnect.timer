@@ -4,8 +4,8 @@ Documentation=file:///home/orangepi/argo/network/README.md
 Requires=argo_wifi_reconnect.service
 
 [Timer]
-# Run every 5 minutes (safer interval)
-OnCalendar=*:0/5
+# Run every 2 minutes (safer interval)
+OnCalendar=*:0/2
 Persistent=true
 AccuracySec=30s
 
