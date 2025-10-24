@@ -1,6 +1,14 @@
-# ROS2 Service Communication Test
+# Argo Testing Directory
 
-This directory contains a simple test to verify that different ROS2 services can communicate with each other via Trigger service calls.
+This directory contains various tests for the Argo sailboat system.
+
+## Test Categories
+
+### ROS2 Service Communication Test
+Tests to verify that different ROS2 services can communicate with each other via Trigger service calls.
+
+### LoRa Communication Tests
+Located in `lora/` subdirectory - testing and analysis scripts for LoRa communication validation.
 
 ## Files
 
