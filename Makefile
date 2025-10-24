@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements
 
 help:
 	@echo "Argo Robot Services Management"
@@ -39,6 +39,7 @@ help:
 	@echo "System Fixes:"
 	@echo "  fix-orangepi-ramlog  - Fix orangepi-ramlog to preserve persistent logs"
 	@echo "  setup-wifi-networks  - Configure WiFi networks with proper priority order"
+	@echo "  install-network-improvements - Install WiFi reconnection system and NetworkManager optimizations"
 	@echo ""
 	@echo "MOTD Customization:"
 	@echo "  install-motd    - Install Argo shutdown status MOTD script"
@@ -215,7 +216,7 @@ install-hardware:
 	@echo "✅ Hardware installation complete!"
 	@echo "⚠️  Reboot required to apply hardware configuration changes."
 
-install-all: install-python-deps install-hardware install-cpu-tuning fix-orangepi-ramlog
+install-all: install-python-deps install-hardware install-cpu-tuning fix-orangepi-ramlog install-network-improvements
 	@echo "✅ Complete Argo hardware installation finished!"
 	@echo "Next steps:"
 	@echo "1. Reboot to apply hardware configuration"
@@ -455,3 +456,15 @@ setup-battery-panel:
 test-battery-status:
 	@echo "Testing battery status functionality..."
 	@$(MAKE) -C scripts test-battery-status
+
+# ==================== NETWORK IMPROVEMENTS ====================
+
+install-network-improvements:
+	@echo "Installing WiFi reconnection system and NetworkManager optimizations..."
+	@if [ -f network/install/install_network_improvements.sh ]; then \
+		sudo ./network/install/install_network_improvements.sh; \
+	else \
+		echo "❌ Error: network/install/install_network_improvements.sh not found!"; \
+		echo "   Make sure you're running this from the Argo project root directory."; \
+		exit 1; \
+	fi
