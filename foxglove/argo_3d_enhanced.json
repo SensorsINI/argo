@@ -34,7 +34,7 @@
     },
     "3D!argo_enhanced": {
       "cameraState": {
-        "distance": 50,
+        "distance": 2000,
         "perspective": true,
         "phi": 60,
         "target": [0, 0, 0],
@@ -43,7 +43,7 @@
         "thetaOffset": 45,
         "fovy": 45,
         "near": 0.5,
-        "far": 1000
+        "far": 10000
       },
       "followMode": "follow-pose",
       "followTf": "base_link",
