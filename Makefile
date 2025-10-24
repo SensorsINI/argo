@@ -152,7 +152,7 @@ check-deps:
 
 install-argo-cli:
 	@echo "Installing Argo CLI (aliases, functions, and dotfiles)..."
-	@if ! grep -q "source.*dotfiles.*\.bashrc" ~/.bashrc 2>/dev/null; then \
+	@if ! grep -q "source.*dotfiles.*bashrc" ~/.bashrc 2>/dev/null; then \
 		echo "" >> ~/.bashrc; \
 		echo "# Source Argo dotfiles" >> ~/.bashrc; \
 		echo "source ~/argo/dotfiles/bashrc" >> ~/.bashrc; \
