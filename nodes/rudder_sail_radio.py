@@ -325,7 +325,7 @@ class RudderSailRadioNode(ArgoBaseNode):
     7. HIGH IMPEDANCE MODE: Set servos to high impedance when not actively controlling
     """
 
-    def __init__(self):
+    def __init__(self, debug_mode: bool = False):
         super().__init__('rudder_sail_radio_node')
 
         # Initialize pause service with namespaced name

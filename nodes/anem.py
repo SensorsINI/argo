@@ -304,7 +304,7 @@ def calculate_speed_mps(dp_ctr, dp_cw, dp_ccw, temp_celsius):
 
 
 class AnemNode(Node):
-    def __init__(self, debug_visually: bool = False):
+    def __init__(self, debug_mode: bool = False):
         super().__init__('anem_node')
 
         # Initialize pause service with namespaced name
@@ -326,7 +326,7 @@ class AnemNode(Node):
         self.health_status = False  # Track current health status
 
         # Visual debug mode flag
-        self.debug_visually = debug_visually
+        self.debug_visually = debug_mode
 
         # CRC error logging throttling
         self._last_crc_error_log_time = 0.0
@@ -945,7 +945,7 @@ Topics Published:
     parsed_args, ros_args = parser.parse_known_args(args)
 
     rclpy.init(args=ros_args)
-    anem_node = AnemNode(debug_visually=parsed_args.debug_visually)
+    anem_node = AnemNode(debug_mode=parsed_args.debug)
 
     if parsed_args.debug_visually:
         # Suppress routine logs to avoid interfering with visual display

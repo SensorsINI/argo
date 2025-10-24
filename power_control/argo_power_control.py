@@ -416,7 +416,19 @@ class PowerController:
         self.heartbeat_paused = False
         self.heartbeat_pause_event = threading.Event()
         self.heartbeat_pause_event.set()  # Start un-paused
-        self.heartbeat_frequency_hz = LED_HEARTBEAT_HZ
+        self.heartbeat_frequency_hz = 1.0/3.0  # 3-second cycle
+        self.heartbeat_duty_cycle = 0.1    # 10% duty cycle per slot
+        
+        # System status monitoring (updated via topic callbacks)
+        self.anemometer_healthy = True
+        self.gps_healthy = True
+        self.lora_healthy = True
+        self.network_healthy = True
+        self.last_anemometer_update = 0.0
+        self.last_gps_update = 0.0
+        self.last_lora_update = 0.0
+        self.last_network_check = 0.0
+        self.status_timeout = 10.0  # Consider unhealthy if no update for 10 seconds
 
         # Desktop notification caching
         self.cached_desktop_user = None
@@ -1427,7 +1439,7 @@ class PowerController:
 
     # TODO for rev3 PCB, LEDs are turned on by low signal on pin because LEDs in button are connected with positive side connected to 5V and negative to the pin, so we need to invert the driving logic signal
     def green_led_heartbeat(self):
-        """Green LED heartbeat - normal pulse when idle, 2X faster when Argo running, 3-flash pattern when recording"""
+        """LED slot-based heartbeat - 3-second cycle with 10 slots of 0.3s each"""
         while self.running:
             self.heartbeat_pause_event.wait()  # Block here if paused
 
@@ -1439,51 +1451,98 @@ class PowerController:
                 time.sleep(0.1)  # Short sleep to avoid busy waiting
                 continue
 
-            if self.recording_active:
-                # Recording mode: 3 quick flashes followed by pause
-                # Total period matches normal heartbeat (1 second)
+            # Check network status periodically (only one that needs active checking)
+            self._check_network_status()
 
-                # 3 quick flashes (150ms on, 50ms off each = 200ms per flash)
-                for flash in range(3):
-                    if not self.running:
-                        break
+            # Generate LED pattern for this cycle
+            pattern = self._generate_led_pattern()
+            
+            # Execute the pattern over 10 slots (3 seconds total)
+            self._execute_led_pattern(pattern)
 
-                    # Flash on (150ms)
-                    self.set_green_led(True)
-                    self._heartbeat_sleep(0.15)  # 150ms on
+    def _generate_led_pattern(self) -> str:
+        """Generate LED pattern string for current system status"""
+        pattern = ""
+        
+        # Determine status flashes needed
+        status_flashes = 1  # Default: basic system alive
+        if self.argo_service_running:
+            status_flashes = 2  # Argo nodes launched
+        if self.recording_active:
+            status_flashes = 3  # Recording active
 
-                    if not self.running:
-                        break
+        # Add green status flashes
+        for i in range(min(status_flashes, 3)):  # Max 3 green flashes
+            pattern += "g"
+        
+        # Add red failure flashes
+        failure_count = self.get_failure_count()
+        for i in range(min(failure_count, 4)):  # Max 4 red flashes
+            pattern += "r"
+        
+        # Add blue status if needed (for special states)
+        if self.critical_battery_detected:
+            pattern += "b"  # Blue for critical battery
+        
+        # Pad with dots to show remaining slots
+        while len(pattern) < 10:
+            pattern += "."
+        
+        # Truncate to exactly 10 slots
+        pattern = pattern[:10]
+        
+        return pattern
 
-                    # Flash off (50ms between flashes, except after last flash)
-                    self.set_green_led(False)
-                    if flash < 2:  # Don't add gap after last flash
-                        self._heartbeat_sleep(0.05)  # 50ms off between flashes
-
-                # Longer pause to complete the 1-second period
-                # 3 flashes took: 3 * (150ms + 50ms) - 50ms = 550ms
-                # Remaining time: 1000ms - 550ms = 450ms
-                if self.running:
-                    self._heartbeat_sleep(0.45)  # 450ms pause
-
+    def _execute_led_pattern(self, pattern: str):
+        """Execute LED pattern over 10 slots of 0.3s each"""
+        for slot in range(10):
+            if not self.running:
+                break
+                
+            if slot < len(pattern):
+                led_state = pattern[slot]
+                self._set_leds_for_slot(led_state)
             else:
-
-                # Use the current heartbeat frequency (set by _update_led_heartbeat_for_pause_state)
-                # This allows for pause state to control the frequency
-
-                heartbeat_interval = 1.0 / self.heartbeat_frequency_hz
-                half_period = heartbeat_interval / 2.0
-
-                # LED on for first half
-                self.set_green_led(True)
-                self._heartbeat_sleep(half_period)
-
-                if not self.running:
-                    break
-
-                # LED off for second half
+                # Turn off all LEDs for empty slots
                 self.set_green_led(False)
-                self._heartbeat_sleep(half_period)
+                self.set_red_led(False)
+                self.set_blue_led(False)
+            
+            # Each slot: 0.03s on + 0.27s off = 0.3s total (10% duty cycle)
+            self._heartbeat_sleep(0.03)  # LED on for 0.03s (10% of 0.3s)
+            
+            if not self.running:
+                break
+                
+            # Turn off all LEDs for 0.27s
+            self.set_green_led(False)
+            self.set_red_led(False)
+            self.set_blue_led(False)
+            self._heartbeat_sleep(0.27)  # LED off for 0.27s (90% of 0.3s)
+
+    def _set_leds_for_slot(self, led_state: str):
+        """Set LED states for a single slot based on character"""
+        # Turn off all LEDs first
+        self.set_green_led(False)
+        self.set_red_led(False)
+        self.set_blue_led(False)
+        
+        if led_state == 'g':  # Green only
+            self.set_green_led(True)
+        elif led_state == 'r':  # Red only
+            self.set_red_led(True)
+        elif led_state == 'b':  # Blue only
+            self.set_blue_led(True)
+        elif led_state == 'y':  # Yellow (red + green)
+            self.set_red_led(True)
+            self.set_green_led(True)
+        elif led_state == 'p':  # Purple (red + blue)
+            self.set_red_led(True)
+            self.set_blue_led(True)
+        elif led_state == 'c':  # Cyan (green + blue)
+            self.set_green_led(True)
+            self.set_blue_led(True)
+        # For '.' or any other character, all LEDs remain off
 
     def _heartbeat_sleep(self, duration):
         """Sleep for heartbeat timing with responsive shutdown checking"""
@@ -2336,6 +2395,22 @@ class PowerController:
             self.controller_pause_sub = self.ros2_node.create_subscription(
                 Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
 
+            # Create subscriptions for system status monitoring
+            from std_msgs.msg import UInt8, Int32
+            from geometry_msgs.msg import Vector3
+            
+            # Anemometer health monitoring
+            self.anem_health_sub = self.ros2_node.create_subscription(
+                Bool, '/anem_health', self._anem_health_callback, 10)
+            
+            # GPS status monitoring (satellite count)
+            self.gps_satellites_sub = self.ros2_node.create_subscription(
+                UInt8, '/gps_num_satellites', self._gps_satellites_callback, 10)
+            
+            # LoRa signal strength monitoring
+            self.lora_signal_sub = self.ros2_node.create_subscription(
+                Int32, '/lora_signal_strength', self._lora_signal_callback, 10)
+
             self.power_services_created = True
             logger.info("Power control ROS2 services created:")
             logger.info("  - /argo/power/start_recording")
@@ -2439,6 +2514,36 @@ class PowerController:
             self._update_led_heartbeat_for_pause_state()
         else:
             logger.debug(f"Controller pause state: {'PAUSED' if msg.data else 'UNPAUSED'}")
+
+    def _anem_health_callback(self, msg):
+        """Receive anemometer health status updates"""
+        import time
+        self.last_anemometer_update = time.time()
+        old_healthy = self.anemometer_healthy
+        self.anemometer_healthy = msg.data
+        
+        if old_healthy != self.anemometer_healthy:
+            logger.info(f"Anemometer health changed: {'HEALTHY' if msg.data else 'UNHEALTHY'}")
+
+    def _gps_satellites_callback(self, msg):
+        """Receive GPS satellite count updates"""
+        import time
+        self.last_gps_update = time.time()
+        old_healthy = self.gps_healthy
+        self.gps_healthy = msg.data >= 4  # Need at least 4 satellites for good fix
+        
+        if old_healthy != self.gps_healthy:
+            logger.info(f"GPS health changed: {'HEALTHY' if self.gps_healthy else 'UNHEALTHY'} ({msg.data} satellites)")
+
+    def _lora_signal_callback(self, msg):
+        """Receive LoRa signal strength updates"""
+        import time
+        self.last_lora_update = time.time()
+        old_healthy = self.lora_healthy
+        self.lora_healthy = msg.data > -90  # Good signal threshold
+        
+        if old_healthy != self.lora_healthy:
+            logger.info(f"LoRa health changed: {'HEALTHY' if self.lora_healthy else 'UNHEALTHY'} (signal: {msg.data} dBm)")
 
     def run(self):
         """Main control loop"""
@@ -2900,6 +3005,49 @@ class PowerController:
         except Exception as e:
             logger.debug(f"Error checking WiFi connectivity: {e}")
             return False
+
+    def _check_network_status(self):
+        """Check network status periodically (only one that needs active checking)"""
+        import time
+        current_time = time.time()
+        if current_time - self.last_network_check < 5.0:  # Check every 5 seconds
+            return
+        
+        self.last_network_check = current_time
+        old_healthy = self.network_healthy
+        self.network_healthy = self.check_wifi_connectivity()
+        
+        if old_healthy != self.network_healthy:
+            logger.info(f"Network health changed: {'HEALTHY' if self.network_healthy else 'UNHEALTHY'}")
+
+    def _check_status_timeouts(self):
+        """Check if any status updates have timed out"""
+        import time
+        current_time = time.time()
+        
+        # Check if any status hasn't been updated recently
+        if current_time - self.last_anemometer_update > self.status_timeout:
+            self.anemometer_healthy = False
+        if current_time - self.last_gps_update > self.status_timeout:
+            self.gps_healthy = False
+        if current_time - self.last_lora_update > self.status_timeout:
+            self.lora_healthy = False
+
+    def get_failure_count(self) -> int:
+        """Get the number of system failures for LED indication"""
+        # Check for timeouts first
+        self._check_status_timeouts()
+        
+        failures = 0
+        if not self.anemometer_healthy:
+            failures += 1
+        if not self.network_healthy:
+            failures += 1
+        if not self.gps_healthy:
+            failures += 1
+        if not self.lora_healthy:
+            failures += 1
+        return failures
 
     def show_critical_battery_confirmation_dialog(self, battery_voltage):
         """Show desktop confirmation dialog for critical battery shutdown

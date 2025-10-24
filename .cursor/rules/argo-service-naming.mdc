@@ -1,0 +1,46 @@
+---
+alwaysApply: true
+description: "Argo service naming conventions using underscores"
+---
+
+# Argo Service Naming Conventions
+
+## Service Names Use Underscores
+
+Argo services consistently use **underscores** in their systemd service names, NOT hyphens.
+
+### Correct Service Names:
+- `argo_power_control.service` ✅
+- `argo_launch.service` ✅  
+- `argo_battery_water.service` ✅
+- `argo_radio_servo_module.service` ✅
+
+### Incorrect Service Names:
+- `argo-power-control.service` ❌
+- `argo-launch.service` ❌
+- `argo-battery-water.service` ❌
+
+## Commands and References
+
+Always use underscores when:
+- Starting/stopping services: `sudo systemctl restart argo_power_control.service`
+- Checking service status: `sudo systemctl status argo_launch.service`
+- Referencing services in documentation
+- Writing scripts that interact with Argo services
+
+## Service File Locations
+
+Argo service files are typically located in:
+- `/etc/systemd/system/argo_*.service`
+- Service definitions in [launch/](mdc:launch/) directory
+
+## Common Argo Services
+
+- **argo_launch.service** - Main lifecycle manager
+- **argo_power_control.service** - Power button and LED control
+- **argo_battery_water.service** - Battery and water monitoring
+- **argo_radio_servo_module.service** - Kernel module service
+- **argo_storage_monitor.service** - Storage monitoring
+- **argo_thermal_monitor.service** - Temperature monitoring
+
+This naming convention is consistent across all Argo systemd services and should be followed in all commands, scripts, and documentation.
