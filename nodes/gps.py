@@ -45,14 +45,32 @@ class GpsNode(ArgoBaseNode):
     - GPS: u-blox NEO-M9N via UART5 (/dev/ttyS5)
     - Baud Rate: 38400 (u-blox default)
     - Frame ID: 'argo_gps' (configurable parameter)
+    - PPS Output: 1Hz pulse, 100ms duration, active when GPS locked
 
     Key Features:
     - Automatic GPS communication verification and setup
+    - Hot start configuration for fast GPS acquisition (CFG-BAT, CFG-NAV5, CFG-PMS)
     - NMEA sentence parsing (GGA, RMC, VTG) for position and navigation data
     - Standard NavSatFix messages for 3D mapping in Foxglove
     - Velocity vector decomposition for course over ground visualization
+    - Real-time satellite count monitoring with immediate change detection
+    - GPS fix status monitoring with PPS correlation logging
+    - Position accuracy reporting (HDOP and 95% confidence circle)
+    - Fix quality reporting (GPS Fix, SBAS Fix, GBAS Fix)
     - Robust error handling with communication timeout detection
     - Configurable debug logging for troubleshooting
+
+    Real-time Monitoring:
+    - Satellite count changes are logged and published immediately
+    - GPS fix acquisition/loss triggers immediate PPS status logging
+    - Position accuracy and fix quality included in status logs
+    - First GPS fix is logged immediately upon acquisition
+
+    Hot Start Capability:
+    - Configures backup battery for almanac/ephemeris retention
+    - Optimizes navigation engine settings for faster acquisition
+    - Enables power management for continuous operation
+    - Reduces cold start delays when power is maintained
 
     For 3D Visualization:
     The /fix topic provides GPS coordinates that can be used directly in Foxglove's
@@ -115,9 +133,12 @@ class GpsNode(ArgoBaseNode):
         self.current_latitude = None  # Latitude in decimal degrees
         self.current_longitude = None  # Longitude in decimal degrees
         self.satellites_used = 0  # Number of satellites used in fix
+        self.last_satellite_count = 0  # Track previous satellite count for change detection
+        self.last_fix_status = False  # Track previous fix status for change detection
 
         # NavSatFix data storage
         self.current_altitude = None  # Altitude in meters above WGS84 ellipsoid
+        self.current_hdop = None  # Horizontal Dilution of Precision
         self.position_covariance = [0.0] * 9  # Position covariance matrix
         self.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
         self.navsat_status = NavSatStatus.STATUS_NO_FIX
@@ -125,8 +146,9 @@ class GpsNode(ArgoBaseNode):
 
         # Periodic logging control
         self.debug_mode = debug_mode
-        self.last_fix_log_time = time.time()
+        self.last_fix_log_time = 0.0  # Initialize to 0 so first fix is logged immediately
         self.last_no_fix_log_time = time.time()
+        self.first_fix_logged = False  # Track if we've logged the first fix
 
         self.serial_port = None
         try:
@@ -175,6 +197,9 @@ class GpsNode(ArgoBaseNode):
 
         # Timer to periodically publish satellite count (ensures zero is published when no fix)
         self.sat_timer = self.create_timer(1.0, self.publish_satellite_count)  # 1 Hz
+        
+        # Timer to periodically publish NavSatFix at 1Hz (for consistent visualization rate)
+        self.navsat_timer = self.create_timer(1.0, self.publish_navsat_fix)  # 1 Hz
 
         # Track pause state to manage power save transitions (PSMOO)
         self._prev_paused = False
@@ -321,6 +346,8 @@ class GpsNode(ArgoBaseNode):
                     self.get_logger().info("✓ GPS is outputting data automatically!")
                     self.get_logger().debug(
                         f"Sample output: {waiting_data[:100]}...")
+                    # Still configure NMEA sentences and hot start even with automatic output
+                    self.enable_nmea_sentences()
                     self.get_logger().info("GPS setup completed. Device is working correctly.")
                     return
             except Exception as e:
@@ -465,6 +492,10 @@ class GpsNode(ArgoBaseNode):
                 time.sleep(0.1)
 
                 self.get_logger().info("✓ Navigation sentences (GGA, RMC, VTG) enabled on GPS module")
+                
+                # Configure GPS for hot start capability
+                self.configure_hot_start()
+                
                 return True
 
             except serial.SerialException as e:
@@ -473,8 +504,149 @@ class GpsNode(ArgoBaseNode):
                 return False
         return False
 
+    def configure_hot_start(self):
+        """Configure GPS for hot start capability with backup battery and almanac retention."""
+        self.get_logger().info("Configuring GPS for hot start capability...")
+        
+        try:
+            # Configure backup battery for hot start (CFG-BAT)
+            # This enables the GPS to maintain almanac/ephemeris data during power cycles
+            backup_battery_cfg = bytes([0xB5, 0x62,  # Sync chars
+                                       0x06, 0x09,  # Class: CFG, ID: BAT
+                                       0x04, 0x00,  # Length: 4 bytes
+                                       0x01,        # Enable backup battery
+                                       0x00,        # Reserved
+                                       0x00,        # Reserved
+                                       0x00])       # Reserved
+            
+            # Calculate checksum
+            backup_battery_cfg += self._ubx_checksum(backup_battery_cfg[2:])
+            
+            # Send backup battery configuration
+            self.serial_port.write(backup_battery_cfg)
+            time.sleep(0.1)
+            self.get_logger().debug("✓ Backup battery configuration sent")
+            
+            # Configure navigation engine settings for hot start (CFG-NAV5)
+            # This optimizes the GPS for faster acquisition using cached data
+            nav5_cfg = bytes([0xB5, 0x62,  # Sync chars
+                             0x06, 0x24,  # Class: CFG, ID: NAV5
+                             0x24, 0x00,  # Length: 36 bytes
+                             0xFF, 0xFF,  # Mask: apply all settings
+                             0x06,        # Dynamic model: automotive
+                             0x03,        # Fix mode: auto 2D/3D
+                             0x00, 0x00,  # Fixed altitude (not used)
+                             0x10, 0x27,  # Fixed altitude variance (not used)
+                             0x05,        # Minimum elevation: 5 degrees
+                             0x00,        # Reserved
+                             0xFA, 0x00,  # Position DOP mask: 250
+                             0xFA, 0x00,  # Time DOP mask: 250
+                             0x64, 0x00,  # Position accuracy mask: 100m
+                             0x2C, 0x01,  # Time accuracy mask: 300s
+                             0x00,        # Static hold threshold: 0 cm/s
+                             0x00,        # DGNSS timeout: 0s
+                             0x00,        # CNO threshold: 0 dBHz
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00,        # Reserved
+                             0x00])       # Reserved
+            
+            # Calculate checksum
+            nav5_cfg += self._ubx_checksum(nav5_cfg[2:])
+            
+            # Send navigation configuration
+            self.serial_port.write(nav5_cfg)
+            time.sleep(0.1)
+            self.get_logger().debug("✓ Navigation engine configuration sent")
+            
+            # Configure power management for hot start (CFG-PMS)
+            # This ensures the GPS maintains satellite data during low power states
+            pms_cfg = bytes([0xB5, 0x62,  # Sync chars
+                            0x06, 0x86,  # Class: CFG, ID: PMS
+                            0x08, 0x00,  # Length: 8 bytes
+                            0x00,        # Power setup value: full power
+                            0x00,        # Period: 0 (continuous)
+                            0x00,        # On time: 0 (continuous)
+                            0x00,        # Reserved
+                            0x00,        # Reserved
+                            0x00,        # Reserved
+                            0x00,        # Reserved
+                            0x00])       # Reserved
+            
+            # Calculate checksum
+            pms_cfg += self._ubx_checksum(pms_cfg[2:])
+            
+            # Send power management configuration
+            self.serial_port.write(pms_cfg)
+            time.sleep(0.1)
+            self.get_logger().debug("✓ Power management configuration sent")
+            
+            # Configure PPS (Pulse Per Second) output
+            self.configure_pps_output()
+            
+            self.get_logger().info("✓ GPS configured for hot start capability")
+            
+        except Exception as e:
+            self.get_logger().warn(f"Failed to configure GPS hot start: {e}")
+
+    def configure_pps_output(self):
+        """Configure PPS (Pulse Per Second) output on the GPS module."""
+        self.get_logger().info("Configuring PPS output...")
+        
+        try:
+            # Configure PPS output (CFG-TP5)
+            # This enables the PPS signal that drives the LED
+            pps_cfg = bytearray([0xB5, 0x62,  # Sync chars
+                                0x06, 0x31,  # Class: CFG, ID: TP5
+                                0x20, 0x00,  # Length: 32 bytes
+                                0x00,        # TP index: 0 (first timepulse)
+                                0x00,        # Version: 0
+                                0x00,        # Reserved
+                                0x00,        # Reserved
+                                0x00, 0x00, 0x00, 0x00,  # Antenna cable delay: 0ns
+                                0x00, 0x00, 0x00, 0x00,  # RF group delay: 0ns
+                                0x40, 0x42, 0x0F, 0x00,  # Frequency period: 1Hz (1,000,000µs)
+                                0x40, 0x42, 0x0F, 0x00,  # Frequency period lock: 1Hz
+                                0xA0, 0x86, 0x01, 0x00,  # Pulse length: 100ms (100,000µs)
+                                0xA0, 0x86, 0x01, 0x00,  # Pulse length lock: 100ms
+                                0x00, 0x00, 0x00, 0x00,  # User configurable delay: 0ns
+                                0x00, 0x00, 0x00, 0x00,  # User configurable delay lock: 0ns
+                                0x06, 0x00, 0x00, 0x00,  # Flags: active, locked, polarity high
+                                0x00, 0x00, 0x00, 0x00]) # Reserved
+            
+            # Calculate checksum
+            pps_cfg += self._ubx_checksum(pps_cfg[2:])
+            
+            # Send PPS configuration
+            self.serial_port.write(pps_cfg)
+            time.sleep(0.1)
+            self.get_logger().debug("✓ PPS output configuration sent")
+            
+            self.get_logger().info("✓ PPS output configured (1Hz, 100ms pulse, active when locked)")
+            
+        except Exception as e:
+            self.get_logger().warn(f"Failed to configure PPS output: {e}")
+
     def parse_rmc_sentence(self, sentence):
-        """Parse GNRMC sentence for SOG and COG data."""
+        """
+        Parse RMC (Recommended Minimum) sentence for speed, course, and fix status.
+        
+        RMC sentence format: $GNRMC,time,status,lat,lat_dir,lon,lon_dir,speed,course,date,mag_var,mag_var_dir*checksum
+        - status: 'A' = valid fix, 'V' = invalid fix
+        - speed: Speed over ground in knots
+        - course: Course over ground in degrees true
+        - Most comprehensive navigation sentence - contains position, speed, course, and fix status
+        """
         try:
             # GNRMC format: $GNRMC,time,status,lat,lat_dir,lon,lon_dir,speed,course,date,mag_var,mag_var_dir,mode*checksum
             parts = sentence.split(',')
@@ -483,33 +655,45 @@ class GpsNode(ArgoBaseNode):
                 speed_knots = parts[7]  # Speed over ground in knots
                 course_true = parts[8]  # Course over ground in degrees true (can be empty when stationary)
 
-                if status == 'A' and speed_knots:
-                    # We have a valid fix with speed data
-                    self.current_sog = float(speed_knots)
+                if status == 'A':
+                    # We have a valid fix
+                    if not self.gps_fix_valid:
+                        self.gps_fix_valid = True
+                        # Handle immediate logging for fix status change
+                        self.handle_fix_status_change(True)
                     
-                    # Course may be empty when stationary (speed near zero)
-                    if course_true:
-                        self.current_cog = float(course_true)
-                        self.get_logger().debug(
-                            f"RMC: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
-                    else:
-                        # Keep previous COG value or set to None if stationary
-                        # Don't clear it - vessel may have stopped but still has heading
-                        self.get_logger().debug(
-                            f"RMC: SOG={self.current_sog:.2f} knots, COG=N/A (stationary)")
-                    
-                    self.gps_fix_valid = True
                     # Set NavSat status to indicate we have a fix
                     if self.navsat_status == NavSatStatus.STATUS_NO_FIX:
                         self.navsat_status = NavSatStatus.STATUS_FIX
-                        # Update health status when we get a fix
-                        self.set_healthy(f"GPS fix valid - {self.satellites_used} satellites")
+                        # Update health status when we get a fix (RMC doesn't have satellite count)
+                        self.set_healthy("GPS fix valid")
+                    
+                    # Process speed data if available
+                    if speed_knots:
+                        self.current_sog = float(speed_knots)
+                        
+                        # Course may be empty when stationary (speed near zero)
+                        if course_true:
+                            self.current_cog = float(course_true)
+                            self.get_logger().debug(
+                                f"RMC: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
+                        else:
+                            # Keep previous COG value or set to None if stationary
+                            # Don't clear it - vessel may have stopped but still has heading
+                            self.get_logger().debug(
+                                f"RMC: SOG={self.current_sog:.2f} knots, COG=N/A (stationary)")
+                    else:
+                        # No speed data available (stationary or no speed info)
+                        self.get_logger().debug("RMC: Valid fix, no speed data available")
+                    
                     return True
                 else:
                     # Invalid status - no GPS fix
                     if self.gps_fix_valid:  # Only update health if fix status changed
+                        self.gps_fix_valid = False
+                        # Handle immediate logging for fix status change
+                        self.handle_fix_status_change(False)
                         self.set_unhealthy("GPS fix lost")
-                    self.gps_fix_valid = False
                     self.navsat_status = NavSatStatus.STATUS_NO_FIX
                     # Clear navigation data when fix is lost
                     self.current_sog = None
@@ -519,7 +703,16 @@ class GpsNode(ArgoBaseNode):
         return False
 
     def parse_vtg_sentence(self, sentence):
-        """Parse GNVTG sentence for additional SOG and COG data."""
+        """
+        Parse VTG (Track Made Good and Ground Speed) sentence for course and speed data.
+        
+        VTG sentence format: $GNVTG,course_true,T,course_mag,M,speed_knots,N,speed_kmh,K,mode*checksum
+        - course_true: Course over ground in degrees true
+        - course_mag: Course over ground in degrees magnetic
+        - speed_knots: Speed over ground in knots
+        - speed_kmh: Speed over ground in km/h
+        - Alternative to RMC for navigation data, provides course and speed information
+        """
         try:
             # GNVTG format: $GNVTG,course_true,T,course_mag,M,speed_knots,N,speed_kmh,K,mode*checksum
             parts = sentence.split(',')
@@ -548,7 +741,16 @@ class GpsNode(ArgoBaseNode):
         return False
 
     def parse_gga_sentence(self, sentence):
-        """Parse GNGGA sentence for position and satellite data."""
+        """
+        Parse GGA (Global Positioning System Fix Data) sentence for position and satellite data.
+        
+        GGA sentence format: $GNGGA,time,lat,lat_dir,lon,lon_dir,quality,sats,hdop,alt,alt_unit,geoid,geoid_unit,dgps_time,dgps_id*checksum
+        - quality: 0=invalid, 1=GPS, 2=DGPS, 3=PPS, 4=RTK, 5=RTK Float, 6=Estimated, 7=Manual, 8=Simulation
+        - sats: Number of satellites used in position calculation
+        - hdop: Horizontal Dilution of Precision (lower is better)
+        - alt: Altitude above mean sea level
+        - Most detailed position data - contains position, altitude, satellite count, and accuracy metrics
+        """
         try:
             # GNGGA format: $GNGGA,time,lat,lat_dir,lon,lon_dir,quality,sats,hdop,alt,alt_unit,geoid,geoid_unit,dgps_time,dgps_id*checksum
             parts = sentence.split(',')
@@ -566,7 +768,13 @@ class GpsNode(ArgoBaseNode):
 
                 # Always extract satellite count for GPS health monitoring, even without fix
                 if num_sats is not None and num_sats != '':
-                    self.satellites_used = int(num_sats)
+                    new_sat_count = int(num_sats)
+                    if new_sat_count != self.satellites_used:
+                        self.satellites_used = new_sat_count
+                        # Handle immediate logging and publishing for satellite count changes
+                        self.handle_satellite_count_change(new_sat_count)
+                    else:
+                        self.satellites_used = new_sat_count
 
                 if fix_quality and int(fix_quality) > 0 and latitude_raw and longitude_raw and num_sats:
                     # Convert DDMM.MMMM to decimal degrees
@@ -594,23 +802,23 @@ class GpsNode(ArgoBaseNode):
 
                     # Update NavSat status and GPS fix validity based on fix quality
                     if not self.gps_fix_valid:  # Only update health if fix status changed
+                        self.gps_fix_valid = True
+                        # Handle immediate logging for fix status change
+                        self.handle_fix_status_change(True)
                         self.set_healthy(f"GPS fix valid - {self.satellites_used} satellites")
                     if int(fix_quality) == 1:
                         self.navsat_status = NavSatStatus.STATUS_FIX
-                        self.gps_fix_valid = True
                     elif int(fix_quality) == 2:
                         self.navsat_status = NavSatStatus.STATUS_SBAS_FIX
-                        self.gps_fix_valid = True
                     elif int(fix_quality) >= 4:
                         self.navsat_status = NavSatStatus.STATUS_GBAS_FIX
-                        self.gps_fix_valid = True
                     else:
                         self.navsat_status = NavSatStatus.STATUS_FIX
-                        self.gps_fix_valid = True
 
                     # Update position covariance based on HDOP if available
                     if hdop:
                         hdop_val = float(hdop)
+                        self.current_hdop = hdop_val  # Store HDOP for logging
                         # Rough conversion from HDOP to position variance (in meters^2)
                         # This is a simplified approximation
                         variance = (hdop_val * 2.0) ** 2
@@ -626,8 +834,10 @@ class GpsNode(ArgoBaseNode):
                 else:
                     # No valid fix - clear GPS fix status
                     if self.gps_fix_valid:  # Only update health if fix status changed
+                        self.gps_fix_valid = False
+                        # Handle immediate logging for fix status change
+                        self.handle_fix_status_change(False)
                         self.set_unhealthy("GPS fix lost")
-                    self.gps_fix_valid = False
                     self.navsat_status = NavSatStatus.STATUS_NO_FIX
                     # Clear navigation data when fix is lost
                     self.current_sog = None
@@ -640,6 +850,76 @@ class GpsNode(ArgoBaseNode):
             self.get_logger().debug(f"Error parsing GGA sentence: {e}")
         return False
 
+    def get_fix_quality_description(self):
+        """Get human-readable description of GPS fix quality."""
+        if self.navsat_status == NavSatStatus.STATUS_NO_FIX:
+            return "No Fix"
+        elif self.navsat_status == NavSatStatus.STATUS_FIX:
+            return "GPS Fix"
+        elif self.navsat_status == NavSatStatus.STATUS_SBAS_FIX:
+            return "SBAS Fix"
+        elif self.navsat_status == NavSatStatus.STATUS_GBAS_FIX:
+            return "GBAS Fix"
+        else:
+            return "Unknown Fix"
+
+    def get_position_accuracy_info(self):
+        """Get position accuracy information from covariance and HDOP."""
+        accuracy_info = []
+        
+        # Add HDOP if available
+        if self.current_hdop is not None:
+            accuracy_info.append(f"HDOP: {self.current_hdop:.2f}")
+        
+        # Calculate position accuracy from covariance matrix
+        if (self.position_covariance_type == NavSatFix.COVARIANCE_TYPE_APPROXIMATED and 
+            self.position_covariance[0] > 0 and self.position_covariance[4] > 0):
+            # Calculate 95% confidence circle radius (2-sigma)
+            # Using the larger of East-East and North-North variances
+            max_variance = max(self.position_covariance[0], self.position_covariance[4])
+            accuracy_95 = 2.0 * math.sqrt(max_variance)  # 2-sigma for 95% confidence
+            accuracy_info.append(f"Accuracy: ±{accuracy_95:.1f}m (95%)")
+        
+        return ", ".join(accuracy_info) if accuracy_info else "Accuracy: Unknown"
+
+    def handle_satellite_count_change(self, new_count):
+        """Handle immediate logging and publishing when satellite count changes."""
+        if new_count != self.last_satellite_count:
+            # Log the change immediately
+            if new_count > self.last_satellite_count:
+                self.get_logger().info(f"Satellite count increased: {self.last_satellite_count} → {new_count}")
+            elif new_count < self.last_satellite_count:
+                self.get_logger().info(f"Satellite count decreased: {self.last_satellite_count} → {new_count}")
+            else:
+                self.get_logger().info(f"Satellite count changed: {self.last_satellite_count} → {new_count}")
+            
+            # Update tracking
+            self.last_satellite_count = new_count
+            
+            # Publish immediately (don't wait for periodic timer)
+            sat_msg = UInt8()
+            sat_msg.data = new_count
+            self.pub_satellites.publish(sat_msg)
+            
+            # Log in debug mode
+            if self.debug_mode:
+                self.get_logger().debug(f"Immediately published satellite count: {new_count}")
+
+    def handle_fix_status_change(self, new_fix_status):
+        """Handle immediate logging when GPS fix status changes (PPS indicator)."""
+        if new_fix_status != self.last_fix_status:
+            if new_fix_status:
+                self.get_logger().info("GPS FIX ACQUIRED - PPS should be active")
+            else:
+                self.get_logger().info("GPS FIX LOST - PPS should be inactive")
+            
+            # Update tracking
+            self.last_fix_status = new_fix_status
+            
+            # Log in debug mode
+            if self.debug_mode:
+                self.get_logger().debug(f"Fix status changed: {not new_fix_status} → {new_fix_status}")
+
     def periodic_status_logging(self):
         """Handle periodic status logging for normal operation."""
         if self.debug_mode:
@@ -649,8 +929,8 @@ class GpsNode(ArgoBaseNode):
         current_time = time.time()
 
         if self.gps_fix_valid and self.current_latitude is not None and self.current_longitude is not None:
-            # Log GPS fix status every 30 seconds
-            if current_time - self.last_fix_log_time >= 30.0:
+            # Log GPS fix status immediately on first fix, then every 30 seconds
+            if not self.first_fix_logged or current_time - self.last_fix_log_time >= 30.0:
                 # Convert SOG from knots to m/s (1 knot = 0.514444 m/s)
                 sog_ms = self.current_sog * 0.514444 if self.current_sog is not None else 0.0
 
@@ -660,12 +940,15 @@ class GpsNode(ArgoBaseNode):
 
                 alt_str = f", Alt: {self.current_altitude:.1f}m" if self.current_altitude is not None else ""
                 cog_str = f"COG: {self.current_cog:.1f}°" if self.current_cog is not None else "COG: N/A"
+                fix_quality_str = self.get_fix_quality_description()
+                accuracy_str = self.get_position_accuracy_info()
                 self.get_logger().info(
-                    f"GPS Fix: {self.satellites_used} satellites, "
+                    f"GPS Fix: {self.satellites_used} satellites ({fix_quality_str}), "
                     f"Position: {lat_str} {lon_str}{alt_str}, "
-                    f"{cog_str}, SOG: {sog_ms:.2f} m/s"
+                    f"{cog_str}, SOG: {sog_ms:.2f} m/s, {accuracy_str}"
                 )
                 self.last_fix_log_time = current_time
+                self.first_fix_logged = True
 
         else:
             # Log no GPS fix every 5 seconds
@@ -808,17 +1091,31 @@ class GpsNode(ArgoBaseNode):
                     msg.data = data_str
                     self.pub_data.publish(msg)
 
-                    # Parse navigation data from specific sentences
+                    # Parse navigation data from specific NMEA sentences
+                    # NMEA sentence prefixes:
+                    # - $GNRMC/$GPRMC: Recommended Minimum (RMC) - speed, course, position, fix status
+                    # - $GNVTG/$GPVTG: Track Made Good and Ground Speed (VTG) - course, speed, heading
+                    # - $GNGGA/$GPGGA: Global Positioning System Fix Data (GGA) - position, altitude, satellites, HDOP
+                    # - $GNGLL/$GPGLL: Geographic Position - Latitude/Longitude (GLL) - position only
+                    # - $GNGSA/$GPGSA: GPS DOP and Active Satellites (GSA) - satellite selection, DOP values
+                    # - $GNGSV/$GPGSV: GPS Satellites in View (GSV) - satellite visibility information
+                    
                     if data_str.startswith('$GNRMC') or data_str.startswith('$GPRMC'):
+                        # RMC: Most comprehensive navigation sentence - contains position, speed, course, and fix status
+                        # Distinguishing feature: Contains 'A' (valid) or 'V' (invalid) fix status
                         if self.parse_rmc_sentence(data_str):
                             self.publish_navigation_data()
                     elif data_str.startswith('$GNVTG') or data_str.startswith('$GPVTG'):
+                        # VTG: Course and speed information - alternative to RMC for navigation data
+                        # Distinguishing feature: Contains course over ground (COG) and speed over ground (SOG)
                         if self.parse_vtg_sentence(data_str):
                             self.publish_navigation_data()
                     elif data_str.startswith('$GNGGA') or data_str.startswith('$GPGGA'):
-                        # Always parse to extract satellite count
+                        # GGA: Position and satellite information - most detailed position data
+                        # Distinguishing feature: Contains satellite count, HDOP, and altitude
+                        # Always parse to extract satellite count and position data
                         self.parse_gga_sentence(data_str)
-                        self.publish_navsat_fix()  # Only publishes if valid fix
+                        # Note: NavSatFix published by periodic timer (1 Hz) for consistent rate
                         # Note: satellite count published by periodic timer (1 Hz)
 
                     # Handle periodic status logging for normal operation
@@ -840,14 +1137,16 @@ class GpsNode(ArgoBaseNode):
                             self.get_logger().info(
                                 f"GPS data flowing: {self.data_count} messages received so far")
                             if self.gps_fix_valid:
+                                fix_quality_str = self.get_fix_quality_description()
+                                accuracy_str = self.get_position_accuracy_info()
                                 if self.current_sog is not None and self.current_cog is not None:
                                     self.get_logger().info(
-                                        f"GPS Fix: SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°")
+                                        f"GPS Fix ({fix_quality_str}): SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°, {accuracy_str}")
                                 elif self.current_sog is not None:
                                     self.get_logger().info(
-                                        f"GPS Fix: SOG={self.current_sog:.2f} knots, COG=N/A (stationary)")
+                                        f"GPS Fix ({fix_quality_str}): SOG={self.current_sog:.2f} knots, COG=N/A (stationary), {accuracy_str}")
                                 else:
-                                    self.get_logger().info("GPS Fix obtained, waiting for navigation data")
+                                    self.get_logger().info(f"GPS Fix ({fix_quality_str}) obtained, waiting for navigation data, {accuracy_str}")
                             else:
                                 self.get_logger().info("No GPS fix - searching for satellites...")
                             self.last_data_log_time = current_time
