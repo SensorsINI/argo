@@ -74,9 +74,10 @@ The 3D visualization system provides a comprehensive view of the Argo sailboat's
 - **Boundaries**: Blue lines (sailing area perimeters)
 - **Hazards**: Red lines (rocks, obstacles)
 
-## Coordinate Frames
+## Coordinate Frames and Transforms
 
-The system uses the following coordinate frame hierarchy:
+The system uses the following coordinate frame hierarchy with specific transform relationships:
+
 ```
 map (fixed world frame at GPS origin)
  └── odom (odometry frame, same as map for now)
@@ -86,6 +87,47 @@ map (fixed world frame at GPS origin)
          ├── wind_sensor_link (anemometer position)
          └── rudder_link (rudder position)
 ```
+
+### Frame Descriptions
+
+- **`map`**: Fixed world coordinate frame at the GPS origin point. This is the reference frame for all global positioning.
+- **`odom`**: Odometry frame, currently identical to map frame. In a full system, this would represent the robot's estimated position from wheel encoders or other odometry sources.
+- **`base_link`**: The center of the boat, typically at the waterline. This is the main reference frame for all boat-mounted sensors and actuators.
+- **`gps_link`**: GPS antenna position relative to base_link. Accounts for the physical offset of the GPS antenna from the boat center.
+- **`compass_link`**: IMU/magnetometer position relative to base_link. Critical for heading and orientation calculations.
+- **`wind_sensor_link`**: Anemometer position relative to base_link. Accounts for wind sensor mounting location.
+- **`rudder_link`**: Rudder position relative to base_link. Shows the actual rudder angle and position.
+
+### Transform Types
+
+- **`/tf`**: Dynamic transforms that change over time (boat position, rudder angle, etc.)
+- **`/tf_static`**: Static transforms that remain constant (sensor mounting positions, etc.)
+
+### ENU Frame (East-North-Up)
+
+The system uses the **ENU (East-North-Up)** coordinate convention:
+- **X-axis**: Points East (positive X = East)
+- **Y-axis**: Points North (positive Y = North)  
+- **Z-axis**: Points Up (positive Z = Up)
+
+This is the standard convention for ROS2 and many robotics applications. The "Root frame" in Foxglove refers to the top-level coordinate frame in the transform tree, typically `map`.
+
+### Common Transform Issues
+
+1. **Rotation Problems**: If the wire mesh or boat model appears rotated 90°, check:
+   - IMU calibration and mounting orientation
+   - Coordinate frame conventions (ENU vs NED)
+   - Transform publishing order and timing
+
+2. **Scale Issues**: If objects appear too large/small:
+   - Verify GPS coordinate conversion to meters
+   - Check marker scale values in visualization nodes
+   - Ensure consistent units across all transforms
+
+3. **Position Drift**: If the boat position doesn't match GPS:
+   - Check GPS-to-map coordinate conversion
+   - Verify transform publisher is running
+   - Ensure GPS fix quality is sufficient
 
 ## Data Sources
 
@@ -194,6 +236,29 @@ The 3D visualization system is designed to work alongside the existing Argo syst
 - Uses existing sensor data topics
 - Compatible with both simulation and real hardware
 - Can be started/stopped independently
+
+## Learning Resources
+
+### Foxglove Studio Documentation
+- **Official Foxglove Docs**: https://docs.foxglove.dev/
+- **3D Panel Guide**: https://docs.foxglove.dev/docs/panels/3d
+- **Layouts and Configurations**: https://docs.foxglove.dev/docs/panels/layouts
+- **Data Sources**: https://docs.foxglove.dev/docs/connecting-to-data
+
+### ROS2 Transform System
+- **TF2 Documentation**: https://docs.ros.org/en/humble/Tutorials/Intermediate/Tf2/Tf2-Main.html
+- **Coordinate Frames**: https://docs.ros.org/en/humble/Tutorials/Intermediate/Tf2/Tf2-Main.html#coordinate-frames
+- **Transform Trees**: https://docs.ros.org/en/humble/Tutorials/Intermediate/Tf2/Tf2-Main.html#transform-trees
+
+### 3D Visualization Best Practices
+- **ROS2 Visualization Markers**: https://docs.ros.org/en/humble/Tutorials/Intermediate/Rviz/Rviz-Interactive-Markers.html
+- **Coordinate Frame Conventions**: https://www.ros.org/reps/rep-0103.html
+- **ENU vs NED Conventions**: https://en.wikipedia.org/wiki/Local_tangent_plane_coordinates
+
+### Foxglove Community
+- **GitHub Repository**: https://github.com/foxglove/studio
+- **Discord Community**: https://discord.gg/foxglove
+- **Example Layouts**: https://github.com/foxglove/studio/tree/main/packages/studio-base/src/panels/ThreeDimensionalViz
 
 ## Future Enhancements
 
