@@ -75,7 +75,7 @@ alog -n 100
 
 ## Integration with Dotfiles
 
-The `alog` alias is defined in `dotfiles/.bash_aliases`:
+The `alog` alias is defined in `dotfiles/bash_aliases`:
 ```bash
 alias alog='/home/orangepi/argo/scripts/argo_logs.sh'
 ```
@@ -91,8 +91,3 @@ relogin
 
 - [argo-systemd-integration](../docs/argo-systemd-integration.md) - Systemd service patterns
 - [15-argo-shutdown-status](./15-argo-shutdown-status) - MOTD script with color examples
-
-
-
-
-

@@ -1,5 +1,5 @@
 
-source ~/argo/dotfiles/.bash_aliases
+source ~/argo/dotfiles/bash_aliases
 
 # Enable bash completion for Argo Python scripts
 if [ -f ~/argo/dotfiles/.bash_completion_argo ]; then

@@ -155,7 +155,7 @@ install-argo-cli:
 	@if ! grep -q "source.*dotfiles.*\.bashrc" ~/.bashrc 2>/dev/null; then \
 		echo "" >> ~/.bashrc; \
 		echo "# Source Argo dotfiles" >> ~/.bashrc; \
-		echo "source ~/argo/dotfiles/.bashrc" >> ~/.bashrc; \
+		echo "source ~/argo/dotfiles/bashrc" >> ~/.bashrc; \
 		echo "✅ Added dotfiles sourcing to ~/.bashrc"; \
 	else \
 		echo "✅ Dotfiles already sourced in ~/.bashrc"; \
@@ -455,4 +455,3 @@ setup-battery-panel:
 test-battery-status:
 	@echo "Testing battery status functionality..."
 	@$(MAKE) -C scripts test-battery-status
-

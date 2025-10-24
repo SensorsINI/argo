@@ -91,7 +91,7 @@ Check these scripts that use argparse and would benefit:
 
 The completion system is configured in:
 - **Config**: `dotfiles/.bash_completion_argo` - Registers Python scripts
-- **Activation**: `dotfiles/.bashrc` - Sources completion config
+- **Activation**: `dotfiles/bashrc` - Sources completion config
 - **Installation**: `make install-argo-cli` - Installs dotfiles
 
 ## Advanced Features
@@ -156,4 +156,3 @@ python3 imu.py --<TAB>
 - **argcomplete docs**: https://kislyuk.github.io/argcomplete/
 - **Argo completion config**: `dotfiles/.bash_completion_argo`
 - **Installation**: Run `make install-argo-cli` from project root
-

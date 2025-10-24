@@ -10,11 +10,11 @@ make install-argo-cli
 source ~/.bashrc
 ```
 
-This will add `source ~/argo/dotfiles/.bashrc` to your `~/.bashrc` file.
+This will add `source ~/argo/dotfiles/bashrc` to your `~/.bashrc` file.
 
 ## What's Included
 
-### Bash Aliases (`dotfiles/.bash_aliases`)
+### Bash Aliases (`dotfiles/bash_aliases`)
 Quick commands for Argo robot control:
 - `al` - Start Argo nodes
 - `aq` - Stop Argo nodes  
@@ -29,7 +29,7 @@ Quick commands for Argo robot control:
 - `asim` - Local simulation
 - `asimr` - Remote simulation
 
-### Bash Functions (`dotfiles/.bashrc`)
+### Bash Functions (`dotfiles/bashrc`)
 - `argo_status()` - Manual status check (always shows full details)
 - `argo_quick_timer()` - Throttled status checking (5+ minutes since last check)
 
@@ -170,7 +170,7 @@ source ~/.bashrc  # Reload configuration
 ```
 
 ### Add New Aliases
-Edit `dotfiles/.bash_aliases` and run:
+Edit `dotfiles/bash_aliases` and run:
 ```bash
 make aliases-install
 source ~/.bashrc
@@ -184,7 +184,7 @@ source ~/.bashrc
 
 ## Files
 
-- `.bash_aliases` - Argo command aliases
+- `bash_aliases` - Argo command aliases
 - `.bash_completion_argo` - Tab completion setup
 - `.bashrc` - Main bash configuration (sources other files)
 - `.tmux.conf` - Tmux configuration
