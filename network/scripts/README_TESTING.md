@@ -209,3 +209,4 @@ grep -E "(WiFi|LED)" /var/log.hdd/persistent/argo-power-control.log
 2. Check all log files for issues
 3. Verify system returned to normal state
 4. Document any unexpected behavior
+

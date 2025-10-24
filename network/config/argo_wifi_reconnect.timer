@@ -1,0 +1,13 @@
+[Unit]
+Description=Argo WiFi Reconnection Timer
+Documentation=file:///home/orangepi/argo/network/README.md
+Requires=argo_wifi_reconnect.service
+
+[Timer]
+# Run every 2 minutes
+OnCalendar=*:0/2
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

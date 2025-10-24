@@ -1,0 +1,23 @@
+[Unit]
+Description=Argo WiFi Reconnection Service
+Documentation=file:///home/orangepi/argo/network/README.md
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+Requires=NetworkManager.service
+
+[Service]
+Type=oneshot
+User=orangepi
+Group=orangepi
+ExecStart=/home/orangepi/argo/network/scripts/wifi_reconnect.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=argo-wifi-reconnect
+
+# Restart policy - run every 2 minutes
+Restart=no
+RestartSec=120
+
+# Timer configuration
+[Install]
+WantedBy=multi-user.target

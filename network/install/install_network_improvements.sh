@@ -63,17 +63,27 @@ install_networkmanager_config() {
     log_success "NetworkManager configuration installed to /etc/NetworkManager/conf.d/argo_wifi_scan.conf"
 }
 
-# Setup cron job for WiFi reconnection
-setup_cron_job() {
-    log "Setting up cron job for WiFi reconnection..."
+# Setup systemd service and timer for WiFi reconnection
+setup_systemd_service() {
+    log "Setting up systemd service and timer for WiFi reconnection..."
     
-    # Check if cron job already exists
-    if crontab -l 2>/dev/null | grep -q "wifi_reconnect.sh"; then
-        log_warning "Cron job for WiFi reconnection already exists"
+    # Copy service and timer files
+    cp "$NETWORK_DIR/config/argo_wifi_reconnect.service" /etc/systemd/system/
+    cp "$NETWORK_DIR/config/argo_wifi_reconnect.timer" /etc/systemd/system/
+    
+    # Reload systemd and enable timer
+    systemctl daemon-reload
+    systemctl enable argo_wifi_reconnect.timer
+    systemctl start argo_wifi_reconnect.timer
+    
+    # Check if timer is active
+    if systemctl is-active --quiet argo_wifi_reconnect.timer; then
+        log_success "WiFi reconnection timer started successfully"
+        log "Timer status:"
+        systemctl status argo_wifi_reconnect.timer --no-pager -l | sed 's/^/  /'
     else
-        # Add cron job to run every 2 minutes
-        (crontab -l 2>/dev/null; echo "*/2 * * * * /usr/local/bin/wifi_reconnect.sh") | crontab -
-        log_success "Cron job added to run WiFi reconnection every 2 minutes"
+        log_error "Failed to start WiFi reconnection timer"
+        exit 1
     fi
 }
 
@@ -122,7 +132,7 @@ show_summary() {
     echo "Installed components:"
     echo "  • WiFi reconnection script: /usr/local/bin/wifi_reconnect.sh"
     echo "  • NetworkManager config: /etc/NetworkManager/conf.d/argo_wifi_scan.conf"
-    echo "  • Cron job: Runs every 2 minutes"
+    echo "  • Systemd timer: argo_wifi_reconnect.timer (runs every 2 minutes)"
     echo "  • Log file: /var/log.hdd/persistent/wifi-reconnect.log"
     echo
     echo "Network priorities:"
@@ -143,7 +153,7 @@ main() {
     check_root
     install_wifi_script
     install_networkmanager_config
-    setup_cron_job
+    setup_systemd_service
     restart_networkmanager
     test_installation
     show_summary

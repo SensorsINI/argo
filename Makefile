@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start
 
 help:
 	@echo "Argo Robot Services Management"
@@ -45,6 +45,12 @@ help:
 	@echo "  test-wifi-reconnection - Start WiFi reconnection test (3min, background)"
 	@echo "  wifi-test-status      - Check WiFi test status and progress"
 	@echo "  wifi-test-results     - Show WiFi test results and logs"
+	@echo ""
+	@echo "WiFi Reconnection Service:"
+	@echo "  wifi-reconnect-status - Check systemd timer status"
+	@echo "  wifi-reconnect-logs   - Show service logs (last hour)"
+	@echo "  wifi-reconnect-stop   - Stop WiFi reconnection service"
+	@echo "  wifi-reconnect-start  - Start WiFi reconnection service"
 	@echo ""
 	@echo "MOTD Customization:"
 	@echo "  install-motd    - Install Argo shutdown status MOTD script"
@@ -501,3 +507,21 @@ wifi-test-results:
 		echo "❌ Error: network/scripts/run_wifi_test.sh not found!"; \
 		exit 1; \
 	fi
+
+wifi-reconnect-status:
+	@echo "Checking WiFi reconnection service status..."
+	@systemctl status argo_wifi_reconnect.timer --no-pager -l
+
+wifi-reconnect-logs:
+	@echo "Showing WiFi reconnection service logs..."
+	@journalctl -u argo_wifi_reconnect.service --since "1 hour ago" --no-pager
+
+wifi-reconnect-stop:
+	@echo "Stopping WiFi reconnection service..."
+	@sudo systemctl stop argo_wifi_reconnect.timer
+	@echo "✅ WiFi reconnection service stopped"
+
+wifi-reconnect-start:
+	@echo "Starting WiFi reconnection service..."
+	@sudo systemctl start argo_wifi_reconnect.timer
+	@echo "✅ WiFi reconnection service started"
