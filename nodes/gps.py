@@ -56,6 +56,7 @@ class GpsNode(ArgoBaseNode):
     - Real-time satellite count monitoring with immediate change detection
     - GPS fix status monitoring with PPS correlation logging
     - Position accuracy reporting (HDOP and 95% confidence circle)
+      HDOP = Horizontal Dilution of Precision (lower values indicate better accuracy)
     - Fix quality reporting (GPS Fix, SBAS Fix, GBAS Fix)
     - Robust error handling with communication timeout detection
     - Configurable debug logging for troubleshooting
@@ -539,8 +540,8 @@ class GpsNode(ArgoBaseNode):
                              0x10, 0x27,  # Fixed altitude variance (not used)
                              0x05,        # Minimum elevation: 5 degrees
                              0x00,        # Reserved
-                             0xFA, 0x00,  # Position DOP mask: 250
-                             0xFA, 0x00,  # Time DOP mask: 250
+                             0xFA, 0x00,  # Position DOP mask: 250 (DOP = Dilution of Precision)
+                             0xFA, 0x00,  # Time DOP mask: 250 (DOP = Dilution of Precision)
                              0x64, 0x00,  # Position accuracy mask: 100m
                              0x2C, 0x01,  # Time accuracy mask: 300s
                              0x00,        # Static hold threshold: 0 cm/s
@@ -748,6 +749,7 @@ class GpsNode(ArgoBaseNode):
         - quality: 0=invalid, 1=GPS, 2=DGPS, 3=PPS, 4=RTK, 5=RTK Float, 6=Estimated, 7=Manual, 8=Simulation
         - sats: Number of satellites used in position calculation
         - hdop: Horizontal Dilution of Precision (lower is better)
+          HDOP = Horizontal Dilution of Precision (measure of horizontal position accuracy)
         - alt: Altitude above mean sea level
         - Most detailed position data - contains position, altitude, satellite count, and accuracy metrics
         """
@@ -816,6 +818,7 @@ class GpsNode(ArgoBaseNode):
                         self.navsat_status = NavSatStatus.STATUS_FIX
 
                     # Update position covariance based on HDOP if available
+                    # HDOP = Horizontal Dilution of Precision (lower values = better horizontal accuracy)
                     if hdop:
                         hdop_val = float(hdop)
                         self.current_hdop = hdop_val  # Store HDOP for logging
@@ -864,7 +867,12 @@ class GpsNode(ArgoBaseNode):
             return "Unknown Fix"
 
     def get_position_accuracy_info(self):
-        """Get position accuracy information from covariance and HDOP."""
+        """
+        Get position accuracy information from covariance and HDOP.
+        
+        HDOP = Horizontal Dilution of Precision (lower values indicate better horizontal accuracy)
+        DOP = Dilution of Precision (measure of satellite geometry quality)
+        """
         accuracy_info = []
         
         # Add HDOP if available
@@ -1096,8 +1104,10 @@ class GpsNode(ArgoBaseNode):
                     # - $GNRMC/$GPRMC: Recommended Minimum (RMC) - speed, course, position, fix status
                     # - $GNVTG/$GPVTG: Track Made Good and Ground Speed (VTG) - course, speed, heading
                     # - $GNGGA/$GPGGA: Global Positioning System Fix Data (GGA) - position, altitude, satellites, HDOP
+                      # HDOP = Horizontal Dilution of Precision (lower values = better horizontal accuracy)
                     # - $GNGLL/$GPGLL: Geographic Position - Latitude/Longitude (GLL) - position only
                     # - $GNGSA/$GPGSA: GPS DOP and Active Satellites (GSA) - satellite selection, DOP values
+                      # DOP = Dilution of Precision (measure of satellite geometry quality)
                     # - $GNGSV/$GPGSV: GPS Satellites in View (GSV) - satellite visibility information
                     
                     if data_str.startswith('$GNRMC') or data_str.startswith('$GPRMC'):
@@ -1113,6 +1123,7 @@ class GpsNode(ArgoBaseNode):
                     elif data_str.startswith('$GNGGA') or data_str.startswith('$GPGGA'):
                         # GGA: Position and satellite information - most detailed position data
                         # Distinguishing feature: Contains satellite count, HDOP, and altitude
+                          # HDOP = Horizontal Dilution of Precision (lower values = better accuracy)
                         # Always parse to extract satellite count and position data
                         self.parse_gga_sentence(data_str)
                         # Note: NavSatFix published by periodic timer (1 Hz) for consistent rate
