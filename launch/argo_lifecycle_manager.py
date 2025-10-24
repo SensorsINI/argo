@@ -203,7 +203,9 @@ class ArgoLifecycleManager:
             'anem.py': '/anemometer_node/health',
             'battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
-            'temp_monitor.py': '/temp_monitor_node/health'
+            'temp_monitor.py': '/temp_monitor_node/health',
+            'argo_transform_publisher.py': '/argo_transform_publisher/health',
+            'argo_boat_visualization.py': '/argo_boat_visualization/health'
         }
         
         # Also keep health topics for backward compatibility
@@ -248,7 +250,9 @@ class ArgoLifecycleManager:
             'anem.py': '/anemometer_node/health',
             'battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
-            'temp_monitor.py': '/temp_monitor_node/health'
+            'temp_monitor.py': '/temp_monitor_node/health',
+            'argo_transform_publisher.py': '/argo_transform_publisher/health',
+            'argo_boat_visualization.py': '/argo_boat_visualization/health'
         }
         
         for node_name, service_name in health_services.items():
@@ -1303,11 +1307,15 @@ class ArgoLifecycleManager:
         else:
             print(f"🎮 CONTROLLER: 🔴 STOPPED")
         
+        print('Querying health status from all nodes via services...',end='',flush=True)
         # Query health status from all nodes via services
         health_data = self._query_node_health_services()
-        
+        # Erase 'Querying health status...' and replace with dynamic query output
+        import sys
+        sys.stdout.write('\r' + ' ' * 60 + '\r')  # Clear the current line
+        print(f"Health Services Queried: {len(health_data)} node{'s' if len(health_data)!=1 else ''} responded")
         # Display nodes in tabular format
-        print("\n📋 NODE STATUS TABLE:")
+        # print("📋 NODE STATUS TABLE:")
         print("┌" + "─" * 25 + "┬" + "─" * 12 + "┬" + "─" * 12 + "┐")
         print("│ " + "NODE NAME".ljust(23) + " │ " + "RUNNING".ljust(10) + " │ " + "HEALTH".ljust(10) + " │")
         print("├" + "─" * 25 + "┼" + "─" * 12 + "┼" + "─" * 12 + "┤")
@@ -1509,28 +1517,21 @@ class ArgoLifecycleManager:
             if battery_service_running:
                 battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = self._get_battery_water_status_alerts()
             
-            # Build system info line showing running nodes out of total nodes with 'running/total'
-            system_info = f"📊 Nodes {running_count}/{total_count} | CPU {cpu_percent:.1f}% | Mem {memory.percent:.1f}% | Free Disk {free_disk:.1f}GB ({disk.percent:.1f}% used) | CPU Temp. {cpu_temp}°C"
-            
-            # Always show battery status (use ??? if unavailable)
-            battery_display = battery_summary if battery_summary else "???"
-            system_info += f" | 🔋 {battery_display}"
-            
-            # Always show charging status (use ??? if unavailable)
-            if charging_status is True:
-                system_info += f" | Charging: 🔌"
-            elif charging_status is False:
-                system_info += f" | Charging: ❌"
-            else:
-                system_info += f" | Charging: ???"
-            
-            # Always show USB power status (use ??? if unavailable)
-            if usb_power_status is True:
-                system_info += f" | USB: ⚡"
-            elif usb_power_status is False:
-                system_info += f" | USB: ❌"
-            else:
-                system_info += f" | USB: ???"
+            # Use unified formatting function for system info line
+            system_info = self._format_status_summary(
+                running_count=running_count,
+                total_count=total_count,
+                cpu_percent=cpu_percent,
+                memory_percent=memory.percent,
+                free_disk_gb=free_disk,
+                disk_percent=disk.percent,
+                cpu_temp=cpu_temp,
+                battery_summary=battery_summary,
+                charging_status=charging_status,
+                usb_power_status=usb_power_status,
+                time_to_full_hours=time_to_full_hours,
+                time_to_empty_hours=time_to_empty_hours
+            )
             
             print(system_info)
             
@@ -1575,6 +1576,100 @@ class ArgoLifecycleManager:
         
         print("=" * 60)
     
+    def _format_status_summary(self, running_count: int, total_count: int, cpu_percent: float, 
+                              memory_percent: float, free_disk_gb: float, disk_percent: float, 
+                              cpu_temp: str, battery_summary: str, charging_status: bool, 
+                              usb_power_status: bool, time_to_full_hours: float = None, 
+                              time_to_empty_hours: float = None, healthy_count: int = 0, 
+                              unhealthy_count: int = 0, controller_paused: bool = None) -> str:
+        """
+        Format a unified single-line status summary.
+        
+        Args:
+            running_count: Number of running nodes
+            total_count: Total number of nodes
+            cpu_percent: CPU usage percentage
+            memory_percent: Memory usage percentage
+            free_disk_gb: Free disk space in GB
+            disk_percent: Disk usage percentage
+            cpu_temp: CPU temperature string
+            battery_summary: Battery voltage/percentage string
+            charging_status: True/False/None for charging status
+            usb_power_status: True/False/None for USB power status
+            time_to_full_hours: Hours to full charge (optional)
+            time_to_empty_hours: Hours to empty (optional)
+            healthy_count: Number of healthy nodes (optional)
+            unhealthy_count: Number of unhealthy nodes (optional)
+            controller_paused: Controller pause state (optional)
+        
+        Returns:
+            Formatted status line string with 🚢 ARGO: prefix
+        """
+        # Use sailing boat emoji for both contexts
+        prefix = f"🚢 ARGO: [{running_count}/{total_count}]"
+        
+        # Build status line
+        status_line = f"{prefix} | 🖥️ {cpu_percent:.1f}%"
+        
+        # Add CPU temperature with thermometer emoji
+        if cpu_temp:
+            status_line += f" | 🌡️ {cpu_temp}°C"
+        
+        # Add memory
+        status_line += f" | Mem {memory_percent:.1f}%"
+        
+        # Add disk space with disk emoji
+        status_line += f" | 💾 {free_disk_gb:.1f}GB ({disk_percent:.1f}% used)"
+        
+        # Add health summary if we have health data
+        if healthy_count > 0 or unhealthy_count > 0:
+            status_line += f" | 🏥 {healthy_count}H/{unhealthy_count}U"
+        
+        # Add controller pause state
+        if controller_paused is not None:
+            pause_indicator = "⏸️" if controller_paused else "▶️"
+            status_line += f" | 🎮 {pause_indicator}"
+        
+        # Always show battery status (use ??? if unavailable)
+        battery_display = battery_summary if battery_summary else "???"
+        status_line += f" | 🔋 {battery_display}"
+        
+        # Always show charging status (use ??? if unavailable)
+        if charging_status is True:
+            status_line += f" | Charging: 🔌"
+        elif charging_status is False:
+            status_line += f" | Charging: ❌"
+        else:
+            status_line += f" | Charging: ???"
+        
+        # Always show USB power status (use ??? if unavailable)
+        if usb_power_status is True:
+            status_line += f" | USB: ⚡"
+        elif usb_power_status is False:
+            status_line += f" | USB: ❌"
+        else:
+            status_line += f" | USB: ???"
+        
+        # Add battery lifetime estimate if available
+        if time_to_full_hours is not None:
+            if time_to_full_hours < 0.1:
+                status_line += f" | ⏱️ Full"
+            elif time_to_full_hours < 1.0:
+                minutes = int(time_to_full_hours * 60)
+                status_line += f" | ⏱️ +{minutes}m"
+            else:
+                status_line += f" | ⏱️ +{time_to_full_hours:.1f}h"
+        elif time_to_empty_hours is not None:
+            if time_to_empty_hours < 0.1:
+                status_line += f" | ⚠️ Empty"
+            elif time_to_empty_hours < 1.0:
+                minutes = int(time_to_empty_hours * 60)
+                status_line += f" | ⏱️ -{minutes}m"
+            else:
+                status_line += f" | ⏱️ -{time_to_empty_hours:.1f}h"
+        
+        return status_line
+    
     def quick_status(self) -> None:
         """Show condensed one-line status of Argo system (optimized for quick checks)"""
         try:
@@ -1585,6 +1680,20 @@ class ArgoLifecycleManager:
             
             # Get CPU usage (quick check with minimal interval)
             cpu_percent = psutil.cpu_percent(interval=0.2)
+            
+            # Get memory and disk info (quick check)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage("/")
+            free_disk_gb = disk.free / (1024**3)
+            
+            # Get CPU temperature (quick check)
+            cpu_temp = None
+            try:
+                with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
+                    temp_millicelsius = int(f.read().strip())
+                    cpu_temp = str(temp_millicelsius // 1000)
+            except Exception:
+                pass
             
             # Get battery info and power status if available (with retry for robustness)
             battery_summary = None
@@ -1621,57 +1730,31 @@ class ArgoLifecycleManager:
                 elif health_status is False:
                     unhealthy_count += 1
             
-            # Build condensed status line
-            status_line = f"🚢 ARGO: [{running_count}/{total_count}] | 🖥️ {cpu_percent:.1f}%"
-            
-            # Add health summary if we have health data
-            if healthy_count > 0 or unhealthy_count > 0:
-                status_line += f" | 🏥 {healthy_count}H/{unhealthy_count}U"
-            
-            # Add controller pause state
+            # Get controller pause state
+            controller_paused = None
             if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
                 # Query current pause state to ensure we have the latest
                 self._query_controller_pause_state()
-                pause_indicator = "⏸️" if self.controller_pause_state else "▶️"
-                status_line += f" | 🎮 {pause_indicator}"
+                controller_paused = self.controller_pause_state
             
-            # Always show battery status (use ??? if unavailable)
-            battery_display = battery_summary if battery_summary else "???"
-            status_line += f" | 🔋 {battery_display}"
-            
-            # Always show charging status (use ??? if unavailable)
-            if charging_status is True:
-                status_line += f" | Charging: 🔌"
-            elif charging_status is False:
-                status_line += f" | Charging: ❌"
-            else:
-                status_line += f" | Charging: ???"
-            
-            # Always show USB power status (use ??? if unavailable)
-            if usb_power_status is True:
-                status_line += f" | USB: ⚡"
-            elif usb_power_status is False:
-                status_line += f" | USB: ❌"
-            else:
-                status_line += f" | USB: ???"
-            
-            # Add battery lifetime estimate if available (condensed format)
-            if time_to_full_hours is not None:
-                if time_to_full_hours < 0.1:
-                    status_line += f" | ⏱️ Full"
-                elif time_to_full_hours < 1.0:
-                    minutes = int(time_to_full_hours * 60)
-                    status_line += f" | ⏱️ +{minutes}m"
-                else:
-                    status_line += f" | ⏱️ +{time_to_full_hours:.1f}h"
-            elif time_to_empty_hours is not None:
-                if time_to_empty_hours < 0.1:
-                    status_line += f" | ⚠️ Empty"
-                elif time_to_empty_hours < 1.0:
-                    minutes = int(time_to_empty_hours * 60)
-                    status_line += f" | ⏱️ -{minutes}m"
-                else:
-                    status_line += f" | ⏱️ -{time_to_empty_hours:.1f}h"
+            # Use unified formatting function
+            status_line = self._format_status_summary(
+                running_count=running_count,
+                total_count=total_count,
+                cpu_percent=cpu_percent,
+                memory_percent=memory.percent,
+                free_disk_gb=free_disk_gb,
+                disk_percent=disk.percent,
+                cpu_temp=cpu_temp,
+                battery_summary=battery_summary,
+                charging_status=charging_status,
+                usb_power_status=usb_power_status,
+                time_to_full_hours=time_to_full_hours,
+                time_to_empty_hours=time_to_empty_hours,
+                healthy_count=healthy_count,
+                unhealthy_count=unhealthy_count,
+                controller_paused=controller_paused
+            )
             
             print(status_line, flush=True)
             

@@ -39,18 +39,25 @@ All markers are published in the 'map' frame for consistent 3D visualization.
 """
 
 import rclpy
-from rclpy.node import Node
 from geometry_msgs.msg import Vector3, PoseStamped
 from sensor_msgs.msg import NavSatFix
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Header
 import math
 import numpy as np
+import sys
+import os
+import argparse
+import argcomplete
+
+# Import ArgoBaseNode
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from argo_base_node import ArgoBaseNode
 
 UPDATE_RATE = 1  # Hz
 
-class ArgoBoatVisualization(Node):
-    def __init__(self):
+class ArgoBoatVisualization(ArgoBaseNode):
+    def __init__(self, debug_mode=False):
         super().__init__('argo_boat_visualization')
         
         # Publishers
@@ -82,6 +89,11 @@ class ArgoBoatVisualization(Node):
         
         # Timer for publishing markers
         self.timer = self.create_timer(1/UPDATE_RATE, self.publish_markers)  #  Hz
+        
+        # Initialize health status - healthy when publishing successfully
+        self.set_healthy("Boat visualization initialized")
+        self.publish_success_count = 0
+        self.publish_failure_count = 0
         
         self.get_logger().info("Argo boat visualization started")
     
@@ -374,43 +386,85 @@ class ArgoBoatVisualization(Node):
     
     def publish_markers(self):
         """Publish all visualization markers"""
-        marker_array = MarkerArray()
-        
-        # Add all markers
-        marker_array.markers.append(self.create_boat_hull_marker())
-        marker_array.markers.append(self.create_mast_marker())
-        marker_array.markers.append(self.create_rudder_indicator_marker())
-        marker_array.markers.append(self.create_sail_indicator_marker())
-        marker_array.markers.append(self.create_wind_vector_marker())
-        marker_array.markers.append(self.create_velocity_vector_marker())
-        marker_array.markers.append(self.create_heading_arrow_marker())
-        
-        # Publish marker array
-        self.marker_array_pub.publish(marker_array)
-        
-        # Also publish individual markers for debugging
-        for marker in marker_array.markers:
-            self.marker_pub.publish(marker)
+        try:
+            marker_array = MarkerArray()
+            
+            # Add all markers
+            marker_array.markers.append(self.create_boat_hull_marker())
+            marker_array.markers.append(self.create_mast_marker())
+            marker_array.markers.append(self.create_rudder_indicator_marker())
+            marker_array.markers.append(self.create_sail_indicator_marker())
+            marker_array.markers.append(self.create_wind_vector_marker())
+            marker_array.markers.append(self.create_velocity_vector_marker())
+            marker_array.markers.append(self.create_heading_arrow_marker())
+            
+            # Publish marker array
+            self.marker_array_pub.publish(marker_array)
+            
+            # Also publish individual markers for debugging
+            for marker in marker_array.markers:
+                self.marker_pub.publish(marker)
+            
+            # Update health status - successful publishing
+            self.publish_success_count += 1
+            if self.publish_success_count % 10 == 0:  # Update health every 10 successful publishes
+                self.set_healthy(f"Publishing visualization markers successfully (count: {self.publish_success_count})")
+                
+        except Exception as e:
+            # Update health status - publishing failure
+            self.publish_failure_count += 1
+            self.set_unhealthy(f"Visualization publishing failed: {e}")
+            self.get_logger().error(f"Error publishing visualization markers: {e}")
 
 def main(args=None):
-    rclpy.init(args=args)
-    
-    node = ArgoBoatVisualization()
+    parser = ArgoBaseNode.create_standard_parser(
+        'Argo Boat 3D Visualization Node',
+        epilog="""
+This ROS2 node publishes standard visualization markers for rendering the Argo sailboat state
+in RViz and the Foxglove 3D panel. Intended for operator situational awareness during 
+development and testing. Does not affect control logic.
+
+What is visualized:
+- Boat hull and mast as basic geometry
+- Rudder position indicator
+- Sail position indicator
+- Wind vector arrow
+- GPS velocity vector
+- Boat heading arrow
+- Roll/pitch indicators derived from accelerometer data
+
+TOPICS:
+  Publishes:
+    /visualization_marker (visualization_msgs/Marker): Individual markers
+    /visualization_marker_array (visualization_msgs/MarkerArray): All markers together
+    /argo_boat_visualization_health: Bool - Node health status (ArgoBaseNode)
+
+  Subscribes:
+    /pose (geometry_msgs/Vector3): Boat heading (z-component)
+    /accel (geometry_msgs/Vector3): IMU accelerometer for roll/pitch
+    /rudder_sail_cmd (geometry_msgs/Vector3): Rudder and sail commands
+    /anem_speed_angle_temp (geometry_msgs/Vector3): Wind data
+    /gps_velocity (geometry_msgs/Vector3): GPS velocity vector
+    /fix (sensor_msgs/NavSatFix): GPS position
+
+SERVICES:
+  /argo_boat_visualization/health: Trigger - Health status service endpoint
+
+HEALTH CRITERIA:
+  - Healthy when successfully publishing visualization markers
+  - Unhealthy when marker publishing fails
+
+Coordinate Frame:
+  All markers are published in the 'map' frame for consistent 3D visualization.
+        """
+    )
     
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    except rclpy.executors.ExternalShutdownException:
-        pass  # Context already shutdown
-    finally:
-        node.destroy_node()
-        # Only shutdown if context is still valid
-        if rclpy.ok():
-            try:
-                rclpy.shutdown()
-            except:
-                pass  # Already shutdown
+        ArgoBaseNode.run_node(ArgoBoatVisualization, args, parser)
+    except Exception as e:
+        print(f"CRITICAL: Failed to initialize Boat Visualization node: {e}")
+        print("CRITICAL: Check ROS2 environment and visualization dependencies.")
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()

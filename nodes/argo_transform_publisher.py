@@ -26,15 +26,22 @@ Subscribed Topics:
 """
 
 import rclpy
-from rclpy.node import Node
 from geometry_msgs.msg import TransformStamped, Vector3
 from sensor_msgs.msg import NavSatFix
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 import math
 import numpy as np
+import sys
+import os
+import argparse
+import argcomplete
 
-class ArgoTransformPublisher(Node):
-    def __init__(self):
+# Import ArgoBaseNode
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from argo_base_node import ArgoBaseNode
+
+class ArgoTransformPublisher(ArgoBaseNode):
+    def __init__(self, debug_mode=False):
         super().__init__('argo_transform_publisher')
         
         # Transform broadcasters
@@ -59,6 +66,11 @@ class ArgoTransformPublisher(Node):
         
         # Timer for dynamic transforms
         self.timer = self.create_timer(0.1, self.publish_dynamic_transforms)  # 10 Hz
+        
+        # Initialize health status - healthy when publishing successfully
+        self.set_healthy("Transform publisher initialized")
+        self.publish_success_count = 0
+        self.publish_failure_count = 0
         
         self.get_logger().info("Argo transform publisher started")
     
@@ -153,74 +165,109 @@ class ArgoTransformPublisher(Node):
         if not self.map_origin_set:
             return  # Wait for GPS fix to set map origin
         
-        # Map to odom transform (identity for now, could be used for odometry drift correction)
-        map_to_odom = TransformStamped()
-        map_to_odom.header.stamp = self.get_clock().now().to_msg()
-        map_to_odom.header.frame_id = "map"
-        map_to_odom.child_frame_id = "odom"
-        map_to_odom.transform.translation.x = 0.0
-        map_to_odom.transform.translation.y = 0.0
-        map_to_odom.transform.translation.z = 0.0
-        map_to_odom.transform.rotation.x = 0.0
-        map_to_odom.transform.rotation.y = 0.0
-        map_to_odom.transform.rotation.z = 0.0
-        map_to_odom.transform.rotation.w = 1.0
-        self.tf_broadcaster.sendTransform(map_to_odom)
-        
-        # Odom to base_link transform (boat position and orientation)
-        # For now, assume boat is at map origin (0,0,0) and only rotates
-        # In a full implementation, this would include GPS position converted to map coordinates
-        
-        # Convert heading to quaternion (yaw rotation around z-axis)
-        heading_rad = math.radians(self.boat_heading)
-        roll_rad = math.radians(self.boat_roll)
-        pitch_rad = math.radians(self.boat_pitch)
-        
-        # Create rotation quaternion from roll, pitch, yaw
-        cy = math.cos(heading_rad * 0.5)
-        sy = math.sin(heading_rad * 0.5)
-        cp = math.cos(pitch_rad * 0.5)
-        sp = math.sin(pitch_rad * 0.5)
-        cr = math.cos(roll_rad * 0.5)
-        sr = math.sin(roll_rad * 0.5)
-        
-        qw = cr * cp * cy + sr * sp * sy
-        qx = sr * cp * cy - cr * sp * sy
-        qy = cr * sp * cy + sr * cp * sy
-        qz = cr * cp * sy - sr * sp * cy
-        
-        odom_to_base = TransformStamped()
-        odom_to_base.header.stamp = self.get_clock().now().to_msg()
-        odom_to_base.header.frame_id = "odom"
-        odom_to_base.child_frame_id = "base_link"
-        odom_to_base.transform.translation.x = 0.0  # TODO: Convert GPS to map coordinates
-        odom_to_base.transform.translation.y = 0.0
-        odom_to_base.transform.translation.z = 0.0
-        odom_to_base.transform.rotation.x = qx
-        odom_to_base.transform.rotation.y = qy
-        odom_to_base.transform.rotation.z = qz
-        odom_to_base.transform.rotation.w = qw
-        self.tf_broadcaster.sendTransform(odom_to_base)
+        try:
+            # Map to odom transform (identity for now, could be used for odometry drift correction)
+            map_to_odom = TransformStamped()
+            map_to_odom.header.stamp = self.get_clock().now().to_msg()
+            map_to_odom.header.frame_id = "map"
+            map_to_odom.child_frame_id = "odom"
+            map_to_odom.transform.translation.x = 0.0
+            map_to_odom.transform.translation.y = 0.0
+            map_to_odom.transform.translation.z = 0.0
+            map_to_odom.transform.rotation.x = 0.0
+            map_to_odom.transform.rotation.y = 0.0
+            map_to_odom.transform.rotation.z = 0.0
+            map_to_odom.transform.rotation.w = 1.0
+            self.tf_broadcaster.sendTransform(map_to_odom)
+            
+            # Odom to base_link transform (boat position and orientation)
+            # For now, assume boat is at map origin (0,0,0) and only rotates
+            # In a full implementation, this would include GPS position converted to map coordinates
+            
+            # Convert heading to quaternion (yaw rotation around z-axis)
+            heading_rad = math.radians(self.boat_heading)
+            roll_rad = math.radians(self.boat_roll)
+            pitch_rad = math.radians(self.boat_pitch)
+            
+            # Create rotation quaternion from roll, pitch, yaw
+            cy = math.cos(heading_rad * 0.5)
+            sy = math.sin(heading_rad * 0.5)
+            cp = math.cos(pitch_rad * 0.5)
+            sp = math.sin(pitch_rad * 0.5)
+            cr = math.cos(roll_rad * 0.5)
+            sr = math.sin(roll_rad * 0.5)
+            
+            qw = cr * cp * cy + sr * sp * sy
+            qx = sr * cp * cy - cr * sp * sy
+            qy = cr * sp * cy + sr * cp * sy
+            qz = cr * cp * sy - sr * sp * cy
+            
+            odom_to_base = TransformStamped()
+            odom_to_base.header.stamp = self.get_clock().now().to_msg()
+            odom_to_base.header.frame_id = "odom"
+            odom_to_base.child_frame_id = "base_link"
+            odom_to_base.transform.translation.x = 0.0  # TODO: Convert GPS to map coordinates
+            odom_to_base.transform.translation.y = 0.0
+            odom_to_base.transform.translation.z = 0.0
+            odom_to_base.transform.rotation.x = qx
+            odom_to_base.transform.rotation.y = qy
+            odom_to_base.transform.rotation.z = qz
+            odom_to_base.transform.rotation.w = qw
+            self.tf_broadcaster.sendTransform(odom_to_base)
+            
+            # Update health status - successful publishing
+            self.publish_success_count += 1
+            if self.publish_success_count % 100 == 0:  # Update health every 100 successful publishes
+                self.set_healthy(f"Publishing transforms successfully (count: {self.publish_success_count})")
+                
+        except Exception as e:
+            # Update health status - publishing failure
+            self.publish_failure_count += 1
+            self.set_unhealthy(f"Transform publishing failed: {e}")
+            self.get_logger().error(f"Error publishing dynamic transforms: {e}")
 
 def main(args=None):
-    rclpy.init(args=args)
-    
-    node = ArgoTransformPublisher()
+    parser = ArgoBaseNode.create_standard_parser(
+        'Argo Transform Publisher for 3D Visualization',
+        epilog="""
+This ROS2 node publishes coordinate frame transforms needed for 3D visualization in Foxglove.
+It establishes the relationship between the map frame, boat frame, and sensor frames.
+
+Coordinate Frame Hierarchy:
+- map (fixed world frame at GPS origin)
+  └── odom (odometry frame, same as map for now)
+      └── base_link (boat center)
+          ├── gps_link (GPS antenna position)
+          ├── compass_link (IMU/magnetometer position)
+          ├── wind_sensor_link (anemometer position)
+          └── rudder_link (rudder position)
+
+TOPICS:
+  Publishes:
+    /tf (geometry_msgs/TransformStamped): Dynamic transforms
+    /tf_static (geometry_msgs/TransformStamped): Static transforms
+    /argo_transform_publisher_health: Bool - Node health status (ArgoBaseNode)
+
+  Subscribes:
+    /fix (sensor_msgs/NavSatFix): GPS position for map frame origin
+    /pose (geometry_msgs/Vector3): Boat heading (z-component)
+    /accel (geometry_msgs/Vector3): IMU accelerometer for roll/pitch estimation
+
+SERVICES:
+  /argo_transform_publisher/health: Trigger - Health status service endpoint
+
+HEALTH CRITERIA:
+  - Healthy when successfully publishing transforms
+  - Unhealthy when transform publishing fails
+        """
+    )
     
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    except rclpy.executors.ExternalShutdownException:
-        pass  # Context already shutdown
-    finally:
-        node.destroy_node()
-        # Only shutdown if context is still valid
-        if rclpy.ok():
-            try:
-                rclpy.shutdown()
-            except:
-                pass  # Already shutdown
+        ArgoBaseNode.run_node(ArgoTransformPublisher, args, parser)
+    except Exception as e:
+        print(f"CRITICAL: Failed to initialize Transform Publisher node: {e}")
+        print("CRITICAL: Check ROS2 environment and dependencies.")
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
