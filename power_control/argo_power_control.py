@@ -358,20 +358,6 @@ def setup_logging(debug=False):
     """Setup logging configuration"""
     handlers = [logging.StreamHandler()]
 
-    # Only add file handler if we have write permission to /var/log/
-    try:
-        # Test if we can write to /var/log/
-        test_file = '/var/log/argo_power_control.log'
-        with open(test_file, 'a') as f:
-            pass
-        handlers.append(logging.FileHandler(test_file))
-    except (PermissionError, OSError):
-        # Fall back to local log file or no file logging
-        try:
-            handlers.append(logging.FileHandler('argo_power_control.log'))
-        except (PermissionError, OSError):
-            pass  # No file logging if we can't write anywhere
-
     # Set logging level based on debug flag
     log_level = logging.DEBUG if debug else logging.INFO
 
