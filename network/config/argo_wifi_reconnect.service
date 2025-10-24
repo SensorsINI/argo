@@ -14,9 +14,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=argo-wifi-reconnect
 
-# Restart policy - run every 2 minutes
+# Restart policy - run every minute
 Restart=no
-RestartSec=120
+RestartSec=60
 
 # Timer configuration
 [Install]
