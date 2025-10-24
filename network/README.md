@@ -10,30 +10,54 @@ NetworkManager 1.36.6 has a known limitation: it doesn't automatically switch to
 2. Stay connected to `uzh-iot` even when `tobi-wlan` (priority 10) or `tobi-s24` (priority 15) became available
 3. Require manual intervention to switch to preferred networks
 
+## Critical Bug Fix (v2.0)
+
+**IMPORTANT**: The initial implementation had a critical bug where aggressive NetworkManager settings (`wifi.scan-interval=30` and `wifi.roam-threshold=70`) caused frequent reconnection attempts that prevented SSH access. This has been fixed in v2.0 with:
+
+- Conservative NetworkManager settings (default scan intervals)
+- Connection stability checks (30-second minimum before switching)
+- Lock file protection against multiple instances
+- Reduced timer frequency (every 5 minutes instead of 2)
+- Comprehensive logging and error handling
+
 ## Solution Components
 
 ### 1. WiFi Reconnection Script (`scripts/wifi_reconnect.sh`)
 
 - **Purpose**: Automatically switches to preferred networks when they become available
-- **Frequency**: Runs every 2 minutes via cron job
+- **Frequency**: Runs every 5 minutes via systemd timer (safer than 2 minutes)
 - **Priority Order**: 
   - `tobi-s24` (priority 15) - highest
   - `tobi-wlan` (priority 10) - medium
   - `uzh-iot` (priority 5) - lowest (fallback)
+- **Safety Features**:
+  - Connection stability checks (30-second minimum before switching)
+  - Lock file protection against multiple instances
+  - Comprehensive logging and error handling
 - **Logging**: All activity logged to `/var/log.hdd/persistent/wifi-reconnect.log`
 - **Smart Detection**: Ignores ZeroTier connections, only manages WiFi
 
 ### 2. NetworkManager Configuration (`config/argo_wifi_scan.conf`)
 
-- **Faster Scanning**: Reduced scan interval from 120s to 30s
-- **Better Roaming**: Enabled with 70% signal threshold
-- **Improved Recognition**: Disabled random MAC addresses
+- **Conservative Settings**: Uses default scan intervals (120s) to prevent aggressive scanning
+- **Improved Recognition**: Disabled random MAC addresses for better network recognition
+- **No Aggressive Roaming**: Disabled to prevent frequent connection attempts
 - **Location**: Installed to `/etc/NetworkManager/conf.d/argo_wifi_scan.conf`
 
-### 3. Installation Script (`install/install_network_improvements.sh`)
+### 3. Systemd Service and Timer (`config/argo_wifi_reconnect.service` & `config/argo_wifi_reconnect.timer`)
+
+- **Service File**: Defines what to run (the WiFi reconnection script)
+- **Timer File**: Defines when to run (every 5 minutes)
+- **Benefits over cron**:
+  - Better logging integration with systemd journal
+  - Dependency management (waits for network to be ready)
+  - More reliable error handling and restart policies
+  - Better integration with systemd service management
+
+### 4. Installation Script (`install/install_network_improvements.sh`)
 
 - **Automated Setup**: Installs all components with proper permissions
-- **Cron Job Management**: Sets up automatic reconnection monitoring
+- **Systemd Integration**: Sets up service and timer instead of cron jobs
 - **Service Restart**: Restarts NetworkManager to apply configuration
 - **Testing**: Validates installation and shows status
 - **Error Handling**: Comprehensive error checking and logging
@@ -83,16 +107,17 @@ The network improvements are integrated into the main Argo Makefile:
 ### Service Dependencies
 
 - **NetworkManager**: Must be running for WiFi management
-- **Cron**: Required for scheduled reconnection checks
-- **Systemd**: Used for NetworkManager service management
+- **Systemd**: Used for timer-based reconnection checks and NetworkManager service management
+- **No Cron**: Uses systemd timers instead of cron for better reliability
 
 ## Monitoring and Troubleshooting
 
 ### Log Files
 
 - **Reconnection Log**: `/var/log.hdd/persistent/wifi-reconnect.log`
+- **Systemd Service Log**: `journalctl -u argo_wifi_reconnect.service`
+- **Systemd Timer Log**: `journalctl -u argo_wifi_reconnect.timer`
 - **NetworkManager Log**: `journalctl -u NetworkManager`
-- **Cron Log**: `journalctl -u cron`
 
 ### Manual Testing
 

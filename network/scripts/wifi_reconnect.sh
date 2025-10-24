@@ -3,11 +3,19 @@
 # Argo WiFi Reconnection Script
 # Forces connection to preferred networks when they become available
 # Priority: tobi-s24 (15) > tobi-wlan (10) > uzh-iot (5)
+# 
+# SAFETY FEATURES:
+# - Only runs when called by systemd timer (every 2 minutes)
+# - Prevents connection changes if already on preferred network
+# - Includes connection stability checks
+# - Logs all actions for debugging
 
 # Configuration
 PREFERRED_NETWORKS=("tobi-s24" "tobi-wlan")
 LOG_FILE="/var/log.hdd/persistent/wifi-reconnect.log"
 MAX_LOG_SIZE=1048576  # 1MB
+LOCK_FILE="/tmp/wifi_reconnect.lock"
+MIN_CONNECTION_TIME=30  # Minimum seconds to stay on a connection before switching
 
 # Function to log messages with timestamp
 log_message() {
@@ -47,9 +55,48 @@ connect_to_network() {
     fi
 }
 
+# Function to check if connection is stable (not recently changed)
+is_connection_stable() {
+    local connection_name="$1"
+    local timestamp_file="/tmp/wifi_connection_${connection_name}_timestamp"
+    
+    if [ -f "$timestamp_file" ]; then
+        local last_change=$(cat "$timestamp_file")
+        local current_time=$(date +%s)
+        local time_diff=$((current_time - last_change))
+        
+        if [ $time_diff -lt $MIN_CONNECTION_TIME ]; then
+            log_message "Connection $connection_name is not stable yet (${time_diff}s < ${MIN_CONNECTION_TIME}s), skipping switch"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Function to record connection change timestamp
+record_connection_change() {
+    local connection_name="$1"
+    local timestamp_file="/tmp/wifi_connection_${connection_name}_timestamp"
+    echo "$(date +%s)" > "$timestamp_file"
+}
+
 # Main logic
 main() {
+    # Check for lock file to prevent multiple instances
+    if [ -f "$LOCK_FILE" ]; then
+        log_message "Another instance is running, exiting"
+        exit 1
+    fi
+    
+    # Create lock file
+    echo $$ > "$LOCK_FILE"
+    
+    # Ensure lock file is removed on exit
+    trap 'rm -f "$LOCK_FILE"' EXIT
+    
     rotate_log
+    log_message "WiFi reconnection check started"
     
     # Get current connection
     CURRENT_CONNECTION=$(get_current_connection)
@@ -72,10 +119,16 @@ main() {
     # Current connection is not preferred, check for preferred networks
     log_message "Current connection ($CURRENT_CONNECTION) is not preferred, checking for better options"
     
+    # Check if current connection is stable before switching
+    if ! is_connection_stable "$CURRENT_CONNECTION"; then
+        return 0
+    fi
+    
     for preferred in "${PREFERRED_NETWORKS[@]}"; do
         if is_network_available "$preferred"; then
             log_message "Preferred network $preferred is available, attempting connection"
             if connect_to_network "$preferred"; then
+                record_connection_change "$preferred"
                 return 0
             fi
         else
