@@ -130,7 +130,7 @@ class BatteryWaterNode(ArgoBaseNode):
         self.pub_sail_current = self.create_publisher(
             Float32, 'sail_current', 10)
         self.pub_temperature = self.create_publisher(
-            Float32, 'pcb_temperature', 10)
+            Float32, 'temperature_pcb', 10)
         self.pub_humidity = self.create_publisher(
             Float32, 'relative_humidity', 10)
         # Alert publishers for safety-critical alerts
@@ -349,8 +349,7 @@ class BatteryWaterNode(ArgoBaseNode):
         # ASCII visual debug (like imu.py/adc.py) when --debug is passed and not in test mode
         self._vis_ascii = self.debug and not self.test_adc
         self._vis_initialized = False
-        if self._vis_ascii:
-            self._init_ascii_vis()
+        # Note: ASCII visualization will be initialized after startup messages are complete
 
         # Dual timers for different sampling requirements
         if self.test_adc:
@@ -419,6 +418,8 @@ class BatteryWaterNode(ArgoBaseNode):
         
         # Initialize service buffer with initial readings
         self._update_service_buffer()
+        
+        # Note: ASCII visualization will be initialized just before first periodic update
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully and save slopes"""
@@ -1224,6 +1225,11 @@ class BatteryWaterNode(ArgoBaseNode):
     def _update_bars(self, bat_v, sw_v, cur_a, temp_c, humid_pct):
         if not self._vis_ascii:
             return
+        
+        # Initialize ASCII visualization on first call (delayed until first periodic update)
+        if not self._vis_initialized:
+            self._init_ascii_vis()
+        
         # Nominal ranges
         bat_max = 12.0
         sw_max = 4.2
@@ -1666,7 +1672,7 @@ TOPICS:
     /battery_voltage: Float32 - Battery voltage in volts
     /saltwater_voltage: Float32 - Saltwater probe voltage in volts  
     /sail_current: Float32 - Sail winch current in amperes
-    /pcb_temperature: Float32 - PCB temperature in Celsius (from SHT45 sensor)
+    /temperature_pcb: Float32 - PCB temperature in Celsius (from SHT45 sensor)
     /relative_humidity: Float32 - Relative humidity percentage
     /battery_remaining_pct: Float32 - Battery state-of-charge percentage
     /battery_lifetime_hours: Float32 - Estimated hours to full/empty

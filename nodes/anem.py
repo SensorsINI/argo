@@ -91,7 +91,7 @@ import smbus
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 
 # I2C sensor addresses
 I2C_CTR = 0x21  # Center sensor (0° - front/back)
@@ -319,6 +319,8 @@ class AnemNode(Node):
             Vector3, 'anem_diffpressure', 10)
         self.pub_wind_temp = self.create_publisher(
             Vector3, 'anem_speed_angle_temp', 10)
+        self.pub_temperature_air = self.create_publisher(
+            Float32, 'temperature_air', 10)
         self.pub_health = self.create_publisher(
             Bool, 'anem_health', 10)
         self.health_status = False  # Track current health status
@@ -336,6 +338,10 @@ class AnemNode(Node):
         self._last_successful_read_time = time.time()
         self._last_recovery_attempt_time = 0.0
         self._recovery_attempt_count = 0
+        
+        # Temperature publishing at low rate (1 per minute)
+        self._last_temperature_publish_time = 0.0
+        self._temperature_publish_interval = 60.0  # 60 seconds
 
         # I2C setup
         # CTR is center (0° - front/back), CW is 120° from front, CCW is 240° from front (looking down on mast)
@@ -786,6 +792,12 @@ class AnemNode(Node):
             self.pub_wind_temp.publish(
                 Vector3(x=float(speed_mps), y=float(angle_deg), z=float(temp_celsius)))
 
+            # Publish air temperature at low rate (1 per minute)
+            current_time = time.time()
+            if current_time - self._last_temperature_publish_time >= self._temperature_publish_interval:
+                self.pub_temperature_air.publish(Float32(data=float(temp_celsius)))
+                self._last_temperature_publish_time = current_time
+
             # Publish health status as healthy
             self._publish_health_status(True)
 
@@ -915,6 +927,8 @@ Topics Published:
     x: wind speed in m/s
     y: wind angle in degrees CW from front of boat (looking down)
     z: average temperature in celsius
+  /temperature_air (std_msgs/Float32):
+    Air temperature in celsius (published at low rate: 1 per minute)
   /anem_diffpressure (geometry_msgs/Vector3):
     x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
     y: differential pressure from I2C_CW (0x22, 120°) in Pascals  

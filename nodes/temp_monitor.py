@@ -12,8 +12,9 @@
 # Health (Bool):
 # - temp_monitor_health (true=healthy, false=failed)
 # Publishing optimization (saves rosbag space):
-# - First 30s: publishes all temperature data at 1Hz, logs temperature states every 5s via ROS info
-# - After 30s: publishes temperature data only when values change >5% OR every 60s (whichever is shorter)
+# - Samples temperature data at 1 sample per minute (60s intervals)
+# - Initial sample occurs immediately after startup
+# - Publishes temperature data only when values change >5% OR every 60s (whichever is shorter)
 # - Alert topics always publish at 1Hz regardless of optimization for safety
 # Debug:
 # - ASCII terminal bars when --debug is used
@@ -45,6 +46,9 @@ HIGH_TEMPERATURE_THRESHOLD_C = 85.0  # makes node unhealthy
 CRITICAL_TEMPERATURE_THRESHOLD_C = 100.0
 TEMPERATURE_HYSTERESIS_C = 2.0
 
+# Sampling rate constant - 1 sample per minute
+SAMPLE_PERIOD_SECONDS = 60.0
+
 
 class TempMonitorNode(ArgoBaseNode):
     def __init__(self, debug_mode=False):
@@ -62,9 +66,7 @@ class TempMonitorNode(ArgoBaseNode):
 
         # Publishers
         self.pub_cpu_temperature = self.create_publisher(
-            Float32, 'cpu_temperature', 10)
-        self.pub_system_temperature = self.create_publisher(
-            Float32, 'system_temperature', 10)
+            Float32, 'temperature_cpu', 10)
         # Alert publishers with default QoS
         self.pub_temperature_high_alert = self.create_publisher(
             Bool, 'temperature_high_alert', 10)
@@ -80,7 +82,6 @@ class TempMonitorNode(ArgoBaseNode):
         self._last_log_time = 0.0
         # Previous temperature values for 5% change detection
         self._prev_cpu_temperature = None
-        self._prev_system_temperature = None
 
         # Temperature thresholds
         self.temp_high_threshold_c = float(self.declare_parameter(
@@ -104,12 +105,16 @@ class TempMonitorNode(ArgoBaseNode):
         if self._vis_ascii:
             self._init_ascii_vis()
 
-        # Timer: 1 Hz
-        self.timer = self.create_timer(1.0, self.read_and_publish)
-        self.get_logger().info('Temperature Monitor node initialized and reading at 1 Hz.')
+        # Timer: 1 sample per minute
+        self.timer = self.create_timer(SAMPLE_PERIOD_SECONDS, self.read_and_publish)
+        self.get_logger().info(f'Temperature Monitor node initialized and reading at {1.0/SAMPLE_PERIOD_SECONDS:.3f} Hz (1 sample per {SAMPLE_PERIOD_SECONDS:.0f} seconds).')
         
         # Set initial health status as unhealthy (no temperature reading yet)
         self.set_unhealthy("No temperature reading yet")
+        
+        # Take initial sample immediately after startup
+        self.get_logger().info('Taking initial temperature sample...')
+        self.read_and_publish()
 
     def _find_thermal_zones(self):
         """Find available thermal zones for temperature monitoring"""
@@ -168,9 +173,6 @@ class TempMonitorNode(ArgoBaseNode):
             return max(temperatures)
         return None
 
-    def _read_system_temperature(self):
-        """Read overall system temperature (same as CPU for now)"""
-        return self._read_cpu_temperature()
 
     def _scale_pct(self, value, vmin, vmax):
         """Scale value to percentage for visualization"""
@@ -179,7 +181,7 @@ class TempMonitorNode(ArgoBaseNode):
         pct = int(100.0 * (max(min(value, vmax), vmin) - vmin) / (vmax - vmin))
         return max(0, min(100, pct))
 
-    def _update_bars(self, cpu_temp_c, sys_temp_c):
+    def _update_bars(self, cpu_temp_c):
         """Update ASCII visualization bars"""
         if not self._vis_ascii:
             return
@@ -198,13 +200,6 @@ class TempMonitorNode(ArgoBaseNode):
                                  ) - temp_min) / temp_span * 100.0
                 lines.append(
                     f"CPU    {cpu_temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
-
-            if sys_temp_c is not None:
-                temp_span = max(1e-6, temp_max - temp_min)
-                temp_norm = (max(temp_min, min(temp_max, sys_temp_c)
-                                 ) - temp_min) / temp_span * 100.0
-                lines.append(
-                    f"System {sys_temp_c:7.2f} C  " + self._bar(temp_norm, 100.0))
 
             lines.append("Ctrl-C to exit")
             for ln in lines:
@@ -273,31 +268,27 @@ class TempMonitorNode(ArgoBaseNode):
 
         # Read temperatures
         cpu_temperature = self._read_cpu_temperature()
-        system_temperature = self._read_system_temperature()
         
         # Update health status based on temperature safety
-        self._update_temp_health_status(cpu_temperature, system_temperature)
+        self._update_temp_health_status(cpu_temperature)
 
         # Determine if we should publish values
         should_publish = False
 
         # First 30 seconds: publish every cycle (1Hz) and log every 5s
-        if time_since_startup <= 30.0:
+        if time_since_startup <=10.0:
             should_publish = True
             if time_since_last_log >= 5.0:
                 # Build temperature state message
                 cpu_str = f"CPU={cpu_temperature:.2f}C" if cpu_temperature is not None else "CPU=N/A"
-                sys_str = f"System={system_temperature:.2f}C" if system_temperature is not None else "System=N/A"
 
                 self.get_logger().info(
-                    f"Temperature states: {cpu_str}, {sys_str}")
+                    f"Temperature states: {cpu_str}")
                 self._last_log_time = current_time
         else:
             # After 30s: publish only if significant change (>5%) or 60s elapsed
             significant_change = (
-                self._has_significant_change(cpu_temperature, self._prev_cpu_temperature) or
-                self._has_significant_change(
-                    system_temperature, self._prev_system_temperature)
+                self._has_significant_change(cpu_temperature, self._prev_cpu_temperature)
             )
 
             if significant_change or time_since_last_publish >= 60.0:
@@ -307,13 +298,9 @@ class TempMonitorNode(ArgoBaseNode):
         if should_publish:
             if cpu_temperature is not None:
                 self.pub_cpu_temperature.publish(Float32(data=cpu_temperature))
-            if system_temperature is not None:
-                self.pub_system_temperature.publish(
-                    Float32(data=system_temperature))
 
             # Update previous values and timestamp
             self._prev_cpu_temperature = cpu_temperature
-            self._prev_system_temperature = system_temperature
             self._last_publish_time = current_time
 
         # Alerts (always published regardless of temperature data publishing logic)
@@ -368,9 +355,9 @@ class TempMonitorNode(ArgoBaseNode):
             self.get_logger().error(f"Error in read_and_publish: {e}")
 
         # Update ASCII bars if enabled
-        self._update_bars(cpu_temperature, system_temperature)
+        self._update_bars(cpu_temperature)
 
-    def _update_temp_health_status(self, cpu_temperature, system_temperature):
+    def _update_temp_health_status(self, cpu_temperature):
         """Update health status based on temperature safety"""
         if cpu_temperature is None:
             self.set_unhealthy("No temperature reading available")
@@ -386,18 +373,18 @@ class TempMonitorNode(ArgoBaseNode):
 def main(args=None):
     """Main function using ArgoBaseNode standardized approach"""
     parser = ArgoBaseNode.create_standard_parser(
-        'System Temperature ROS2 Node - Monitors CPU and system temperature',
+        'System Temperature ROS2 Node - Monitors CPU temperature',
         epilog="""
 This ROS2 node monitors system temperature on the Argo autonomous sailboat:
-- Reads CPU temperature from thermal zones
+- Reads CPU temperature from thermal zones at 1 sample per minute
+- Takes initial sample immediately after startup
 - Monitors system temperature and provides alerts
 - Calculates temperature alerts with hysteresis
 - Publishes alerts for high and critical temperatures
 
 Topics:
   Publishes:
-    /cpu_temperature: Float32 - CPU temperature in Celsius
-    /system_temperature: Float32 - System temperature in Celsius
+    /temperature_cpu: Float32 - CPU temperature in Celsius
     /temperature_high_alert: Bool - High temperature alert
     /temperature_critical_alert: Bool - Critical temperature alert
     /temp_monitor_health: Bool - Node health status (ArgoBaseNode)

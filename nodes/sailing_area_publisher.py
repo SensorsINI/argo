@@ -29,9 +29,10 @@ class SailingAreaPublisher(Node):
         self.publish_all_markers()
         
         # Create a timer to republish periodically (in case of reconnection)
-        self.timer = self.create_timer(60.0, self.publish_all_markers)
+        self.timer = self.create_timer(60.0, self.periodic_republish)
         
-        self.get_logger().info(f"Sailing area publisher started with {len(self.sailing_areas)} areas")
+        # Log comprehensive startup information
+        self.log_startup_info()
     
     def load_sailing_areas(self):
         """Load all GeoJSON sailing area files"""
@@ -51,6 +52,95 @@ class SailingAreaPublisher(Node):
                 self.get_logger().error(f"Failed to load {geojson_file}: {e}")
         
         return sailing_areas
+    
+    def log_startup_info(self):
+        """Log comprehensive startup information about the sailing area publisher"""
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("SAILING AREA PUBLISHER STARTUP INFORMATION")
+        self.get_logger().info("=" * 60)
+        
+        # Published topics information
+        self.get_logger().info("Published Topics:")
+        self.get_logger().info(f"  • /sailing_waypoints (visualization_msgs/MarkerArray) - Waypoint markers")
+        self.get_logger().info(f"  • /sailing_boundaries (visualization_msgs/MarkerArray) - Boundary markers")
+        self.get_logger().info(f"  • /sailing_hazards (visualization_msgs/MarkerArray) - Hazard markers")
+        
+        # Publishing rate information
+        self.get_logger().info("Publishing Configuration:")
+        self.get_logger().info(f"  • Initial publish: Immediate on startup")
+        self.get_logger().info(f"  • Periodic republish: Every 60.0 seconds")
+        self.get_logger().info(f"  • QoS depth: 10 messages")
+        
+        # Maps directory information
+        self.get_logger().info("Maps Configuration:")
+        self.get_logger().info(f"  • Maps directory: {self.maps_dir}")
+        self.get_logger().info(f"  • Directory exists: {self.maps_dir.exists()}")
+        
+        # Loaded sailing areas information
+        self.get_logger().info("Loaded Sailing Areas:")
+        if not self.sailing_areas:
+            self.get_logger().warn("  • No sailing areas loaded")
+        else:
+            for area_name, geojson_data in self.sailing_areas.items():
+                features = geojson_data.get('features', [])
+                self.get_logger().info(f"  • {area_name}: {len(features)} features")
+                
+                # Count feature types
+                feature_types = {}
+                for feature in features:
+                    geom_type = feature['geometry']['type']
+                    prop_type = feature['properties'].get('type', 'unknown')
+                    key = f"{geom_type} ({prop_type})"
+                    feature_types[key] = feature_types.get(key, 0) + 1
+                
+                for feature_type, count in feature_types.items():
+                    self.get_logger().info(f"    - {feature_type}: {count}")
+        
+        # Marker statistics
+        waypoint_count, boundary_count, hazard_count = self.count_markers()
+        self.get_logger().info("Marker Statistics:")
+        self.get_logger().info(f"  • Total waypoints: {waypoint_count}")
+        self.get_logger().info(f"  • Total boundaries: {boundary_count}")
+        self.get_logger().info(f"  • Total hazards: {hazard_count}")
+        self.get_logger().info(f"  • Total markers: {waypoint_count + boundary_count + hazard_count}")
+        
+        # Frame and coordinate information
+        self.get_logger().info("Coordinate System:")
+        self.get_logger().info(f"  • Frame ID: map")
+        self.get_logger().info(f"  • Coordinate format: Longitude, Latitude, Altitude")
+        self.get_logger().info(f"  • Units: Degrees (lon/lat), Meters (altitude)")
+        
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("Sailing area publisher ready for Foxglove visualization")
+        self.get_logger().info("=" * 60)
+    
+    def count_markers(self):
+        """Count the number of markers by type"""
+        waypoint_count = 0
+        boundary_count = 0
+        hazard_count = 0
+        
+        for area_name, geojson_data in self.sailing_areas.items():
+            for feature in geojson_data.get('features', []):
+                geom_type = feature['geometry']['type']
+                feature_type = feature['properties'].get('type', 'unknown')
+                
+                if geom_type == 'Point':
+                    waypoint_count += 1
+                elif geom_type == 'LineString':
+                    boundary_count += 1
+                elif geom_type == 'Polygon':
+                    if feature_type == 'hazard':
+                        hazard_count += 1
+                    else:
+                        boundary_count += 1
+        
+        return waypoint_count, boundary_count, hazard_count
+    
+    def periodic_republish(self):
+        """Periodic republish with logging"""
+        self.get_logger().info("Periodic republish of sailing area markers (every 60 seconds)")
+        self.publish_all_markers()
     
     def create_waypoint_marker(self, feature, marker_id):
         """Create a marker for a waypoint"""
@@ -202,9 +292,11 @@ class SailingAreaPublisher(Node):
         self.boundary_pub.publish(boundary_markers)
         self.hazard_pub.publish(hazard_markers)
         
-        self.get_logger().debug(f"Published {len(waypoint_markers.markers)} waypoints, "
+        total_markers = len(waypoint_markers.markers) + len(boundary_markers.markers) + len(hazard_markers.markers)
+        self.get_logger().info(f"Published sailing area markers: {len(waypoint_markers.markers)} waypoints, "
                               f"{len(boundary_markers.markers)} boundaries, "
-                              f"{len(hazard_markers.markers)} hazards")
+                              f"{len(hazard_markers.markers)} hazards "
+                              f"(total: {total_markers} markers)")
 
 def main(args=None):
     rclpy.init(args=args)
