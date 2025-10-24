@@ -332,7 +332,6 @@ CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 # WiFi Monitoring
 WIFI_MONITORING_INTERVAL_S = 10     # Check WiFi status interval (seconds)
 WIFI_CONNECTIVITY_TIMEOUT_S = 5     # Timeout for WiFi connectivity tests (seconds)
-WIFI_LOSS_LED_FREQUENCY_HZ = 0.5    # Frequency for alternating red/green pattern (0.5Hz = 2 second cycle)
 
 # DEVELOPMENT FLAG: Critical Battery Behavior
 # Set to True to use normal shutdown (cuts power) instead of halt (preserves power)
@@ -413,9 +412,6 @@ class PowerController:
         self.blue_led_state = False
 
         # Heartbeat control
-        self.heartbeat_paused = False
-        self.heartbeat_pause_event = threading.Event()
-        self.heartbeat_pause_event.set()  # Start un-paused
         self.heartbeat_frequency_hz = 1.0/3.0  # 3-second cycle
         self.heartbeat_duty_cycle = 0.1    # 10% duty cycle per slot
         
@@ -445,10 +441,8 @@ class PowerController:
 
         # WiFi monitoring state
         self.wifi_connected = True  # Assume connected at startup
-        self.wifi_loss_detected = False
         self.last_wifi_check_time = 0.0
         self.wifi_monitoring_active = False
-        self.wifi_loss_led_active = False
 
         # Service wait pattern state
         self.service_wait_active = False
@@ -1441,15 +1435,9 @@ class PowerController:
     def green_led_heartbeat(self):
         """LED slot-based heartbeat - 3-second cycle with 10 slots of 0.3s each"""
         while self.running:
-            self.heartbeat_pause_event.wait()  # Block here if paused
 
             if not self.running:
                 break
-
-            # Skip heartbeat if WiFi loss pattern is active (it uses both LEDs)
-            if self.wifi_loss_led_active:
-                time.sleep(0.1)  # Short sleep to avoid busy waiting
-                continue
 
             # Check network status periodically (only one that needs active checking)
             self._check_network_status()
@@ -1609,50 +1597,6 @@ class PowerController:
         self.sos_led_active = False
         logger.info("SOS LED pattern completed")
 
-    def wifi_loss_led_pattern(self):
-        """Alternating red/green LED pattern for WiFi loss indication"""
-        logger.info("Starting alternating red/green LED pattern for WiFi loss")
-        self.wifi_loss_led_active = True
-
-        # Calculate timing for alternating pattern (0.5Hz = 2 second cycle)
-        # Each LED is on for 1 second, then off for 1 second, alternating
-        cycle_duration = 1.0 / WIFI_LOSS_LED_FREQUENCY_HZ  # 2 seconds total cycle
-        led_duration = cycle_duration / 2.0  # 1 second per LED
-
-        while self.running and self.wifi_loss_led_active and self.wifi_loss_detected and not self.critical_battery_detected:
-            try:
-                # Red LED on, Green LED off
-                self.set_red_led(True)
-                self.set_green_led(False)
-
-                # Sleep in small increments for responsive shutdown
-                sleep_time = 0
-                while sleep_time < led_duration and self.running and self.wifi_loss_led_active and self.wifi_loss_detected and not self.critical_battery_detected:
-                    time.sleep(0.01)  # Sleep in 10ms increments
-                    sleep_time += 0.01
-
-                if not self.running or not self.wifi_loss_led_active or not self.wifi_loss_detected or self.critical_battery_detected:
-                    break
-
-                # Green LED on, Red LED off
-                self.set_green_led(True)
-                self.set_red_led(False)
-
-                # Sleep in small increments for responsive shutdown
-                sleep_time = 0
-                while sleep_time < led_duration and self.running and self.wifi_loss_led_active and self.wifi_loss_detected and not self.critical_battery_detected:
-                    time.sleep(0.01)  # Sleep in 10ms increments
-                    sleep_time += 0.01
-
-            except Exception as e:
-                logger.error(f"Error in WiFi loss LED pattern: {e}")
-                break
-
-        # Turn off LEDs when done
-        self.set_red_led(False)
-        self.set_green_led(False)
-        self.wifi_loss_led_active = False
-        logger.info("WiFi loss LED pattern completed")
 
     def shutdown_led_pattern(self):
         """1Hz LED pattern with configurable duty cycle during shutdown sequence"""
@@ -2846,7 +2790,7 @@ class PowerController:
         logger.info("Critical battery monitoring thread stopped")
 
     def monitor_wifi_connectivity(self):
-        """Monitor WiFi connectivity every 10 seconds and update LED patterns"""
+        """Monitor WiFi connectivity every 10 seconds and update network_healthy status"""
         logger.info("Starting WiFi connectivity monitoring thread")
         self.wifi_monitoring_active = True
 
@@ -2866,12 +2810,9 @@ class PowerController:
                     consecutive_failures = 0
 
                     # Check if WiFi was previously lost and now restored
-                    if self.wifi_loss_detected and consecutive_successes >= MAX_CONSECUTIVE_SUCCESSES:
-                        logger.info("WiFi connectivity restored - stopping WiFi loss LED pattern")
-                        self.wifi_loss_detected = False
-                        self.wifi_loss_led_active = False  # Stop the alternating pattern
-                        # Resume normal heartbeat
-                        self.resume_heartbeat()
+                    if not self.network_healthy and consecutive_successes >= MAX_CONSECUTIVE_SUCCESSES:
+                        logger.info("WiFi connectivity restored")
+                        self.network_healthy = True
                         # Send notification
                         self.send_desktop_notification(
                             "WiFi Restored",
@@ -2885,17 +2826,13 @@ class PowerController:
                     consecutive_successes = 0
 
                     # Check if WiFi was previously connected and now lost
-                    if not self.wifi_loss_detected and consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                        logger.warning("WiFi connectivity lost - starting alternating red/green LED pattern")
-                        self.wifi_loss_detected = True
-                        # Pause heartbeat to make WiFi loss pattern visible
-                        self.pause_heartbeat()
-                        # Start alternating red/green LED pattern in separate thread
-                        threading.Thread(target=self.wifi_loss_led_pattern, daemon=True).start()
+                    if self.network_healthy and consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        logger.warning("WiFi connectivity lost")
+                        self.network_healthy = False
                         # Send notification
                         self.send_desktop_notification(
                             "WiFi Connection Lost",
-                            "WiFi connectivity has been lost\nAlternating red/green LED pattern activated",
+                            "WiFi connectivity has been lost",
                             "critical"
                         )
                         consecutive_failures = 0  # Reset counter
@@ -3390,8 +3327,6 @@ If you take no action within 30 seconds, the system will automatically
             # Stop SOS LED pattern if active
             self.sos_led_active = False
 
-            # Stop WiFi loss LED pattern if active
-            self.wifi_loss_led_active = False
 
             # Clear critical battery flag if set
             if self.critical_battery_detected:
@@ -3419,21 +3354,6 @@ If you take no action within 30 seconds, the system will automatically
 
         logger.info("Power controller cleanup complete")
 
-    def pause_heartbeat(self):
-        """Pause the green LED heartbeat"""
-        if not self.heartbeat_paused:
-            logger.info("Pausing green LED heartbeat")
-            self.heartbeat_paused = True
-            self.heartbeat_pause_event.clear()
-            # Ensure LED is off
-            self.set_green_led(False)
-
-    def resume_heartbeat(self):
-        """Resume the green LED heartbeat"""
-        if self.heartbeat_paused:
-            logger.info("Resuming green LED heartbeat")
-            self.heartbeat_paused = False
-            self.heartbeat_pause_event.set()
 
     def set_heartbeat_frequency(self, frequency_hz):
         """Set the heartbeat frequency"""
