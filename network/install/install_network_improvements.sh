@@ -71,10 +71,12 @@ setup_systemd_service() {
     cp "$NETWORK_DIR/config/argo_wifi_reconnect.timer" /etc/systemd/system/
     
     # Create log file with correct permissions
+    # The service runs as root to handle log rotation properly
+    # Log file is owned by root with 644 permissions (readable by all)
     LOG_FILE="/var/log.hdd/persistent/wifi-reconnect.log"
+    mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
-    chown orangepi:orangepi "$LOG_FILE"
-    chmod 664 "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
     log_success "WiFi reconnection log file created with correct permissions: $LOG_FILE"
     
     # Reload systemd and enable timer

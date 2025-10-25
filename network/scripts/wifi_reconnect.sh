@@ -17,9 +17,36 @@ MAX_LOG_SIZE=1048576  # 1MB
 LOCK_FILE="/tmp/wifi_reconnect.lock"
 MIN_CONNECTION_TIME=30  # Minimum seconds to stay on a connection before switching
 
+# Function to ensure log file has correct permissions
+ensure_log_permissions() {
+    # Create log directory if it doesn't exist
+    mkdir -p "$(dirname "$LOG_FILE")"
+    
+    # Create log file if it doesn't exist with correct permissions
+    if [ ! -f "$LOG_FILE" ]; then
+        touch "$LOG_FILE"
+        chmod 644 "$LOG_FILE"
+        # Service runs as root, log file is owned by root
+        # This is fine - the service needs root to handle log rotation
+    else
+        # Ensure file is readable by others (644 = rw-r--r--)
+        local current_perms=$(stat -c '%a' "$LOG_FILE" 2>/dev/null || echo "644")
+        if [ "$current_perms" != "644" ]; then
+            chmod 644 "$LOG_FILE" 2>/dev/null || true
+        fi
+    fi
+}
+
 # Function to log messages with timestamp
 log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+    local message="$(date '+%Y-%m-%d %H:%M:%S') - $1"
+    
+    # Ensure log file has correct permissions before writing
+    ensure_log_permissions
+    
+    # Append to log file (script runs as root, so permissions are handled)
+    echo "$message" | tee -a "$LOG_FILE" >/dev/null 2>&1
+    echo "$message"
 }
 
 # Function to rotate log if it gets too large

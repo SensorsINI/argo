@@ -7,12 +7,17 @@ Requires=NetworkManager.service
 
 [Service]
 Type=oneshot
-User=orangepi
-Group=orangepi
+# Run as root to ensure log file permissions are handled correctly after rotation
+User=root
+Group=root
 ExecStart=/home/orangepi/argo/network/scripts/wifi_reconnect.sh
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=argo-wifi-reconnect
+
+# Set environment for proper operation
+Environment="HOME=/home/orangepi"
+Environment="USER=orangepi"
 
 # Restart policy - run every minute
 Restart=no
