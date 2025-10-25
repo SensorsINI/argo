@@ -1,0 +1,13 @@
+[Unit]
+Description=Temperature Logger for Orange Pi Zero 2W
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/temp-logger.sh
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

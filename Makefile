@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring
 
 help:
 	@echo "Argo Robot Services Management"
@@ -81,6 +81,11 @@ help:
 	@echo "  install-battery-monitor - Install battery status monitor"
 	@echo "  setup-battery-panel     - Configure XFCE4 panel with battery status"
 	@echo "  test-battery-status     - Test battery status functionality"
+	@echo ""
+	@echo "System Monitoring Services (Optional - for debugging):"
+	@echo "  install-system-monitoring - Install all system monitoring services"
+	@echo "  uninstall-system-monitoring - Uninstall all system monitoring services"
+	@echo "  make -C system-monitoring help - Show detailed system monitoring help"
 	@echo ""
 	@echo "Utilities:"
 	@echo "  aliases-install - Install/update aliases and activate them immediately"
@@ -525,3 +530,30 @@ wifi-reconnect-start:
 	@echo "Starting WiFi reconnection service..."
 	@sudo systemctl start argo_wifi_reconnect.timer
 	@echo "✅ WiFi reconnection service started"
+
+# ==================== SYSTEM MONITORING SERVICES ====================
+
+# Install all system monitoring services (optional - for debugging)
+install-system-monitoring:
+	@echo "🔧 Installing system monitoring services..."
+	@make -C system-monitoring install-all
+	@echo "✅ System monitoring services installed successfully!"
+	@echo ""
+	@echo "📋 Installed services:"
+	@echo "  • Boot history logger - Boot event logging"
+	@echo "  • Cursor process monitor - Cursor IDE process monitoring"
+	@echo "  • Memory monitor - Memory and process monitoring"
+	@echo "  • Orange Pi monitor - Orange Pi hardware monitoring"
+	@echo "  • Persistent dmesg - Kernel message logging"
+	@echo "  • Crash dump collector - Crash dump collection"
+	@echo "  • Temperature logger - Temperature logging"
+	@echo ""
+	@echo "📝 Log files are stored in: /var/log.hdd/persistent"
+	@echo "🔍 Monitor logs with: tail -f /var/log.hdd/persistent/*.log"
+	@echo "📊 Check service status with: make -C system-monitoring status"
+
+# Uninstall all system monitoring services
+uninstall-system-monitoring:
+	@echo "🗑️  Uninstalling system monitoring services..."
+	@make -C system-monitoring uninstall-all
+	@echo "✅ System monitoring services uninstalled successfully!"

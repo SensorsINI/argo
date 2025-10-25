@@ -1,0 +1,11 @@
+[Unit]
+Description=Crash dump collection
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'if [ -f /var/crash/* ]; then cp /var/crash/* /var/log.hdd/persistent/ 2>/dev/null; fi'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

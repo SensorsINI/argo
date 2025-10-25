@@ -86,12 +86,24 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 - Graceful shutdown procedures
 - System health monitoring
 
-## System-Level Monitoring Services
+## System-Level Monitoring Services (Optional)
+
+**Note**: These services are **NOT installed by default** and are available as optional debugging tools in the `system-monitoring/` directory.
+
+### Installation
+```bash
+# Install all system monitoring services
+make install-system-monitoring
+
+# Or install individually
+make -C system-monitoring install-all
+```
 
 ### 1. Boot History Logger Service
 
 **Service**: `boot-history-logger.service`  
-**Script**: `/usr/local/bin/boot-logger.sh`
+**Script**: `system-monitoring/scripts/boot-logger.sh`  
+**Installation**: `make -C system-monitoring install-boot-logger`
 
 **Log Files**:
 - `boot-history.log`
@@ -108,7 +120,8 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 ### 2. Cursor Process Monitor Service
 
 **Service**: `cursor-monitor.service`  
-**Script**: `/usr/local/bin/cursor-monitor.sh`
+**Script**: `system-monitoring/scripts/cursor-monitor.sh`  
+**Installation**: `make -C system-monitoring install-cursor-monitor`
 
 **Log Files**:
 - `cursor-processes-YYYYMMDD.log`
@@ -124,7 +137,8 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 ### 3. Memory Monitor Service
 
 **Service**: `memory-monitor.service`  
-**Script**: `/usr/local/bin/memory-monitor.sh`
+**Script**: `system-monitoring/scripts/memory-monitor.sh`  
+**Installation**: `make -C system-monitoring install-memory-monitor`
 
 **Log Files**:
 - `memory-YYYYMMDD.log`
@@ -140,7 +154,8 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 
 ### 4. Orange Pi Monitor Service
 
-**Service**: `orangepi-monitor.service`
+**Service**: `orangepi-monitor.service`  
+**Installation**: `make -C system-monitoring install-orangepi-monitor`
 
 **Log Files**:
 - `orangepi-monitor-YYYYMMDD.log`
@@ -153,7 +168,8 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 
 ### 5. Persistent dmesg Service
 
-**Service**: `persistent-dmesg.service`
+**Service**: `persistent-dmesg.service`  
+**Installation**: `make -C system-monitoring install-persistent-dmesg`
 
 **Log Files**:
 - `dmesg-YYYYMMDD-HHMMSS.log`
@@ -166,7 +182,8 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 
 ### 6. Crash Dump Service
 
-**Service**: `crash-dump.service`
+**Service**: `crash-dump.service`  
+**Installation**: `make -C system-monitoring install-crash-dump`
 
 **Purpose**: Copies crash dumps to persistent storage  
 **Features**:
@@ -174,12 +191,11 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 - Preserves crash information across reboots
 - Runs once per boot
 
-## Temperature Logging Services
-
-### Temperature Logger Service
+### 7. Temperature Logger Service
 
 **Service**: `temp-logger.service` + `temp-logger.timer`  
-**Script**: `/usr/local/bin/temp-logger.sh`
+**Script**: `system-monitoring/scripts/temp-logger.sh`  
+**Installation**: `make -C system-monitoring install-temp-logger`
 
 **Log Files**: `/var/log/temperature.log` (not in persistent directory)
 
@@ -220,15 +236,16 @@ make fix-orangepi-ramlog                  # Preserve persistent logs
 ### System Services Management
 
 ```bash
-# Check service status
+# Check Argo service status
 systemctl status argo_thermal_monitor.service
-systemctl status boot-history-logger.service
-systemctl status cursor-monitor.service
-systemctl status memory-monitor.service
-systemctl status orangepi-monitor.service
 
-# View service logs
+# Check system monitoring services (if installed)
+make -C system-monitoring status
+
+# View Argo service logs
 journalctl -u argo_thermal_monitor.service -f
+
+# View system monitoring service logs (if installed)
 journalctl -u boot-history-logger.service -f
 journalctl -u cursor-monitor.service -f
 journalctl -u memory-monitor.service -f

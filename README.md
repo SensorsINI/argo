@@ -157,6 +157,13 @@ Foxglove Studio integration for live system monitoring:
 - **`custom-argo-panel/`** - TypeScript custom panel for specialized boat visualization
 - **`setup_foxglove.sh`** - Automated Foxglove Bridge configuration and startup
 
+### `system-monitoring/` - Optional System Monitoring Services
+Optional system-level monitoring services for debugging and development:
+- **`Makefile`** - Installation and management of system monitoring services
+- **`services/`** - Systemd service files for system monitoring
+- **`scripts/`** - Monitoring scripts for boot history, memory, processes, etc.
+- **Not installed by default** - Use `make install-system-monitoring` to install
+
 **Core ROS2 Nodes:**
 - **`gps.py`** - GPS receiver interface (UART5, u-blox NEO-M9N)
 - **`bno085.py`** - 9-DOF Orientation IMU with sensor fusion (I2C, [Adafruit BNO085](https://www.adafruit.com/product/4754))

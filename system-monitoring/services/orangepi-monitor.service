@@ -1,0 +1,12 @@
+[Unit]
+Description=Orange Pi Monitor logging service
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'orangepimonitor -m >> /var/log.hdd/persistent/orangepi-monitor-$(date +%%Y%%m%%d).log 2>&1'
+Restart=no
+User=root
+
+[Install]
+WantedBy=multi-user.target

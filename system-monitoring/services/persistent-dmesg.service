@@ -1,0 +1,11 @@
+[Unit]
+Description=Persistent dmesg logging
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'dmesg > /var/log.hdd/persistent/dmesg-$(date +%%Y%%m%%d-%%H%%M%%S).log'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

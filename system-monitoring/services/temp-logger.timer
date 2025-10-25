@@ -1,0 +1,11 @@
+[Unit]
+Description=Temperature Logger Timer for Orange Pi Zero 2W
+Requires=temp-logger.service
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
