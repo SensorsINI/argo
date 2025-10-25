@@ -325,7 +325,7 @@ class LoRaNode(ArgoBaseNode):
             self.spi.open(self.spi_bus, self.spi_device)
             self.get_logger().debug("SPI device opened")
             
-            self.spi.max_speed_hz = 500000  # 500 kHz SPI clock
+            self.spi.max_speed_hz = 100000  # 100 kHz SPI clock (reduced for signal integrity)
             self.spi.mode = 0  # SPI Mode 0 (CPOL=0, CPHA=0)
             # Note: We manually control CS via GPIO (LORA_SEL on pin 27)
             # Hardware CS on pin 24 is not used

@@ -10,7 +10,7 @@ Hardware Configuration:
 - SPI Bus: 1
 - SPI Device: 0 (CS0)
 - SPI Mode: 0 (CPOL=0, CPHA=0)
-- SPI Speed: 1 MHz (conservative for debugging)
+- SPI Speed: 100 kHz (reduced for signal integrity testing)
 
 GPIO Pins (Orange Pi Zero 2W):
 - LORA_SEL (CS):  GPIO 266 (PI10) - Manual chip select
@@ -44,7 +44,7 @@ import gpiod
 SPI_BUS = 1
 SPI_DEVICE = 0
 SPI_MODE = 0b00  # Mode 0: CPOL=0, CPHA=0
-SPI_MAX_SPEED = 1000000  # 1 MHz
+SPI_MAX_SPEED = 100000  # 100 kHz (reduced for signal integrity testing)
 
 # GPIO Configuration (gpiochip0 line numbers)
 LORA_SEL = 266  # PI10 - Manual chip select
