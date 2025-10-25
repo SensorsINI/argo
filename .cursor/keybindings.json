@@ -1,0 +1,27 @@
+// Place your key bindings in this file to override the defaults
+[
+    {
+        "key": "ctrl+i",
+        "command": "composerMode.agent"
+    },
+    {
+        "key": "ctrl+alt+up",
+        "command": "editor.action.moveLinesUpAction",
+        "when": "editorTextFocus && !editorReadonly"
+    },
+    {
+        "key": "ctrl+alt+down", 
+        "command": "editor.action.moveLinesDownAction",
+        "when": "editorTextFocus && !editorReadonly"
+    },
+    {
+        "key": "alt+down",
+        "command": "editor.action.goToNextReference",
+        "when": "editorHasReferenceProvider && editorTextFocus"
+    },
+    {
+        "key": "alt+up",
+        "command": "editor.action.goToPreviousReference", 
+        "when": "editorHasReferenceProvider && editorTextFocus"
+    }
+]
