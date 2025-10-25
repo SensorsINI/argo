@@ -27,7 +27,8 @@ Usage:
     
 Test Modes:
     basic    - Basic SPI read/write test (default)
-    pins     - Toggle GPIO pins for oscilloscope verification
+    pins     - Toggle CS and RST pins for oscilloscope verification
+               Shows which physical pins to probe
     reset    - Test reset sequence
     version  - Read chip version repeatedly
     regs     - Read multiple registers
@@ -176,25 +177,37 @@ class LoRaSPITest:
         print("\n" + "="*60)
         print("TEST: GPIO Pin Toggling (for oscilloscope)")
         print("="*60)
+        
+        print("\nPins being toggled:")
+        print(f"  CS  (Chip Select): GPIO {LORA_SEL} (PI10) - Orange Pi Pin 7")
+        print(f"  RST (Reset):       GPIO {LORA_RST} (PI0)  - Orange Pi Pin 11")
+        print()
+        print("Oscilloscope probing:")
+        print("  - Probe CS  (Pin 7)  - Should see 10ms pulses LOW/HIGH")
+        print("  - Probe RST (Pin 11) - Should see 10ms pulses LOW/HIGH")
+        print("  - Expect: ~3.3V high, ~0V low, clean square waves")
+        print("  - Pattern: CS toggles, then RST toggles, repeat ~25 Hz")
+        print()
         print("Press Ctrl+C to stop...")
+        print()
         
         try:
             count = 0
             while True:
                 count += 1
-                print(f"\rToggle cycle {count}", end='', flush=True)
+                print(f"\rToggle cycle {count} (CS: LOW->HIGH, RST: LOW->HIGH)", end='', flush=True)
                 
                 # Toggle CS
-                self.cs_line.set_value(0)
-                time.sleep(0.01)
-                self.cs_line.set_value(1)
-                time.sleep(0.01)
+                self.cs_line.set_value(0)  # LOW
+                time.sleep(0.01)           # 10ms
+                self.cs_line.set_value(1)  # HIGH
+                time.sleep(0.01)           # 10ms
                 
                 # Toggle RST
-                self.rst_line.set_value(0)
-                time.sleep(0.01)
-                self.rst_line.set_value(1)
-                time.sleep(0.01)
+                self.rst_line.set_value(0) # LOW
+                time.sleep(0.01)           # 10ms
+                self.rst_line.set_value(1) # HIGH
+                time.sleep(0.01)           # 10ms
                 
         except KeyboardInterrupt:
             print("\n  Stopped by user")
@@ -352,4 +365,3 @@ def main():
         
 if __name__ == '__main__':
     sys.exit(main())
-
