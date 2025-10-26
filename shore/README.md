@@ -12,6 +12,8 @@ This directory contains shore-side ROS2 nodes for communicating with the Argo sa
 
 ### Installation
 
+#### Option 1: Native Installation (Linux/Mac)
+
 ```bash
 # 1. Install ROS2 (one-time setup)
 #    See INSTALL.md for complete instructions
@@ -39,6 +41,79 @@ python3 lora_shore.py
 **👉 For detailed installation instructions, see [INSTALL.md](INSTALL.md)**
 
 **⚠️ Conda Users**: If you use conda, either use `run_lora_shore.sh` or deactivate conda before running. See [INSTALL.md](INSTALL.md#error-ros2-not-found-but-youre-in-a-conda-environment) for details.
+
+#### Option 2: Docker on Windows (Windows 10/11)
+
+Running `lora_shore.py` on Windows via Docker is **NOT RECOMMENDED** due to USB serial device challenges:
+
+**Challenges:**
+- **USB Device Passthrough**: Docker Desktop for Windows has limited USB passthrough support
+- **Serial Port Access**: Direct `/dev/tty*` device access doesn't work on Windows Docker
+- **Complex Setup**: Requires WSL2, USBIP, or third-party tools with poor reliability
+- **Poor Performance**: USB forwarding through Docker layers adds significant latency
+
+**Recommended Alternatives:**
+1. **Use WSL2** (Windows Subsystem for Linux): Best option for Windows users
+   ```bash
+   # Install WSL2 with Ubuntu 22.04
+   wsl --install -d Ubuntu-22.04
+   
+   # Inside WSL2, follow the native installation instructions above
+   ```
+
+2. **Dual Boot or VM**: Use a Linux VM or dual-boot Ubuntu for reliable USB access
+
+3. **Dedicated Raspberry Pi**: Use a Raspberry Pi on the shore as a dedicated bridge computer
+
+**If you still want to try Docker** (not supported):
+```bash
+# This likely won't work well, but you can try
+docker run -it --device=/dev/ttyACM0 ubuntu:22.04 bash
+# Install ROS2 and Python dependencies inside container
+# USB device forwarding through Docker Desktop is unreliable
+```
+
+### Architecture: LoRa Shore vs Web Dashboard
+
+**Key Relationship**: The LoRa shore node (`lora_shore.py`) and the web dashboard (`argo_web_dashboard.py`) serve **different purposes** and can work together:
+
+#### When Argo is in WiFi Range:
+- **Argo → WiFi → Your Phone/Computer**: Direct connection
+- **Web Dashboard**: Served by Argo at `http://ARGO_IP:8081`
+- **LoRa Shore**: Not needed (optional for redundant communication)
+
+#### When Argo is OUT of WiFi Range:
+- **Argo → LoRa Radio → Shore Computer**: Long-range communication
+- **Web Dashboard on Shore Computer**: You need to run BOTH:
+  1. **LoRa Shore Node** (`lora_shore.py`): Receives Argo data via radio
+  2. **Web Dashboard** (`argo_web_dashboard.py`): Displays the data via HTTP
+
+**Important**: When Argo is out of WiFi range:
+- ❌ **You CANNOT** access `http://ARGO_IP:8081` (no IP connection)
+- ✅ **You MUST** run the web dashboard on your shore computer
+- ✅ **LoRa Shore Node** republishes Argo data to ROS2 topics
+- ✅ **Web Dashboard** subscribes to those topics to display data
+
+#### Setup for Out-of-Range Operation:
+
+```bash
+# On shore computer (Linux/WSL2):
+
+# Terminal 1: Start LoRa shore node
+cd /path/to/argo/shore
+source /opt/ros/humble/setup.bash
+python3 lora_shore.py
+
+# Terminal 2: Start web dashboard  
+cd /path/to/argo/nodes
+source /opt/ros/humble/setup.bash
+python3 argo_web_dashboard.py
+
+# Terminal 3: Access dashboard
+# Open browser to: http://localhost:8081
+```
+
+The web dashboard automatically detects and displays LoRa-sourced data when WiFi data is unavailable (see the dashboard's data source tracking).
 
 ## Components
 
