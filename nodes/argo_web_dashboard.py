@@ -49,7 +49,7 @@ from argo_node_utils import ArgoNodeManager
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
 
-UPDATE_RATE = 1  # Hz
+UPDATE_RATE = .2  # Hz
 
 class ArgoWebDashboard(ArgoBaseNode):
     """ROS2 node providing web-based monitoring and control interface."""
@@ -62,6 +62,8 @@ class ArgoWebDashboard(ArgoBaseNode):
         self._check_for_running_dashboard()
         
         self.get_logger().info('Starting Argo Web Dashboard...')
+        self.get_logger().debug('debug test')
+ 
         
         # Health monitoring - track data reception
         self.last_boat_data_received = 0
@@ -147,7 +149,6 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
         self.controller_pause_state_sub = self.create_subscription(
             Bool, '/controller_pause_state', self.controller_pause_state_cb, 10)
-        self.battery_status_client = self.create_client(Trigger, '/battery_status')
         self.recording_start_client = self.create_client(Trigger, '/argo/recording/start')
         self.recording_stop_client = self.create_client(Trigger, '/argo/recording/stop')
         self.controller_switch_client = self.create_client(Trigger, '/controller_node/switch_controller')
@@ -156,6 +157,8 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.create_subscription(Bool, '/human_controlled', lambda msg: self.human_control_cb(msg, 'wifi'), 10)
         self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), 10)
         self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), 10)
+        self.create_subscription(Bool, '/charging_status', self.charging_status_cb, 10)
+        self.create_subscription(Bool, '/ac_power_present', self.ac_power_cb, 10)
         self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), 10)
         self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), 10)
         self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), 10)
@@ -350,6 +353,16 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Update health status - battery percentage is boat data
         self._update_boat_data_received(f"battery_pct_{source}")
+    
+    def charging_status_cb(self, msg):
+        """Callback for battery charging status."""
+        with self.state_lock:
+            self.state['battery_charging'] = msg.data
+    
+    def ac_power_cb(self, msg):
+        """Callback for AC/USB power present."""
+        with self.state_lock:
+            self.state['battery_usb_power'] = msg.data
     
     def compass_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -680,9 +693,6 @@ class ArgoWebDashboard(ArgoBaseNode):
                 }
                 self.state['system_running'] = len(running_nodes) > 0
             
-            # Get battery status via service
-            self._update_battery_status()
-            
             # Get CPU temperature
             self._update_cpu_temp()
             
@@ -691,29 +701,6 @@ class ArgoWebDashboard(ArgoBaseNode):
                 
         except Exception as e:
             self.get_logger().error(f"Error updating system status: {e}")
-    
-    def _update_battery_status(self):
-        """Get detailed battery status from battery service."""
-        try:
-            if not self.battery_status_client.wait_for_service(timeout_sec=0.5):
-                return
-            
-            request = Trigger.Request()
-            future = self.battery_status_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=1.0)
-            
-            if future.done() and future.result().success:
-                data = json.loads(future.result().message)
-                raw_data = data.get('raw_data', {})
-                
-                with self.state_lock:
-                    self.state['battery_charging'] = raw_data.get('charging_status')
-                    self.state['battery_usb_power'] = raw_data.get('ac_power_present')
-                    self.state['battery_time_to_full'] = raw_data.get('time_to_full_hours')
-                    self.state['battery_time_to_empty'] = raw_data.get('time_to_empty_hours')
-                    
-        except Exception as e:
-            self.get_logger().debug(f"Battery status update error: {e}")
     
     def _update_cpu_temp(self):
         """Read CPU temperature from thermal zone."""
