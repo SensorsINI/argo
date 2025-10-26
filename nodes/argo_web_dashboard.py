@@ -201,6 +201,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Flask shutdown control
         self.flask_shutdown_requested = False
+        self.signal_received = False  # Prevent recursive signal handling
         
         # Start Flask in separate thread (daemon so it exits when main thread exits)
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
@@ -214,16 +215,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.get_logger().info('   Access from phone: http://ORANGEPI_IP:8081')
     
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully"""
+        """Handle shutdown signals gracefully (only once)"""
+        # Prevent recursive signal handling
+        if self.signal_received:
+            return
+        self.signal_received = True
+        
         self.get_logger().info(f"Received signal {signum}, initiating shutdown...")
         self.set_unhealthy("Node shutting down")
         
-        # Request Flask shutdown via internal shutdown endpoint
-        try:
-            import requests
-            requests.post('http://127.0.0.1:8081/shutdown', timeout=0.5)
-        except Exception:
-            pass  # Flask may already be shutting down or not responding
+        # Mark Flask as needing shutdown
+        self.flask_shutdown_requested = True
         
         # Don't wait for Flask thread - it's a daemon thread and will exit with main process
     
@@ -689,20 +691,6 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def setup_routes(self):
         """Setup Flask routes for web interface."""
-        
-        @self.app.route('/shutdown', methods=['POST'])
-        def shutdown():
-            """Shutdown Flask server gracefully."""
-            shutdown_func = request.environ.get('werkzeug.server.shutdown')
-            if shutdown_func is None:
-                # Running with production server, use alternative shutdown
-                import os
-                import signal
-                os.kill(os.getpid(), signal.SIGTERM)
-                return jsonify({'message': 'Server shutting down...'})
-            else:
-                shutdown_func()
-                return jsonify({'message': 'Server shutting down...'})
         
         @self.app.route('/')
         def index():
