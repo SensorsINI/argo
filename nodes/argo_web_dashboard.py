@@ -43,19 +43,27 @@ from flask_cors import CORS
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'launch'))
 from argo_node_utils import ArgoNodeManager
 
+# Add support directory to path for ArgoBaseNode
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'support'))
+from argo_base_node import ArgoBaseNode
+
 UPDATE_RATE = 1  # Hz
 
-class ArgoWebDashboard(Node):
+class ArgoWebDashboard(ArgoBaseNode):
     """ROS2 node providing web-based monitoring and control interface."""
     
     def __init__(self, debug_mode=False):
-        super().__init__('argo_web_dashboard')
+        super().__init__('argo_web_dashboard', enable_health_service=True, enable_health_publisher=True)
         self.debug_mode = debug_mode
         
         # Check for running web dashboard processes before starting
         self._check_for_running_dashboard()
         
         self.get_logger().info('Starting Argo Web Dashboard...')
+        
+        # Health monitoring - track data reception
+        self.last_boat_data_received = 0
+        self.boat_data_timeout = 10.0  # seconds - consider unhealthy if no boat data for 10s
         
         # Initialize state storage (thread-safe with lock)
         self.state_lock = threading.Lock()
@@ -163,6 +171,9 @@ class ArgoWebDashboard(Node):
         
         # Timer for periodic status updates
         self.create_timer(1/UPDATE_RATE, self.update_system_status)
+        
+        # Timer for periodic health status checks
+        self.create_timer(2.0, self._check_health_status)
         
         # Flask app setup
         self.app = Flask(__name__, 
@@ -279,6 +290,9 @@ class ArgoWebDashboard(Node):
                     self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()
+        
+        # Update health status - battery voltage is boat data
+        self._update_boat_data_received(f"battery_voltage_{source}")
     
     def battery_pct_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -291,6 +305,9 @@ class ArgoWebDashboard(Node):
                 self.state['data_source'] = 'WiFi'
             
             self._update_data_age_indicators()
+        
+        # Update health status - battery percentage is boat data
+        self._update_boat_data_received(f"battery_pct_{source}")
     
     def compass_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -309,6 +326,9 @@ class ArgoWebDashboard(Node):
                     self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()
+        
+        # Update health status - compass heading is boat data
+        self._update_boat_data_received(f"compass_{source}")
     
     def pose_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -321,6 +341,9 @@ class ArgoWebDashboard(Node):
                 self.state['data_source'] = 'WiFi'
             
             self._update_data_age_indicators()
+        
+        # Update health status - pose data is boat data
+        self._update_boat_data_received(f"pose_{source}")
     
     def gps_cog_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -339,6 +362,9 @@ class ArgoWebDashboard(Node):
                     self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()
+        
+        # Update health status - GPS COG is boat data
+        self._update_boat_data_received(f"gps_cog_{source}")
     
     def gps_sog_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -357,6 +383,9 @@ class ArgoWebDashboard(Node):
                     self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()
+        
+        # Update health status - GPS SOG is boat data
+        self._update_boat_data_received(f"gps_sog_{source}")
     
     def wind_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -371,6 +400,9 @@ class ArgoWebDashboard(Node):
                 self.state['data_source'] = 'WiFi'
             
             self._update_data_age_indicators()
+        
+        # Update health status - wind data is boat data
+        self._update_boat_data_received(f"wind_{source}")
     
     def gps_fix_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -412,6 +444,9 @@ class ArgoWebDashboard(Node):
                     self.state['home_latitude'], self.state['home_longitude'])
             
             self._update_data_age_indicators()
+        
+        # Update health status - GPS fix data is boat data
+        self._update_boat_data_received(f"gps_fix_{source}")
     
     def gps_satellites_cb(self, msg, source='wifi'):
         """Unified callback for GPS satellite count"""
@@ -434,6 +469,9 @@ class ArgoWebDashboard(Node):
                         self.get_logger().debug(f"GPS satellites (LoRa): {msg.data}")
             
             self._update_data_age_indicators()
+        
+        # Update health status - GPS satellite count is boat data
+        self._update_boat_data_received(f"gps_satellites_{source}")
     
     def lora_rssi_cb(self, msg):
         """Receive LoRa signal strength"""
@@ -473,6 +511,31 @@ class ArgoWebDashboard(Node):
             self.state['data_source'] = 'LoRa'
         else:
             self.state['data_source'] = 'Offline'
+    
+    def _update_boat_data_received(self, data_type: str):
+        """Update timestamp when boat data is received (not just human_controlled)"""
+        now = time.time()
+        self.last_boat_data_received = now
+        
+        # Update health status based on data reception
+        self._check_health_status()
+        
+        if self.debug_mode:
+            self.get_logger().debug(f"Boat data received: {data_type} at {now}")
+    
+    def _check_health_status(self):
+        """Check health status based on boat data reception"""
+        now = time.time()
+        time_since_data = now - self.last_boat_data_received
+        
+        if time_since_data < self.boat_data_timeout:
+            # We have recent boat data - healthy
+            data_age = f"{time_since_data:.1f}s ago"
+            self.set_healthy(f"Receiving boat data ({data_age})")
+        else:
+            # No recent boat data - unhealthy
+            data_age = f"{time_since_data:.1f}s ago"
+            self.set_unhealthy(f"No boat data received ({data_age})")
     
     def controller_state_cb(self, msg):
         with self.state_lock:
@@ -738,6 +801,7 @@ Features:
   - GPS tracking with satellite count and fix status
   - LoRa communication monitoring and fallback
   - Mobile-optimized interface for phone/tablet access
+  - Health monitoring service and status publishing
 
 Local Access:
   http://localhost:8081 or http://127.0.0.1:8081
@@ -760,29 +824,25 @@ Usage Examples:
   # Run as ROS2 node
   ros2 run argo argo_web_dashboard --debug
 
+Health Monitoring:
+  - Service: ros2 service call /argo_web_dashboard/health std_srvs/srv/Trigger
+  - Topic: ros2 topic echo /argo_web_dashboard_health
+  - Health status based on boat data reception (not just human_controlled)
+
 Troubleshooting:
   - If port 8081 is in use, the dashboard will refuse to start and show conflicting processes
   - Use --debug to see detailed HTTP request logs
   - Check ROS2 topics are publishing: ros2 topic list | grep -E "(gps|battery|compass)"
   - Verify system is running: ros2 node list
+  - Check health status: ros2 service call /argo_web_dashboard/health std_srvs/srv/Trigger
         ''',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument('--debug', action='store_true', 
                        help='Enable debug mode (shows HTTP request logs and detailed topic data)')
-    known_args, unknown_args = parser.parse_known_args(args)
     
-    rclpy.init(args=unknown_args)
-    node = ArgoWebDashboard(debug_mode=known_args.debug)
-    
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down web dashboard...")
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    # Use ArgoBaseNode's standardized run_node method
+    ArgoBaseNode.run_node(ArgoWebDashboard, args, parser)
 
 
 if __name__ == '__main__':
