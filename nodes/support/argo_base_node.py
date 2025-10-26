@@ -107,16 +107,18 @@ class ArgoBaseNode(Node):
     def _handle_health_request(self, request, response):
         """Handle health status service request"""
         try:
-            # Simple response first to test if callback is working
             response.success = True
-            response.message = "Health check working"
-            self.get_logger().info("Health service called successfully")
-            return response
+            response.message = json.dumps({
+                'healthy': self.health_status,
+                'details': self.health_details,
+                'timestamp': self.last_health_update,
+                'node_name': self.node_name
+            })
         except Exception as e:
-            self.get_logger().error(f"Health service callback error: {e}")
             response.success = False
             response.message = f"Health check failed: {e}"
-            return response
+        
+        return response
     
     def _publish_health_status(self):
         """Publish health status to topic"""
