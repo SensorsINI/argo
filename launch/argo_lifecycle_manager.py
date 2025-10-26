@@ -142,7 +142,10 @@ class ArgoLifecycleManager:
         
         for node in discovered_nodes:
             if node in self.excluded_nodes:
-                continue  # Skip excluded nodes
+                if node == 'bno085':
+                    # BNO085 is excluded from launch but should be monitored for health
+                    self.special_nodes.append(node)
+                continue  # Skip other excluded nodes
             elif node == 'foxglove_bridge':
                 self.special_nodes.append(node)  # Special handling needed
             else:
@@ -264,7 +267,8 @@ class ArgoLifecycleManager:
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',
             'argo_transform_publisher.py': '/argo_transform_publisher/health',
-            'argo_boat_visualization.py': '/argo_boat_visualization/health'
+            'argo_boat_visualization.py': '/argo_boat_visualization/health',
+            'bno085.py': '/bno085_bridge/health'  # Monitor BNO085 health even when excluded from launch
         }
         
         for node_name, service_name in health_services.items():
@@ -497,7 +501,8 @@ class ArgoLifecycleManager:
             discovered_nodes = self.node_manager.discover_nodes()
             special_nodes_to_launch = [
                 node for node in discovered_nodes
-                if node == 'foxglove_bridge' and node not in self.excluded_nodes]
+                if (node == 'foxglove_bridge' and node not in self.excluded_nodes) or 
+                   (node == 'bno085' and node in self.excluded_nodes)]  # BNO085: monitor but don't launch
 
         for special_node in special_nodes_to_launch:
             if special_node == 'foxglove_bridge':
@@ -514,6 +519,9 @@ class ArgoLifecycleManager:
                 )
                 self.node_processes.append(proc)
                 print(f"✅ Launched {special_node} (PID: {proc.pid})")
+            elif special_node == 'bno085':
+                # BNO085 is excluded from launch but should be monitored for health
+                print(f"ℹ️  Monitoring {special_node} (running as independent service)")
         
         # Set the main process to the first node process for compatibility
         if self.node_processes:
