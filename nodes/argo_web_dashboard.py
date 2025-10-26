@@ -194,7 +194,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Configure Flask to use our custom formatter with node name prefix
             self._configure_flask_logging()
         
-        # Start Flask in separate thread
+        # Start Flask in separate thread (daemon so it exits when main thread exits)
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
         self.flask_thread.start()
         
@@ -840,9 +840,27 @@ Troubleshooting:
     )
     parser.add_argument('--debug', action='store_true', 
                        help='Enable debug mode (shows HTTP request logs and detailed topic data)')
+    known_args, unknown_args = parser.parse_known_args(args)
     
-    # Use ArgoBaseNode's standardized run_node method
-    ArgoBaseNode.run_node(ArgoWebDashboard, args, parser)
+    # Initialize ROS2
+    rclpy.init(args=unknown_args)
+    
+    # Create node with MultiThreadedExecutor to handle service callbacks properly
+    node = ArgoWebDashboard(debug_mode=known_args.debug)
+    
+    # Use MultiThreadedExecutor to handle service callbacks in separate threads
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down web dashboard...")
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
