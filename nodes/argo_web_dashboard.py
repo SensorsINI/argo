@@ -175,10 +175,10 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.create_subscription(String, 'lora/last_contact', self.lora_contact_cb, 10)
         
         # Timer for periodic status updates
-        self.create_timer(1/UPDATE_RATE, self.update_system_status)
+        self.status_timer = self.create_timer(1/UPDATE_RATE, self.update_system_status)
         
         # Timer for periodic health status checks
-        self.create_timer(2.0, self._check_health_status)
+        self.health_timer = self.create_timer(2.0, self._check_health_status)
         
         # Flask app setup
         self.app = Flask(__name__, 
@@ -227,7 +227,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Mark Flask as needing shutdown
         self.flask_shutdown_requested = True
         
-        # Don't wait for Flask thread - it's a daemon thread and will exit with main process
+        # Cancel timers to stop health check spam
+        try:
+            if hasattr(self, 'status_timer'):
+                self.status_timer.cancel()
+            if hasattr(self, 'health_timer'):
+                self.health_timer.cancel()
+        except Exception:
+            pass
+        
+        # Trigger ROS2 shutdown to stop executor
+        raise KeyboardInterrupt()
     
     def _check_for_running_dashboard(self):
         """Check for running web dashboard processes and refuse to start if found."""
