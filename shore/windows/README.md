@@ -126,42 +126,191 @@ In **Windows PowerShell** (regular, not Administrator):
 winget install --interactive --exact dorssel.usbipd-win
 ```
 
-**Connect your Waveshare LoRa USB device**, then:
+**Important**: After installation, **close and reopen PowerShell** to refresh the PATH environment variable. The `usbipd` command won't be recognized in the current session.
+
+**Connect your Waveshare LoRa USB device**, then (in the new PowerShell window):
 
 ```powershell
 # List all USB devices
-usbipd list
-
-# Find your LoRa device (usually "USB Serial Device" or similar)
-# Note the BUSID (e.g., 1-1, 2-1, etc.)
-
-# Bind the device (one-time)
-usbipd bind --busid 1-1
-
-# Attach to WSL2 (needed each Windows session)
-usbipd attach --wsl --busid 1-1
+usbipd.exe list
 ```
+
+You should see output like this (your BUSID and COM port may differ):
+
+```
+Connected:
+BUSID  VID:PID    DEVICE                                                        STATE
+1-2    1a86:55d3  USB-Enhanced-SERIAL CH343 (COM9)                              Not shared
+1-5    8087:0a2b  Intel(R) Wireless Bluetooth(R)                                Not shared
+1-7    05c8:03c0  HD Camera                                                     Not shared
+```
+
+**Find your LoRa device** - it will be "USB-Enhanced-SERIAL CH343" (COM port can vary). Note the BUSID (e.g., 1-2 in the example above).
+
+Now bind and attach the device:
+
+```powershell
+# Bind the device (one-time setup)
+usbipd.exe bind --busid 1-2
+
+# Attach to WSL2 (needed each time Windows restarts)
+usbipd.exe attach --wsl --busid 1-2
+```
+After binding, `usbipd.exe list` should show the USB-to-LoRa device as **"Shared"**. After attaching, it should show as **"Attached"**.
+
+<details>
+<summary>Prefer a GUI? (Optional)</summary>
+
+If you prefer a graphical interface instead of command line, you can use a third-party GUI tool:
+
+**WSL USB GUI** (Community Project):
+- Download: https://gitlab.com/alelec/wsl-usb-gui/-/releases
+- Provides point-and-click interface for binding and attaching USB devices
+- Note: This is a community project, not officially supported by Microsoft
+
+The command-line tool (`usbipd.exe`) is faster and more reliable for scripting and daily use.
+
+</details>
+
+<details>
+<summary>Getting "Access denied" error when binding?</summary>
+
+**Problem**: 
+```
+usbipd: error: Access denied; this operation requires administrator privileges.
+```
+
+**Solution**: The `bind` command requires administrator privileges. Right-click on **Windows Terminal** or **PowerShell** in the Start menu and select **"Run as administrator"**, then run the bind command again:
+
+```powershell
+usbipd.exe bind --busid 1-2
+```
+
+**Note**: You only need administrator rights for the `bind` command. The `attach` command can run without administrator privileges.
+
+</details>
+
+<details>
+<summary>Getting "usbipd command not found" error?</summary>
+
+**Problem**: After installing usbipd-win, PowerShell says `usbipd : The term 'usbipd' is not recognized...`
+
+**Solution**: Close PowerShell completely and open a new PowerShell window. The PATH environment variable needs to be refreshed to include the newly installed program.
+
+**Alternative**: If you don't want to close PowerShell, you can use the full path:
+```powershell
+& "C:\Program Files\usbipd-win\usbipd.exe" list
+```
+
+</details>
 
 Verify it's attached in Ubuntu:
 
 ```bash
 ls /dev/ttyUSB* /dev/ttyACM*
-# Should show: /dev/ttyUSB0 (or similar)
+# Should show: /dev/ttyACM0 or /dev/ttyUSB0
 ```
 
+**Note**: The CH343 device usually appears as `/dev/ttyACM0` in WSL2. If you see `/dev/ttyACM0`, that's correct!
+
 <details>
-<summary>USB device not showing up?</summary>
+<summary>USB device not showing up in WSL?</summary>
 
 **Problem**: `ls /dev/ttyUSB*` shows "No such file or directory"
 
-**Solutions**:
-1. Make sure device is plugged into Windows
-2. Run `usbipd list` in PowerShell - device should appear
-3. Run `usbipd attach --wsl --busid YOUR_BUSID` again
-4. Check device isn't being used by another program in Windows
-5. Try a different USB port
+This is the most common issue. Follow these diagnostic steps:
 
-**Note**: You need to run `usbipd attach --wsl --busid YOUR_BUSID` each time you restart Windows. The `bind` command only needs to be done once.
+### Step 1: Verify device is attached (not just bound)
+
+In **PowerShell**, run:
+```powershell
+usbipd.exe list
+```
+
+Check the STATE column for your device:
+- **"Shared"** = Device is bound but NOT attached to WSL
+- **"Attached"** = Device is attached to WSL (this is what you want!)
+
+If it shows **"Shared"** instead of **"Attached"**, the device was only bound but not attached. Run:
+```powershell
+usbipd.exe attach --wsl --busid 1-2
+```
+
+### Step 2: If attach command fails or hangs
+
+Try detaching first, then re-attaching:
+```powershell
+# Detach (if previously attached)
+usbipd.exe detach --busid 1-2
+
+# Wait 2 seconds, then attach again
+usbipd.exe attach --wsl --busid 1-2
+```
+
+### Step 3: Check if WSL2 can see USB devices
+
+In **Ubuntu terminal**, run:
+```bash
+lsusb
+```
+
+You should see your device listed (look for "1a86:55d3" or "CH343"):
+```
+Bus 001 Device 002: ID 1a86:55d3 QinHeng Electronics USB-Enhanced-SERIAL CH343
+```
+
+If `lsusb` shows nothing or gives an error, your WSL2 kernel may not have USB support. Update WSL2:
+```powershell
+# In PowerShell
+wsl --update
+wsl --shutdown
+```
+
+Then restart Ubuntu and try attaching again.
+
+### Step 4: Check kernel modules
+
+In **Ubuntu terminal**, verify USB serial drivers are loaded:
+```bash
+lsmod | grep -E 'usbserial|ch341'
+```
+
+If no output, try loading the driver manually:
+```bash
+sudo modprobe usbserial
+sudo modprobe ch341
+```
+
+### Step 5: Check dmesg for errors
+
+In **Ubuntu terminal**, check system logs:
+```bash
+dmesg | tail -20
+```
+
+Look for USB-related messages. You should see something like:
+```
+usb 1-1: new full-speed USB device number 2 using vhci_hcd
+ch341 1-1:1.0: ch341-uart converter detected
+usb 1-1: ch341-uart converter now attached to ttyUSB0
+```
+
+### Step 6: Other common issues
+
+1. **Device is busy in Windows**: Close any Windows programs that might be using the COM port (Device Manager, PuTTY, Arduino IDE, etc.)
+
+2. **Try a different USB port**: Some USB ports work better than others with WSL2
+
+3. **Restart WSL2 completely**:
+   ```powershell
+   # In PowerShell
+   wsl --shutdown
+   # Wait 5 seconds, then restart Ubuntu from Start menu
+   ```
+
+4. **Unplug and replug the device**: Physically disconnect and reconnect the USB device, then run attach again
+
+**Note**: You need to run `usbipd.exe attach --wsl --busid YOUR_BUSID` each time you restart Windows or WSL2. The `bind` command only needs to be done once.
 
 </details>
 
@@ -194,7 +343,7 @@ After the one-time setup, daily operation is simple:
 1. **Attach USB device** (if Windows was restarted):
    ```powershell
    # In PowerShell
-   usbipd attach --wsl --busid 1-1
+   usbipd.exe attach --wsl --busid 1-2
    ```
 
 2. **Launch shore station**:
@@ -285,12 +434,13 @@ pip3 install pyserial flask flask-cors
 2. Verify it's attached to WSL2:
    ```powershell
    # PowerShell
-   usbipd list
-   usbipd attach --wsl --busid YOUR_BUSID
+   usbipd.exe list
+   usbipd.exe attach --wsl --busid YOUR_BUSID
    ```
 3. Check in Ubuntu:
    ```bash
    ls /dev/ttyUSB* /dev/ttyACM*
+   # Should show /dev/ttyACM0 or /dev/ttyUSB0
    ```
 
 #### "Permission denied: /dev/ttyUSB0"
@@ -487,10 +637,11 @@ The WSL2 solution performs excellently:
 wsl --install -d Ubuntu-22.04          # PowerShell as Admin, then restart
 cd ~ && git clone https://github.com/SensorsINI/argo.git
 cd argo && ./shore/setup_shore_station.sh
-usbipd attach --wsl --busid 1-1        # PowerShell (after finding BUSID)
+usbipd.exe bind --busid 1-2            # PowerShell as Admin (one-time)
+usbipd.exe attach --wsl --busid 1-2    # PowerShell (after binding)
 
 # Daily use (30 seconds)
-usbipd attach --wsl --busid 1-1        # If Windows was restarted
+usbipd.exe attach --wsl --busid 1-2    # PowerShell (if Windows restarted)
 ~/argo/shore/launch_shore_station.sh   # Ubuntu terminal
 # Open browser: http://localhost:8081
 ```
