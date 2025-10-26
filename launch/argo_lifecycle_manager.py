@@ -457,9 +457,10 @@ class ArgoLifecycleManager:
             return True
         
         # Check if any expected nodes are running
+        # Exclude special nodes (bno085) that run as independent services
         node_status = self._get_node_status()
-        running_nodes = [node for node,
-                         status in node_status.items() if "RUNNING" in status]
+        running_nodes = [node for node, status in node_status.items() 
+                        if "RUNNING" in status and node in self.expected_nodes]
         return len(running_nodes) > 0
     
     def _launch_nodes_directly(self):
@@ -2027,7 +2028,8 @@ class ArgoLifecycleManager:
                 Trigger, service_name)
 
             # Wait for the service to be available
-            if not service_client.wait_for_service(timeout_sec=1.0):
+            # Use the same timeout as the service call itself for consistency
+            if not service_client.wait_for_service(timeout_sec=timeout_sec):
                 error_msg = f"Service {service_name} not available"
                 if debug:
                     print(f"🔧 DEBUG: {error_msg}")
@@ -2114,9 +2116,10 @@ class ArgoLifecycleManager:
     def _call_battery_service_client(self) -> Optional[Dict[str, Any]]:
         """Call battery service using centralized Trigger service call"""
         try:
-            # Use centralized Trigger service call
+            # Use centralized Trigger service call with longer timeout
+            # Battery service may be slow to respond during sensor re-initialization
             success, message = self._call_trigger_service(
-                '/battery_status', timeout_sec=1.0, debug=False)
+                '/battery_status', timeout_sec=5.0, debug=False)
 
             if success:
                 # Parse JSON from response message
@@ -2130,9 +2133,10 @@ class ArgoLifecycleManager:
     def _call_battery_service_subprocess(self) -> Optional[Dict[str, Any]]:
         """Fallback: Call battery service using inline ROS2 client"""
         try:
-            # Use centralized Trigger service call
+            # Use centralized Trigger service call with longer timeout
+            # Battery service may be slow to respond during sensor re-initialization
             success, message = self._call_trigger_service(
-                '/battery_status', timeout_sec=1.0, debug=False)
+                '/battery_status', timeout_sec=5.0, debug=False)
 
             if success:
                 # Parse JSON from response message
