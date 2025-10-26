@@ -54,12 +54,38 @@ fi
 echo -e "${BLUE}[1/7] Checking system...${NC}"
 echo "  OS: $(lsb_release -d | cut -f2)"
 echo "  Argo root: $ARGO_ROOT"
+
+# Check Ubuntu version
+UBUNTU_VERSION=$(lsb_release -rs)
+UBUNTU_CODENAME=$(lsb_release -cs)
+echo "  Ubuntu version: $UBUNTU_VERSION ($UBUNTU_CODENAME)"
+
+# Determine appropriate ROS2 version
+if [[ "$UBUNTU_VERSION" == "22.04" ]] || [[ "$UBUNTU_CODENAME" == "jammy" ]]; then
+    ROS_DISTRO="humble"
+    echo "  ROS2 version: Humble (recommended for Ubuntu 22.04)"
+elif [[ "$UBUNTU_VERSION" == "20.04" ]] || [[ "$UBUNTU_CODENAME" == "focal" ]]; then
+    ROS_DISTRO="foxy"
+    echo -e "  ${YELLOW}⚠${NC} Ubuntu 20.04 detected - will install ROS2 Foxy instead of Humble"
+    echo "    (For Humble, upgrade to Ubuntu 22.04)"
+else
+    echo -e "  ${RED}✗${NC} Unsupported Ubuntu version: $UBUNTU_VERSION"
+    echo "  Supported versions: 20.04 (ROS2 Foxy) or 22.04 (ROS2 Humble)"
+    exit 1
+fi
+
+# Check for conda environment
+if [ -n "$CONDA_DEFAULT_ENV" ]; then
+    echo -e "  ${YELLOW}⚠${NC} Running in conda environment: $CONDA_DEFAULT_ENV"
+    echo "    This may cause Python package conflicts with ROS2"
+    echo "    Consider running: conda deactivate"
+fi
 echo ""
 
 # Function to check if ROS2 is installed
 check_ros2() {
-    if [ -f "/opt/ros/humble/setup.bash" ]; then
-        source /opt/ros/humble/setup.bash
+    if [ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]; then
+        source /opt/ros/${ROS_DISTRO}/setup.bash
         if command -v ros2 &> /dev/null; then
             return 0
         fi
@@ -68,53 +94,82 @@ check_ros2() {
 }
 
 # Check ROS2 installation
-echo -e "${BLUE}[2/7] Checking ROS2 Humble installation...${NC}"
+echo -e "${BLUE}[2/7] Checking ROS2 $ROS_DISTRO installation...${NC}"
 if check_ros2; then
-    echo -e "  ${GREEN}✓${NC} ROS2 Humble is already installed"
+    echo -e "  ${GREEN}✓${NC} ROS2 $ROS_DISTRO is already installed"
     ROS2_VERSION=$(ros2 --version 2>/dev/null || echo "unknown")
     echo "    Version: $ROS2_VERSION"
 else
-    echo -e "  ${YELLOW}⚠${NC} ROS2 Humble not found"
+    echo -e "  ${YELLOW}⚠${NC} ROS2 $ROS_DISTRO not found"
     echo ""
-    echo "  Installing ROS2 Humble (this will take 5-10 minutes)..."
+    echo "  Installing ROS2 $ROS_DISTRO (this will take 5-10 minutes)..."
     echo "  You may be prompted for your password (sudo access required)"
     echo ""
     
     # Update package list
-    echo "  [2.1/2.5] Updating package lists..."
+    echo "  [2.1/2.6] Updating package lists..."
     sudo apt update -qq
     
     # Install prerequisites
-    echo "  [2.2/2.5] Installing prerequisites..."
-    sudo apt install -y -qq software-properties-common curl gnupg lsb-release > /dev/null 2>&1
+    echo "  [2.2/2.6] Installing prerequisites..."
+    sudo apt install -y software-properties-common curl gnupg lsb-release
     
-    # Add ROS2 repository
-    echo "  [2.3/2.5] Adding ROS2 repository..."
-    sudo add-apt-repository universe -y > /dev/null 2>&1
-    sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo apt-key add - > /dev/null 2>&1
-    sudo sh -c 'echo "deb http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" > /etc/apt/sources.list.d/ros2-latest.list'
+    # Add ROS2 repository with proper GPG key handling
+    echo "  [2.3/2.6] Adding ROS2 repository..."
+    sudo add-apt-repository universe -y
+    
+    # Use proper GPG key installation for newer systems
+    if command -v gpg &> /dev/null; then
+        echo "    Installing ROS2 GPG key..."
+        sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+    else
+        # Fallback to apt-key for older systems
+        sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo apt-key add -
+        sudo sh -c 'echo "deb http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" > /etc/apt/sources.list.d/ros2-latest.list'
+    fi
     
     # Update with ROS2 repo
-    echo "  [2.4/2.5] Updating package lists with ROS2 repository..."
-    sudo apt update -qq
+    echo "  [2.4/2.6] Updating package lists with ROS2 repository..."
+    sudo apt update
+    
+    # Install git if not present
+    echo "  [2.5/2.6] Ensuring git is installed..."
+    sudo apt install -y git
     
     # Install ROS2
-    echo "  [2.5/2.5] Installing ROS2 Humble (please be patient)..."
-    sudo apt install -y ros-humble-ros-base python3-pip > /dev/null 2>&1
+    echo "  [2.6/2.6] Installing ROS2 $ROS_DISTRO (this may take several minutes)..."
+    echo "    Package: ros-${ROS_DISTRO}-ros-base"
+    
+    if ! sudo apt install -y ros-${ROS_DISTRO}-ros-base python3-pip; then
+        echo -e "  ${RED}✗${NC} ROS2 installation failed!"
+        echo ""
+        echo "  Possible issues:"
+        echo "    - No internet connection"
+        echo "    - Disk space full"
+        echo "    - Package repository issues"
+        echo ""
+        echo "  Try manually:"
+        echo "    sudo apt update"
+        echo "    sudo apt install ros-${ROS_DISTRO}-ros-base"
+        echo ""
+        exit 1
+    fi
     
     # Verify installation
     if check_ros2; then
-        echo -e "  ${GREEN}✓${NC} ROS2 Humble installed successfully!"
+        echo -e "  ${GREEN}✓${NC} ROS2 $ROS_DISTRO installed successfully!"
     else
         echo -e "  ${RED}✗${NC} ROS2 installation failed!"
-        echo "  Please install manually and run this script again."
+        echo "  The package was installed but cannot be found."
+        echo "  Please check the error messages above."
         exit 1
     fi
 fi
 echo ""
 
 # Ensure ROS2 is sourced for rest of script
-source /opt/ros/humble/setup.bash
+source /opt/ros/${ROS_DISTRO}/setup.bash
 
 # Check Python dependencies
 echo -e "${BLUE}[3/7] Checking Python dependencies...${NC}"
@@ -180,13 +235,13 @@ echo ""
 
 # Check ROS2 environment in bashrc
 echo -e "${BLUE}[4/7] Configuring ROS2 environment...${NC}"
-if grep -q "source /opt/ros/humble/setup.bash" ~/.bashrc; then
+if grep -q "source /opt/ros/${ROS_DISTRO}/setup.bash" ~/.bashrc; then
     echo -e "  ${GREEN}✓${NC} ROS2 environment already configured in ~/.bashrc"
 else
     echo -e "  ${YELLOW}⚠${NC} Adding ROS2 environment to ~/.bashrc"
     echo "" >> ~/.bashrc
-    echo "# ROS2 Humble environment (added by Argo setup)" >> ~/.bashrc
-    echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+    echo "# ROS2 $ROS_DISTRO environment (added by Argo setup)" >> ~/.bashrc
+    echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc
     echo -e "  ${GREEN}✓${NC} ROS2 environment added to ~/.bashrc"
     echo "    (will be active in new terminal sessions)"
 fi
@@ -221,9 +276,11 @@ cat > "$LAUNCHER" << 'EOF'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARGO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Source ROS2 environment
+# Source ROS2 environment (try both Humble and Foxy)
 if [ -f "/opt/ros/humble/setup.bash" ]; then
     source /opt/ros/humble/setup.bash
+elif [ -f "/opt/ros/foxy/setup.bash" ]; then
+    source /opt/ros/foxy/setup.bash
 else
     echo "ERROR: ROS2 not found! Run setup_shore_station.sh first."
     exit 1
@@ -353,8 +410,16 @@ if $ALL_OK; then
     echo -e "${GREEN}✓ Setup Complete!${NC}"
     echo "========================================"
     echo ""
+    echo "ROS2 $ROS_DISTRO installed and configured"
+    echo ""
     echo "Next steps:"
     echo ""
+    if [ -n "$CONDA_DEFAULT_ENV" ]; then
+        echo -e "${YELLOW}⚠ IMPORTANT:${NC} You're in a conda environment ($CONDA_DEFAULT_ENV)"
+        echo "   Before running the shore station, deactivate conda:"
+        echo "     conda deactivate"
+        echo ""
+    fi
     echo "1. Connect your Waveshare LoRa USB device"
     echo ""
     if [[ $(uname -r) == *microsoft* ]]; then
