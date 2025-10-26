@@ -25,6 +25,7 @@ import threading
 import argparse
 import logging
 import signal
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -65,6 +66,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Health monitoring - track data reception
         self.last_boat_data_received = 0
         self.boat_data_timeout = 10.0  # seconds - consider unhealthy if no boat data for 10s
+        self.last_health_log_time = 0  # Track when we last logged health status
+        self.last_logged_health_state = None  # Track last logged state (True=healthy, False=unhealthy)
+        self.health_log_throttle_s = 30.0  # Only log unchanged health status every 30s
         
         # Service callback threading fix - use flag-based approach
         self.health_service_requested = False
@@ -562,18 +566,42 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.get_logger().debug(f"Boat data received: {data_type} at {now}")
     
     def _check_health_status(self):
-        """Check health status based on boat data reception"""
+        """Check health status based on boat data reception (with throttled logging)"""
         now = time.time()
         time_since_data = now - self.last_boat_data_received
         
-        if time_since_data < self.boat_data_timeout:
+        # Determine current health state
+        is_healthy = time_since_data < self.boat_data_timeout
+        
+        # Check if we should log (state changed or enough time passed)
+        state_changed = self.last_logged_health_state != is_healthy
+        time_since_last_log = now - self.last_health_log_time
+        should_log = state_changed or time_since_last_log >= self.health_log_throttle_s
+        
+        if is_healthy:
             # We have recent boat data - healthy
             data_age = f"{time_since_data:.1f}s ago"
-            self.set_healthy(f"Receiving boat data ({data_age})")
+            if should_log:
+                self.set_healthy(f"Receiving boat data ({data_age})")
+                self.last_health_log_time = now
+                self.last_logged_health_state = True
+            else:
+                # Update health status silently (no logging)
+                self.health_status = True
+                self.health_details = f"Receiving boat data ({data_age})"
+                self.last_health_update = now
         else:
             # No recent boat data - unhealthy
             data_age = f"{time_since_data:.1f}s ago"
-            self.set_unhealthy(f"No boat data received ({data_age})")
+            if should_log:
+                self.set_unhealthy(f"No boat data received ({data_age})")
+                self.last_health_log_time = now
+                self.last_logged_health_state = False
+            else:
+                # Update health status silently (no logging)
+                self.health_status = False
+                self.health_details = f"No boat data received ({data_age})"
+                self.last_health_update = now
     
     def controller_state_cb(self, msg):
         with self.state_lock:
