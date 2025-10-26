@@ -258,6 +258,10 @@ class ArgoLifecycleManager:
         """Query health status from all nodes via services"""
         health_data = {}
         
+        # Check if ROS2 node is available
+        if not self.ros2_node:
+            return health_data
+        
         # Define health services for each node
         health_services = {
             'gps.py': '/gps_node/health',
@@ -286,8 +290,12 @@ class ArgoLifecycleManager:
                     if future.done():
                         response = future.result()
                         if response.success:
-                            health_info = json.loads(response.message)
-                            health_data[node_name] = health_info
+                            try:
+                                health_info = json.loads(response.message)
+                                health_data[node_name] = health_info
+                            except json.JSONDecodeError as e:
+                                # Handle non-JSON responses (like BNO085 before fix)
+                                health_data[node_name] = {'healthy': None, 'error': f'JSON parse error: {e}'}
                         else:
                             health_data[node_name] = {'healthy': False, 'error': response.message}
                     else:
@@ -305,6 +313,17 @@ class ArgoLifecycleManager:
         # Try service data first if provided
         if health_data and node_name in health_data:
             node_health = health_data[node_name]
+            if 'healthy' in node_health:
+                if node_health['healthy'] is None:
+                    return "❓"
+                elif node_health['healthy']:
+                    return "🟢"
+                else:
+                    return "🔴"
+        
+        # Try with .py extension if not found
+        if health_data and f"{node_name}.py" in health_data:
+            node_health = health_data[f"{node_name}.py"]
             if 'healthy' in node_health:
                 if node_health['healthy'] is None:
                     return "❓"

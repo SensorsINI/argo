@@ -187,6 +187,7 @@ from std_srvs.srv import Trigger
 import math
 import sys
 import time
+import json
 import argparse
 import argcomplete
 import subprocess
@@ -332,8 +333,18 @@ class BNO085Bridge(Node):
     
     def _handle_health_request(self, request, response):
         """Handle health status service request."""
-        response.success = True
-        response.message = f"BNO085 bridge health: {'HEALTHY' if self.health_status else 'UNHEALTHY'}"
+        try:
+            response.success = True
+            response.message = json.dumps({
+                'healthy': self.health_status,
+                'details': f"BNO085 bridge health: {'HEALTHY' if self.health_status else 'UNHEALTHY'}",
+                'timestamp': time.time(),
+                'node_name': 'bno085_bridge'
+            })
+        except Exception as e:
+            response.success = False
+            response.message = f"Health check failed: {e}"
+        
         return response
     
     def _switch_to_recovery_mode(self):
