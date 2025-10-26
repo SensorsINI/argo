@@ -30,7 +30,7 @@ from typing import Dict, Any, Optional
 # ROS2 imports
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float64, Float32, String, Int32
+from std_msgs.msg import Bool, Float64, Float32, String, Int32, UInt8
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
 from std_srvs.srv import Trigger, SetBool
@@ -51,6 +51,10 @@ class ArgoWebDashboard(Node):
     def __init__(self, debug_mode=False):
         super().__init__('argo_web_dashboard')
         self.debug_mode = debug_mode
+        
+        # Check for running web dashboard processes before starting
+        self._check_for_running_dashboard()
+        
         self.get_logger().info('Starting Argo Web Dashboard...')
         
         # Initialize state storage (thread-safe with lock)
@@ -141,6 +145,7 @@ class ArgoWebDashboard(Node):
         self.create_subscription(Float64, '/gps_sog', lambda msg: self.gps_sog_cb(msg, 'wifi'), 10)
         self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), 10)
         self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), 10)
+        self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), 10)
         self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
         
         # LoRa sources (fallback when WiFi unavailable)
@@ -150,6 +155,7 @@ class ArgoWebDashboard(Node):
         self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), 10)
         self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), 10)
         self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), 10)
+        self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), 10)
         
         # LoRa-specific monitoring
         self.create_subscription(Int32, 'lora/rssi', self.lora_rssi_cb, 10)
@@ -183,6 +189,35 @@ class ArgoWebDashboard(Node):
         
         self.get_logger().info('🌐 Web dashboard started on http://0.0.0.0:8081')
         self.get_logger().info('   Access from phone: http://ORANGEPI_IP:8081')
+    
+    def _check_for_running_dashboard(self):
+        """Check for running web dashboard processes and refuse to start if found."""
+        try:
+            # Check for processes using port 8081 (more reliable than pgrep)
+            result = subprocess.run([
+                'lsof', '-ti:8081'
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                pids = result.stdout.strip().split('\n')
+                self.get_logger().error(f"❌ Port 8081 is already in use!")
+                self.get_logger().error(f"   Processes using port 8081: {', '.join(pids)}")
+                self.get_logger().error(f"   Please stop the conflicting process first:")
+                self.get_logger().error(f"   sudo kill {' '.join(pids)}")
+                raise RuntimeError("Port 8081 already in use - conflict prevented")
+            
+            # Note: Port check is sufficient - if port 8081 is free, we can start
+            # pgrep can find zombie processes, so we rely on port availability instead
+                
+        except subprocess.TimeoutExpired:
+            self.get_logger().warn("Timeout checking for running processes - proceeding anyway")
+        except FileNotFoundError:
+            # pgrep or lsof not available, skip check
+            if self.debug_mode:
+                self.get_logger().debug("pgrep/lsof not available - skipping process check")
+        except Exception as e:
+            self.get_logger().error(f"Error checking for running processes: {e}")
+            raise
     
     def _configure_flask_logging(self):
         """Configure Flask logging to include node name prefix."""
@@ -375,6 +410,28 @@ class ArgoWebDashboard(Node):
                 self.state['bearing_to_home'] = self._calculate_bearing(
                     self.state['gps_latitude'], self.state['gps_longitude'],
                     self.state['home_latitude'], self.state['home_longitude'])
+            
+            self._update_data_age_indicators()
+    
+    def gps_satellites_cb(self, msg, source='wifi'):
+        """Unified callback for GPS satellite count"""
+        now = time.time()
+        
+        with self.state_lock:
+            if source == 'wifi':
+                self.last_wifi_update['gps_satellites'] = now
+                self.state['gps_satellites'] = msg.data
+                self.state['data_source'] = 'WiFi'
+                if self.debug_mode:
+                    self.get_logger().debug(f"GPS satellites (WiFi): {msg.data}")
+            elif source == 'lora':
+                self.last_lora_update['gps_satellites'] = now
+                wifi_age = now - self.last_wifi_update.get('gps_satellites', 0)
+                if wifi_age > 2.0:
+                    self.state['gps_satellites'] = msg.data
+                    self.state['data_source'] = 'LoRa'
+                    if self.debug_mode:
+                        self.get_logger().debug(f"GPS satellites (LoRa): {msg.data}")
             
             self._update_data_age_indicators()
     
@@ -667,9 +724,52 @@ class ArgoWebDashboard(Node):
 
 def main(args=None):
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Argo Web Dashboard')
+    parser = argparse.ArgumentParser(
+        description='Argo Web Dashboard - Mobile-friendly monitoring and control interface',
+        epilog='''
+Purpose:
+  Provides a web-based interface for monitoring and controlling the Argo autonomous sailboat.
+  Optimized for mobile devices with large touch targets and real-time status updates.
+
+Features:
+  - Real-time system monitoring (nodes, battery, GPS, sensors, wind)
+  - Controller switching (Proportional, Wind-Aware, Return-to-Home)
+  - System control (start/stop, pause, recording)
+  - GPS tracking with satellite count and fix status
+  - LoRa communication monitoring and fallback
+  - Mobile-optimized interface for phone/tablet access
+
+Local Access:
+  http://localhost:8081 or http://127.0.0.1:8081
+
+Remote Access:
+  http://ORANGEPI_IP:8081 (replace ORANGEPI_IP with actual IP address)
+  
+  To find the IP address:
+    hostname -I
+    or
+    ip addr show | grep inet
+
+Usage Examples:
+  # Start with normal logging
+  python3 argo_web_dashboard.py
+  
+  # Start with debug logging (shows HTTP requests)
+  python3 argo_web_dashboard.py --debug
+  
+  # Run as ROS2 node
+  ros2 run argo argo_web_dashboard --debug
+
+Troubleshooting:
+  - If port 8081 is in use, the dashboard will refuse to start and show conflicting processes
+  - Use --debug to see detailed HTTP request logs
+  - Check ROS2 topics are publishing: ros2 topic list | grep -E "(gps|battery|compass)"
+  - Verify system is running: ros2 node list
+        ''',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument('--debug', action='store_true', 
-                       help='Enable debug mode (shows HTTP request logs)')
+                       help='Enable debug mode (shows HTTP request logs and detailed topic data)')
     known_args, unknown_args = parser.parse_known_args(args)
     
     rclpy.init(args=unknown_args)
