@@ -124,7 +124,17 @@ class ArgoLifecycleManager:
 
         # Nodes to exclude (running as independent services)
         # - battery_water: Runs as independent service for critical battery monitoring
+        # - bno085: Runs as independent service when argo_bno085.service is active
         self.excluded_nodes = ['battery_water']
+        
+        # Check if BNO085 service is running and exclude bno085 node to avoid conflicts
+        try:
+            result = subprocess.run(['systemctl', 'is-active', 'argo_bno085.service'],
+                                    capture_output=True, text=True, timeout=2)
+            if result.returncode == 0 and result.stdout.strip() == 'active':
+                self.excluded_nodes.append('bno085')
+        except Exception:
+            pass  # If we can't check service status, don't exclude
         
         # Convert to .py format for process matching and handle special nodes
         self.expected_nodes = []
@@ -205,7 +215,8 @@ class ArgoLifecycleManager:
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',
             'argo_transform_publisher.py': '/argo_transform_publisher/health',
-            'argo_boat_visualization.py': '/argo_boat_visualization/health'
+            'argo_boat_visualization.py': '/argo_boat_visualization/health',
+            'bno085.py': '/bno085_bridge/health'  # BNO085 bridge health service
         }
         
         # Also keep health topics for backward compatibility
@@ -215,7 +226,8 @@ class ArgoLifecycleManager:
             'anem.py': '/anem_health',
             'battery_water.py': '/battery_water_health',
             'rudder_sail_radio.py': '/rudder_sail_radio_health',
-            'temp_monitor.py': '/temp_monitor_health'
+            'temp_monitor.py': '/temp_monitor_health',
+            'bno085.py': '/imu_health'  # BNO085 IMU health status
         }
         
         # Create subscribers for health topics

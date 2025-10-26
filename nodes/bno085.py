@@ -183,6 +183,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Imu, MagneticField
 from geometry_msgs.msg import Vector3
 from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
 import math
 import sys
 import time
@@ -209,15 +210,21 @@ class BNO085Bridge(Node):
         self.pub_gyro = self.create_publisher(Vector3, '/gyro', 10)
         self.pub_health = self.create_publisher(Bool, '/imu_health', 10)
         
+        # Health service (for lifecycle manager queries)
+        self.health_service = self.create_service(
+            Trigger, '/bno085_bridge/health', self._handle_health_request)
+        
         # Subscribers (from BNO08x driver)
         self.sub_imu = self.create_subscription(Imu, '/imu', self.imu_callback, 10)
         self.sub_mag = self.create_subscription(MagneticField, '/magnetic_field', self.mag_callback, 10)
         
-        # Health monitoring and recovery tracking
-        self.health_status = False  # Start unhealthy until first data received
+        # Health monitoring - simple KISS approach
+        self.health_status = False  # Start unhealthy until we get driver data
         self.last_imu_time = None
-        self.last_successful_read_time = time.time()
         self.health_check_timer = self.create_timer(1.0, self._check_health)
+        
+        # Publish initial health status
+        self._publish_health_status(False)
         
         # I2C error recovery tracking
         self.node_healthy = False  # Track if we're receiving data
@@ -260,23 +267,10 @@ class BNO085Bridge(Node):
         """Process IMU message: extract heading, gyro, accel."""
         current_time = time.time()
         
-        # Update health tracking
+        # Update health tracking - simple KISS approach
         self.last_imu_time = current_time
-        self.last_successful_read_time = current_time
-        self.consecutive_failures = 0
         
-        # Mark as healthy if we were unhealthy
-        if not self.node_healthy:
-            self.node_healthy = True
-            self.recovery_attempt_count = 0
-            self.total_errors_this_session = 0
-            self.last_unreachable_log_time = 0.0
-            self.get_logger().info("BNO085 I2C communication recovered - data flowing normally")
-            
-            # Switch back to normal health check interval if in recovery mode
-            if self.in_recovery_mode:
-                self._switch_to_normal_mode()
-        
+        # Set health to true when we get driver data
         if not self.health_status:
             self._publish_health_status(True)
         
@@ -311,57 +305,36 @@ class BNO085Bridge(Node):
         pass
     
     def _check_health(self):
-        """Periodic health check with I2C error detection and recovery."""
+        """Simple health check - timeout if no driver data."""
         current_time = time.time()
         
-        if self.last_imu_time is None:
-            # No data received yet
+        # If we have no IMU data or it's stale (3+ seconds), mark unhealthy
+        if self.last_imu_time is None or (current_time - self.last_imu_time) > 3.0:
             if self.health_status:
                 self._publish_health_status(False)
-            
-            # Check if we should attempt recovery
-            time_since_start = current_time - self.last_successful_read_time
-            if time_since_start > 5.0 and not self.node_healthy:
-                self._attempt_recovery(current_time)
-            return
-        
-        # Check if data is stale (no data for 3 seconds = likely I2C failure)
-        time_since_last = current_time - self.last_imu_time
-        
-        if time_since_last > 3.0:
-            # Data is stale - likely I2C communication failure
-            self.consecutive_failures += 1
-            self.total_errors_this_session += 1
-            
-            if self.health_status:
-                self.get_logger().warn(f"No IMU data for {time_since_last:.1f}s - I2C communication issue detected")
-                self._publish_health_status(False)
-            
-            # Mark node as unhealthy
-            if self.node_healthy:
-                self.node_healthy = False
-                self.get_logger().warn("BNO085 marked UNHEALTHY - switching to recovery mode")
-                self._switch_to_recovery_mode()
-            
-            # Attempt recovery
-            self._attempt_recovery(current_time)
-            
-        elif not self.health_status:
-            # Data recovered
-            self._publish_health_status(True)
+        else:
+            # We have recent data, ensure we're healthy
+            if not self.health_status:
+                self._publish_health_status(True)
     
     def _publish_health_status(self, is_healthy: bool):
         """Publish health status update."""
-        if self.health_status != is_healthy:
-            self.health_status = is_healthy
-            health_msg = Bool()
-            health_msg.data = is_healthy
-            self.pub_health.publish(health_msg)
-            
-            if is_healthy:
-                self.get_logger().info("BNO085 health: HEALTHY")
-            else:
-                self.get_logger().warn("BNO085 health: UNHEALTHY")
+        # Always publish health status (not just when it changes)
+        self.health_status = is_healthy
+        health_msg = Bool()
+        health_msg.data = is_healthy
+        self.pub_health.publish(health_msg)
+        
+        if is_healthy:
+            self.get_logger().info("BNO085 health: HEALTHY")
+        else:
+            self.get_logger().warn("BNO085 health: UNHEALTHY")
+    
+    def _handle_health_request(self, request, response):
+        """Handle health status service request."""
+        response.success = True
+        response.message = f"BNO085 bridge health: {'HEALTHY' if self.health_status else 'UNHEALTHY'}"
+        return response
     
     def _switch_to_recovery_mode(self):
         """Switch to low-frequency recovery mode (checking every 3 seconds)."""
