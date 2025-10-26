@@ -25,6 +25,7 @@ import threading
 import argparse
 import logging
 import signal
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -65,6 +66,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Health monitoring - track data reception
         self.last_boat_data_received = 0
         self.boat_data_timeout = 10.0  # seconds - consider unhealthy if no boat data for 10s
+        self.last_health_log_time = 0  # Track when we last logged health status
+        self.last_logged_health_state = None  # Track last logged state (True=healthy, False=unhealthy)
+        self.health_log_throttle_s = 30.0  # Only log unchanged health status every 30s
         
         # Service callback threading fix - use flag-based approach
         self.health_service_requested = False
@@ -175,10 +179,10 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.create_subscription(String, 'lora/last_contact', self.lora_contact_cb, 10)
         
         # Timer for periodic status updates
-        self.create_timer(1/UPDATE_RATE, self.update_system_status)
+        self.status_timer = self.create_timer(1/UPDATE_RATE, self.update_system_status)
         
         # Timer for periodic health status checks
-        self.create_timer(2.0, self._check_health_status)
+        self.health_timer = self.create_timer(2.0, self._check_health_status)
         
         # Flask app setup
         self.app = Flask(__name__, 
@@ -199,6 +203,10 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Configure Flask to use our custom formatter with node name prefix
             self._configure_flask_logging()
         
+        # Flask shutdown control
+        self.flask_shutdown_requested = False
+        self.signal_received = False  # Prevent recursive signal handling
+        
         # Start Flask in separate thread (daemon so it exits when main thread exits)
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
         self.flask_thread.start()
@@ -211,14 +219,29 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.get_logger().info('   Access from phone: http://ORANGEPI_IP:8081')
     
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully"""
+        """Handle shutdown signals gracefully (only once)"""
+        # Prevent recursive signal handling
+        if self.signal_received:
+            return
+        self.signal_received = True
+        
         self.get_logger().info(f"Received signal {signum}, initiating shutdown...")
         self.set_unhealthy("Node shutting down")
         
-        # Give Flask a moment to clean up
-        if hasattr(self, 'flask_thread') and self.flask_thread.is_alive():
-            self.get_logger().info("Waiting for Flask server to shutdown...")
-            self.flask_thread.join(timeout=2.0)
+        # Mark Flask as needing shutdown
+        self.flask_shutdown_requested = True
+        
+        # Cancel timers to stop health check spam
+        try:
+            if hasattr(self, 'status_timer'):
+                self.status_timer.cancel()
+            if hasattr(self, 'health_timer'):
+                self.health_timer.cancel()
+        except Exception:
+            pass
+        
+        # Trigger ROS2 shutdown to stop executor
+        raise KeyboardInterrupt()
     
     def _check_for_running_dashboard(self):
         """Check for running web dashboard processes and refuse to start if found."""
@@ -543,18 +566,42 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.get_logger().debug(f"Boat data received: {data_type} at {now}")
     
     def _check_health_status(self):
-        """Check health status based on boat data reception"""
+        """Check health status based on boat data reception (with throttled logging)"""
         now = time.time()
         time_since_data = now - self.last_boat_data_received
         
-        if time_since_data < self.boat_data_timeout:
+        # Determine current health state
+        is_healthy = time_since_data < self.boat_data_timeout
+        
+        # Check if we should log (state changed or enough time passed)
+        state_changed = self.last_logged_health_state != is_healthy
+        time_since_last_log = now - self.last_health_log_time
+        should_log = state_changed or time_since_last_log >= self.health_log_throttle_s
+        
+        if is_healthy:
             # We have recent boat data - healthy
             data_age = f"{time_since_data:.1f}s ago"
-            self.set_healthy(f"Receiving boat data ({data_age})")
+            if should_log:
+                self.set_healthy(f"Receiving boat data ({data_age})")
+                self.last_health_log_time = now
+                self.last_logged_health_state = True
+            else:
+                # Update health status silently (no logging)
+                self.health_status = True
+                self.health_details = f"Receiving boat data ({data_age})"
+                self.last_health_update = now
         else:
             # No recent boat data - unhealthy
             data_age = f"{time_since_data:.1f}s ago"
-            self.set_unhealthy(f"No boat data received ({data_age})")
+            if should_log:
+                self.set_unhealthy(f"No boat data received ({data_age})")
+                self.last_health_log_time = now
+                self.last_logged_health_state = False
+            else:
+                # Update health status silently (no logging)
+                self.health_status = False
+                self.health_details = f"No boat data received ({data_age})"
+                self.last_health_update = now
     
     def controller_state_cb(self, msg):
         with self.state_lock:
@@ -911,13 +958,6 @@ Troubleshooting:
         print(f"\n❌ Error: {e}")
     finally:
         # Ensure proper cleanup
-        try:
-            if hasattr(node, 'flask_thread') and node.flask_thread.is_alive():
-                print("🔄 Stopping Flask server...")
-                # Flask server cleanup is handled by daemon thread
-        except Exception:
-            pass
-        
         try:
             node.destroy_node()
         except Exception:
