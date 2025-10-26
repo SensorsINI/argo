@@ -635,8 +635,49 @@ class PowerController:
                 'SUDO_USER') or os.environ.get('USER') or 'orangepi'
             self.cached_display_env = ':0'
 
+    def _handle_gpio_conflicts(self):
+        """Handle GPIO conflicts by stopping conflicting services"""
+        try:
+            # Check if boot indicator service is running and stop it
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'is-active', 'argo_boot_indicator.service'],
+                capture_output=True, text=True, timeout=5
+            )
+            
+            if result.returncode == 0 and result.stdout.strip() == 'active':
+                logger.warning("Boot indicator service is still running - attempting to stop it")
+                
+                # Force stop the boot indicator service
+                stop_result = subprocess.run(
+                    ['sudo', 'systemctl', 'stop', 'argo_boot_indicator.service'],
+                    capture_output=True, text=True, timeout=10
+                )
+                
+                if stop_result.returncode == 0:
+                    logger.info("✅ Boot indicator service stopped successfully")
+                    # Give it a moment to release GPIO resources
+                    time.sleep(0.5)
+                else:
+                    logger.error(f"❌ Failed to stop boot indicator service: {stop_result.stderr}")
+                    
+                    # Try killing the process directly as fallback
+                    logger.warning("Attempting to kill boot indicator process directly")
+                    kill_result = subprocess.run(
+                        ['sudo', 'pkill', '-f', 'argo_boot_indicator.py'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    
+                    if kill_result.returncode == 0:
+                        logger.info("✅ Boot indicator process killed successfully")
+                        time.sleep(0.5)
+                    else:
+                        logger.error("❌ Failed to kill boot indicator process")
+                        
+        except Exception as e:
+            logger.error(f"Error handling GPIO conflicts: {e}")
+
     def init_gpio(self):
-        """Initialize GPIO pins"""
+        """Initialize GPIO pins with conflict resolution"""
         # Skip GPIO initialization if gpiod is not available in test mode
         if not _HAS_GPIOD:
             if self.test_mode:
@@ -653,11 +694,30 @@ class PowerController:
                 # Should never reach here due to check in __init__
                 raise RuntimeError("gpiod not available in production mode!")
 
-        try:
-            logger.info(f"Attempting to open GPIO chip: {self.GPIO_CHIP}")
-            self.chip = gpiod.Chip(self.GPIO_CHIP)
-            logger.info(f"Successfully opened GPIO chip: {self.GPIO_CHIP}")
+        # Handle GPIO conflicts before attempting to open chip
+        self._handle_gpio_conflicts()
 
+        # Retry logic for GPIO initialization
+        max_retries = 3
+        retry_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Attempting to open GPIO chip: {self.GPIO_CHIP} (attempt {attempt + 1}/{max_retries})")
+                self.chip = gpiod.Chip(self.GPIO_CHIP)
+                logger.info(f"Successfully opened GPIO chip: {self.GPIO_CHIP}")
+                break
+            except OSError as e:
+                if "Device or resource busy" in str(e) and attempt < max_retries - 1:
+                    logger.warning(f"GPIO chip busy (attempt {attempt + 1}/{max_retries}) - retrying in {retry_delay}s")
+                    self._handle_gpio_conflicts()  # Try to resolve conflicts again
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    raise
+
+        try:
             # Get line objects
             # NOTE: power_relay_line (GPIO 259) is NOT controlled by this service
             # Power relay control is handled exclusively by the shutdown hook
