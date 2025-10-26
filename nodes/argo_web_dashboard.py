@@ -24,6 +24,7 @@ import subprocess
 import threading
 import argparse
 import logging
+import signal
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -64,6 +65,10 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Health monitoring - track data reception
         self.last_boat_data_received = 0
         self.boat_data_timeout = 10.0  # seconds - consider unhealthy if no boat data for 10s
+        
+        # Service callback threading fix - use flag-based approach
+        self.health_service_requested = False
+        self.health_service_response = None
         
         # Initialize state storage (thread-safe with lock)
         self.state_lock = threading.Lock()
@@ -198,8 +203,22 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
         self.flask_thread.start()
         
+        # Add signal handler for graceful Flask shutdown
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        
         self.get_logger().info('🌐 Web dashboard started on http://0.0.0.0:8081')
         self.get_logger().info('   Access from phone: http://ORANGEPI_IP:8081')
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        self.get_logger().info(f"Received signal {signum}, initiating shutdown...")
+        self.set_unhealthy("Node shutting down")
+        
+        # Give Flask a moment to clean up
+        if hasattr(self, 'flask_thread') and self.flask_thread.is_alive():
+            self.get_logger().info("Waiting for Flask server to shutdown...")
+            self.flask_thread.join(timeout=2.0)
     
     def _check_for_running_dashboard(self):
         """Check for running web dashboard processes and refuse to start if found."""
@@ -545,6 +564,37 @@ class ArgoWebDashboard(ArgoBaseNode):
         with self.state_lock:
             self.state['controller_paused'] = msg.data
     
+    def _handle_health_request(self, request, response):
+        """Override ArgoBaseNode health service callback with flag-based approach"""
+        self.get_logger().info("🔥 HEALTH SERVICE CALLBACK CALLED!")
+        try:
+            # Set flag to indicate health service was requested
+            self.health_service_requested = True
+            
+            # Create response data
+            health_data = {
+                'healthy': self.health_status,
+                'details': self.health_details,
+                'timestamp': self.last_health_update,
+                'node_name': self.node_name
+            }
+            
+            # Store response for Flask thread to use
+            self.health_service_response = health_data
+            
+            # Return immediate response
+            response.success = True
+            response.message = json.dumps(health_data)
+            
+            self.get_logger().info(f"🔥 Health service response: {response.message}")
+            return response
+            
+        except Exception as e:
+            self.get_logger().error(f"🔥 Health service callback error: {e}")
+            response.success = False
+            response.message = f"Health check failed: {e}"
+            return response
+    
     # ==================== Utility Functions ====================
     
     def _calculate_distance(self, lat1, lon1, lat2, lon2):
@@ -857,10 +907,27 @@ Troubleshooting:
         executor.spin()
     except KeyboardInterrupt:
         print("\n🛑 Shutting down web dashboard...")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        # Ensure proper cleanup
+        try:
+            if hasattr(node, 'flask_thread') and node.flask_thread.is_alive():
+                print("🔄 Stopping Flask server...")
+                # Flask server cleanup is handled by daemon thread
+        except Exception:
+            pass
+        
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+            
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
