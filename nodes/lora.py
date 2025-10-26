@@ -223,7 +223,7 @@ class LoRaNode(ArgoBaseNode):
         self.sub_gps_cog = self.create_subscription(
             Float64, 'gps_cog', self.gps_cog_callback, 10)
         self.sub_battery_voltage = self.create_subscription(
-            Float64, 'battery_voltage', self.battery_voltage_callback, 10)
+            Float32, 'battery_voltage', self.battery_voltage_callback, 10)
         self.sub_human_controlled = self.create_subscription(
             Bool, 'human_controlled', self.human_controlled_callback, 10)
         # Add GPS position and compass heading subscriptions
@@ -1028,7 +1028,7 @@ Topics:
     /lora_tx_data: String - Data to transmit
     /gps_sog: Float64 - Speed for status packets
     /gps_cog: Float64 - Course for status packets
-    /battery_voltage: Float64 - Battery for status packets
+    /battery_voltage: Float32 - Battery for status packets
     /human_controlled: Bool - Control mode for status packets
 
 Services:
