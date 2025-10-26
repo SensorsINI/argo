@@ -199,6 +199,9 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Configure Flask to use our custom formatter with node name prefix
             self._configure_flask_logging()
         
+        # Flask shutdown control
+        self.flask_shutdown_requested = False
+        
         # Start Flask in separate thread (daemon so it exits when main thread exits)
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
         self.flask_thread.start()
@@ -215,10 +218,14 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.get_logger().info(f"Received signal {signum}, initiating shutdown...")
         self.set_unhealthy("Node shutting down")
         
-        # Give Flask a moment to clean up
-        if hasattr(self, 'flask_thread') and self.flask_thread.is_alive():
-            self.get_logger().info("Waiting for Flask server to shutdown...")
-            self.flask_thread.join(timeout=2.0)
+        # Request Flask shutdown via internal shutdown endpoint
+        try:
+            import requests
+            requests.post('http://127.0.0.1:8081/shutdown', timeout=0.5)
+        except Exception:
+            pass  # Flask may already be shutting down or not responding
+        
+        # Don't wait for Flask thread - it's a daemon thread and will exit with main process
     
     def _check_for_running_dashboard(self):
         """Check for running web dashboard processes and refuse to start if found."""
@@ -683,6 +690,20 @@ class ArgoWebDashboard(ArgoBaseNode):
     def setup_routes(self):
         """Setup Flask routes for web interface."""
         
+        @self.app.route('/shutdown', methods=['POST'])
+        def shutdown():
+            """Shutdown Flask server gracefully."""
+            shutdown_func = request.environ.get('werkzeug.server.shutdown')
+            if shutdown_func is None:
+                # Running with production server, use alternative shutdown
+                import os
+                import signal
+                os.kill(os.getpid(), signal.SIGTERM)
+                return jsonify({'message': 'Server shutting down...'})
+            else:
+                shutdown_func()
+                return jsonify({'message': 'Server shutting down...'})
+        
         @self.app.route('/')
         def index():
             """Main dashboard page."""
@@ -911,13 +932,6 @@ Troubleshooting:
         print(f"\n❌ Error: {e}")
     finally:
         # Ensure proper cleanup
-        try:
-            if hasattr(node, 'flask_thread') and node.flask_thread.is_alive():
-                print("🔄 Stopping Flask server...")
-                # Flask server cleanup is handled by daemon thread
-        except Exception:
-            pass
-        
         try:
             node.destroy_node()
         except Exception:
