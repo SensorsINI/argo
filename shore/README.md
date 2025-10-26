@@ -67,10 +67,14 @@ Running `lora_shore.py` on Windows via Docker is **NOT RECOMMENDED** due to USB 
 
 **If you still want to try Docker** (not supported):
 ```bash
-# This likely won't work well, but you can try
-docker run -it --device=/dev/ttyACM0 ubuntu:22.04 bash
-# Install ROS2 and Python dependencies inside container
-# USB device forwarding through Docker Desktop is unreliable
+# Pre-built ROS2 Docker images are available:
+# https://hub.docker.com/r/osrf/ros2
+docker pull osrf/ros:humble-desktop
+
+# Run with USB device access (still unreliable on Windows):
+docker run -it --device=/dev/ttyACM0 osrf/ros:humble-desktop bash
+# Inside container, you'd still need to install pyserial and run lora_shore.py
+# USB device forwarding through Docker Desktop is unreliable on Windows
 ```
 
 ### Architecture: LoRa Shore vs Web Dashboard
