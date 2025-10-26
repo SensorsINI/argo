@@ -30,7 +30,8 @@ Test Modes:
     pins     - Toggle CS and RST pins for oscilloscope verification
                Shows which physical pins to probe
     reset    - Test reset sequence
-    version  - Read chip version repeatedly
+    version  - Read chip version repeatedly with reset before each read
+    spi      - Continuous SPI transactions for oscilloscope debugging
     regs     - Read multiple registers
     all      - Run all tests
 """
@@ -102,16 +103,19 @@ class LoRaSPITest:
         print(f"  Mode: {SPI_MODE}, Speed: {SPI_MAX_SPEED} Hz")
         print(f"  Bits per word: 8")
         
-    def reset_module(self):
+    def reset_module(self, quiet=False):
         """Reset the LoRa module"""
-        print("\nResetting LoRa module...")
-        print("  RST -> LOW")
+        if not quiet:
+            print("\nResetting LoRa module...")
+            print("  RST -> LOW")
         self.rst_line.set_value(0)
         time.sleep(0.1)  # 100ms reset pulse (increased for reliability)
-        print("  RST -> HIGH")
+        if not quiet:
+            print("  RST -> HIGH")
         self.rst_line.set_value(1)
         time.sleep(0.01)  # 10ms after reset
-        print("  Reset complete")
+        if not quiet:
+            print("  Reset complete")
         
     def spi_write_register(self, reg_addr, value):
         """Write to SX1276 register via SPI"""
@@ -228,26 +232,63 @@ class LoRaSPITest:
             print(f"  Version after reset: 0x{version:02X}")
             
     def test_version_repeated(self):
-        """Read version register repeatedly"""
+        """Read version register repeatedly with reset before each read"""
         print("\n" + "="*60)
-        print("TEST: Repeated Version Reads")
+        print("TEST: Repeated Version Reads (with reset)")
         print("="*60)
         print("Press Ctrl+C to stop...")
+        print("NOTE: Each read is preceded by a module reset")
+        print()
         
         try:
             count = 0
             last_version = None
             while True:
+                # Reset module before each read (quiet mode for cleaner output)
+                self.reset_module(quiet=True)
+                
+                # Read version after reset
                 version = self.spi_read_register(REG_VERSION)
                 count += 1
                 
                 if version != last_version:
-                    print(f"\nRead #{count}: Version = 0x{version:02X}")
+                    print(f"Read #{count}: Version = 0x{version:02X} (after reset)")
                     last_version = version
                 else:
-                    print(f"\rRead #{count}: Version = 0x{version:02X} (stable)", end='', flush=True)
+                    print(f"Read #{count}: Version = 0x{version:02X} (stable after reset)")
                     
-                time.sleep(0.1)
+                time.sleep(0.5)  # Longer delay to account for reset time
+                
+        except KeyboardInterrupt:
+            print("\n  Stopped by user")
+    
+    def test_spi_continuous(self):
+        """Continuously send SPI data for oscilloscope debugging"""
+        print("\n" + "="*60)
+        print("TEST: Continuous SPI Transactions")
+        print("="*60)
+        print("Press Ctrl+C to stop...")
+        print()
+        print("Oscilloscope probing:")
+        print("  - CS (Pin 7)   - Should pulse LOW during each transaction")
+        print("  - SCLK (Pin 23) - Should show clock bursts during CS LOW")
+        print("  - MOSI (Pin 19) - Should show data during CS LOW")
+        print("  - MISO (Pin 21) - Should show return data during CS LOW")
+        print()
+        
+        try:
+            count = 0
+            while True:
+                count += 1
+                # Continuously read version register
+                self.cs_line.set_value(0)  # CS LOW
+                time.sleep(0.001)  # Short delay
+                result = self.spi.xfer2([REG_VERSION & 0x7F, 0x00])
+                time.sleep(0.001)  # Short delay
+                self.cs_line.set_value(1)  # CS HIGH
+                
+                print(f"\rTransaction #{count}: Version = 0x{result[1]:02X}", end='', flush=True)
+                time.sleep(0.05)  # 50ms between transactions for scope triggering
                 
         except KeyboardInterrupt:
             print("\n  Stopped by user")
@@ -310,9 +351,9 @@ def main():
             return 0
         test_mode = sys.argv[1]
         
-    if test_mode not in ['basic', 'pins', 'reset', 'version', 'regs', 'all']:
+    if test_mode not in ['basic', 'pins', 'reset', 'version', 'spi', 'regs', 'all']:
         print(f"Unknown test mode: {test_mode}")
-        print("Valid modes: basic, pins, reset, version, regs, all")
+        print("Valid modes: basic, pins, reset, version, spi, regs, all")
         return 1
         
     print("="*60)
@@ -340,6 +381,9 @@ def main():
             
         if test_mode == 'version' or test_mode == 'all':
             tester.test_version_repeated()
+        
+        if test_mode == 'spi':
+            tester.test_spi_continuous()
             
         if test_mode == 'regs' or test_mode == 'all':
             tester.test_registers()
