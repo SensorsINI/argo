@@ -485,6 +485,9 @@ class ArgoLifecycleManager:
         """Launch all expected nodes directly without using ros2 launch"""
         print("🚀 Launching nodes directly...")
         
+        # Clear the process cache so we get fresh results after launching
+        self.node_manager.clear_process_cache()
+        
         # Get the nodes directory
         nodes_dir = os.path.join(self.argo_dir, 'nodes')
         
@@ -992,6 +995,10 @@ class ArgoLifecycleManager:
     def stop(self) -> bool:
         """Stop the Argo launch process and all related nodes"""
         print("🛑 Stopping Argo ROS2 nodes...")
+        
+        # Clear the process cache so next query gets fresh results
+        if hasattr(self, 'node_manager'):
+            self.node_manager.clear_process_cache()
         
         success = True
         

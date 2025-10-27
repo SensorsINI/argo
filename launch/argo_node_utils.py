@@ -51,6 +51,7 @@ class ArgoNodeManager:
         self._discovered_nodes = None
         self._special_nodes = ['foxglove_bridge']  # Nodes not in nodes/ folder
         self._simulation_only_nodes = ['argo_unified_simulator_bridge']  # Nodes only for simulation mode
+        self._cached_processes = None  # Cache for get_all_ros_processes results
     
     def discover_nodes(self, exclude_simulation_only: bool = False) -> List[str]:
         """
@@ -146,6 +147,10 @@ class ArgoNodeManager:
         Returns:
             Dictionary mapping node names to lists of process info
         """
+        # Return cached results if available (nodes don't change during runtime)
+        if self._cached_processes is not None:
+            return self._cached_processes
+        
         nodes = self.discover_nodes()
         
         # Build grep pattern for all nodes
@@ -207,7 +212,16 @@ class ArgoNodeManager:
                     'cmd': cmd_line
                 })
         
+        # Cache the result for future calls
+        self._cached_processes = processes
         return processes
+    
+    def clear_process_cache(self):
+        """
+        Clear the cached process results to force a fresh lookup on next call.
+        Useful when nodes are started/stopped or during testing.
+        """
+        self._cached_processes = None
     
     def get_node_status(self) -> Dict[str, Dict]:
         """
