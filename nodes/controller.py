@@ -183,7 +183,7 @@ class BoatState:
     # Controller state
     target_heading: Optional[float] = None   # degrees
 
-    # Battery/Water monitoring (from battery_water node with persistent QoS)
+    # Battery/Water monitoring (from argo_battery_water node with persistent QoS)
     battery_voltage: Optional[float] = None      # volts
     battery_remaining_pct: Optional[float] = None  # percentage
     battery_low_alert: bool = False              # low battery alert
@@ -901,31 +901,31 @@ class ControllerNode(Node):
 
     # --- Battery/Water Monitoring Callbacks ---
     def battery_voltage_callback(self, msg):
-        """Receive battery voltage from battery_water node"""
+        """Receive battery voltage from argo_battery_water node"""
         # Always process battery data for safety, even when paused
         self.boat_state.battery_voltage = msg.data
 
     def battery_remaining_callback(self, msg):
-        """Receive battery remaining percentage from battery_water node"""
+        """Receive battery remaining percentage from argo_battery_water node"""
         # Always process battery data for safety, even when paused
         self.boat_state.battery_remaining_pct = msg.data
 
     def battery_low_alert_callback(self, msg):
-        """Receive battery low alert from battery_water node"""
+        """Receive battery low alert from argo_battery_water node"""
         # Always process safety alerts, even when paused
         self.boat_state.battery_low_alert = msg.data
         if msg.data:
             self.get_logger().warn("🔋 LOW BATTERY ALERT - Consider returning to shore")
 
     def saltwater_alert_callback(self, msg):
-        """Receive saltwater intrusion alert from battery_water node"""
+        """Receive saltwater intrusion alert from argo_battery_water node"""
         # Always process safety alerts, even when paused
         self.boat_state.saltwater_alert = msg.data
         if msg.data:
             self.get_logger().warn("💧 SALTWATER INTRUSION ALERT - Check hull integrity")
 
     def humidity_alert_callback(self, msg):
-        """Receive humidity alert from battery_water node"""
+        """Receive humidity alert from argo_battery_water node"""
         # Always process safety alerts, even when paused
         self.boat_state.humidity_alert = msg.data
         if msg.data:

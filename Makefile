@@ -132,7 +132,7 @@ install-foxglove-bridge:
 	@echo "✅ Foxglove Bridge installed successfully!"
 	@echo ""
 	@echo "🔧 Quick Start:"
-	@echo "  1. Run your Python ROS2 node: python3 nodes/battery_water.py"
+	@echo "  1. Run your Python ROS2 node: python3 nodes/argo_battery_water.py"
 	@echo "  2. In another terminal: ros2 run foxglove_bridge foxglove_bridge"
 	@echo "  3. Connect Foxglove Studio to: ws://$(shell hostname -I | awk '{print $$1}'):8765"
 
@@ -291,7 +291,7 @@ uninstall-power-control:
 	@$(MAKE) -C power_control uninstall
 
 # ==================== BATTERY MONITORING ====================
-# Battery monitoring is now integrated into battery_water.py node
+# Battery monitoring is now integrated into argo_battery_water.py node
 # CSV files are automatically created in /var/log.hdd/persistent/
 # No separate service installation needed
 

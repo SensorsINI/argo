@@ -81,7 +81,7 @@ Check these scripts that use argparse and would benefit:
 - `nodes/controller.py`
 - `nodes/gps.py`
 - `nodes/anem.py`
-- `nodes/battery_water.py`
+- `nodes/argo_battery_water.py`
 - `nodes/rudder_sail_radio.py`
 - `nodes/temp_monitor.py`
 - `nodes/lora.py`

@@ -309,3 +309,4 @@ help:
 	@echo ""
 	@echo "Log files are stored in: $(PERSISTENT_LOG_DIR)"
 	@echo "Monitor logs with: tail -f $(PERSISTENT_LOG_DIR)/*.log"
+

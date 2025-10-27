@@ -141,7 +141,7 @@ Type=simple
 User=orangepi
 WorkingDirectory=/home/orangepi/argo/nodes
 Environment=ROS_DOMAIN_ID=0
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/nodes/battery_water.py'
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/nodes/argo_battery_water.py'
 Restart=always
 RestartSec=5
 
@@ -206,7 +206,7 @@ bash -c 'source /opt/ros/humble/setup.bash && ros2 service call /battery_status 
 
 ## Files
 
-- `battery_water.py` - Main battery monitoring ROS2 node
+- `argo_battery_water.py` - Main battery monitoring ROS2 node
 - `battery_water.service` - Systemd service configuration
 - `Makefile` - Installation and management commands
 - `README_BATTERY_SERVICE.md` - This documentation

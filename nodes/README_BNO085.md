@@ -8,7 +8,7 @@ The Argo autonomous sailboat uses the [Adafruit BNO085](https://www.adafruit.com
 
 ### System Overview
 
-**IMPORTANT:** The BNO085 uses a **two-process architecture** unlike other Argo sensor nodes like `anem.py`, `gps.py`, or `battery_water.py` which directly access hardware. This dual-process design requires systemd service management for production use.
+**IMPORTANT:** The BNO085 uses a **two-process architecture** unlike other Argo sensor nodes like `anem.py`, `gps.py`, or `argo_battery_water.py` which directly access hardware. This dual-process design requires systemd service management for production use.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -50,7 +50,7 @@ The Argo autonomous sailboat uses the [Adafruit BNO085](https://www.adafruit.com
 |-------------|-----------|--------------|------------------|
 | `anem.py` | Direct (smbus2) | Single Python process | ❌ No |
 | `gps.py` | N/A (UART) | Single Python process | ❌ No |
-| `battery_water.py` | Direct (smbus2) | Single Python process | ✅ Yes (basic service) |
+| `argo_battery_water.py` | Direct (smbus2) | Single Python process | ✅ Yes (basic service) |
 | **`bno085.py`** | **Via C++ driver** | **Two processes + systemd** | **✅ Yes (dual-process service)** |
 
 ### Systemd Service Integration

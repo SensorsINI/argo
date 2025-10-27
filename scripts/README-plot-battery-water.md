@@ -1,6 +1,6 @@
 # Battery Water Data Plotting
 
-The `plot-battery-water.py` script provides comprehensive visualization of battery and sensor data collected by the `battery_water.py` ROS2 node.
+The `plot-battery-water.py` script provides comprehensive visualization of battery and sensor data collected by the `argo_battery_water.py` ROS2 node.
 
 ## Features
 
@@ -61,7 +61,7 @@ The script expects CSV files with the following columns:
 - `battery_low_alert`: Battery low alert (0/1)
 - `saltwater_alert`: Saltwater intrusion alert (0/1)
 - `humidity_alert`: High humidity alert (0/1)
-- `battery_water_health`: Overall health status (0/1)
+- `argo_battery_water_health`: Overall health status (0/1)
 
 ## Output Files
 
@@ -116,7 +116,7 @@ python3 plot-battery-water.py --no-plots
 
 ## Integration with Battery Water Node
 
-The plotting script works seamlessly with the `battery_water.py` node:
+The plotting script works seamlessly with the `argo_battery_water.py` node:
 - CSV files are automatically created every 30 seconds
 - Files are stored in `/var/log.hdd/persistent/`
 - Script auto-detects the latest file
@@ -126,8 +126,8 @@ The plotting script works seamlessly with the `battery_water.py` node:
 
 ### No CSV Files Found
 ```bash
-# Check if battery_water.py is running
-ros2 node list | grep battery_water_node
+# Check if argo_battery_water.py is running
+ros2 node list | grep argo_battery_water_node
 
 # Check if CSV files exist
 ls -la /var/log.hdd/persistent/battery-monitor-*.csv

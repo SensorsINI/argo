@@ -2,7 +2,7 @@
 """
 Battery Water Data Plotting Script
 
-This script reads CSV data from battery_water.py and creates visualizations
+This script reads CSV data from argo_battery_water.py and creates visualizations
 for battery voltage decay, sensor trends, and alert patterns.
 
 Features:
@@ -204,12 +204,12 @@ def load_battery_data(csv_file_paths):
             # Check if we have the expected columns
             if 'timestamp' not in df.columns:
                 # If timestamp column is missing, try reading without headers
-                # Updated column names to match current battery_water.py output
+                # Updated column names to match current argo_battery_water.py output
                 column_names = [
                     'timestamp', 'battery_voltage', 'battery_remaining_pct',
                     'saltwater_voltage', 'sail_current', 'pcb_temperature',
                     'relative_humidity', 'battery_low_alert', 'saltwater_alert',
-                    'humidity_alert', 'battery_water_health', 'charging_status', 'ac_power_present'
+                    'humidity_alert', 'argo_battery_water_health', 'charging_status', 'ac_power_present'
                 ]
                 df = pd.read_csv(csv_file_path, header=None, names=column_names)
                 print(
@@ -537,7 +537,7 @@ def plot_alerts(df, output_dir):
 
     # Health status
     plt.subplot(3, 1, 3)
-    plt.plot(plot_df['timestamp'], plot_df['battery_water_health'],
+    plt.plot(plot_df['timestamp'], plot_df['argo_battery_water_health'],
              'k-', linewidth=2, label='System Health')
     plt.title('Battery Water System Health',
               fontsize=SUBTITLE_FONT_SIZE, fontweight='bold')
@@ -616,7 +616,7 @@ def print_data_summary(df):
     battery_alerts = df['battery_low_alert'].sum()
     saltwater_alerts = df['saltwater_alert'].sum()
     humidity_alerts = df['humidity_alert'].sum()
-    health_failures = (df['battery_water_health'] == 0).sum()
+    health_failures = (df['argo_battery_water_health'] == 0).sum()
 
     print(f"\nAlerts:")
     print(f"  Battery Low: {battery_alerts} occurrences")
@@ -747,7 +747,7 @@ Examples:
         csv_file_paths = find_latest_csv_files(args.num_files)
         if not csv_file_paths:
             print("Error: No battery monitor CSV files found.")
-            print("Make sure battery_water.py is running and creating CSV files.")
+            print("Make sure argo_battery_water.py is running and creating CSV files.")
             sys.exit(1)
         print(f"\nConcatenating {len(csv_file_paths)} CSV file(s)")
 

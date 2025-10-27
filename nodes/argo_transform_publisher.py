@@ -65,7 +65,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.publish_static_transforms()
         
         # Timer for dynamic transforms
-        self.timer = self.create_timer(0.1, self.publish_dynamic_transforms)  # 10 Hz
+        self.timer = self.create_timer(0.1, self.publish_dynamic_transforms)  # period in seconds
         
         # Initialize health status - healthy when publishing successfully
         self.set_healthy("Transform publisher initialized")

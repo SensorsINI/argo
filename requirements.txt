@@ -38,7 +38,7 @@ psutil                   # System and process monitoring (lifecycle manager, con
 # These packages are optional and gracefully handled if not available
 
 # Data visualization (for testing and analysis)
-matplotlib               # Plotting for ADC testing (battery_water.py --test-adc)
+matplotlib               # Plotting for ADC testing (argo_battery_water.py --test-adc)
 pandas                   # Data analysis for CSV files and plotting scripts
 
 # ROS2 diagnostic system (optional, for advanced health monitoring)

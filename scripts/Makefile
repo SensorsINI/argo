@@ -56,8 +56,8 @@ test-battery-service:
 		echo "✅ Battery service is available"; \
 		ros2 service call /battery_status std_srvs/srv/Trigger; \
 	else \
-		echo "❌ Battery service not available - make sure battery_water node is running"; \
-		echo "   Start with: python3 ../nodes/battery_water.py"; \
+		echo "❌ Battery service not available - make sure argo_battery_water node is running"; \
+		echo "   Start with: python3 ../nodes/argo_battery_water.py"; \
 	fi
 
 

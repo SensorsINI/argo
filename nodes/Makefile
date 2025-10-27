@@ -19,7 +19,7 @@
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 SYSTEMD_SYSTEM_DIR := /etc/systemd/system
 BATTERY_WATER_SERVICE_FILE := argo_battery_water.service
-BATTERY_WATER_SCRIPT_FILE := battery_water.py
+BATTERY_WATER_SCRIPT_FILE := argo_battery_water.py
 
 .PHONY: help battery-water-install battery-water-uninstall battery-water-status battery-water-enable battery-water-disable battery-water-restart battery-water-start battery-water-stop battery-water-logs battery-water-logs-follow battery-water-check bno08x-help bno08x-init bno08x-build bno08x-test bno08x-launch bno08x-calibrate bno08x-clean bno085-service-install bno085-service-uninstall bno085-service-enable bno085-service-disable bno085-service-start bno085-service-stop bno085-service-restart bno085-service-status bno085-service-logs
 
@@ -33,8 +33,8 @@ help:
 	@echo "This Makefile manages multiple Argo robot services and components."
 	@echo ""
 	@echo "BATTERY WATER SERVICE (Critical Battery Monitoring):"
-	@echo "  battery-water-install  - Install battery_water service (requires sudo)"
-	@echo "  battery-water-uninstall - Remove battery_water service (requires sudo)"
+	@echo "  battery-water-install  - Install argo_battery_water service (requires sudo)"
+	@echo "  battery-water-uninstall - Remove argo_battery_water service (requires sudo)"
 	@echo "  battery-water-enable   - Enable service to start on boot"
 	@echo "  battery-water-disable  - Disable service from starting on boot"
 	@echo "  battery-water-start    - Start the battery service"

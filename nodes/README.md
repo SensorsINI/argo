@@ -144,7 +144,7 @@ ros2 run argo anem.py --debug_visually
 
 ### System Monitoring Nodes
 
-#### 4. `battery_water.py` - Power and Safety Monitoring Node
+#### 4. `argo_battery_water.py` - Power and Safety Monitoring Node
 **Purpose**: Monitors battery voltage, water intrusion, and environmental conditions
 
 **Hardware**:
@@ -170,11 +170,11 @@ ros2 run argo anem.py --debug_visually
 
 **Usage**:
 ```bash
-ros2 run argo battery_water.py
+ros2 run argo argo_battery_water.py
 # With debug terminal bars:
-ros2 run argo battery_water.py --debug
+ros2 run argo argo_battery_water.py --debug
 # ADC testing mode:
-ros2 run argo battery_water.py --test-adc
+ros2 run argo argo_battery_water.py --test-adc
 ```
 
 ### Control and Interface Nodes
@@ -279,7 +279,7 @@ The system is designed for ROS2 but launch files are being migrated from ROS1. C
 ros2 run argo gps.py &
 ros2 run argo imu.py &
 ros2 run argo anem.py &
-ros2 run argo battery_water.py &
+ros2 run argo argo_battery_water.py &
 ros2 run argo pwm.py &
 ros2 run argo control.py &
 ```

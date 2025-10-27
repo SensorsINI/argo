@@ -111,8 +111,8 @@ def generate_launch_description():
         
         # Battery/Water node
         ExecuteProcess(
-            cmd=[os.path.join(script_dir, 'battery_water.py')],
-            name='battery_water',
+            cmd=[os.path.join(script_dir, 'argo_battery_water.py')],
+            name='argo_battery_water',
             output='screen'
         ),
     ]

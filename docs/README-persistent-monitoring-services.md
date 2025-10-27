@@ -39,7 +39,7 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 
 ### 2. Battery Water Monitoring Service
 
-**Node**: `nodes/battery_water.py` (ROS2 node)  
+**Node**: `nodes/argo_battery_water.py` (ROS2 node)  
 **Installation**: `make -C scripts install-battery-monitor`  
 **Makefile**: `scripts/Makefile` (lines 28-35)
 
@@ -271,7 +271,7 @@ cat /var/log.hdd/persistent/boot-history.log
 | Log File Pattern | Generating Service | Purpose | Frequency |
 |------------------|-------------------|---------|-----------|
 | `thermal-YYYYMMDD.log` | `argo_thermal_monitor.service` | Argo thermal monitoring | 30s |
-| `battery-monitor-YYYYMMDD.csv` | `battery_water.py` (ROS2) | Battery/sensor data | 30s |
+| `battery-monitor-YYYYMMDD.csv` | `argo_battery_water.py` (ROS2) | Battery/sensor data | 30s |
 | `wifi-reconnect.log` | `argo_wifi_reconnect.service` | WiFi management | 5min |
 | `argo-power-control.log` | `argo_power_control.service` | Power control | Event-based |
 | `boot-history.log` | `boot-history-logger.service` | Boot events | Per boot |

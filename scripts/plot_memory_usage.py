@@ -34,7 +34,7 @@ def plot_memory_usage(csv_file):
     system_memory_gb = [float(row['system_memory_used_gb']) for row in data]
     
     # Get node names (excluding anem.py since it's not running)
-    expected_nodes = ['pwm.py', 'gps.py', 'imu.py', 'control.py', 'battery_water.py', 'temp_monitor.py']
+    expected_nodes = ['pwm.py', 'gps.py', 'imu.py', 'control.py', 'argo_battery_water.py', 'temp_monitor.py']
     
     # Create the plot with dual y-axes
     fig, ax1 = plt.subplots(figsize=(14, 10))

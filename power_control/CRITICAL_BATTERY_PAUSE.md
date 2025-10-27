@@ -17,7 +17,7 @@ def _pause_argo_system_for_power_conservation(self):
     This allows sensors (IMU, anemometer, LoRa) to enter hardware shutdown
     mode before system halt to conserve remaining battery power.
     
-    Critical nodes (battery_water, temp_monitor) are never paused.
+    Critical nodes (argo_battery_water, temp_monitor) are never paused.
     """
 ```
 
@@ -166,7 +166,7 @@ def _shutdown_gps_hardware(self):
 
 These nodes are already excluded from pause operations (defined in `launch/argo_lifecycle_manager.py`):
 
-- **`battery_water.py`** - Critical for battery monitoring
+- **`argo_battery_water.py`** - Critical for battery monitoring
 - **`temp_monitor.py`** - Critical for system temperature monitoring
 
 ## Testing

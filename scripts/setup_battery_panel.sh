@@ -21,10 +21,10 @@ if [ ! -f "/opt/ros/humble/setup.bash" ]; then
     exit 1
 fi
 
-# Check if battery_water node is running
+# Check if argo_battery_water node is running
 if ! ros2 service list 2>/dev/null | grep -q "/battery_status"; then
-    echo "⚠️  Warning: Battery service not available. Make sure the battery_water node is running."
-    echo "   You can start it with: python3 $PROJECT_ROOT/nodes/battery_water.py"
+    echo "⚠️  Warning: Battery service not available. Make sure the argo_battery_water node is running."
+    echo "   You can start it with: python3 $PROJECT_ROOT/nodes/argo_battery_water.py"
 fi
 
 echo "✅ Environment checks passed"
@@ -66,7 +66,7 @@ echo ""
 echo "🔧 Troubleshooting:"
 echo ""
 echo "If the battery status doesn't appear:"
-echo "1. Check that the battery_water node is running:"
+echo "1. Check that the argo_battery_water node is running:"
 echo "   ros2 service list | grep battery_status"
 echo ""
 echo "2. Test the genmon script output:"
@@ -78,7 +78,7 @@ echo ""
 echo "4. Check ROS2 environment is sourced:"
 echo "   source /opt/ros/humble/setup.bash"
 echo ""
-echo "5. Verify the battery_water node is healthy:"
+echo "5. Verify the argo_battery_water node is healthy:"
 echo "   ros2 service call /battery_status std_srvs/srv/Trigger"
 echo ""
 echo "✨ Battery status panel setup complete!"

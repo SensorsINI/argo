@@ -141,9 +141,9 @@ class ArgoLifecycleManager:
         discovered_nodes = self.node_manager.discover_nodes(exclude_simulation_only=True)
 
         # Nodes to exclude (running as independent services)
-        # - battery_water: Runs as independent service for critical battery monitoring
+        # - argo_battery_water: Runs as independent service for critical battery monitoring
         # - bno085: Runs as independent service when argo_bno085.service is active
-        self.excluded_nodes = ['battery_water']
+        self.excluded_nodes = ['argo_battery_water']
         
         # Check if BNO085 service is running and exclude bno085 node to avoid conflicts
         try:
@@ -232,7 +232,7 @@ class ArgoLifecycleManager:
             'gps.py': '/gps_node/health',
             'lora.py': '/lora_node/health', 
             'anem.py': '/anemometer_node/health',
-            'battery_water.py': '/battery_water_node/health',
+            'argo_battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',
             'argo_transform_publisher.py': '/argo_transform_publisher/health',
@@ -245,7 +245,7 @@ class ArgoLifecycleManager:
             'gps.py': '/gps_health',
             'lora.py': '/lora_health',  # Updated to use ArgoBaseNode health topic
             'anem.py': '/anem_health',
-            'battery_water.py': '/battery_water_health',
+            'argo_battery_water.py': '/battery_water_health',
             'rudder_sail_radio.py': '/rudder_sail_radio_health',
             'temp_monitor.py': '/temp_monitor_health',
             'bno085.py': '/imu_health'  # BNO085 IMU health status
@@ -285,7 +285,7 @@ class ArgoLifecycleManager:
             'gps.py': '/gps_node/health',
             'lora.py': '/lora_node/health', 
             'anem.py': '/anemometer_node/health',
-            'battery_water.py': '/battery_water_node/health',
+            'argo_battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',
             'argo_transform_publisher.py': '/argo_transform_publisher/health',
@@ -1088,7 +1088,7 @@ class ArgoLifecycleManager:
         - anem.py (conflicts with simulator wind topics)
         - rudder_sail_radio.py (conflicts with simulator control)
         
-        Note: battery_water.py and temp_monitor.py run as independent systemd services
+        Note: argo_battery_water.py and temp_monitor.py run as independent systemd services
         """
         self.simulation_mode = mode
         print(f"🚢 Starting Argo in SIMULATION mode ({mode.upper()})...")
@@ -1113,7 +1113,7 @@ class ArgoLifecycleManager:
             return False
 
         # Define simulation mode node scripts (exclude conflicting hardware nodes)
-        # Note: battery_water.py and temp_monitor.py run as independent systemd services
+        # Note: argo_battery_water.py and temp_monitor.py run as independent systemd services
         self.expected_nodes = [
             # Provides simulated sensor data + keyboard control
             "argo_unified_simulator_bridge.py",
@@ -1561,9 +1561,9 @@ class ArgoLifecycleManager:
             node_status = self._get_node_status()
 
             # Battery and alerts
-            # Note: battery_water.py runs as independent service
+            # Note: argo_battery_water.py runs as independent service
             battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = None, None, None, None, None, None
-            # Check if battery_water service is running independently
+            # Check if argo_battery_water service is running independently
             battery_service_running = False
             try:
                 result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
@@ -2189,7 +2189,7 @@ class ArgoLifecycleManager:
 
         expected_map = {
             "anem": [0x21, 0x22, 0x23],
-            "battery_water": [0x34, 0x44],  # 0x34: ADC, 0x44: humidity
+            "argo_battery_water": [0x34, 0x44],  # 0x34: ADC, 0x44: humidity
             "bno085": [0x4a],  # BNO085 IMU at 0x4a (replaces old IMU at 0x69)
         }
 
@@ -2288,7 +2288,7 @@ CONTROLLER PAUSE:
 
 NODE MANAGEMENT:
   Excluded Nodes:
-    - battery_water and argo_power_control: Run as independent systemd services for critical monitoring
+    - argo_battery_water and argo_power_control: Run as independent systemd services for critical monitoring
   
   Critical Nodes (Essential for Operation):
     - pwm.py: Servo control for rudder and sail

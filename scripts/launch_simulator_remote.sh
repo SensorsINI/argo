@@ -5,7 +5,7 @@ echo "🚢 Starting Argo in REMOTE simulation mode..."
 echo "This will launch only the necessary nodes for remote simulation:"
 echo "  - argo_unified_simulator_bridge.py (remote mode)"
 echo "  - controller.py (autonomous navigation)"
-echo "  - battery_water.py (hardware monitoring)"
+echo "  - argo_battery_water.py (hardware monitoring)"
 echo "  - temp_monitor.py (hardware monitoring)"
 echo ""
 echo "Hardware nodes excluded (conflict with simulator):"
@@ -33,7 +33,7 @@ python3 nodes/controller.py --ros-args --params-file nodes/argo.yaml &
 CONTROLLER_PID=$!
 
 echo "Starting battery monitoring..."
-python3 nodes/battery_water.py &
+python3 nodes/argo_battery_water.py &
 BATTERY_PID=$!
 
 echo "Starting temperature monitoring..."

@@ -159,7 +159,7 @@ sudo /usr/local/bin/temp-logger.sh
 These services work alongside the core Argo monitoring services:
 
 - **Argo Thermal Monitor**: `argo_thermal_monitor.service` (in `launch/`)
-- **Argo Battery Monitor**: `battery_water.py` (in `nodes/`)
+- **Argo Battery Monitor**: `argo_battery_water.py` (in `nodes/`)
 - **Argo WiFi Monitor**: `argo_wifi_reconnect.service` (in `network/`)
 - **Argo Power Control**: `argo_power_control.service` (in `power_control/`)
 
@@ -270,3 +270,4 @@ system-monitoring/
 - [Thermal Monitor Installation](../launch/README-thermal-monitor.md)
 - [Network Improvements](../network/README.md)
 - [Power Control System](../power_control/README.md)
+

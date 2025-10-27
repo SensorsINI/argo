@@ -262,7 +262,7 @@ Response parsing:
 ## Related Documentation
 
 - [Power Control System](../power_control/README.md)
-- [Battery Monitoring](../nodes/battery_water.py)
+- [Battery Monitoring](../nodes/argo_battery_water.py)
 - [Argo Lifecycle Management](../launch/README.md)
 
 ## Version History

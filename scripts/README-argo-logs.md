@@ -7,7 +7,7 @@
 ## Services Monitored
 
 - **argo-launch.service** (cyan) - Main ROS2 node launcher
-- **battery_water.service** (yellow) - Battery and water monitoring
+- **argo_battery_water.service** (yellow) - Battery and water monitoring
 - **argo_power_control.service** (green) - Power control and button handling
 
 ## Usage
@@ -58,7 +58,7 @@ $ alog
 📋 Argo Multi-Service Logs
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● argo-launch.service (cyan)
-● battery_water.service (yellow)
+● argo_battery_water.service (yellow)
 ● argo_power_control.service (green)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

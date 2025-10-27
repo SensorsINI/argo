@@ -2911,7 +2911,7 @@ class PowerController:
         logger.info("WiFi connectivity monitoring thread stopped")
 
     def _call_battery_service(self) -> Optional[Dict[str, Any]]:
-        """Call battery_water service to get current battery data using rclpy"""
+        """Call argo_battery_water service to get current battery data using rclpy"""
         success, message = self._call_trigger_service(
             '/battery_status', timeout_sec=5.0)
 

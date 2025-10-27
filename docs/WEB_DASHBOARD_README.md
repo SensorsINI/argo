@@ -184,7 +184,7 @@ The web dashboard integrates with existing Argo infrastructure:
 
 **Services Called:**
 - `/toggle_pause` - Pause/unpause nodes (argo_lifecycle_manager)
-- `/battery_status` - Get battery details (battery_water node)
+- `/battery_status` - Get battery details (argo_battery_water node)
 - `/argo/recording/start` - Start recording (record node)
 - `/argo/recording/stop` - Stop recording (record node)
 - `/controller_node/switch_controller` - Switch controller type (NEW in controller.py)

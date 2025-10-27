@@ -15,7 +15,7 @@ When running simulation, several hardware nodes conflict with the simulator topi
 **Nodes that run in simulation:**
 - `argo_unified_simulator_bridge.py` → provides simulated sensor data + integrated keyboard control
 - `controller.py` → autonomous navigation
-- `battery_water.py` → hardware monitoring (no conflicts)
+- `argo_battery_water.py` → hardware monitoring (no conflicts)
 - `temp_monitor.py` → hardware monitoring (no conflicts)
 
 ## Simulation Modes
@@ -42,7 +42,7 @@ python3 launch/argo_lifecycle_manager.py simulate_local
 # Method 3: Manual launch
 python3 nodes/argo_unified_simulator_bridge.py --mode local &
 python3 nodes/controller.py --ros-args --params-file nodes/argo.yaml &
-python3 nodes/battery_water.py &
+python3 nodes/argo_battery_water.py &
 python3 nodes/temp_monitor.py &
 ```
 

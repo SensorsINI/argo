@@ -161,8 +161,8 @@ Test logs saved in: `/tmp/power_control_test_output.log`
 ## 📞 Support
 
 If issues occur during deployment:
-1. Check logs: `sudo journalctl -u argo_power_control.service -u battery_water.service -n 100`
-2. Verify both services running: `sudo systemctl status argo_power_control.service battery_water.service`
+1. Check logs: `sudo journalctl -u argo_power_control.service -u argo_battery_water.service -n 100`
+2. Verify both services running: `sudo systemctl status argo_power_control.service argo_battery_water.service`
 3. Check battery service: `ros2 service call /battery_status std_srvs/srv/Trigger`
 4. Rollback if needed (see DEPLOYMENT_SUMMARY.md)
 

@@ -46,7 +46,7 @@ Intelligent argument completion for all Argo Python scripts:
 - ✅ `nodes/controller.py` - Full argument completion
 - ✅ `nodes/anem.py` - Full argument completion
 - ✅ `nodes/gps.py` - Full argument completion
-- ✅ `nodes/battery_water.py` - Full argument completion
+- ✅ `nodes/argo_battery_water.py` - Full argument completion
 - ✅ `nodes/argo_unified_simulator_bridge.py` - Full argument completion
 - ✅ `nodes/rudder_sail_radio.py` - Full argument completion
 - ✅ `nodes/temp_monitor.py` - Full argument completion

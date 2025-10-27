@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Battery Status Panel for XFCE4
-Displays battery status from battery_water.py ROS2 node in the XFCE4 panel
+Displays battery status from argo_battery_water.py ROS2 node in the XFCE4 panel
 """
 
 import sys
@@ -36,7 +36,7 @@ class BatteryStatusPanel(Node):
         self.battery_service_client = self.create_client(Trigger, '/battery_status')
         
         # Wait for service to be available
-        self.get_logger().info("Waiting for battery_water node service...")
+        self.get_logger().info("Waiting for argo_battery_water node service...")
         if not self.battery_service_client.wait_for_service(timeout_sec=10.0):
             self.get_logger().warn("Battery service not available - will retry periodically")
         
@@ -63,7 +63,7 @@ class BatteryStatusPanel(Node):
             self.last_error_log_time = current_time
     
     def _get_battery_status(self) -> Optional[Dict[str, Any]]:
-        """Get battery status from battery_water node service"""
+        """Get battery status from argo_battery_water node service"""
         try:
             if not self.battery_service_client.service_is_ready():
                 return None
@@ -175,7 +175,7 @@ def main():
         description='Battery Status Panel for XFCE4',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-This script displays battery status from the battery_water.py ROS2 node
+This script displays battery status from the argo_battery_water.py ROS2 node
 in the XFCE4 panel. It connects to the /battery_status service and
 formats the data for display.
 

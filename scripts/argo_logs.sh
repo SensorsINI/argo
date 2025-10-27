@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Argo Multi-Service Log Viewer
-# Tails logs from argo-launch, battery_water, and argo_power_control services
+# Tails logs from argo-launch, argo_battery_water, and argo_power_control services
 # with color-coded output for easy identification
 #
 # Usage: argo_logs.sh [OPTIONS] [PATTERN]
@@ -20,7 +20,7 @@ ERROR_CHECK=false
 
 # Color codes for each service
 COLOR_ARGO_LAUNCH='\e[0;96m'      # Cyan for argo-launch
-COLOR_BATTERY='\e[0;93m'           # Yellow for battery_water
+COLOR_BATTERY='\e[0;93m'           # Yellow for argo_battery_water
 COLOR_POWER='\e[0;92m'             # Green for power_control
 COLOR_IMU='\e[0;95m'               # Magenta for BNO085 IMU
 COLOR_TIMESTAMP='\e[0;90m'         # Gray for timestamps
@@ -135,7 +135,7 @@ else
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo -e "${COLOR_ARGO_LAUNCH}●${RESET} argo-launch.service (cyan)"
-echo -e "${COLOR_BATTERY}●${RESET} battery_water.service (yellow)"
+echo -e "${COLOR_BATTERY}●${RESET} argo_battery_water.service (yellow)"
 echo -e "${COLOR_POWER}●${RESET} argo_power_control.service (green)"
 echo -e "${COLOR_IMU}●${RESET} argo_bno085.service (magenta)"
 echo -e "${COLOR_ERROR}●${RESET} ERROR lines (bold bright red)"
@@ -202,7 +202,7 @@ if [ "$ERROR_CHECK" = true ]; then
                 echo -e "${COLOR_WARN}${line}${RESET}"
             elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
                 echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-            elif echo "$line" | grep -q "battery_water_node\|battery_water"; then
+            elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
                 echo -e "${COLOR_BATTERY}${line}${RESET}"
             elif echo "$line" | grep -q "argo_power_control"; then
                 echo -e "${COLOR_POWER}${line}${RESET}"
@@ -262,7 +262,7 @@ if [ "$ERROR_CHECK" = true ]; then
                 echo -e "${COLOR_WARN}${line}${RESET}"
             elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
                 echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-            elif echo "$line" | grep -q "battery_water_node\|battery_water"; then
+            elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
                 echo -e "${COLOR_BATTERY}${line}${RESET}"
             elif echo "$line" | grep -q "argo_power_control"; then
                 echo -e "${COLOR_POWER}${line}${RESET}"
@@ -294,8 +294,8 @@ elif [ "$FOLLOW" = true ]; then
         elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
             # Color the entire line cyan for argo-launch
             echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-        elif echo "$line" | grep -q "battery_water_node\|battery_water"; then
-            # Color the entire line yellow for battery_water
+        elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
+            # Color the entire line yellow for argo_battery_water
             echo -e "${COLOR_BATTERY}${line}${RESET}"
         elif echo "$line" | grep -q "argo_power_control"; then
             # Color the entire line green for power_control
@@ -324,7 +324,7 @@ elif [ -n "$GREP_PATTERN" ]; then
         done
     echo ""
     
-    echo -e "${COLOR_BATTERY}=== battery_water.service ===${RESET}"
+    echo -e "${COLOR_BATTERY}=== argo_battery_water.service ===${RESET}"
     journalctl -u "$SERVICE_BATTERY" --no-pager 2>/dev/null | \
         grep "$GREP_PATTERN" | \
         while IFS= read -r line; do
@@ -379,7 +379,7 @@ else
         done
     echo ""
     
-    echo -e "${COLOR_BATTERY}=== battery_water.service ===${RESET}"
+    echo -e "${COLOR_BATTERY}=== argo_battery_water.service ===${RESET}"
     journalctl -u "$SERVICE_BATTERY" -n "$LINES" --no-pager 2>/dev/null | \
         while IFS= read -r line; do
             if echo "$line" | grep -qi "ERROR"; then

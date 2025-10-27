@@ -4,7 +4,7 @@ This document describes how to add battery status from the Argo sailboat system 
 
 ## Overview
 
-The battery status panel displays real-time battery information from the `battery_water.py` ROS2 node, including:
+The battery status panel displays real-time battery information from the `argo_battery_water.py` ROS2 node, including:
 - Battery voltage and percentage
 - Charging status
 - AC power presence
@@ -84,7 +84,7 @@ The battery status displays with icons and text:
 
 ### Battery Status Not Appearing
 
-1. Check if battery_water node is running:
+1. Check if argo_battery_water node is running:
    ```bash
    ros2 service list | grep battery_status
    ```
@@ -103,9 +103,9 @@ The battery status displays with icons and text:
 ### Service Not Available
 
 If the battery service is not available:
-1. Start the battery_water node:
+1. Start the argo_battery_water node:
    ```bash
-   python3 /home/orangepi/argo/nodes/battery_water.py
+   python3 /home/orangepi/argo/nodes/argo_battery_water.py
    ```
 
 2. Or start the full Argo system:
@@ -136,7 +136,7 @@ You can modify the display format by editing the `_format_battery_display()` met
 ## Integration with Argo System
 
 The battery panel integrates seamlessly with the Argo sailboat system:
-- Uses the existing `/battery_status` service from `battery_water.py`
+- Uses the existing `/battery_status` service from `argo_battery_water.py`
 - Respects the same error handling and logging patterns
 - Works with the Argo lifecycle management system
 - Compatible with simulation mode (shows mock data)
@@ -146,7 +146,7 @@ The battery panel integrates seamlessly with the Argo sailboat system:
 - ROS2 Humble
 - Python 3
 - XFCE4 desktop environment
-- `battery_water.py` node running
+- `argo_battery_water.py` node running
 - `std_srvs` ROS2 package
 
 ## Notes

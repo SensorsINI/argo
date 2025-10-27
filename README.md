@@ -131,7 +131,7 @@ Central control hub for the entire Argo system:
 
 ### `nodes/` - ROS2 Node Implementations
 Hardware interface and control nodes:
-- **Sensor Nodes**: `gps.py`, `imu.py`, `anem.py`, `battery_water.py`, `temp_monitor.py`
+- **Sensor Nodes**: `gps.py`, `imu.py`, `anem.py`, `argo_battery_water.py`, `temp_monitor.py`
 - **Control Nodes**: `rudder_sail_radio.py`, `controller.py`, `record.py`
 - **`pwm_capture_module/`** - Custom kernel module for radio control and servo interfaces
 - **`RTIMULib2/`** - IMU sensor fusion library
@@ -168,7 +168,7 @@ Optional system-level monitoring services for debugging and development:
 - **`gps.py`** - GPS receiver interface (UART5, u-blox NEO-M9N)
 - **`bno085.py`** - 9-DOF Orientation IMU with sensor fusion (I2C, [Adafruit BNO085](https://www.adafruit.com/product/4754))
 - **`anem.py`** - Wind sensor array (3x SDP3x pressure sensors)
-- **`battery_water.py`** - Power monitoring and safety systems
+- **`argo_battery_water.py`** - Power monitoring and safety systems
 - **`rudder_sail_radio.py`** - Radio control input and servo output interface
 - **`controller.py`** - Autonomous navigation and sail control algorithms
 - **`record.py`** - Data recording management (ROS2 bag files)
@@ -348,7 +348,7 @@ python3 nodes/gps.py --debug
 python3 nodes/bno085.py bridge  # IMU bridge mode
 python3 nodes/bno085.py status  # Check IMU health
 python3 nodes/anem.py --debug
-python3 nodes/battery_water.py --debug
+python3 nodes/argo_battery_water.py --debug
 python3 nodes/rudder_sail_radio.py
 python3 nodes/controller.py
 ```
@@ -367,7 +367,7 @@ ros2 topic echo /rudder_sail_radio
 - **`gps.py`**: GPS interface via UART5, publishes `/gps_data`
 - **`bno085.py`**: [Adafruit BNO085](https://www.adafruit.com/product/4754) IMU with sensor fusion, publishes `/compass`, `/pose`, `/accel`, `/gyro`, `/imu_health`
 - **`anem.py`**: Wind speed/direction from 3 pressure sensors, publishes `/anem_speed_angle_temp`
-- **`battery_water.py`**: Power and safety monitoring, publishes battery/water alerts
+- **`argo_battery_water.py`**: Power and safety monitoring, publishes battery/water alerts
 - **`rudder_sail_radio.py`**: Radio control interface and servo output
 - **`controller.py`**: Autonomous navigation controller
 - **`argo_unified_simulator_bridge.py`**: Unified simulator bridge for local and remote simulation

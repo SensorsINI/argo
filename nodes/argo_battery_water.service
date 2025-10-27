@@ -1,6 +1,6 @@
 [Unit]
 Description=Argo Battery and Water Monitoring Service
-Documentation=file://%h/argo/nodes/battery_water.py
+Documentation=file://%h/argo/nodes/argo_battery_water.py
 After=basic.target sysinit.target
 Wants=basic.target
 DefaultDependencies=no
@@ -12,7 +12,7 @@ User=orangepi
 Group=orangepi
 WorkingDirectory=/home/orangepi/argo/nodes
 Environment=ROS_DOMAIN_ID=0
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/nodes/battery_water.py'
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/nodes/argo_battery_water.py'
 Restart=always
 RestartSec=5
 StandardOutput=journal
