@@ -1,0 +1,17 @@
+[Unit]
+Description=Set permissions for Argo PH4 Green LED sysfs files
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/argo-ph4-led-postinit.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+
+
+

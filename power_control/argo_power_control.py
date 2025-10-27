@@ -411,6 +411,12 @@ class PowerController:
         self.green_led_state = False
         self.blue_led_state = False
 
+        # Sysfs LED control paths
+        self.green_led_sysfs_path = Path("/sys/class/leds/argo:green:heartbeat")
+        self.green_led_brightness_path = self.green_led_sysfs_path / "brightness"
+        self.green_led_trigger_path = self.green_led_sysfs_path / "trigger"
+        self.green_led_available = False
+
         # Heartbeat control
         self.heartbeat_frequency_hz = 1.0/3.0  # 3-second cycle
         self.heartbeat_duty_cycle = 0.1    # 10% duty cycle per slot
@@ -458,7 +464,8 @@ class PowerController:
         # Correct GPIO Line offsets from gpio readall
         self.POWER_RELAY_LINE = 259    # PI3 (Pin 40) - !POW
         self.POWER_BUTTON_LINE = 265   # PI9 (Pin 28) - !POW_BUT
-        self.GREEN_LED_LINE = 228      # PH4 (Pin 18) - Green LED
+        # GREEN_LED_LINE is now managed by the kernel overlay
+        # self.GREEN_LED_LINE = 228      # PH4 (Pin 18) - Green LED
         self.BLUE_LED_LINE = 257       # PI1 (Pin 12) - Blue LED
         self.RED_LED_LINE = 272        # PI16 (Pin 37) - Red LED
 
@@ -521,11 +528,11 @@ class PowerController:
         # Initialize desktop user detection and caching
         self._detect_and_cache_desktop_user()
 
-        # Initialize GPIO and configure button interrupts
-        # Note: Button press activates SET coil which powers on the system,
-        # so by the time software starts, button has already been released.
-        # No need to check initial state - button detection is always active.
+        # Initialize GPIO for button and other LEDs
         self.init_gpio()
+
+        # Initialize and take control of sysfs-managed Green LED
+        self.init_sysfs_led()
 
         # Configure button line for interrupt-based monitoring
         if self.gpio_available:
@@ -681,6 +688,38 @@ class PowerController:
         except Exception as e:
             logger.error(f"Error handling GPIO conflicts: {e}")
 
+    def init_sysfs_led(self):
+        """Initialize and take control of the sysfs-managed green LED."""
+        if not self.green_led_sysfs_path.is_dir():
+            logger.warning(f"Sysfs LED '{self.green_led_sysfs_path}' not found.")
+            logger.warning("Green LED will be non-functional. Ensure the 'argo-ph4-led' overlay is loaded.")
+            self.green_led_available = False
+            return
+
+        try:
+            logger.info(f"Found sysfs LED at {self.green_led_sysfs_path}")
+            # Take control of the LED by disabling the kernel trigger
+            self.green_led_trigger_path.write_text("none")
+            self.green_led_available = True
+            logger.info("Took control of green LED from kernel (trigger set to 'none').")
+        except (IOError, PermissionError) as e:
+            logger.error(f"Failed to take control of sysfs green LED: {e}")
+            logger.error("Please ensure you have the correct permissions.")
+            self.green_led_available = False
+
+    def release_sysfs_led(self):
+        """Release control of the sysfs green LED back to the kernel."""
+        if not self.green_led_available:
+            return
+        try:
+            # Restore the default heartbeat trigger
+            self.green_led_trigger_path.write_text("heartbeat")
+            # Turn off the LED manually as the trigger takes over.
+            self.green_led_brightness_path.write_text("0")
+            logger.info("Released control of green LED to kernel (trigger set to 'heartbeat').")
+        except (IOError, PermissionError) as e:
+            logger.warning(f"Failed to release control of sysfs green LED: {e}")
+
     def init_gpio(self):
         """Initialize GPIO pins with conflict resolution"""
         # Skip GPIO initialization if gpiod is not available in test mode
@@ -691,7 +730,7 @@ class PowerController:
                 # Set dummy values for test mode
                 self.chip = None
                 self.power_button_line = None
-                self.green_led_line = None
+                # self.green_led_line = None # No longer used
                 self.blue_led_line = None
                 self.red_led_line = None
                 return
@@ -726,7 +765,7 @@ class PowerController:
             # NOTE: power_relay_line (GPIO 259) is NOT controlled by this service
             # Power relay control is handled exclusively by the shutdown hook
             self.power_button_line = self.chip.get_line(self.POWER_BUTTON_LINE)
-            self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE)
+            # self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE) # No longer used
             self.blue_led_line = self.chip.get_line(self.BLUE_LED_LINE)
             self.red_led_line = self.chip.get_line(self.RED_LED_LINE)
 
@@ -739,11 +778,7 @@ class PowerController:
             )
 
             # Request LED lines (active-low: HIGH = OFF)
-            self.green_led_line.request(
-                consumer="argo_power_control.py",
-                type=gpiod.LINE_REQ_DIR_OUT,
-                default_vals=[LED_OFF_STATE]  # Start with LED off (HIGH for active-low)
-            )
+            # Green LED is now managed via sysfs
             self.blue_led_line.request(
                 consumer="argo_power_control.py",
                 type=gpiod.LINE_REQ_DIR_OUT,
@@ -766,7 +801,7 @@ class PowerController:
                 # Set dummy values for test mode
                 self.chip = None
                 self.power_button_line = None
-                self.green_led_line = None
+                # self.green_led_line = None # No longer used
                 self.blue_led_line = None
                 self.red_led_line = None
             else:
@@ -1450,17 +1485,21 @@ class PowerController:
     pass
 
     def set_green_led(self, state):
-        """Control green LED (system running indicator)"""
-        if not self.gpio_available:
+        """Control green LED (system running indicator) via sysfs."""
+        if not self.green_led_available:
             self.green_led_state = state
             return
         try:
-            # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
-            value = LED_ON_STATE if state else LED_OFF_STATE
-            self.green_led_line.set_value(value)
+            # For sysfs, "1" is on, "0" is off. The overlay handles active-low logic.
+            value = "1" if state else "0"
+            self.green_led_brightness_path.write_text(value)
             self.green_led_state = state
-        except Exception as e:
-            logger.error(f"Error controlling green LED: {e}")
+        except (IOError, PermissionError) as e:
+            # Log only once to avoid spamming
+            if self.green_led_available:
+                logger.error(f"Error controlling sysfs green LED: {e}")
+                # Mark as unavailable to prevent further errors
+                self.green_led_available = False
 
     def set_blue_led(self, state):
         """Control blue LED (charging indicator)"""
@@ -2441,6 +2480,22 @@ class PowerController:
 
         except Exception as e:
             logger.error(f"Error preparing shutdown message: {e}")
+
+        # Stop battery monitoring
+        self.battery_monitoring_active = False
+
+        # Stop WiFi monitoring
+        self.wifi_monitoring_active = False
+
+        # Stop SOS LED pattern if active
+        self.sos_led_active = False
+
+        # Release control of the green LED back to the kernel
+        self.release_sysfs_led()
+
+        # Clear critical battery flag if set
+        if self.critical_battery_detected:
+            self._clear_critical_battery_flag()
 
     def initiate_shutdown(self):
         """Initiate system shutdown sequence"""

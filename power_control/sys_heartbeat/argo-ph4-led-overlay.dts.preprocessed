@@ -1,0 +1,29 @@
+# 0 "argo-ph4-led-overlay.dts"
+# 0 "<built-in>"
+# 0 "<command-line>"
+# 1 "argo-ph4-led-overlay.dts"
+/dts-v1/;
+/plugin/;
+
+# 1 "/lib/modules/6.1.31-sun50iw9/build/include/dt-bindings/gpio/gpio.h" 1
+# 5 "argo-ph4-led-overlay.dts" 2
+
+/ {
+    compatible = "xunlong,orangepi-zero2w", "allwinner,sun50i-h618";
+
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            leds {
+                compatible = "gpio-leds";
+
+                green_heartbeat: heartbeat {
+                    label = "argo:green:heartbeat";
+                    gpios = <&pio 7 4 1>;
+                    default-state = "off";
+                    linux,default-trigger = "heartbeat";
+                };
+            };
+        };
+    };
+};

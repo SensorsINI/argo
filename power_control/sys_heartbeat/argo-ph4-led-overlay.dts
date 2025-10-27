@@ -1,0 +1,24 @@
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+    compatible = "xunlong,orangepi-zero2w", "allwinner,sun50i-h618";
+
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            leds {
+                compatible = "gpio-leds";
+
+                green_heartbeat: heartbeat {
+                    label = "argo:green:heartbeat";
+                    gpios = <&pio 7 4 GPIO_ACTIVE_LOW>; /* PH4 */
+                    default-state = "off";
+                    linux,default-trigger = "heartbeat";
+                };
+            };
+        };
+    };
+};

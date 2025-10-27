@@ -12,7 +12,7 @@ KDIR := /lib/modules/$(shell uname -r)/build
 MDIR := /lib/modules/$(shell uname -r)/kernel/drivers/misc/argo
 PWD := $(shell pwd)
 
-.PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup install_module_service install_spi_rules # Ensure all targets are listed here
+.PHONY: all clean overlay install_overlay insmod rmmod watch test_pwm install_module install_rules post_insmod_setup install_module_service install_spi_rules uninstall # Ensure all targets are listed here
 
 # all target does everything needed to build the module and overlay
 all: module overlay install_module install_overlay install_boot_env install_rules install_permissions_service install_module_service install_spi_rules
@@ -32,18 +32,17 @@ overlay:
 
 install_overlay: overlay
 	# installing overlay to boot environment
-	sudo cp $(OVERLAY).dtbo /boot/overlay-user
+	sudo cp $(OVERLAY).dtbo /boot/overlays
 
 install_boot_env:
-	# only copy if orangepiEnv.txt is diffferent than the existing one
-	@if ! cmp -s orangepiEnv.txt /boot/orangepiEnv.txt; then \
-		echo "orangepiEnv.txt has changed, copying to /boot..."; \
-		echo "Installing boot environment variables for Orange Pi..."; \
-		sudo cp orangepiEnv.txt /boot/; \
-		echo "Reboot to apply changes."; \
-	else \
-		echo "No changes in orangepiEnv.txt, skipping copy."; \
-	fi
+	# Use centralized script to add the overlay to orangepiEnv.txt
+	@echo "Adding overlay '$(OVERLAY)' to /boot/orangepiEnv.txt..."
+	sudo bash ../../orangepiEnv/manage_overlays.sh add $(OVERLAY)
+
+uninstall_boot_env:
+	# Use centralized script to remove the overlay from orangepiEnv.txt
+	@echo "Removing overlay '$(OVERLAY)' from /boot/orangepiEnv.txt..."
+	sudo bash ../../orangepiEnv/manage_overlays.sh remove $(OVERLAY)
 
 # following rules not used, instead permissions service that is more robust
 # install_rules:
@@ -64,6 +63,14 @@ install_permissions_service:
 	# Enable the service to start on boot
 	sudo systemctl enable argo_radio_servo_perms.service
 
+uninstall_permissions_service:
+	@echo "--- Uninstalling permissions service ---"
+	sudo systemctl disable argo_radio_servo_perms.service
+	sudo rm -f /etc/systemd/system/argo_radio_servo_perms.service
+	sudo rm -f /usr/local/bin/argo_radio_servo_postinit.sh
+	sudo systemctl daemon-reload
+	@echo "Permissions service uninstalled."
+
 install_module: module
 	@echo "--- Installing kernel module for boot-time loading ---"
 	@echo "Creating target directory: $(MDIR)"
@@ -79,6 +86,14 @@ install_module: module
 	@echo "To test, run: 'sudo modprobe $(MOD)'"
 	@echo "To check status, run: 'lsmod | grep $(MOD)'"
 	@echo "The module is configured to load automatically on next boot."
+
+uninstall_module:
+	@echo "--- Uninstalling kernel module ---"
+	-sudo rmmod $(MOD) 2>/dev/null && echo "Removed module from running kernel"
+	sudo rm -f "$(MDIR)/$(MOD).ko"
+	sudo rm -f /etc/modules-load.d/argo-radio-servo.conf
+	sudo depmod -a
+	@echo "Kernel module uninstalled."
 
 # The post_insmod_setup target is now only for manual testing, not for boot-time persistence.
 # Udev rules handle boot-time permissions.
@@ -128,6 +143,13 @@ install_module_service:
 	# Enable the service to start on boot
 	sudo systemctl enable argo_radio_servo_module.service
 	@echo "Kernel module service installed and enabled"
+
+uninstall_module_service:
+	@echo "--- Uninstalling kernel module service ---"
+	sudo systemctl disable argo_radio_servo_module.service
+	sudo rm -f /etc/systemd/system/argo_radio_servo_module.service
+	sudo systemctl daemon-reload
+	@echo "Kernel module service uninstalled."
 
 install_spi_rules:
 	@echo "--- Installing SPI device permissions ---"
