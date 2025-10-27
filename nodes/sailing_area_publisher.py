@@ -175,9 +175,9 @@ class SailingAreaPublisher(Node):
         marker.pose.position.z = coords[2] if len(coords) > 2 else 0.0  # altitude
         
         # Scale
-        marker.scale.x = 5.0  # 5-meter sphere
-        marker.scale.y = 5.0
-        marker.scale.z = 5.0
+        marker.scale.x = 1.0  # 1-meter sphere
+        marker.scale.y = 1.0
+        marker.scale.z = 1.0
         
         # Color (green for waypoints)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
@@ -212,7 +212,7 @@ class SailingAreaPublisher(Node):
             marker.points.append(point)
         
         # Scale (line width)
-        marker.scale.x = 1.0  # 1-meter thick line
+        marker.scale.x = 0.2  # 20cm thick line
         
         # Color based on type
         if feature_type == "sailing_boundary":
@@ -258,7 +258,7 @@ class SailingAreaPublisher(Node):
             marker.points.append(point)
         
         # Scale (line width)
-        marker.scale.x = 1.0  # 1-meter thick line
+        marker.scale.x = 0.2  # 20cm thick line
         
         # Color based on type
         if feature_type == "sailing_area":
