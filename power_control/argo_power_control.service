@@ -17,6 +17,7 @@ Environment=HOME=/home/orangepi
 Environment=DISPLAY=:0
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStartPre=/bin/sleep 1
 ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py'
 ExecStop=/bin/bash -c 'echo "System shutting down - power relay will be disconnected"'
 Restart=no

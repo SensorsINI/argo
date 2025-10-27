@@ -27,6 +27,8 @@ USAGE:
 import time
 import sys
 import signal
+import logging
+from datetime import datetime
 
 # Try to import gpiod
 try:
@@ -56,11 +58,49 @@ HEARTBEAT_DUTY_CYCLE = 0.2    # % duty cycle
 # Global flag for graceful shutdown
 running = True
 
+# Persistent logging setup
+PERSISTENT_LOG_DIR = "/var/log.hdd/persistent"
+LOG_FILENAME = f"{PERSISTENT_LOG_DIR}/argo-boot-indicator.log"
+
+def setup_logging():
+    """Setup logging to both console and persistent log file"""
+    # Create log directory if it doesn't exist
+    import os
+    try:
+        os.makedirs(PERSISTENT_LOG_DIR, exist_ok=True)
+        
+        # Configure logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(sys.stdout),  # Console output
+                logging.FileHandler(LOG_FILENAME)    # Persistent log file
+            ]
+        )
+        
+        logger = logging.getLogger('argo_boot_indicator')
+        logger.info(f"Boot indicator logging initialized - persistent log: {LOG_FILENAME}")
+        return logger
+        
+    except PermissionError:
+        # Fallback to console-only logging if persistent log fails
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
+        
+        logger = logging.getLogger('argo_boot_indicator')
+        logger.warning(f"Permission denied for persistent log {LOG_FILENAME} - using console logging only")
+        return logger
+
 
 def signal_handler(signum, frame):
     """Handle termination signals gracefully"""
     global running
-    print(f"Received signal {signum}, shutting down gracefully...")
+    logger = logging.getLogger('argo_boot_indicator')
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
     running = False
 
 
@@ -69,6 +109,7 @@ def run_boot_indicator():
     global running
     chip = None
     green_led = None
+    logger = logging.getLogger('argo_boot_indicator')
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
@@ -77,7 +118,7 @@ def run_boot_indicator():
     try:
         # Open GPIO chip
         chip = gpiod.Chip(GPIO_CHIP)
-        print(f"Boot indicator: Opened GPIO chip {GPIO_CHIP}")
+        logger.info(f"Boot indicator: Opened GPIO chip {GPIO_CHIP}")
 
         # Get GREEN LED line
         green_led = chip.get_line(GREEN_LED_LINE)
@@ -88,10 +129,10 @@ def run_boot_indicator():
             type=gpiod.LINE_REQ_DIR_OUT,
             default_vals=[LED_OFF_STATE]
         )
-        print("Boot indicator: GPIO configured, starting early boot pattern")
+        logger.info("Boot indicator: GPIO configured, starting early boot pattern")
 
         # Initial flash sequence to show boot started
-        print(f"Boot indicator: Initial flash sequence ({INITIAL_FLASH_COUNT} flashes)")
+        logger.info(f"Boot indicator: Initial flash sequence ({INITIAL_FLASH_COUNT} flashes)")
         for i in range(INITIAL_FLASH_COUNT):
             if not running:
                 break
@@ -104,7 +145,7 @@ def run_boot_indicator():
         time.sleep(0.3)
 
         # Continue with heartbeat pattern until terminated
-        print(f"Boot indicator: Starting heartbeat ({HEARTBEAT_FREQUENCY_HZ}Hz)")
+        logger.info(f"Boot indicator: Starting heartbeat ({HEARTBEAT_FREQUENCY_HZ}Hz)")
         heartbeat_period = 1.0 / HEARTBEAT_FREQUENCY_HZ
         on_time = heartbeat_period * HEARTBEAT_DUTY_CYCLE
         off_time = heartbeat_period * (1.0 - HEARTBEAT_DUTY_CYCLE)
@@ -131,26 +172,26 @@ def run_boot_indicator():
                 time.sleep(0.05)
                 elapsed += 0.05
 
-        print("Boot indicator: Heartbeat stopped, cleaning up")
+        logger.info("Boot indicator: Heartbeat stopped, cleaning up")
         return 0
 
     except FileNotFoundError:
-        print(f"ERROR: GPIO chip not found: {GPIO_CHIP}")
-        print("This may be a hardware or kernel module issue")
+        logger.error(f"ERROR: GPIO chip not found: {GPIO_CHIP}")
+        logger.error("This may be a hardware or kernel module issue")
         return 1
     except PermissionError:
-        print("ERROR: Permission denied accessing GPIO")
-        print("This script must run as root or with gpio group access")
+        logger.error("ERROR: Permission denied accessing GPIO")
+        logger.error("This script must run as root or with gpio group access")
         return 1
     except Exception as e:
-        print(f"ERROR: Failed to run boot indicator: {e}")
+        logger.error(f"ERROR: Failed to run boot indicator: {e}")
         import traceback
-        traceback.print_exc()
+        logger.error(traceback.format_exc())
         return 1
     finally:
         # CRITICAL: Always release GPIO, even if an exception occurred
         # This ensures the main power control service can claim the GPIO
-        print("Boot indicator: Releasing GPIO resources")
+        logger.info("Boot indicator: Releasing GPIO resources")
         try:
             if green_led is not None:
                 # Turn off LED before releasing
@@ -159,21 +200,29 @@ def run_boot_indicator():
                 except:
                     pass
                 green_led.release()
-                print("Boot indicator: GPIO line released")
+                logger.info("Boot indicator: GPIO line released")
         except Exception as e:
-            print(f"WARNING: Error releasing GPIO line: {e}")
+            logger.warning(f"WARNING: Error releasing GPIO line: {e}")
 
         try:
             if chip is not None:
                 chip.close()
-                print("Boot indicator: GPIO chip closed")
+                logger.info("Boot indicator: GPIO chip closed")
         except Exception as e:
-            print(f"WARNING: Error closing GPIO chip: {e}")
+            logger.warning(f"WARNING: Error closing GPIO chip: {e}")
 
 
 def main():
     """Main entry point"""
-    return run_boot_indicator()
+    # Initialize logging first
+    logger = setup_logging()
+    logger.info("Argo boot indicator starting")
+    
+    # Run the boot indicator
+    result = run_boot_indicator()
+    
+    logger.info(f"Argo boot indicator exiting with code {result}")
+    return result
 
 
 if __name__ == "__main__":
