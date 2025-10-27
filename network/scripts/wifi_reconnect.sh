@@ -12,7 +12,7 @@
 
 # Configuration
 PREFERRED_NETWORKS=("tobi-s24" "tobi-wlan")
-LOG_FILE="/var/log.hdd/persistent/wifi-reconnect.log"
+LOG_FILE="/var/log.hdd/persistent/wifi-reconnect-$(date +%Y%m%d).log"
 MAX_LOG_SIZE=1048576  # 1MB
 LOCK_FILE="/tmp/wifi_reconnect.lock"
 MIN_CONNECTION_TIME=30  # Minimum seconds to stay on a connection before switching
@@ -168,4 +168,3 @@ main() {
 
 # Run main function
 main "$@"
-
