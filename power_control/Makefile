@@ -4,19 +4,16 @@
 # Service configuration
 SERVICE_DIR = /etc/systemd/system
 POWER_SERVICE_NAME = argo_power_control
-BOOT_INDICATOR_SERVICE_NAME = argo_boot_indicator
 # Directory containing this Makefile (power_control directory in repo)
 SCRIPT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PYTHON_SCRIPT = argo_power_control.py
 POWER_SERVICE_FILE = argo_power_control.service
-BOOT_INDICATOR_SCRIPT = argo_boot_indicator.py
-BOOT_INDICATOR_SERVICE_FILE = argo_boot_indicator.service
 
 # Detect the user performing installation (supports sudo)
 INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else id -un; fi)
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 
-.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook install_boot_indicator
+.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook
 
 # Default target
 all: install
@@ -24,19 +21,17 @@ all: install
 # ==================== POWER CONTROL SYSTEM ====================
 
 # Main power control installation target
-install: check_deps install_service install_boot_indicator enable_service install_shutdown_hook
+install: check_deps install_service enable_service install_shutdown_hook
 	@echo ""
 	@echo "✅ Argo Power Control System Installation Complete!"
 	@echo ""
 	@echo "Next steps:"
 	@echo "1. If you were just added to the gpio group, log out and log back in"
 	@echo "2. The power control service will start automatically on boot"
-	@echo "3. The boot indicator will flash the GREEN LED during early boot"
-	@echo "4. Check service status with: sudo systemctl status $(POWER_SERVICE_NAME)"
-	@echo "5. View logs with: sudo journalctl -u $(POWER_SERVICE_NAME) -f"
-	@echo "6. Test with: sudo systemctl start $(POWER_SERVICE_NAME)"
-	@echo "7. Test boot indicator: sudo python3 $(SCRIPT_DIR)/$(BOOT_INDICATOR_SCRIPT)"
-	@echo "8. Note: GPIO shutdown requires kernel driver support (checked during installation)"
+	@echo "3. Check service status with: sudo systemctl status $(POWER_SERVICE_NAME)"
+	@echo "4. View logs with: sudo journalctl -u $(POWER_SERVICE_NAME) -f"
+	@echo "5. Test with: sudo systemctl start $(POWER_SERVICE_NAME)"
+	@echo "6. Note: GPIO shutdown requires kernel driver support (checked during installation)"
 	@echo ""
 
 # Check and install dependencies
@@ -93,18 +88,6 @@ install_shutdown_hook:
 	@echo "📋 Installing late shutdown hook..."
 	@sudo install -m 0755 $(SCRIPT_DIR)/argo_poweroff.shutdown /lib/systemd/system-shutdown/argo_poweroff
 	@echo "✅ Late shutdown hook installed"
-
-# Install early boot indicator service (flashes GREEN LED during boot)
-install_boot_indicator:
-	@echo "📋 Installing early boot indicator service..."
-	@sudo chmod +x $(SCRIPT_DIR)/$(BOOT_INDICATOR_SCRIPT)
-	@sed -e "s#/home/orangepi#$(INSTALL_HOME)#g" \
-	    $(SCRIPT_DIR)/$(BOOT_INDICATOR_SERVICE_FILE) > /tmp/$(BOOT_INDICATOR_SERVICE_FILE)
-	@sudo cp /tmp/$(BOOT_INDICATOR_SERVICE_FILE) /etc/systemd/system/$(BOOT_INDICATOR_SERVICE_FILE)
-	@rm -f /tmp/$(BOOT_INDICATOR_SERVICE_FILE)
-	@sudo systemctl daemon-reload
-	@sudo systemctl enable $(BOOT_INDICATOR_SERVICE_NAME)
-	@echo "✅ Boot indicator service installed and enabled"
 
 # # Install early boot power-on hook (runs once at early boot)
 # DISABLED: not needed anymore with rev3 board that uses dual coil relay
@@ -197,8 +180,6 @@ clean_power_control:
 	@sudo systemctl stop $(POWER_SERVICE_NAME) 2>/dev/null || true
 	@sudo systemctl disable $(POWER_SERVICE_NAME) 2>/dev/null || true
 	@sudo rm -f /etc/systemd/system/$(POWER_SERVICE_NAME).service
-	@sudo systemctl disable $(BOOT_INDICATOR_SERVICE_NAME) 2>/dev/null || true
-	@sudo rm -f /etc/systemd/system/$(BOOT_INDICATOR_SERVICE_NAME).service
 	# DISABLED: not needed anymore with rev3 board that uses dual coil relay
 	# @sudo systemctl disable argo_poweron.service 2>/dev/null || true
 	# @sudo rm -f /etc/systemd/system/argo_poweron.service
@@ -229,7 +210,6 @@ help:
 	@echo "Component Targets:"
 	@echo "  check_deps           - Check and install required dependencies"
 	@echo "  install_service      - Install systemd service only"
-	@echo "  install_boot_indicator - Install early boot LED indicator service"
 	@echo "  enable_service       - Enable and start the service"
 	@echo "  install_shutdown_hook - Install late shutdown hook (poweroff/halt only, not reboot)"
 	@echo "  clean_power_control  - Stop and disable service, remove service file"

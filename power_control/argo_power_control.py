@@ -715,7 +715,6 @@ class PowerController:
             except OSError as e:
                 if "Device or resource busy" in str(e) and attempt < max_retries - 1:
                     logger.warning(f"GPIO chip busy (attempt {attempt + 1}/{max_retries}) - retrying in {retry_delay}s")
-                    self._handle_gpio_conflicts()  # Try to resolve conflicts again
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
                     continue

@@ -3,7 +3,6 @@ Description=Argo Power Control System
 Documentation=file://%h/argo/launch/ARGO_POWER_CONTROL_README.md
 After=local-fs.target systemd-user-sessions.service argo_battery_water.service
 Wants=argo_battery_water.service
-Conflicts=argo_boot_indicator.service
 DefaultDependencies=no
 Before=shutdown.target
 
@@ -20,7 +19,7 @@ Environment=XDG_RUNTIME_DIR=/run/user/1000
 ExecStartPre=/bin/sleep 1
 ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py'
 ExecStop=/bin/bash -c 'echo "System shutting down - power relay will be disconnected"'
-Restart=no
+Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
