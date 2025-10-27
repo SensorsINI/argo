@@ -415,6 +415,11 @@ class PowerController:
         self.heartbeat_frequency_hz = 1.0/3.0  # 3-second cycle
         self.heartbeat_duty_cycle = 0.1    # 10% duty cycle per slot
         
+        # LED pattern logging
+        self.last_logged_pattern = None
+        self.last_pattern_log_time = 0.0
+        self.pattern_log_interval = 60.0  # Log at least once per minute
+        
         # System status monitoring (updated via topic callbacks)
         self.anemometer_healthy = True
         self.gps_healthy = True
@@ -869,6 +874,46 @@ class PowerController:
                 logger.info(f"Recording service not available: {e}")
                 self.last_logged_recording_service_state = False
             self.recording_service_available = False
+            return False
+
+    def _check_critical_nodes_running(self) -> bool:
+        """Check if critical nodes are running before allowing recording."""
+        try:
+            # Get node status from lifecycle manager
+            success, message = self._call_trigger_service(
+                '/argo/lifecycle/status', timeout_sec=3.0)
+            
+            if not success:
+                logger.warning("Could not retrieve node status for critical nodes check")
+                return False
+            
+            # Parse the status response
+            import json
+            status_data = json.loads(message)
+            nodes = status_data.get('nodes', {})
+            
+            # Check critical nodes
+            critical_nodes = ['controller.py', 'pwm.py']
+            running_critical = 0
+            
+            for node in critical_nodes:
+                if node in nodes and "RUNNING" in nodes[node]:
+                    running_critical += 1
+            
+            logger.info(f"Critical nodes status: {running_critical}/{len(critical_nodes)} running")
+            
+            # Require at least half of critical nodes to be running
+            if running_critical >= len(critical_nodes) // 2:
+                return True
+            else:
+                logger.warning(f"Not enough critical nodes running: {running_critical}/{len(critical_nodes)}")
+                return False
+                
+        except json.JSONDecodeError as e:
+            logger.warning(f"Could not parse node status JSON: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check critical nodes: {e}")
             return False
 
     def query_current_recording_status(self):
@@ -1505,6 +1550,21 @@ class PowerController:
             # Generate LED pattern for this cycle
             pattern = self._generate_led_pattern()
             
+            # Log pattern changes and periodic updates
+            current_time = time.time()
+            pattern_changed = pattern != self.last_logged_pattern
+            time_since_log = current_time - self.last_pattern_log_time
+            
+            # Log if pattern changed or if it's been more than a minute since last log
+            if pattern_changed or time_since_log >= self.pattern_log_interval:
+                explanation = self._explain_led_pattern(pattern)
+                if pattern_changed:
+                    logger.info(f"LED pattern changed to {pattern}: ({explanation})")
+                else:
+                    logger.info(f"LED pattern {pattern}: ({explanation})")
+                self.last_logged_pattern = pattern
+                self.last_pattern_log_time = current_time
+            
             # Execute the pattern over 10 slots (3 seconds total)
             self._execute_led_pattern(pattern)
 
@@ -1540,6 +1600,57 @@ class PowerController:
         pattern = pattern[:10]
         
         return pattern
+    
+    def _explain_led_pattern(self, pattern: str) -> str:
+        """Generate a detailed explanation of the LED pattern"""
+        parts = []
+        
+        # Count pattern components
+        green_count = pattern.count('g')
+        red_count = pattern.count('r')
+        blue_count = pattern.count('b')
+        off_count = pattern.count('.')
+        
+        # Explain green status flashes
+        if green_count == 0:
+            parts.append("system stopped")
+        elif green_count == 1:
+            parts.append("system alive")
+        elif green_count == 2:
+            parts.append("launch active")
+            if self.recording_active:
+                # This shouldn't happen with current logic, but handle it
+                parts.append("(recording state unclear)")
+        elif green_count >= 3:
+            parts.append("recording active")
+        
+        # Explain red failure flashes
+        if red_count > 0:
+            failure_count = self.get_failure_count()
+            unhealthy_components = []
+            if not self.anemometer_healthy:
+                unhealthy_components.append("anem")
+            if not self.network_healthy:
+                unhealthy_components.append("network")
+            if not self.gps_healthy:
+                unhealthy_components.append("gps")
+            if not self.lora_healthy:
+                unhealthy_components.append("lora")
+            
+            if unhealthy_components:
+                parts.append(f"{failure_count} unhealthy: {', '.join(unhealthy_components)}")
+            else:
+                parts.append(f"{failure_count} unverified")
+        
+        # Explain blue status
+        if blue_count > 0:
+            parts.append("critical battery")
+        
+        # Explain off slots
+        if off_count > 0:
+            parts.append(f"{off_count} idle slots")
+        
+        return "; ".join(parts)
 
     def _execute_led_pattern(self, pattern: str):
         """Execute LED pattern over 10 slots of 0.3s each"""
@@ -2129,6 +2240,14 @@ class PowerController:
             self.send_desktop_notification(
                 "Recording Unavailable", "Argo service is not ready for recording.", "critical")
             return
+        
+        # NEW: Check if critical nodes are running before allowing recording
+        if not self._check_critical_nodes_running():
+            logger.warning(
+                "Double tap detected but critical nodes not running.")
+            self.send_desktop_notification(
+                "Recording Unavailable", "Critical nodes are not running.", "critical")
+            return
 
         if is_currently_recording:
             logger.info("Double tap detected - requesting to stop recording")
@@ -2335,6 +2454,21 @@ class PowerController:
 
         # Publish button event
         self._publish_button_event("long_press_shutdown")
+
+        # NEW: Stop recording before shutdown to prevent hangs
+        if self.recording_active:
+            logger.warning("Recording is active - stopping recording before shutdown...")
+            self.send_desktop_notification(
+                "Shutdown Preparations",
+                "Stopping recording before shutdown...",
+                "critical"
+            )
+            success = self.stop_recording()
+            if success:
+                logger.info("✅ Recording stopped successfully before shutdown")
+                time.sleep(2)  # Allow recording to fully stop
+            else:
+                logger.warning("⚠️  Failed to stop recording before shutdown, proceeding anyway...")
 
         # Start 1Hz LED pattern immediately to show shutdown initiated
         threading.Thread(
