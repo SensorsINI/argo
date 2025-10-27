@@ -11,6 +11,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Header
 import os
 from pathlib import Path
+import math
 
 class SailingAreaPublisher(Node):
     def __init__(self):
@@ -20,6 +21,11 @@ class SailingAreaPublisher(Node):
         self.waypoint_pub = self.create_publisher(MarkerArray, '/sailing_waypoints', 10)
         self.boundary_pub = self.create_publisher(MarkerArray, '/sailing_boundaries', 10)
         self.hazard_pub = self.create_publisher(MarkerArray, '/sailing_hazards', 10)
+        
+        # Define origin for coordinate conversion (from 'home' waypoint in GeoJSON)
+        self.origin_lon = 8.5448386
+        self.origin_lat = 47.3981555
+        self.earth_radius = 6378137.0  # meters
         
         # Load sailing area data
         self.maps_dir = Path("/home/orangepi/argo/foxglove/maps")
@@ -107,12 +113,18 @@ class SailingAreaPublisher(Node):
         # Frame and coordinate information
         self.get_logger().info("Coordinate System:")
         self.get_logger().info(f"  • Frame ID: map")
-        self.get_logger().info(f"  • Coordinate format: Longitude, Latitude, Altitude")
-        self.get_logger().info(f"  • Units: Degrees (lon/lat), Meters (altitude)")
+        self.get_logger().info(f"  • Coordinate format: Local x, y, z")
+        self.get_logger().info(f"  • Units: Meters")
         
         self.get_logger().info("=" * 60)
         self.get_logger().info("Sailing area publisher ready for Foxglove visualization")
         self.get_logger().info("=" * 60)
+    
+    def lonlat_to_xy(self, lon, lat):
+        """Converts longitude/latitude to local x/y meters using an equirectangular projection."""
+        x = (math.radians(lon) - math.radians(self.origin_lon)) * self.earth_radius * math.cos(math.radians(self.origin_lat))
+        y = (math.radians(lat) - math.radians(self.origin_lat)) * self.earth_radius
+        return x, y
     
     def count_markers(self):
         """Count the number of markers by type"""
@@ -157,14 +169,15 @@ class SailingAreaPublisher(Node):
         marker.action = Marker.ADD
         
         # Position (convert from lon/lat to x/y/z)
-        marker.pose.position.x = coords[0]  # longitude
-        marker.pose.position.y = coords[1]  # latitude  
+        x, y = self.lonlat_to_xy(coords[0], coords[1])
+        marker.pose.position.x = x
+        marker.pose.position.y = y
         marker.pose.position.z = coords[2] if len(coords) > 2 else 0.0  # altitude
         
         # Scale
-        marker.scale.x = 0.0001  # Small sphere
-        marker.scale.y = 0.0001
-        marker.scale.z = 0.0001
+        marker.scale.x = 5.0  # 5-meter sphere
+        marker.scale.y = 5.0
+        marker.scale.z = 5.0
         
         # Color (green for waypoints)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
@@ -191,14 +204,15 @@ class SailingAreaPublisher(Node):
         
         # Add all points
         for coord in coords:
+            x, y = self.lonlat_to_xy(coord[0], coord[1])
             point = Point()
-            point.x = coord[0]  # longitude
-            point.y = coord[1]  # latitude
+            point.x = x
+            point.y = y
             point.z = coord[2] if len(coord) > 2 else 0.0  # altitude
             marker.points.append(point)
         
         # Scale (line width)
-        marker.scale.x = 0.00005  # Very thin line
+        marker.scale.x = 1.0  # 1-meter thick line
         
         # Color based on type
         if feature_type == "sailing_boundary":
@@ -227,22 +241,24 @@ class SailingAreaPublisher(Node):
         
         # Add all points (including closing the polygon)
         for coord in coords:
+            x, y = self.lonlat_to_xy(coord[0], coord[1])
             point = Point()
-            point.x = coord[0]  # longitude
-            point.y = coord[1]  # latitude
+            point.x = x
+            point.y = y
             point.z = coord[2] if len(coord) > 2 else 0.0  # altitude
             marker.points.append(point)
         
         # Close the polygon
         if coords[0] != coords[-1]:
+            x, y = self.lonlat_to_xy(coords[0][0], coords[0][1])
             point = Point()
-            point.x = coords[0][0]
-            point.y = coords[0][1]
+            point.x = x
+            point.y = y
             point.z = coords[0][2] if len(coords[0]) > 2 else 0.0
             marker.points.append(point)
         
         # Scale (line width)
-        marker.scale.x = 0.0001  # Thin line
+        marker.scale.x = 1.0  # 1-meter thick line
         
         # Color based on type
         if feature_type == "sailing_area":
