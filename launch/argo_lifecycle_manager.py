@@ -4,18 +4,36 @@
 Argo ROS2 Lifecycle Manager
 ===========================
 
-A robust lifecycle manager for Argo ROS2 nodes that provides:
-- Process monitoring and auto-restart
+A comprehensive lifecycle manager for Argo ROS2 nodes that provides:
+- Continuous health monitoring and fault detection
 - Graceful shutdown handling
-- Status reporting
-- Simple command-line interface
+- Detailed status reporting with system diagnostics
+- Simulation mode support (local and remote)
+- Node pause/unpause control
+- Battery and power monitoring integration
+- ROS2 service interface for runtime control
 
-Usage:
-    python3 argo_lifecycle_manager.py run      # Start all nodes and keep running (for systemd)
-    python3 argo_lifecycle_manager.py stop     # Stop all nodes
-    python3 argo_lifecycle_manager.py restart  # Restart all nodes
-    python3 argo_lifecycle_manager.py status   # Show status
-    python3 argo_lifecycle_manager.py monitor  # Monitor mode (watch for failures)
+Commands:
+    help             Show detailed help message (-h, --help also available)
+    run              Start all nodes and keep running (for systemd service)
+    stop             Stop all nodes and clean up processes
+    restart          Restart all nodes (stop + start)
+    status           Show comprehensive system status with diagnostics
+    quick_status     Show condensed one-line status (fast check)
+    simulate_local   Start local simulation mode
+    simulate_remote  Start remote simulation mode
+
+Options:
+    --toggle_pause   Toggle controller pause state (pauses autonomous navigation)
+    --debug          Enable debug output for troubleshooting
+    --quiet          Suppress initialization messages
+
+Examples:
+    python3 argo_lifecycle_manager.py help
+    python3 argo_lifecycle_manager.py run
+    python3 argo_lifecycle_manager.py status
+    python3 argo_lifecycle_manager.py simulate_local
+    python3 argo_lifecycle_manager.py --toggle_pause
 """
 
 import os
@@ -2196,6 +2214,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 COMMANDS:
+  help             Show this help message and exit
+                   - Also available with -h or --help flags
+                   - Displays complete command reference and examples
+
   run              Start all Argo ROS2 nodes and keep running (for systemd service)
                    - Launches all discovered nodes except excluded ones
                    - Monitors node health continuously
@@ -2237,40 +2259,36 @@ COMMANDS:
                    - Better performance for resource-constrained hardware
                    - Same node exclusions as local simulation
 
-PAUSE TOGGLING:
-  The lifecycle manager provides multiple ways to pause/unpause nodes:
+CONTROLLER PAUSE:
+  The autonomous controller (controller.py) supports pause/resume functionality.
+  When paused, the controller stops publishing autonomous commands, allowing manual control.
   
-  Command Line Option:
+  Command Line Options:
+    # Via lifecycle manager
     python3 argo_lifecycle_manager.py --toggle_pause
     
-  ROS2 Service:
-    Service: /toggle_pause (std_srvs/srv/Trigger)
-    Usage: ros2 service call /toggle_pause std_srvs/srv/Trigger
+    # Via shell alias (bash_aliases)
+    ap    # Toggle controller pause state
+    
+  ROS2 Service (Direct):
+    Service: /controller_node/pause (std_srvs/srv/SetBool)
+    Usage: ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: true}"   # Pause
+           ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: false}"  # Resume
+    
+  Status Monitoring:
+    Topic: /controller_pause_state (std_msgs/msg/Bool)
+    - Published by controller.py
+    - Subscribed by lifecycle manager for status display
     
   Behavior:
-    - Automatically detects current pause state of nodes
-    - Pauses all running nodes if they are currently unpaused
-    - Unpauses all paused nodes if they are currently paused
-    - Excludes critical nodes from pause control (battery_water.py, temp_monitor.py)
-    - Provides detailed response about which nodes were affected
-    
-  Critical Nodes (Never Paused):
-    - battery_water.py: Critical battery monitoring
-    - temp_monitor.py: System temperature monitoring
-    
-  Pauseable Nodes:
-    - pwm.py: Servo control
-    - controller.py: Autonomous navigation
-    - gps.py: GPS navigation
-    - bno085.py: IMU/compass data
-    - anem.py: Wind sensor
-    - rudder_sail_radio.py: Radio control interface
-    - record.py: Data recording
-    - foxglove_bridge: Visualization bridge
+    - When paused: Controller stops autonomous navigation, human takes control
+    - When resumed: Controller resumes autonomous navigation
+    - Pause state persists across service restarts
+    - Only controller.py supports pause functionality
 
 NODE MANAGEMENT:
-  Excluded Nodes (Hardware Not Ready):
-    - battery_water: Runs as independent systemd service for critical monitoring
+  Excluded Nodes:
+    - battery_water and argo_power_control: Run as independent systemd services for critical monitoring
   
   Critical Nodes (Essential for Operation):
     - pwm.py: Servo control for rudder and sail
@@ -2288,6 +2306,11 @@ MONITORING:
   - CPU, memory, and temperature monitoring
 
 EXAMPLES:
+  # Show help
+  python3 argo_lifecycle_manager.py help
+  python3 argo_lifecycle_manager.py -h
+  python3 argo_lifecycle_manager.py --help
+  
   # Start Argo system
   python3 argo_lifecycle_manager.py run
   
@@ -2300,11 +2323,14 @@ EXAMPLES:
   # Start local simulation
   python3 argo_lifecycle_manager.py simulate_local
   
-  # Pause all nodes (via ROS2 service)
-  ros2 service call /toggle_pause std_srvs/srv/Trigger
-  
-  # Toggle pause state (command line option)
+  # Toggle controller pause (command line)
   python3 argo_lifecycle_manager.py --toggle_pause
+  
+  # Toggle controller pause (shell alias)
+  ap
+  
+  # Pause controller directly (ROS2 service)
+  ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: true}"
   
   # Stop all nodes
   python3 argo_lifecycle_manager.py stop
@@ -2312,7 +2338,7 @@ EXAMPLES:
 
     parser.add_argument('command',
                         choices=['run', 'stop', 'restart', 'status', 'quick_status',
-                                 'simulate_local', 'simulate_remote'],
+                                 'simulate_local', 'simulate_remote', 'help'],
                         nargs='?',  # Make command optional
                         help='Command to execute (see detailed descriptions below)')
     parser.add_argument('--debug', action='store_true',
@@ -2320,11 +2346,16 @@ EXAMPLES:
     parser.add_argument('--quiet', action='store_true',
                         help='Suppress initialization messages (useful for quick_status)')
     parser.add_argument('--toggle_pause', action='store_true',
-                        help='Toggle pause state of all pausable nodes (requires lifecycle manager to be running)')
+                        help='Toggle controller pause state (pauses autonomous navigation)')
     
     # Enable bash completion for command-line arguments
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
+    
+    # Handle help command first (no need to initialize manager)
+    if args.command == 'help':
+        parser.print_help()
+        sys.exit(0)
     
     # Validate that either a command or --toggle_pause is provided
     if not args.command and not args.toggle_pause:
