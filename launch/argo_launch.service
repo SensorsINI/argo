@@ -1,18 +1,16 @@
 [Unit]
 Description=Argo Robot ROS2 Launch Service
-After=network.target
-Wants=argo_radio_servo_module.service
+After=network.target argo_power_control.service
+Wants=argo_power_control.service
 
 [Service]
 Type=simple
 User=orangepi
 Group=orangepi
-WorkingDirectory=/home/orangepi/argo
-EnvironmentFile=/home/orangepi/argo/launch/argo.env
 Environment=ROS_DOMAIN_ID=0
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 launch/argo_lifecycle_manager.py run'
-ExecStop=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 launch/argo_lifecycle_manager.py stop'
+ExecStart=/bin/bash -c 'set -m && source /opt/ros/humble/setup.bash && python3 launch/argo_lifecycle_manager.py run'
 Restart=no
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 

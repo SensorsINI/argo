@@ -75,6 +75,13 @@ except ImportError:
 
 class ArgoLifecycleManager:
     def __init__(self, quiet: bool = True):
+        # Become session leader to manage child processes effectively
+        try:
+            os.setsid()
+        except OSError as e:
+            # This will fail if we are already a session leader, which is fine
+            pass
+        
         self.argo_dir = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))
         self.process = None
@@ -87,6 +94,7 @@ class ArgoLifecycleManager:
         self.remote_simulator_proc = None
         self.remote_tunnel_proc = None
         self.shutdown_requested = False  # Flag to coordinate shutdown
+        self.pgid = os.getpgrp() # Get our own process group ID
 
         # Initialize ROS2 for service client if available
         self.ros2_node = None
@@ -504,6 +512,7 @@ class ArgoLifecycleManager:
                 if node != 'foxglove_bridge' and node not in self.excluded_nodes]
         
         # Launch each node in a separate process
+        # Store as list of dicts: {'proc': process, 'name': script_name}
         self.node_processes = []
         self.node_output_threads = []
         
@@ -525,7 +534,8 @@ class ArgoLifecycleManager:
                     stderr=None,  # Let errors go to systemd journal
                     universal_newlines=True
                 )
-                self.node_processes.append(proc)
+                # Store process with script name for easier debugging
+                self.node_processes.append({'proc': proc, 'name': script})
                 print(f"✅ Launched {script} (PID: {proc.pid})")
             else:
                 print(f"⚠️  Warning: {script} not found at {script_path}")
@@ -558,7 +568,8 @@ class ArgoLifecycleManager:
                     stderr=None,  # Let errors go to systemd journal
                     universal_newlines=True
                 )
-                self.node_processes.append(proc)
+                # Store process with node name for easier debugging
+                self.node_processes.append({'proc': proc, 'name': special_node})
                 print(f"✅ Launched {special_node} (PID: {proc.pid})")
             elif special_node == 'bno085':
                 # BNO085 is excluded from launch but should be monitored for health
@@ -566,7 +577,7 @@ class ArgoLifecycleManager:
         
         # Set the main process to the first node process for compatibility
         if self.node_processes:
-            self.process = self.node_processes[0]
+            self.process = self.node_processes[0]['proc']
         else:
             print("❌ No nodes were launched")
             self.process = None
@@ -724,9 +735,20 @@ class ArgoLifecycleManager:
             print("⚠️  Argo launch process is already running")
             return True
         
+        # Check if shutdown has been requested before launching
+        if self.shutdown_requested:
+            print("⚠️  Shutdown requested before node launch - aborting")
+            return True
+        
         try:
             # Start the nodes directly
             self._launch_nodes_directly()
+            
+            # Check again after launch
+            if self.shutdown_requested:
+                print("⚠️  Shutdown requested during launch - stopping nodes")
+                self.stop()
+                return True
             
             # Wait and check for actual node startup with continuous feedback
             print("⏳ Waiting for nodes to start...")
@@ -736,6 +758,12 @@ class ArgoLifecycleManager:
             start_time = time.time()
             
             while time.time() - start_time < timeout:
+                # Check for shutdown request during launch
+                if self.shutdown_requested:
+                    print("⚠️  Shutdown requested during node startup - stopping nodes")
+                    self.stop()
+                    return True
+                
                 if not self._is_launch_running():
                     print("❌ Launch process died during startup")
                     
@@ -779,6 +807,12 @@ class ArgoLifecycleManager:
                     stabilization_check_interval = 1.0  # Check every second during stabilization
                     
                     while time.time() - stabilization_start < self.stabilization_wait:
+                        # Check for shutdown request during stabilization
+                        if self.shutdown_requested:
+                            print("⚠️  Shutdown requested during stabilization - stopping nodes")
+                            self.stop()
+                            return True
+                        
                         # Check for node failures during stabilization
                         current_status = self._get_node_status()
                         current_running = [
@@ -916,6 +950,10 @@ class ArgoLifecycleManager:
             check_interval = 300  # Check every 5 minutes (much less frequent)
             
             while not self.shutdown_requested and (rclpy.ok() if self.ros2_node else True):
+                # Check shutdown flag FIRST before any operations
+                if self.shutdown_requested:
+                    break
+                
                 # Spin ROS2 node to process service requests (if available)
                 if self.ros2_node:
                     try:
@@ -984,17 +1022,66 @@ class ArgoLifecycleManager:
             # Publish final status before cleanup
             self._publish_status_update("Argo lifecycle manager stopping")
             
-            # Stop all nodes first
-            self.stop()
+            # Stop all nodes first only if they are actually running
+            if self._is_launch_running():
+                self.stop()
             
             # Clean up ROS2 last
             self._cleanup_ros2()
             
-            return not self.shutdown_requested or True  # Always return True for clean exit
+            # Ensure we don't relaunch after shutdown
+            self.shutdown_requested = True
+            
+            # Explicitly exit if shutdown was requested
+            if self.shutdown_requested:
+                print("✅ Lifecycle manager shutdown complete - exiting")
+                sys.exit(0)
+        
+        return True  # Always return True for clean exit
     
     def stop(self) -> bool:
         """Stop the Argo launch process and all related nodes"""
         print("🛑 Stopping Argo ROS2 nodes...")
+        
+        # New: Terminate the entire process group
+        try:
+            print(f"DEBUG: Terminating process group {self.pgid}...")
+            os.killpg(self.pgid, signal.SIGTERM)
+            # Wait a moment for processes to terminate
+            time.sleep(2)
+            print("✅ Process group terminated.")
+            self.node_processes.clear()
+            self._cleanup_ros2()
+            return True
+        except ProcessLookupError:
+            # This can happen if the process group is already gone
+            print("✅ Process group already terminated.")
+            self._cleanup_ros2()
+            return True
+        except Exception as e:
+            print(f"⚠️  Error killing process group: {e}")
+            # Fallback to old method if killpg fails
+            return self._stop_fallback()
+
+    def _stop_fallback(self) -> bool:
+        """Fallback method to stop nodes individually if process group kill fails."""
+        print("⚠️  Falling back to individual process termination...")
+        # Stop recording first if it's active (only if we have a ROS2 node available)
+        # Don't try to stop recording during shutdown as ROS2 context may be unavailable
+        if self.ros2_node and not self.shutdown_requested:
+            recording_active = self._check_recording_status()
+            if recording_active:
+                print("⚠️  Recording is active - stopping recording first...")
+                try:
+                    success, message = self._call_trigger_service('/argo/recording/stop', timeout_sec=5.0, debug=False)
+                    if success:
+                        print("✅ Recording stopped successfully")
+                        time.sleep(1)  # Allow recording to fully stop
+                    else:
+                        print(f"⚠️  Failed to stop recording: {message}")
+                        print("⚠️  Proceeding with node shutdown anyway...")
+                except Exception as e:
+                    print(f"⚠️  Could not stop recording: {e}")
         
         # Clear the process cache so next query gets fresh results
         if hasattr(self, 'node_manager'):
@@ -1005,6 +1092,7 @@ class ArgoLifecycleManager:
         # Stop main launch process
         if self.process and self._is_launch_running():
             try:
+                print(f"DEBUG (Thread: {threading.get_ident()}): Terminating main launch process {self.process.pid}")
                 self.process.terminate()
                 self.process.wait(timeout=5)
                 print("✅ Main launch process stopped")
@@ -1017,51 +1105,83 @@ class ArgoLifecycleManager:
                 success = False
         
         # Stop individual node processes
-        try:
-            if hasattr(self, 'node_processes') and self.node_processes:
-                print(
-                    f"🛑 Stopping {len(self.node_processes)} node processes...")
-                for proc in self.node_processes:
-                    if proc and proc.poll() is None:
+        if hasattr(self, 'node_processes') and self.node_processes:
+            print(
+                f"DEBUG (Thread: {threading.get_ident()}): Stopping {len(self.node_processes)} node processes (fallback)...")
+            for node_info in self.node_processes:
+                proc = node_info['proc']
+                name = node_info['name']
+                
+                if proc and proc.poll() is None:
+                    try:
+                        print(f"  DEBUG (Thread: {threading.get_ident()}): Terminating {name} (PID: {proc.pid})...")
                         proc.terminate()
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            print(f"⚡ Force killing process {proc.pid}")
-                            proc.kill()
-                            proc.wait()
-                self.node_processes = []
-            
-            # Also use pkill as backup to catch any remaining processes
-            # Note: excluded_nodes are not in expected_nodes, so no need to filter here
-            for node in self.expected_nodes:
-                subprocess.run(['pkill', '-f', f'/{node}'], 
-                               capture_output=True, timeout=2)
+                        proc.wait(timeout=2)
+                        print(f"  ✅ {name} stopped gracefully")
+                    except subprocess.TimeoutExpired:
+                        print(f"  ⚡ Force killing {name} (PID: {proc.pid})")
+                        proc.kill()
+                        proc.wait(timeout=1)
+                    except Exception as e:
+                        print(f"  ⚠️  Error stopping {name} (PID: {proc.pid}): {e}")
+            self.node_processes = []
+        
+        # Also use pkill as backup to catch any remaining processes
+        print(f"DEBUG (Thread: {threading.get_ident()}): Using pkill as a fallback...")
+        for node in self.expected_nodes:
+            print(f"  DEBUG: pkill -f /{node}")
+            subprocess.run(['pkill', '-f', f'/{node}'], 
+                           capture_output=True, timeout=2)
 
-            # Also kill special nodes (like foxglove_bridge)
-            if hasattr(self, 'special_nodes') and self.special_nodes:
-                for special_node in self.special_nodes:
-                    if special_node == 'foxglove_bridge':
-                        subprocess.run(['pkill', '-f', 'foxglove_bridge'],
-                             capture_output=True, timeout=2)
-            
-            print("✅ Argo processes terminated")
-        except Exception as e:
-            print(f"⚠️  Error stopping processes: {e}")
-            success = False
+        # Also kill special nodes (like foxglove_bridge)
+        if hasattr(self, 'special_nodes') and self.special_nodes:
+            for special_node in self.special_nodes:
+                if special_node == 'foxglove_bridge':
+                    print(f"  DEBUG: pkill -f foxglove_bridge")
+                    subprocess.run(['pkill', '-f', 'foxglove_bridge'],
+                         capture_output=True, timeout=2)
+        
+        print("✅ Argo processes terminated")
         
         self.process = None
         # Stop remote processes if they were started
         self._stop_remote_processes()
         print("✅ All Argo processes stopped")
+        self._cleanup_ros2()
         return success
     
     def restart(self) -> bool:
-        """Restart the Argo launch process"""
+        """Restart the Argo launch process with recording awareness"""
         print("🔄 Restarting Argo ROS2 nodes...")
+        
+        # Check if recording is active
+        recording_active = self._check_recording_status()
+        if recording_active:
+            print("⚠️  Recording is active - stopping recording before restart...")
+            success, message = self._call_trigger_service('/argo/recording/stop', timeout_sec=10.0)
+            if success:
+                print("✅ Recording stopped successfully")
+                time.sleep(2)  # Allow recording to fully stop
+            else:
+                print(f"⚠️  Failed to stop recording: {message}")
+                print("⚠️  Proceeding with restart anyway...")
+        
         self.stop()
         time.sleep(1)
         return self.start()
+    
+    def _check_recording_status(self) -> bool:
+        """Check if recording is currently active"""
+        try:
+            success, message = self._call_trigger_service(
+                '/argo/recording/get_status', timeout_sec=5.0, debug=False)
+            
+            # The 'success' field of Trigger response indicates recording state
+            # True means recording is active
+            return success and message.lower() != 'not active'
+        except Exception:
+            # If we can't check, assume not recording to be safe
+            return False
     
     def simulate_local(self) -> bool:
         """Launch Argo in local simulation mode."""
