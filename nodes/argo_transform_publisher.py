@@ -52,6 +52,9 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.map_origin_set = False
         self.map_origin_lat = 0.0
         self.map_origin_lon = 0.0
+        self.current_lat = 0.0
+        self.current_lon = 0.0
+        self.earth_radius = 6378137.0  # meters
         self.boat_heading = 0.0
         self.boat_roll = 0.0
         self.boat_pitch = 0.0
@@ -74,13 +77,28 @@ class ArgoTransformPublisher(ArgoBaseNode):
         
         self.get_logger().info("Argo transform publisher started")
     
+    def lonlat_to_xy(self, lon, lat):
+        """Converts longitude/latitude to local x/y meters using an equirectangular projection."""
+        if not self.map_origin_set:
+            return 0.0, 0.0
+        x = (math.radians(lon) - math.radians(self.map_origin_lon)) * self.earth_radius * math.cos(math.radians(self.map_origin_lat))
+        y = (math.radians(lat) - math.radians(self.map_origin_lat)) * self.earth_radius
+        return x, y
+    
     def gps_callback(self, msg):
-        """Set map origin from first GPS fix"""
-        if not self.map_origin_set and not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
+        """Set map origin from first GPS fix and update current position"""
+        if math.isnan(msg.latitude) or math.isnan(msg.longitude):
+            return # Ignore invalid GPS data
+            
+        if not self.map_origin_set:
             self.map_origin_lat = msg.latitude
             self.map_origin_lon = msg.longitude
             self.map_origin_set = True
             self.get_logger().info(f"Map origin set to: {self.map_origin_lat:.6f}, {self.map_origin_lon:.6f}")
+
+        # Always update the current position
+        self.current_lat = msg.latitude
+        self.current_lon = msg.longitude
     
     def pose_callback(self, msg):
         """Update boat heading from pose topic"""
@@ -206,9 +224,13 @@ class ArgoTransformPublisher(ArgoBaseNode):
             odom_to_base.header.stamp = self.get_clock().now().to_msg()
             odom_to_base.header.frame_id = "odom"
             odom_to_base.child_frame_id = "base_link"
-            odom_to_base.transform.translation.x = 0.0  # TODO: Convert GPS to map coordinates
-            odom_to_base.transform.translation.y = 0.0
+            
+            # Convert current GPS coordinates to map coordinates
+            x, y = self.lonlat_to_xy(self.current_lon, self.current_lat)
+            odom_to_base.transform.translation.x = x
+            odom_to_base.transform.translation.y = y
             odom_to_base.transform.translation.z = 0.0
+            
             odom_to_base.transform.rotation.x = qx
             odom_to_base.transform.rotation.y = qy
             odom_to_base.transform.rotation.z = qz
