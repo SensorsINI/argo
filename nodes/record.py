@@ -295,7 +295,7 @@ class ArgoRecordingNode(Node):
             # Log available topics before recording starts
             try:
                 topics_cmd = ['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 topic list']
-                topics_result = subprocess.run(topics_cmd, capture_output=True, text=True, timeout=5)
+                topics_result = subprocess.run(topics_cmd, capture_output=True, text=True, timeout=15)
                 if topics_result.returncode == 0:
                     topic_count = len([line for line in topics_result.stdout.strip().split('\n') if line.strip()])
                     self._log_info(f"📡 Found {topic_count} topics available for recording")
