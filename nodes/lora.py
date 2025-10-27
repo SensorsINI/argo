@@ -57,7 +57,7 @@ Key Features:
 
 import rclpy
 from rclpy.executors import ExternalShutdownException
-from std_msgs.msg import String, Bool, Int32, Float64
+from std_msgs.msg import String, Bool, Int32, Float64, Float32
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
 from std_srvs.srv import Trigger
