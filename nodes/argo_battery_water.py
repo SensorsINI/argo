@@ -688,11 +688,13 @@ class BatteryWaterNode(ArgoBaseNode):
                     self.get_logger().warning(f"Failed to load existing slopes: {e}")
             
             # Validate that slopes are meaningful (not None, not zero, within reasonable range)
+            # Use same minimum thresholds as in slope update to avoid saving near-zero slopes
+            MIN_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h minimum for meaningful slopes
             has_meaningful_charging = (self._charging_slope_v_per_s is not None and 
-                                      abs(self._charging_slope_v_per_s) > 1e-9 and 
+                                      self._charging_slope_v_per_s > MIN_SLOPE_V_PER_S and 
                                       abs(self._charging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
             has_meaningful_discharging = (self._discharging_slope_v_per_s is not None and 
-                                         abs(self._discharging_slope_v_per_s) > 1e-9 and 
+                                         self._discharging_slope_v_per_s < -MIN_SLOPE_V_PER_S and 
                                          abs(self._discharging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
             
             # Additional validation: slopes should only be saved if they represent
@@ -818,15 +820,30 @@ class BatteryWaterNode(ArgoBaseNode):
             if fit_result is not None:
                 slope_v_per_s, intercept = fit_result
                 
+                # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
+                # 0.3 V/h = 8.33e-5 V/s minimum for meaningful slope updates
+                MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
+                MIN_DISCHARGING_SLOPE_V_PER_S = -8.33e-5  # -0.3 V/h (magnitude)
+                
+                # Also check that battery is not already fully charged to avoid capturing voltage float near full
+                is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)  # Within 0.1V of full
+                is_near_empty = voltage <= 6.5  # Within 0.5V of empty
+                
                 # Update persistent slopes if we have good data, sufficient samples, and proper charging state
-                if (charging and slope_v_per_s > 1e-6 and len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
-                    self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples)):  # Positive slope for charging
+                if (charging and 
+                    slope_v_per_s > MIN_CHARGING_SLOPE_V_PER_S and  # Significant positive slope
+                    len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
+                    self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
+                    not is_fully_charged):  # Don't update slope when already fully charged
                     self._charging_slope_v_per_s = slope_v_per_s
-                    self.get_logger().debug(f"Updated charging slope: {slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples")
-                elif (not charging and slope_v_per_s < -1e-6 and len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
-                      self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples)):  # Negative slope for discharging
+                    self.get_logger().debug(f"Updated charging slope: {slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                elif (not charging and 
+                      slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and  # Significant negative slope
+                      len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
+                      self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
+                      not is_near_empty):  # Don't update slope when already near empty
                     self._discharging_slope_v_per_s = slope_v_per_s
-                    self.get_logger().debug(f"Updated discharging slope: {slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples")
+                    self.get_logger().debug(f"Updated discharging slope: {slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
             else:
                 # Use persistent slopes if available
                 if charging:
