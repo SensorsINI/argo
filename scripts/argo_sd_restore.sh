@@ -79,6 +79,36 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Validate that a backup file was specified before anything else
+if [ -z "$BACKUP_FILE" ]; then
+    echo -e "${RED}Error: Backup file not specified${NC}"
+    usage
+    exit 1
+fi
+
+# Validate that the backup file exists (local or remote) BEFORE device detection
+echo "Validating backup source..."
+if [[ "$BACKUP_FILE" == *":"* ]]; then
+    # Remote file: Check for existence via SSH
+    REMOTE_HOST=$(echo "$BACKUP_FILE" | cut -d: -f1)
+    REMOTE_PATH=$(echo "$BACKUP_FILE" | cut -d: -f2)
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "test -f '$REMOTE_PATH'"; then
+        echo -e "${RED}❌ Error: Remote backup file not found or SSH connection failed.${NC}"
+        echo "   Checked for '$REMOTE_PATH' on host '$REMOTE_HOST'."
+        echo "   Please verify the path and ensure SSH key-based authentication is set up."
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Remote backup file found.${NC}"
+else
+    # Local file: Check for existence
+    if [ ! -f "$BACKUP_FILE" ]; then
+        echo -e "${RED}❌ Error: Local backup file not found: $BACKUP_FILE${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Local backup file found.${NC}"
+fi
+echo ""
+
 # Auto-detect device if not specified
 if [ -z "$DEVICE" ]; then
     echo -e "${YELLOW}Device not specified. Starting interactive detection...${NC}"
@@ -118,13 +148,6 @@ if [ -z "$DEVICE" ]; then
         exit 1
     fi
     echo ""
-fi
-
-# Validate arguments
-if [ -z "$BACKUP_FILE" ]; then
-    echo -e "${RED}Error: Backup file not specified${NC}"
-    usage
-    exit 1
 fi
 
 # Check if running as root (REQUIRED for restore)
@@ -197,7 +220,7 @@ if [[ "$BACKUP_FILE" == *":"* ]]; then
     echo ""
 fi
 
-# Verify backup file exists
+# Verify backup file exists (this check is now redundant, but harmless)
 if [ ! -f "$BACKUP_FILE" ]; then
     echo -e "${RED}Error: Backup file not found: $BACKUP_FILE${NC}"
     exit 1
