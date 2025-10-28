@@ -8,10 +8,28 @@ The Argo system uses a sophisticated logging architecture that combines Argo-spe
 
 ## Log Directory Structure
 
-All monitoring services write to `/var/log.hdd/persistent/` with the following naming conventions:
+The Argo system uses a dual logging architecture:
+
+### Persistent Logging (`/var/log.hdd/persistent/`)
+**Purpose**: Logs that survive system reboots and provide long-term diagnostic information
 - **Daily logs**: `service-name-YYYYMMDD.log`
 - **Timestamped logs**: `service-name-YYYYMMDD-HHMMSS.log`
 - **CSV data**: `service-name-YYYYMMDD.csv`
+
+### System Logging (`/var/log.hdd/` and `/var/log/`)
+**Purpose**: Standard system logs managed by rsyslog and systemd journal
+- **System logs**: `/var/log.hdd/syslog`, `/var/log.hdd/kern.log`, etc.
+- **Journal logs**: Managed by systemd-journald with rotation
+- **Service logs**: Some services log to both persistent and system logs
+
+### Logging Configuration Decision Matrix
+
+| Service Type | Persistent Logging | System Logging | Reason |
+|--------------|-------------------|----------------|---------|
+| **Argo Monitoring Services** | ✅ Required | ✅ Optional | Critical for diagnostics |
+| **System Services** | ❌ Not needed | ✅ Standard | Managed by systemd/journald |
+| **Development Services** | ✅ Recommended | ✅ Optional | Debugging and analysis |
+| **Boot-time Services** | ✅ Required | ✅ Optional | Boot diagnostics |
 
 ## Argo-Specific Monitoring Services
 
@@ -78,13 +96,15 @@ All monitoring services write to `/var/log.hdd/persistent/` with the following n
 **Makefile**: `power_control/Makefile` (lines 27-40)
 
 **Log Files**:
-- `argo-power-control.log` (referenced in testing scripts)
+- `argo-power-control.log` - Persistent logging to `/var/log.hdd/persistent/`
+- **Systemd Journal**: Also logs to systemd journal (rotated)
 
 **Purpose**: Power button and LED control, system health monitoring  
 **Features**:
 - GPIO management for power button and LEDs
 - Graceful shutdown procedures
 - System health monitoring
+- **Dual Logging**: Both persistent files and systemd journal
 
 ## System-Level Monitoring Services (Optional)
 
@@ -220,6 +240,156 @@ make -C system-monitoring install-all
 - Ensures persistent storage of all logs
 - Critical for maintaining log history across reboots
 
+## Log Rotation Configuration
+
+### Systemd Journal Rotation
+The systemd journal is configured in `/etc/systemd/journald.conf`:
+```ini
+[Journal]
+Storage=persistent
+Compress=yes
+RateLimitIntervalSec=30s
+RateLimitBurst=10000
+SystemMaxUse=500M
+SystemKeepFree=1G
+MaxRetentionSec=2week
+ForwardToSyslog=no
+```
+
+**Key Settings**:
+- **Storage**: `persistent` - Logs stored in `/var/log/journal/`
+- **SystemMaxUse**: `500M` - Maximum disk usage for journal
+- **MaxRetentionSec**: `2week` - Maximum retention time
+- **Compress**: `yes` - Compress old journal files
+
+### Logrotate Configuration
+Log rotation is managed by `/etc/logrotate.conf` and `/etc/logrotate.d/`:
+
+#### Global Settings (`/etc/logrotate.conf`)
+```bash
+# Rotate log files weekly
+weekly
+
+# Use the adm group by default
+su root adm
+
+# Keep 4 weeks worth of backlogs
+rotate 4
+
+# Create new (empty) log files after rotating old ones
+create
+
+# Compress rotated files
+compress
+```
+
+#### Persistent Logs (`/etc/logrotate.d/persistent-logs`)
+```bash
+/var/log.hdd/persistent/*.log {
+    daily
+    missingok
+    rotate 2
+    compress
+    delaycompress
+    create 644 root root
+    su root root
+}
+```
+
+#### System Logs (`/etc/logrotate.d/rsyslog`)
+```bash
+/var/log.hdd/syslog
+/var/log.hdd/mail.info
+/var/log.hdd/mail.warn
+/var/log.hdd/mail.err
+/var/log.hdd/mail.log
+/var/log.hdd/daemon.log
+/var/log.hdd/kern.log
+/var/log.hdd/auth.log
+/var/log.hdd/user.log
+/var/log.hdd/lpr.log
+/var/log.hdd/cron.log
+/var/log.hdd/debug
+/var/log.hdd/messages
+{
+    rotate 4
+    weekly
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate
+    endscript
+}
+```
+
+### Log Rotation Schedule
+
+| Log Type | Rotation Frequency | Retention | Compression | Location |
+|----------|-------------------|-----------|-------------|----------|
+| **Persistent Logs** | Daily | 2 days | Yes (delayed) | `/var/log.hdd/persistent/` |
+| **System Logs** | Weekly | 4 weeks | Yes (delayed) | `/var/log.hdd/` |
+| **Systemd Journal** | Automatic | 2 weeks | Yes | `/var/log/journal/` |
+| **Boot History** | Daily | 2 days | Yes (delayed) | `/var/log.hdd/persistent/` |
+
+### Log Rotation Troubleshooting
+
+#### Check Logrotate Status
+```bash
+# Test logrotate configuration
+sudo logrotate -d /etc/logrotate.conf
+
+# Force log rotation
+sudo logrotate -f /etc/logrotate.conf
+
+# Check logrotate logs
+sudo cat /var/log/logrotate.log
+```
+
+#### Check Journal Status
+```bash
+# Check journal disk usage
+journalctl --disk-usage
+
+# List available boots
+journalctl --list-boots
+
+# Check journal configuration
+systemctl status systemd-journald
+```
+
+#### Manual Log Rotation
+```bash
+# Rotate specific log files
+sudo logrotate -f /etc/logrotate.d/persistent-logs
+
+# Check rotated files
+ls -la /var/log.hdd/persistent/*.log*
+```
+
+### Service-Specific Logging Configuration
+
+#### Services with Persistent Logging
+These services are configured to log to `/var/log.hdd/persistent/`:
+
+1. **argo_power_control.service**:
+   ```ini
+   StandardOutput=append:/var/log.hdd/persistent/argo-power-control.log
+   StandardError=append:/var/log.hdd/persistent/argo-power-control.log
+   ```
+
+2. **argo_thermal_monitor.service**: Uses shell script with `>>` redirection
+
+3. **Boot History Logger**: Uses shell script with `>>` redirection
+
+#### Services with System Logging Only
+These services log only to systemd journal:
+- Most system services
+- Services without explicit logging configuration
+- Services using `StandardOutput=journal`
+
 ## Service Installation and Management
 
 ### Argo Services Installation
@@ -268,20 +438,25 @@ cat /var/log.hdd/persistent/boot-history.log
 
 ## Log File Summary
 
-| Log File Pattern | Generating Service | Purpose | Frequency |
-|------------------|-------------------|---------|-----------|
-| `thermal-YYYYMMDD.log` | `argo_thermal_monitor.service` | Argo thermal monitoring | 30s |
-| `battery-monitor-YYYYMMDD.csv` | `argo_battery_water.py` (ROS2) | Battery/sensor data | 30s |
-| `wifi-reconnect.log` | `argo_wifi_reconnect.service` | WiFi management | 5min |
-| `argo-power-control.log` | `argo_power_control.service` | Power control | Event-based |
-| `boot-history.log` | `boot-history-logger.service` | Boot events | Per boot |
-| `dmesg-YYYYMMDD.log` | `boot-history-logger.service` | Boot-time kernel messages | Per boot |
-| `dmesg-YYYYMMDD-HHMMSS.log` | `persistent-dmesg.service` | Timestamped kernel messages | Per boot |
-| `journalctl-YYYYMMDD-HHMMSS.log` | `boot-history-logger.service` | Boot-time systemd journal | Per boot |
-| `cursor-processes-YYYYMMDD.log` | `cursor-monitor.service` | Cursor IDE monitoring | 60s |
-| `memory-YYYYMMDD.log` | `memory-monitor.service` | Memory usage | 30s |
-| `processes-YYYYMMDD.log` | `memory-monitor.service` | Process monitoring | 30s |
-| `orangepi-monitor-YYYYMMDD.log` | `orangepi-monitor.service` | Orange Pi hardware monitoring | Continuous |
+| Log File Pattern | Generating Service | Purpose | Frequency | Logging Type |
+|------------------|-------------------|---------|-----------|--------------|
+| `thermal-YYYYMMDD.log` | `argo_thermal_monitor.service` | Argo thermal monitoring | 30s | Persistent |
+| `battery-monitor-YYYYMMDD.csv` | `argo_battery_water.py` (ROS2) | Battery/sensor data | 30s | Persistent |
+| `wifi-reconnect.log` | `argo_wifi_reconnect.service` | WiFi management | 5min | Persistent |
+| `argo-power-control.log` | `argo_power_control.service` | Power control | Event-based | **Dual** (Persistent + Journal) |
+| `boot-history.log` | `boot-history-logger.service` | Boot events | Per boot | Persistent |
+| `dmesg-YYYYMMDD.log` | `boot-history-logger.service` | Boot-time kernel messages | Per boot | Persistent |
+| `dmesg-YYYYMMDD-HHMMSS.log` | `persistent-dmesg.service` | Timestamped kernel messages | Per boot | Persistent |
+| `journalctl-YYYYMMDD-HHMMSS.log` | `boot-history-logger.service` | Boot-time systemd journal | Per boot | Persistent |
+| `cursor-processes-YYYYMMDD.log` | `cursor-monitor.service` | Cursor IDE monitoring | 60s | Persistent |
+| `memory-YYYYMMDD.log` | `memory-monitor.service` | Memory usage | 30s | Persistent |
+| `processes-YYYYMMDD.log` | `memory-monitor.service` | Process monitoring | 30s | Persistent |
+| `orangepi-monitor-YYYYMMDD.log` | `orangepi-monitor.service` | Orange Pi hardware monitoring | Continuous | Persistent |
+
+### Logging Type Legend
+- **Persistent**: Logs to `/var/log.hdd/persistent/` - survives reboots
+- **Dual**: Logs to both persistent files and systemd journal
+- **Journal**: Logs only to systemd journal (rotated, may be lost)
 
 ## Troubleshooting
 
