@@ -79,6 +79,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Check if running as root first (REQUIRED for restore)
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}❌ Error: This script MUST be run as root (sudo)${NC}"
+    echo "Example: sudo $0 $*"
+    exit 1
+fi
+
 # Validate that a backup file was specified before anything else
 if [ -z "$BACKUP_FILE" ]; then
     echo -e "${RED}Error: Backup file not specified${NC}"
@@ -148,13 +155,6 @@ if [ -z "$DEVICE" ]; then
         exit 1
     fi
     echo ""
-fi
-
-# Check if running as root (REQUIRED for restore)
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}❌ Error: This script MUST be run as root (sudo)${NC}"
-    echo "Example: sudo ./argo_sd_restore.sh $BACKUP_FILE"
-    exit 1
 fi
 
 # Safety confirmation
