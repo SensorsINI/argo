@@ -176,7 +176,14 @@ if [[ "$BACKUP_FILE" == *":"* ]]; then
     # Remote file - download first
     echo "Downloading backup from remote location..."
     REMOTE_FILE="$BACKUP_FILE"
-    TMP_FILE="/tmp/argo_restore_temp_$(date +%s).img.gz"
+    
+    # Determine extension for temp file
+    if [[ "$REMOTE_FILE" == *.7z ]]; then
+        TMP_FILE="/tmp/argo_restore_temp_$(date +%s).img.7z"
+    else
+        # Default to .gz for backward compatibility
+        TMP_FILE="/tmp/argo_restore_temp_$(date +%s).img.gz"
+    fi
     
     scp "$REMOTE_FILE" "$TMP_FILE"
     
@@ -218,7 +225,23 @@ echo "This will take 15-25 minutes..."
 echo ""
 
 # Unzip and write to device with progress
-zcat "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M status=progress conv=fsync
+if [[ "$BACKUP_FILE" == *.7z ]]; then
+    if ! command -v 7z &> /dev/null; then
+        echo -e "${RED}❌ Error: '7z' command not found.${NC}"
+        echo "   Please install p7zip-full to restore .7z archives."
+        echo "   Run: sudo apt update && sudo apt install p7-zip-full"
+        exit 1
+    fi
+    echo "Decompressing 7z file..."
+    7z x -so "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M status=progress conv=fsync
+elif [[ "$BACKUP_FILE" == *.gz ]]; then
+    echo "Decompressing gz file..."
+    zcat "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M status=progress conv=fsync
+else
+    echo -e "${RED}❌ Error: Unsupported backup file format.${NC}"
+    echo "   Only .gz and .7z compressed images are supported."
+    exit 1
+fi
 
 if [ $? -eq 0 ]; then
     echo ""
