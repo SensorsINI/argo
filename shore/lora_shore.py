@@ -148,6 +148,14 @@ class LoRaShoreNode(Node):
         self.packet_count = 0
         self.command_count = 0
         
+        # Diagnostics tracking
+        self.success_count = 0
+        self.failure_count = 0
+        self.json_decode_errors = 0
+        self.processing_errors = 0
+        self.last_failure_report_time = time.time()
+        self.failure_report_interval_s = 10.0
+        
         # Ping mechanism
         self.ping_sequence = 0
         self.ping_timer = self.create_timer(5.0, self.send_ping)
@@ -159,6 +167,9 @@ class LoRaShoreNode(Node):
         
         # Status timer
         self.status_timer = self.create_timer(5.0, self.publish_status)
+        
+        # Diagnostics timer - report failures every 10s
+        self.diagnostics_timer = self.create_timer(self.failure_report_interval_s, self.report_diagnostics)
         
         self.get_logger().info("Shore-side LoRa node ready. Listening for Argo packets...")
     
@@ -249,6 +260,8 @@ class LoRaShoreNode(Node):
                                 packet = json.loads(json_str)
                                 self.process_argo_packet(packet, json_str)
                             except json.JSONDecodeError as e:
+                                self.json_decode_errors += 1
+                                self.failure_count += 1
                                 if self.debug:
                                     self.get_logger().warn(f"JSON decode error: {e}, data: {json_str}")
                         except ValueError:
@@ -281,14 +294,35 @@ class LoRaShoreNode(Node):
             
         try:
             self.packet_count += 1
+            self.success_count += 1
             self.last_packet_time = time.time()
             
+            # Extract key message details for immediate logging
+            msg_details = []
+            if 'sog' in packet:
+                msg_details.append(f"SOG={packet['sog']:.1f}kt")
+            if 'cog' in packet:
+                msg_details.append(f"COG={packet['cog']:.1f}°")
+            if 'hdg' in packet:
+                msg_details.append(f"HDG={packet['hdg']:.1f}°")
+            if 'lat' in packet and 'lon' in packet:
+                msg_details.append(f"GPS={packet['lat']:.5f},{packet['lon']:.5f}")
+            if 'bat' in packet:
+                msg_details.append(f"BAT={packet['bat']:.1f}V")
+            if 'hum' in packet:
+                msg_details.append(f"HUMAN={'YES' if packet['hum'] else 'NO'}")
+            
+            details_str = ", ".join(msg_details) if msg_details else "no data fields"
+            
+            # Always log successful reception (not just in debug mode)
+            self.get_logger().info(
+                f"✓ RX #{self.success_count}: {details_str} | "
+                f"{len(raw_json)}B | {datetime.now().strftime('%H:%M:%S')}"
+            )
+            
             if self.debug:
-                self.get_logger().info(f"=== PACKET #{self.packet_count} RECEIVED ===")
-                self.get_logger().info(f"Raw JSON: {raw_json}")
-                self.get_logger().info(f"Parsed packet: {packet}")
-                self.get_logger().info(f"Packet keys: {list(packet.keys())}")
-                self.get_logger().info(f"Timestamp: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+                self.get_logger().info(f"  Raw JSON: {raw_json}")
+                self.get_logger().info(f"  All keys: {list(packet.keys())}")
             
             # Publish raw data
             raw_msg = String()
@@ -336,15 +370,14 @@ class LoRaShoreNode(Node):
             contact_msg.data = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.pub_argo_last_contact.publish(contact_msg)
             
-            if self.debug:
-                self.get_logger().info(f"=== PACKET #{self.packet_count} PROCESSING COMPLETE ===")
-            
             # Note: RSSI is appended by Waveshare as trailing bytes, not in JSON
             # Would need separate parsing if needed
             
         except Exception as e:
+            self.processing_errors += 1
+            self.failure_count += 1
             if not self.shutting_down:
-                self.get_logger().error(f"Error processing Argo packet: {e}")
+                self.get_logger().error(f"✗ Error processing packet #{self.packet_count}: {e}")
     
     def send_ping(self):
         """Send periodic ping to Argo for connection monitoring"""
@@ -369,6 +402,34 @@ class LoRaShoreNode(Node):
                 self.get_logger().debug(f"Sent ping #{self.ping_sequence} with Waveshare header")
         except Exception as e:
             self.get_logger().debug(f"Error sending ping: {e}")
+    
+    def report_diagnostics(self):
+        """Periodic diagnostics report - log failure counts every 10 seconds"""
+        if self.shutting_down:
+            return
+        
+        current_time = time.time()
+        elapsed = current_time - self.last_failure_report_time
+        
+        # Report if there are any failures
+        if self.failure_count > 0:
+            success_rate = (self.success_count / (self.success_count + self.failure_count)) * 100 if (self.success_count + self.failure_count) > 0 else 0
+            
+            self.get_logger().warn(
+                f"📊 Diagnostics ({elapsed:.0f}s): "
+                f"Success={self.success_count}, Failures={self.failure_count} "
+                f"(JSON errors={self.json_decode_errors}, Processing errors={self.processing_errors}) | "
+                f"Success rate: {success_rate:.1f}%"
+            )
+        else:
+            # Only log if we have successful receptions (avoid spam during disconnection)
+            if self.success_count > 0:
+                self.get_logger().info(
+                    f"📊 Diagnostics ({elapsed:.0f}s): "
+                    f"Success={self.success_count}, Failures=0 | All good! ✓"
+                )
+        
+        self.last_failure_report_time = current_time
     
     def remote_command_callback(self, msg):
         """Receive command from ROS2 and send to Argo via LoRa"""
@@ -433,7 +494,11 @@ class LoRaShoreNode(Node):
                 'connection_attempts': self.connection_attempts,
                 'packets_received': self.packet_count,
                 'commands_sent': self.command_count,
-                'time_since_last_packet': time.time() - self.last_packet_time if self.last_packet_time else None
+                'time_since_last_packet': time.time() - self.last_packet_time if self.last_packet_time else None,
+                'success_count': self.success_count,
+                'failure_count': self.failure_count,
+                'json_decode_errors': self.json_decode_errors,
+                'processing_errors': self.processing_errors
             }
             
             msg = String()
