@@ -35,3 +35,4 @@ RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 # Default command: run both services
 CMD ["bash", "-c", "source /opt/ros/humble/setup.bash && python3 shore/lora_shore.py --port /dev/ttyUSB0 & sleep 5 && python3 nodes/argo_web_dashboard.py"]
 
+
