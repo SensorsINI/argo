@@ -85,13 +85,13 @@ if [ -z "$DEVICE" ]; then
     echo ""
 
     # Get devices before insertion
-    echo "Please ensure the SD card is ${RED}NOT connected${NC}, then press [Enter]."
+    printf "Please ensure the SD card is ${RED}NOT connected${NC}, then press [Enter].\n"
     read -p ""
 
     BEFORE_DEVICES=$(get_disks)
 
     echo ""
-    echo "Now ${GREEN}connect the SD card${NC}, wait for it to be recognized, then press [Enter]."
+    printf "Now ${GREEN}connect the SD card${NC}, wait for it to be recognized, then press [Enter].\n"
     read -p ""
 
     # Wait a moment for the device to register
