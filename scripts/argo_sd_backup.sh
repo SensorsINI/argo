@@ -15,7 +15,12 @@ SD_DEVICE="/dev/mmcblk0"
 BACKUP_DIR="$HOME/sd_backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 HOSTNAME=$(hostname)
-BACKUP_NAME="argo_${HOSTNAME}_${TIMESTAMP}.img.7z"
+# Get device size for filename tag
+SIZE_BYTES=$(lsblk -b -d -n -o SIZE "$SD_DEVICE")
+# Round up to nearest GB for a user-friendly tag
+SIZE_GB=$(( (SIZE_BYTES + 1024*1024*1024 - 1) / (1024*1024*1024) ))
+SIZE_TAG="${SIZE_GB}GB"
+BACKUP_NAME="argo_${HOSTNAME}_${SIZE_TAG}_${TIMESTAMP}.img.7z"
 
 # Colors for output
 RED='\033[0;31m'
@@ -97,7 +102,7 @@ Examples:
     # Unattended remote backup (immune to SSH hangups)
     nohup ./argo_sd_backup.sh tobi@sensors-tobidh87.lan.ini.uzh.ch -y &
 
-The backup file will be named: argo_${HOSTNAME}_YYYYMMDD_HHMMSS.img.7z
+The backup file will be named: argo_${HOSTNAME}_${SIZE_TAG}_YYYYMMDD_HHMMSS.img.7z
 
 EOF
 }

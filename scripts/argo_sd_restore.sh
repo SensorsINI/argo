@@ -160,10 +160,29 @@ fi
 # Get details for the selected device for user confirmation
 echo "Fetching device details..."
 DEVICE_DETAILS=$(lsblk -d -n -o SIZE,VENDOR,MODEL "$DEVICE" || echo "N/A N/A N/A")
-DEVICE_SIZE=$(echo "$DEVICE_DETAILS" | awk '{print $1}')
+DEVICE_SIZE_STR=$(echo "$DEVICE_DETAILS" | awk '{print $1}')
 DEVICE_VENDOR=$(echo "$DEVICE_DETAILS" | awk '{print $2}')
 DEVICE_MODEL=$(echo "$DEVICE_DETAILS" | awk '{print $3}')
 PARTITION_INFO=$(lsblk -n -o NAME,SIZE,FSTYPE,MOUNTPOINT "$DEVICE" | tail -n +2 | sed 's/^/    /')
+
+# Attempt to parse required size from backup filename (e.g., argo_..._32GB_....img.7z)
+BACKUP_SIZE_TAG=$(echo "$BACKUP_FILE" | grep -oP '_\K[0-9]+GB(?=_)')
+if [ -n "$BACKUP_SIZE_TAG" ]; then
+    REQUIRED_SIZE_GB=${BACKUP_SIZE_TAG%GB}
+    DEVICE_SIZE_BYTES=$(lsblk -b -d -n -o SIZE "$DEVICE")
+    DEVICE_SIZE_GB=$((DEVICE_SIZE_BYTES / 1024 / 1024 / 1024))
+
+    echo -e "${GREEN}Backup filename indicates it requires a ${REQUIRED_SIZE_GB}GB card.${NC}"
+    
+    if (( DEVICE_SIZE_GB < REQUIRED_SIZE_GB )); then
+        echo -e "${RED}❌ Error: Target device is too small.${NC}"
+        echo "   Backup requires a ${REQUIRED_SIZE_GB}GB card, but target is only ${DEVICE_SIZE_GB}GB."
+        exit 1
+    else
+        echo -e "${GREEN}✅ Target device size is sufficient.${NC}"
+    fi
+    echo ""
+fi
 
 # Safety confirmation
 echo ""
@@ -174,14 +193,14 @@ echo ""
 echo "This will COMPLETELY DESTROY all data on the following device:"
 echo ""
 echo -e "${CYAN}  Device:         $DEVICE${NC}"
-echo -e "${CYAN}  Size:           $DEVICE_SIZE${NC}"
+echo -e "${CYAN}  Size:           $DEVICE_SIZE_STR${NC}"
 echo -e "${CYAN}  Vendor / Model: ${DEVICE_VENDOR:-N/A} / ${DEVICE_MODEL:-N/A}${NC} (Note: May be the USB adapter)"
 echo ""
 echo -e "${CYAN}  Partitions Found:${NC}"
 echo -e "${CYAN}    NAME    SIZE FSTYPE MOUNTPOINT${NC}"
 echo -e "${CYAN}${PARTITION_INFO}${NC}"
 echo ""
-echo -e "${YELLOW}The script cannot know the original backup size. You must ensure the target device (${DEVICE_SIZE}) is large enough.${NC}"
+echo -e "${YELLOW}The script cannot know the original backup size. You must ensure the target device (${DEVICE_SIZE_STR}) is large enough.${NC}"
 echo -e "${YELLOW}Restoring to a smaller device will fail and may corrupt the card.${NC}"
 echo ""
 echo "Please confirm the device details and size are correct before proceeding."
@@ -266,7 +285,14 @@ echo ""
 echo "This will take 15-25 minutes..."
 echo ""
 
+# Create a temporary file to capture dd's stderr
+DD_ERROR_LOG=$(mktemp)
+
+# Enable pipefail to catch errors in any part of the pipe
+set -o pipefail
+
 # Unzip and write to device with progress
+RESTORE_SUCCESS=true
 if [[ "$BACKUP_FILE" == *.7z ]]; then
     if ! command -v 7z &> /dev/null; then
         echo -e "${RED}❌ Error: '7z' command not found.${NC}"
@@ -275,17 +301,24 @@ if [[ "$BACKUP_FILE" == *.7z ]]; then
         exit 1
     fi
     echo "Decompressing 7z file..."
-    7z x -so "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M status=progress conv=fsync
+    if ! ( 7z x -so "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M conv=fsync ) 2> "$DD_ERROR_LOG"; then
+        RESTORE_SUCCESS=false
+    fi
 elif [[ "$BACKUP_FILE" == *.gz ]]; then
     echo "Decompressing gz file..."
-    zcat "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M status=progress conv=fsync
+    if ! ( zcat "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M conv=fsync ) 2> "$DD_ERROR_LOG"; then
+        RESTORE_SUCCESS=false
+    fi
 else
     echo -e "${RED}❌ Error: Unsupported backup file format.${NC}"
     echo "   Only .gz and .7z compressed images are supported."
     exit 1
 fi
 
-if [ $? -eq 0 ]; then
+# Disable pipefail
+set +o pipefail
+
+if [ "$RESTORE_SUCCESS" = true ]; then
     echo ""
     echo -e "${GREEN}✅ Restore completed successfully!${NC}"
     echo ""
@@ -296,8 +329,16 @@ if [ $? -eq 0 ]; then
 else
     echo ""
     echo -e "${RED}❌ Restore failed!${NC}"
-    echo "   The SD card may be in an inconsistent state."
-    echo "   You may need to format and restore again."
+    # Check for the specific "No space left" error
+    if grep -q "No space left on device" "$DD_ERROR_LOG"; then
+        echo -e "${YELLOW}   Specific Error: The target SD card is too small for the backup image.${NC}"
+        echo "   You must use an SD card that is the same size as or larger than the one the backup was made from."
+    else
+        echo "   The SD card may be in an inconsistent state."
+        echo "   You may need to format and restore again."
+        echo "   Error details from dd:"
+        cat "$DD_ERROR_LOG"
+    fi
     exit 1
 fi
 
@@ -306,3 +347,4 @@ if [ -n "$TMP_FILE" ] && [ -f "$TMP_FILE" ]; then
     rm "$TMP_FILE"
     echo "Cleaned up temporary file."
 fi
+rm -f "$DD_ERROR_LOG"
