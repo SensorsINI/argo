@@ -157,6 +157,34 @@ if [ -z "$DEVICE" ]; then
     echo ""
 fi
 
+# Check for and handle mounted partitions on the target device
+MOUNTED_PARTITIONS=$(lsblk -ln -o NAME,MOUNTPOINT "$DEVICE" | grep -v "^${DEVICE##*/}$" | awk '$2!="" {print "/"$1" mounted on "$2}')
+if [ -n "$MOUNTED_PARTITIONS" ]; then
+    echo -e "${YELLOW}Warning: The target device has mounted partitions:${NC}"
+    echo "$MOUNTED_PARTITIONS"
+    echo ""
+    read -p "Shall I attempt to unmount them before proceeding? (yes/no): " UNMOUNT_CONFIRM
+    if [ "$UNMOUNT_CONFIRM" = "yes" ]; then
+        echo "Attempting to unmount..."
+        lsblk -ln -o NAME "$DEVICE" | tail -n +2 | while read -r PART; do
+            umount "/dev/$PART" 2>/dev/null || true
+        done
+        # Verify unmount was successful
+        sleep 1
+        UPDATED_MOUNTS=$(lsblk -ln -o NAME,MOUNTPOINT "$DEVICE" | grep -v "^${DEVICE##*/}$" | awk '$2!="" {print "/"$1}')
+        if [ -n "$UPDATED_MOUNTS" ]; then
+            echo -e "${RED}❌ Error: Failed to unmount all partitions. Please unmount manually.${NC}"
+            exit 1
+        else
+            echo -e "${GREEN}✅ All partitions unmounted successfully.${NC}"
+        fi
+    else
+        echo "Restore cancelled. Please unmount the partitions manually and try again."
+        exit 1
+    fi
+    echo ""
+fi
+
 # Get details for the selected device for user confirmation
 echo "Fetching device details..."
 DEVICE_DETAILS=$(lsblk -d -n -o SIZE,VENDOR,MODEL "$DEVICE" || echo "N/A N/A N/A")
