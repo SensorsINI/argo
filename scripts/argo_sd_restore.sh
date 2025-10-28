@@ -157,16 +157,27 @@ if [ -z "$DEVICE" ]; then
     echo ""
 fi
 
+# Get details for the selected device for user confirmation
+echo "Fetching device details..."
+DEVICE_DETAILS=$(lsblk -d -n -o SIZE,VENDOR,MODEL "$DEVICE" || echo "N/A N/A N/A")
+DEVICE_SIZE=$(echo "$DEVICE_DETAILS" | awk '{print $1}')
+DEVICE_VENDOR=$(echo "$DEVICE_DETAILS" | awk '{print $2}')
+DEVICE_MODEL=$(echo "$DEVICE_DETAILS" | awk '{print $3}')
+
 # Safety confirmation
 echo ""
 echo -e "${RED}═══════════════════════════════════════════════════${NC}"
 echo -e "${RED}  ⚠️   DANGER: SD CARD RESTORE OPERATION  ⚠️${NC}"
 echo -e "${RED}═══════════════════════════════════════════════════${NC}"
 echo ""
-echo "This will COMPLETELY DESTROY all data on:"
-echo -e "${CYAN}  $DEVICE${NC}"
+echo "This will COMPLETELY DESTROY all data on the following device:"
 echo ""
-echo "Make sure this is the correct device!"
+echo -e "${CYAN}  Device:  $DEVICE${NC}"
+echo -e "${CYAN}  Size:    $DEVICE_SIZE${NC}"
+echo -e "${CYAN}  Vendor:  ${DEVICE_VENDOR:-N/A}${NC}"
+echo -e "${CYAN}  Model:   ${DEVICE_MODEL:-N/A}${NC}"
+echo ""
+echo "Please confirm these details are correct."
 echo ""
 read -p "Type 'YES' to proceed (anything else will cancel): " CONFIRM
 
@@ -190,8 +201,9 @@ fi
 
 # Check device size to ensure compatibility
 echo "Checking device size..."
-DEVICE_SIZE=$(sudo fdisk -l "$DEVICE" | grep "Disk ${DEVICE}:" | awk '{print $3 $4}' | tr -d ',')
-echo "  Device size: $DEVICE_SIZE"
+# This check is now less critical as details are displayed above, but kept as a basic guardrail
+EXISTING_DEVICE_SIZE=$(sudo fdisk -l "$DEVICE" | grep "Disk ${DEVICE}:" | awk '{print $3 $4}' | tr -d ',')
+echo "  Device size: $EXISTING_DEVICE_SIZE"
 echo ""
 
 # Handle remote files
