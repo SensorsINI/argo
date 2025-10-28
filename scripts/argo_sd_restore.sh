@@ -163,6 +163,7 @@ DEVICE_DETAILS=$(lsblk -d -n -o SIZE,VENDOR,MODEL "$DEVICE" || echo "N/A N/A N/A
 DEVICE_SIZE=$(echo "$DEVICE_DETAILS" | awk '{print $1}')
 DEVICE_VENDOR=$(echo "$DEVICE_DETAILS" | awk '{print $2}')
 DEVICE_MODEL=$(echo "$DEVICE_DETAILS" | awk '{print $3}')
+PARTITION_INFO=$(lsblk -n -o NAME,SIZE,FSTYPE,MOUNTPOINT "$DEVICE" | tail -n +2 | sed 's/^/    /')
 
 # Safety confirmation
 echo ""
@@ -172,12 +173,15 @@ echo -e "${RED}═════════════════════�
 echo ""
 echo "This will COMPLETELY DESTROY all data on the following device:"
 echo ""
-echo -e "${CYAN}  Device:  $DEVICE${NC}"
-echo -e "${CYAN}  Size:    $DEVICE_SIZE${NC}"
-echo -e "${CYAN}  Vendor:  ${DEVICE_VENDOR:-N/A}${NC}"
-echo -e "${CYAN}  Model:   ${DEVICE_MODEL:-N/A}${NC}"
+echo -e "${CYAN}  Device:         $DEVICE${NC}"
+echo -e "${CYAN}  Size:           $DEVICE_SIZE${NC}"
+echo -e "${CYAN}  Vendor / Model: ${DEVICE_VENDOR:-N/A} / ${DEVICE_MODEL:-N/A}${NC} (Note: May be the USB adapter)"
 echo ""
-echo "Please confirm these details are correct."
+echo -e "${CYAN}  Partitions Found:${NC}"
+echo -e "${CYAN}    NAME    SIZE FSTYPE MOUNTPOINT${NC}"
+echo -e "${CYAN}${PARTITION_INFO}${NC}"
+echo ""
+echo "Please confirm these details, especially the partition layout, are correct."
 echo ""
 read -p "Type 'YES' to proceed (anything else will cancel): " CONFIRM
 
