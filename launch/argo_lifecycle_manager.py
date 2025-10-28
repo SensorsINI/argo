@@ -239,7 +239,7 @@ class ArgoLifecycleManager:
         health_services = {
             'gps.py': '/gps_node/health',
             'lora.py': '/lora_node/health', 
-            'anem.py': '/anemometer_node/health',
+            'anem.py': '/anem_node/health',
             'argo_battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',
@@ -250,12 +250,12 @@ class ArgoLifecycleManager:
         
         # Also keep health topics for backward compatibility
         health_topics = {
-            'gps.py': '/gps_health',
-            'lora.py': '/lora_health',  # Updated to use ArgoBaseNode health topic
-            'anem.py': '/anem_health',
-            'argo_battery_water.py': '/battery_water_health',
-            'rudder_sail_radio.py': '/rudder_sail_radio_health',
-            'temp_monitor.py': '/temp_monitor_health',
+            'gps.py': '/gps_node_health',
+            'lora.py': '/lora_node_health',
+            'anem.py': '/anem_node_health',
+            'argo_battery_water.py': '/battery_water_node_health',
+            'rudder_sail_radio.py': '/rudder_sail_radio_node_health',
+            'temp_monitor.py': '/temp_monitor_node_health',
             'bno085.py': '/imu_health'  # BNO085 IMU health status
         }
         
@@ -292,7 +292,7 @@ class ArgoLifecycleManager:
         health_services = {
             'gps.py': '/gps_node/health',
             'lora.py': '/lora_node/health', 
-            'anem.py': '/anemometer_node/health',
+            'anem.py': '/anem_node/health',
             'argo_battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',

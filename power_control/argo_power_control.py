@@ -2593,7 +2593,7 @@ class PowerController:
             
             # Anemometer health monitoring
             self.anem_health_sub = self.ros2_node.create_subscription(
-                Bool, '/anem_health', self._anem_health_callback, 10)
+                Bool, '/anem_node_health', self._anem_health_callback, 10)
             
             # GPS status monitoring (satellite count)
             self.gps_satellites_sub = self.ros2_node.create_subscription(

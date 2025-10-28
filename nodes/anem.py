@@ -70,9 +70,6 @@
 #   x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
 #   y: differential pressure from I2C_CW (0x22, 120°) in Pascals
 #   z: differential pressure from I2C_CCW (0x23, 240°) in Pascals
-# /anem_health (std_msgs/Bool):
-#   data: true when node is healthy, false when unhealthy or shutting down
-#   Published only on state changes, startup, and shutdown
 
 # Import the shared pause service
 import sys
