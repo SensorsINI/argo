@@ -181,9 +181,12 @@ echo -e "${CYAN}  Partitions Found:${NC}"
 echo -e "${CYAN}    NAME    SIZE FSTYPE MOUNTPOINT${NC}"
 echo -e "${CYAN}${PARTITION_INFO}${NC}"
 echo ""
-echo "Please confirm these details, especially the partition layout, are correct."
+echo -e "${YELLOW}The script cannot know the original backup size. You must ensure the target device (${DEVICE_SIZE}) is large enough.${NC}"
+echo -e "${YELLOW}Restoring to a smaller device will fail and may corrupt the card.${NC}"
 echo ""
-read -p "Type 'YES' to proceed (anything else will cancel): " CONFIRM
+echo "Please confirm the device details and size are correct before proceeding."
+echo ""
+read -p "Type 'YES' to proceed with overwriting the device (anything else will cancel): " CONFIRM
 
 if [ "$CONFIRM" != "YES" ]; then
     echo "Restore cancelled."
