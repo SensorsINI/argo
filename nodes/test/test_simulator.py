@@ -4,6 +4,7 @@
 import sys
 import time
 import math
+from pathlib import Path
 
 def test_sailboat_playground():
     """Test the sailboat-playground simulator."""
@@ -54,7 +55,12 @@ def test_mock_simulator():
     
     try:
         # Import our mock simulator
-        sys.path.append('/home/orangepi/argo/nodes')
+        # Determine Argo repository directory dynamically
+        script_path = Path(__file__).resolve()
+        argo_dir = script_path.parents[2]  # nodes/test -> argo
+        nodes_dir = argo_dir / "nodes"
+        sys.path.append(str(nodes_dir))
+        
         from argo_simulator_bridge import MockSailboatSimulator
         
         print("✅ Mock simulator imported successfully")

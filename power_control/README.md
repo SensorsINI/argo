@@ -194,7 +194,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/power_control/argo_power_control.py'
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 ~/argo/power_control/argo_power_control.py'
 Restart=always
 User=root
 
@@ -234,7 +234,7 @@ sudo usermod -a -G gpio $USER
 
 ### Full Installation (Recommended)
 ```bash
-cd /home/orangepi/argo/power_control
+cd ~/argo/power_control
 
 # Check dependencies
 make check_deps
@@ -465,7 +465,7 @@ sudo journalctl -u argo_power_control.service | grep ROS
 
 ### Full Uninstall
 ```bash
-cd /home/orangepi/argo/power_control
+cd ~/argo/power_control
 
 # Use Makefile target
 make clean_power_control

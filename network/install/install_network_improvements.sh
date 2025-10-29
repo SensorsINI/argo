@@ -66,9 +66,15 @@ install_networkmanager_config() {
 setup_systemd_service() {
     log "Setting up systemd service and timer for WiFi reconnection..."
     
-    # Copy service and timer files
-    cp "$NETWORK_DIR/config/argo_wifi_reconnect.service" /etc/systemd/system/
+    # Configure service file with correct paths
+    sed -e "s#/home/orangepi/argo#$ARGO_ROOT#g" \
+        -e "s#/home/orangepi#$HOME#g" \
+        "$NETWORK_DIR/config/argo_wifi_reconnect.service" > /tmp/argo_wifi_reconnect.service
+    
+    # Copy configured service and timer files
+    cp /tmp/argo_wifi_reconnect.service /etc/systemd/system/
     cp "$NETWORK_DIR/config/argo_wifi_reconnect.timer" /etc/systemd/system/
+    rm /tmp/argo_wifi_reconnect.service
     
     # Create log file with correct permissions
     # The service runs as root to handle log rotation properly

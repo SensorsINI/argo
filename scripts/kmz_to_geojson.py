@@ -141,8 +141,12 @@ def convert_kmz_to_geojson(kmz_path, output_path):
         return True
 
 def main():
-    maps_dir = Path("/home/orangepi/argo/maps")
-    output_dir = Path("/home/orangepi/argo/foxglove/maps")
+    # Determine Argo repository directory dynamically
+    script_path = Path(__file__).resolve()
+    argo_dir = script_path.parents[1]  # scripts -> argo
+    
+    maps_dir = argo_dir / "maps"
+    output_dir = argo_dir / "foxglove" / "maps"
     
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)

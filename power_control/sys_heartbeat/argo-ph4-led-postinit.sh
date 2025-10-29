@@ -1,5 +1,5 @@
 #!/bin/bash
-# /home/orangepi/argo/power_control/sys_heartbeat/argo-ph4-led-postinit.sh
+# ~/argo/power_control/sys_heartbeat/argo-ph4-led-postinit.sh
 
 # This script is run by a systemd service at boot to set the correct
 # permissions on the sysfs files for the kernel-managed PH4 Green LED.

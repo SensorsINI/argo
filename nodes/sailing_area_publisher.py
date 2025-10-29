@@ -12,6 +12,8 @@ from std_msgs.msg import ColorRGBA, Header
 import os
 from pathlib import Path
 import math
+from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
+
 
 class SailingAreaPublisher(Node):
     def __init__(self):
@@ -27,8 +29,24 @@ class SailingAreaPublisher(Node):
         self.origin_lat = 47.3981555
         self.earth_radius = 6378137.0  # meters
         
+        # Determine Argo repository directory dynamically
+        script_path = Path(__file__).resolve()
+        self.argo_dir = script_path.parents[1]  # nodes -> argo
+        self.maps_dir = self.argo_dir / "foxglove" / "maps"
+
+        self.get_logger().info(f"Using maps directory: {self.maps_dir}")
+
+        qos_profile = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            depth=10
+        )
+        self.waypoint_pub.qos_profile = qos_profile
+        self.boundary_pub.qos_profile = qos_profile
+        self.hazard_pub.qos_profile = qos_profile
+        
         # Load sailing area data
-        self.maps_dir = Path("/home/orangepi/argo/foxglove/maps")
         self.sailing_areas = self.load_sailing_areas()
         
         # Publish markers at startup

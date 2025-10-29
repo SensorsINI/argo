@@ -2,7 +2,14 @@
 
 import sys
 import os
-sys.path.append('/home/orangepi/argo/power_control')
+from pathlib import Path
+
+# Add argo root to sys.path
+script_path = Path(__file__).resolve()
+argo_dir = script_path.parents[1]
+power_control_dir = argo_dir / "power_control"
+sys.path.append(str(power_control_dir))
+
 
 from argo_power_control import PowerController
 

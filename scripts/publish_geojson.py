@@ -9,6 +9,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 import json
 import math
+from pathlib import Path
+
 
 class GeoJSONPublisher(Node):
     def __init__(self):
@@ -30,7 +32,14 @@ class GeoJSONPublisher(Node):
     def load_and_publish_geojson(self):
         """Load GeoJSON file and convert to markers"""
         try:
-            with open('/home/orangepi/argo/foxglove/maps/Argo Irchel pond sailing area.geojson', 'r') as f:
+            # Determine Argo repository directory dynamically
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[1]  # scripts -> argo
+            geojson_path = argo_dir / "foxglove" / "maps" / "Argo Irchel pond sailing area.geojson"
+            
+            self.get_logger().info(f"Loading geojson from {geojson_path}")
+
+            with open(geojson_path, 'r') as f:
                 geojson_data = json.load(f)
             
             self.boundaries_markers = MarkerArray()

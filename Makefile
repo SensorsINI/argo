@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote
 
 help:
 	@echo "Argo Robot Services Management"
@@ -32,6 +32,10 @@ help:
 	@echo "  make -C launch restart     - Restart argo_launch service"
 	@echo "  make -C launch clean       - Clean old bag files (>7 days)"
 	@echo "  make -C launch help        - Show detailed service management help"
+	@echo ""
+	@echo "Simulation Management:"
+	@echo "  simulate-local       - Start Argo in local simulation mode"
+	@echo "  simulate-remote      - Start Argo in remote simulation mode"
 	@echo ""
 	@echo "CPU Governor Tuning:"
 	@echo "  install-cpu-tuning   - Install and enable CPU governor tuning service"
@@ -104,6 +108,16 @@ help:
 	@echo "  ar  - Record data"
 	@echo "  ac  - Close recording"
 	@echo "  af  - Launch argo with Foxglove visualization"
+
+# ==================== SIMULATION MANAGEMENT ====================
+
+simulate-local:
+	@echo "Starting Argo in LOCAL simulation mode..."
+	@python3 launch/argo_lifecycle_manager.py simulate_local
+
+simulate-remote:
+	@echo "Starting Argo in REMOTE simulation mode..."
+	@python3 launch/argo_lifecycle_manager.py simulate_remote
 
 # ==================== DEPENDENCY INSTALLATION ====================
 
