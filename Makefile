@@ -169,14 +169,17 @@ check-deps:
 
 install-argo-cli:
 	@echo "Installing Argo CLI (aliases, functions, and dotfiles)..."
-	@if ! grep -q "source.*dotfiles.*bashrc" ~/.bashrc 2>/dev/null; then \
-		echo "" >> ~/.bashrc; \
-		echo "# Source Argo dotfiles" >> ~/.bashrc; \
-		echo "source ~/argo/dotfiles/bashrc" >> ~/.bashrc; \
-		echo "✅ Added dotfiles sourcing to ~/.bashrc"; \
-	else \
-		echo "✅ Dotfiles already sourced in ~/.bashrc"; \
-	fi
+	@# Remove existing Argo dotfiles sourcing to prevent duplicates and handle name changes.
+	@sed -i.bak \
+		-e '/^# Source Argo dotfiles$$/d' \
+		-e '/source.*dotfiles\/\.bashrc/d' \
+		-e '/source.*dotfiles\/bashrc/d' \
+		~/.bashrc
+	@# Add the correct sourcing line for the new dotfiles.
+	@echo "" >> ~/.bashrc
+	@echo "# Source Argo dotfiles" >> ~/.bashrc
+	@echo "source ~/argo/dotfiles/bashrc" >> ~/.bashrc
+	@echo "✅ Updated dotfiles sourcing in ~/.bashrc"
 	@if [ -f dotfiles/.tmux.conf ]; then \
 		cp dotfiles/.tmux.conf ~/.tmux.conf; \
 		echo "✅ Installed .tmux.conf"; \
