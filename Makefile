@@ -21,6 +21,7 @@ help:
 	@echo "  install-deps         - Install all ROS2 dependencies (foxglove-bridge, etc.)"
 	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
 	@echo "  install-python-deps  - Install Python runtime dependencies (smbus2, pyserial, etc.)"
+	@echo "  install-simulation-deps - Install Python dependencies for the simulator"
 	@echo "  check-deps           - Check status of all dependencies"
 	@echo "  install-hardware     - Install PWM capture module and hardware configuration"
 	@echo "  install-all          - Install hardware and dependencies (complete setup)"
@@ -112,8 +113,8 @@ help:
 # ==================== SIMULATION MANAGEMENT ====================
 
 simulate-local:
-	@echo "Starting Argo in LOCAL simulation mode..."
-	@python3 launch/argo_lifecycle_manager.py simulate_local
+	@echo "Starting Argo in LOCAL simulation mode via launch script..."
+	@./scripts/launch_simulation.sh
 
 simulate-remote:
 	@echo "Starting Argo in REMOTE simulation mode..."
@@ -176,6 +177,21 @@ check-deps:
 	@echo ""
 	@echo "🔍 Quick Test:"
 	@echo "   Test foxglove-bridge: ros2 run foxglove_bridge foxglove_bridge --help"
+
+install-simulation-deps:
+	@echo "Installing system and Python dependencies for sailboat-playground simulator..."
+	@echo "--- Installing system libraries (requires sudo) ---"
+	sudo apt-get update
+	sudo apt-get install -y libglu1-mesa-dev
+	@echo "--- Installing Python packages ---"
+	@if [ -f simulator/sailboat-playground/requirements.txt ]; then \
+		pip3 install -r simulator/sailboat-playground/requirements.txt; \
+	else \
+		echo "❌ Error: simulator/sailboat-playground/requirements.txt not found!"; \
+		echo "   Have you initialized the submodule? Run: make submodule-init"; \
+		exit 1; \
+	fi
+	@echo "✅ Simulation dependencies installed successfully!"
 
 # ==================== SERVICE MANAGEMENT ====================
 # Service management targets are now in launch/Makefile

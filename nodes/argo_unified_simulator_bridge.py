@@ -32,44 +32,70 @@ import signal
 import traceback
 
 # Try to import sailboat-playground for local simulation
+SIMULATOR_AVAILABLE = False
 try:
-    # Set headless mode for pyglet (no display required)
+    # Set headless mode for pyglet (no display required).
+    # This prevents it from trying to create a window, but it might still try to
+    # initialize a graphics context for loading resources, which we avoid by
+    # only importing the 'engine' module.
     os.environ['PYGLET_HEADLESS'] = '1'
     
-    # Add simulator submodule to Python path
-    simulator_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'simulator', 'sailboat-playground')
+    # Add the simulator's PARENT directory to the Python path. This makes
+    # 'sailboat_playground' a recognizable package, allowing the 'engine'
+    # module's internal relative imports to work, while still bypassing the
+    # top-level __init__.py that loads the visualization code.
+    parent_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'simulator', 'sailboat-playground')
     
     # --- Diagnostic checks for sailboat-playground ---
-    print(f"INFO: Attempting to load sailboat-playground from: {simulator_path}")
-    if not os.path.isdir(simulator_path):
-        print(f"WARNING: Simulator path does not exist or is not a directory.")
-        print(f"  - Searched path: {os.path.abspath(simulator_path)}")
-        SIMULATOR_AVAILABLE = False
+    print(f"INFO: Attempting to load sailboat-playground from: {parent_path}")
+    if not os.path.isdir(parent_path):
+        print(f"WARNING: Simulator parent path does not exist or is not a directory.")
+        print(f"  - Searched path: {os.path.abspath(parent_path)}")
     else:
-        print("INFO: Simulator path found.")
-        if simulator_path not in sys.path:
-            sys.path.insert(0, simulator_path)
-            print(f"INFO: Added to sys.path: {simulator_path}")
+        print("INFO: Simulator parent path found.")
+        if parent_path not in sys.path:
+            sys.path.insert(0, parent_path)
+            print(f"INFO: Added to sys.path: {parent_path}")
 
-        # Import sailboat-playground modules
-        import sailboat_playground
-        available_attrs = [x for x in dir(sailboat_playground) if not x.startswith('_')]
-        print(f"INFO: sailboat-playground module available, contents: {available_attrs}")
-        
-        # Try to import the engine module for simulation
-        try:
-            from sailboat_playground import engine
-            print("INFO: sailboat-playground engine module imported successfully")
-            SIMULATOR_AVAILABLE = True
-        except ImportError as e:
-            print(f"INFO: sailboat-playground engine not available: {e}")
-            SIMULATOR_AVAILABLE = False
-        
+        # Import the engine module from the package. Because we added the parent
+        # dir to the path, this works without triggering the top-level __init__.py
+        from sailboat_playground import engine
+        print("INFO: sailboat-playground engine module imported successfully")
+        SIMULATOR_AVAILABLE = True
+
 except ImportError as e:
-    module_name = str(e).split("'")[1]
-    print(f"WARNING: sailboat-playground not available due to missing dependency: '{module_name}'")
-    print(f"         Please install required Python packages by running:")
-    print(f"           make install-python-deps")
+    error_msg = str(e)
+    module_name = ""
+    if "No module named" in error_msg:
+        try:
+            module_name = error_msg.split("'")[1]
+        except IndexError:
+            pass  # Keep module_name as empty string
+
+    if module_name == 'engine':
+        print("\nERROR: Failed to import the 'engine' module from sailboat-playground.")
+        print("       This suggests an issue with the path or submodule structure, not a missing dependency.")
+        tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+        print(f'Stack trace for import failure:\n{tb_str}')
+
+    elif module_name:
+        print(f"WARNING: sailboat-playground not available due to missing Python package: '{module_name}'")
+        print(f"         Please install simulation-specific dependencies by running:")
+        print(f"           make install-simulation-deps")
+
+    elif 'GLU' in error_msg:
+        print(f"WARNING: sailboat-playground not available due to a missing system library (GLU).")
+        print(f"         This is required by the pyglet visualization library.")
+        print(f"         Please install the required system package by running:")
+        print(f"           make install-simulation-deps")
+
+    else:
+        # Generic ImportError
+        print(f"WARNING: sailboat-playground not available due to an import error.")
+        print(f"         {e}")
+        tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+        print(f'Stack trace for import failure:\n{tb_str}')
+
     print(f"         Falling back to mock simulator.")
     SIMULATOR_AVAILABLE = False
 except Exception as e:
@@ -789,7 +815,6 @@ class ArgoUnifiedSimulatorBridge(Node):
         if SIMULATOR_AVAILABLE:
             try:
                 self.get_logger().info('Initializing sailboat-playground simulator...')
-                from sailboat_playground.engine import Manager
                 import numpy as np
                 
                 # Configuration file paths
@@ -802,14 +827,17 @@ class ArgoUnifiedSimulatorBridge(Node):
                 if not os.path.exists(env_config):
                     raise FileNotFoundError(f"Environment configuration file not found: {env_config}")
                 
+                # The simulator's data files (e.g., foil profiles) are relative to its
+                # own directory. We must provide an absolute path to the 'foils'
+                # directory to prevent FileNotFoundError when launched via ROS2.
+                parent_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'simulator', 'sailboat-playground')
+                foils_path = os.path.join(parent_path, 'foils')
+
                 # Initialize the sailboat-playground simulation manager with configs
-                self.sim_manager = Manager(
+                self.sim_manager = engine.Manager(
                     boat_config,
                     env_config,
-                    foils_dir="simulator/foils/",        # Path to foil data files
-                    boat_heading=0.0,                    # Start facing north
-                    boat_position=np.array([0.0, 0.0]),  # Start at origin
-                    debug=False
+                    foils_dir=foils_path  # Provide the absolute path here
                 )
                 
                 self.simulator = self.sim_manager  # Use the manager as our simulator interface
@@ -1171,53 +1199,8 @@ MODES:
    - Monitors connection status
 
 USAGE:
-  python3 argo_unified_simulator_bridge.py --mode local    # Local simulation with curses display
-  python3 argo_unified_simulator_bridge.py --mode remote   # Remote simulation with curses display
-  python3 argo_unified_simulator_bridge.py --mode local --no-curses  # Local simulation with standard logging
-
-PUBLISHED TOPICS (Simulator → Argo):
-  /pose                    - IMU compass heading (Vector3, z=heading degrees)
-  /compass                 - Raw compass data (Vector3, z=heading degrees)
-  /gps_cog                 - Course over ground (Float64, degrees)
-  /gps_sog                 - Speed over ground (Float64, knots)
-  /gps_velocity            - GPS velocity vector (Vector3, x=north, y=east, z=speed knots)
-  /anem_speed_angle_temp   - Wind data (Vector3, x=speed m/s, y=angle degrees, z=temp °C)
-  /rudder_sail_radio       - Mock human input (Vector3, x=rudder, y=sail, z=0)
-
-SUBSCRIBED TOPICS (Argo → Simulator):
-  /rudder_sail_servo       - Control commands from Argo (Vector3, x=rudder, y=sail)
-  /human_controlled        - Control mode status (Bool, true=human, false=robot)
-
-LOCAL MODE FEATURES:
-- Mock sailboat physics with wind effects
-- Realistic boat dynamics (speed, turning, wind interaction)
-- Configurable wind conditions (speed: 8 m/s, direction: 45°)
-- Mock human input generation for testing
-- Real-time curses display with control visualization
-- Status reporting every second
-
-REMOTE MODE FEATURES:
-- Connection monitoring with 10-second timeout
-- Automatic reconnection detection
-- Heartbeat mechanism for connection health
-- Status reporting for connection state
-
-CURSES DISPLAY FEATURES:
-- Real-time control visualization with ASCII progress bars
-- Rudder and sail position indicators
-- Boat status information (heading, speed, wind)
-- Scrolling log window with timestamped messages
-- Clean terminal restoration on exit
-- Responsive display updates at 10Hz
-
-EXAMPLES:
-  # Local simulation
-  python3 argo_unified_simulator_bridge.py --mode local
-  
-  # Remote simulation
-  python3 argo_unified_simulator_bridge.py --mode remote
-
-For more information, see the Argo documentation or check the source code.
+  python3 argo_unified_simulator_bridge.py --mode local    # Local simulation
+  python3 argo_unified_simulator_bridge.py --mode remote   # Remote simulation
 """
     print(help_text)
 
@@ -1247,6 +1230,19 @@ def main(args=None):
         print("       For more information, run with --help")
         sys.exit(1)
     
+    # --- Check if running interactively and provide guidance ---
+    # The launch file passes '--no-curses'. If this flag is missing, we can
+    # assume the user is running the script directly and guide them to the correct method.
+    if not parsed_args.no_curses:
+        print("🚢 INFO: This script is part of the Argo simulation launch system and is not intended to be run directly.")
+        print("         Running it this way will only start the bridge, not the full simulation environment.")
+        print("\n✅ To start the complete local simulation, please use the 'asim' alias:")
+        print("   asim")
+        print("\n   Alternatively, you can use the ROS2 launch command:")
+        print("   ros2 launch argo_launch simulation_launch.py")
+        print("\nThis method ensures all required nodes (controller, etc.) are launched and managed correctly.")
+        sys.exit(0)
+
     use_curses = not parsed_args.no_curses
     
     if not use_curses:
