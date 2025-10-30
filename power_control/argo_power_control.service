@@ -1,36 +1,21 @@
 [Unit]
 Description=Argo Power Control System
-Documentation=file://%h/argo/launch/ARGO_POWER_CONTROL_README.md
-After=local-fs.target systemd-user-sessions.service argo_battery_water.service
-Wants=argo_battery_water.service
-DefaultDependencies=no
-Before=shutdown.target
+After=multi-user.target argo-launch.service
+Wants=argo-launch.service
+Documentation=file:///root/argo/launch/ARGO_POWER_CONTROL_README.md
 
 [Service]
 Type=simple
 User=orangepi
 Group=orangepi
 WorkingDirectory=/home/orangepi/argo/power_control
-Environment=ROS_DOMAIN_ID=0
-Environment=HOME=/home/orangepi
-Environment=DISPLAY=:0
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-ExecStartPre=/bin/sleep 1
 ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py'
-ExecStop=/bin/bash -c 'echo "System shutting down - power relay will be disconnected"'
-Restart=on-failure
+Restart=always
 RestartSec=5
-StandardOutput=append:/var/log.hdd/persistent/argo-power-control.log
-StandardError=append:/var/log.hdd/persistent/argo-power-control.log
+StandardOutput=journal
+StandardError=journal
 TimeoutStopSec=30
 KillMode=mixed
-KillSignal=SIGTERM
-FinalKillSignal=SIGKILL
-
-# Security settings
-NoNewPrivileges=false
-PrivateTmp=false
 
 [Install]
 WantedBy=multi-user.target
