@@ -29,6 +29,7 @@ import os
 import curses
 import queue
 import signal
+import traceback
 
 # Try to import sailboat-playground for local simulation
 try:
@@ -37,28 +38,44 @@ try:
     
     # Add simulator submodule to Python path
     simulator_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'simulator', 'sailboat-playground')
-    if simulator_path not in sys.path:
-        sys.path.insert(0, simulator_path)
     
-    # Import sailboat-playground modules
-    import sailboat_playground
-    available_attrs = [x for x in dir(sailboat_playground) if not x.startswith('_')]
-    print(f"INFO: sailboat-playground module available, contents: {available_attrs}")
-    
-    # Try to import the engine module for simulation
-    try:
-        from sailboat_playground import engine
-        print("INFO: sailboat-playground engine module imported successfully")
-        SIMULATOR_AVAILABLE = True
-    except ImportError as e:
-        print(f"INFO: sailboat-playground engine not available: {e}")
+    # --- Diagnostic checks for sailboat-playground ---
+    print(f"INFO: Attempting to load sailboat-playground from: {simulator_path}")
+    if not os.path.isdir(simulator_path):
+        print(f"WARNING: Simulator path does not exist or is not a directory.")
+        print(f"  - Searched path: {os.path.abspath(simulator_path)}")
         SIMULATOR_AVAILABLE = False
+    else:
+        print("INFO: Simulator path found.")
+        if simulator_path not in sys.path:
+            sys.path.insert(0, simulator_path)
+            print(f"INFO: Added to sys.path: {simulator_path}")
+
+        # Import sailboat-playground modules
+        import sailboat_playground
+        available_attrs = [x for x in dir(sailboat_playground) if not x.startswith('_')]
+        print(f"INFO: sailboat-playground module available, contents: {available_attrs}")
         
-except ImportError:
-    print("WARNING: sailboat-playground not available, using mock simulator")
+        # Try to import the engine module for simulation
+        try:
+            from sailboat_playground import engine
+            print("INFO: sailboat-playground engine module imported successfully")
+            SIMULATOR_AVAILABLE = True
+        except ImportError as e:
+            print(f"INFO: sailboat-playground engine not available: {e}")
+            SIMULATOR_AVAILABLE = False
+        
+except ImportError as e:
+    module_name = str(e).split("'")[1]
+    print(f"WARNING: sailboat-playground not available due to missing dependency: '{module_name}'")
+    print(f"         Please install required Python packages by running:")
+    print(f"           make install-python-deps")
+    print(f"         Falling back to mock simulator.")
     SIMULATOR_AVAILABLE = False
 except Exception as e:
     print(f"WARNING: sailboat-playground failed to initialize: {e}")
+    tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+    print(f'Stack trace for initialization failure:\n{tb_str}')
     SIMULATOR_AVAILABLE = False
 
 class CursesDisplayManager:
@@ -1134,7 +1151,7 @@ class ArgoUnifiedSimulatorBridge(Node):
         super().destroy_node()
 
 def print_help():
-    """Print detailed help information and exit."""
+    """Print detailed help information."""
     help_text = """
 Argo Unified Simulator Bridge - Local and Remote Simulation Support
 
@@ -1203,7 +1220,6 @@ EXAMPLES:
 For more information, see the Argo documentation or check the source code.
 """
     print(help_text)
-    sys.exit(0)
 
 def main(args=None):
     # Parse command line arguments
@@ -1211,8 +1227,8 @@ def main(args=None):
         description='Argo Unified Simulator Bridge - Local and Remote Simulation Support',
         add_help=False  # We'll handle --help manually
     )
-    parser.add_argument('--help', action='store_true', help='Show this help message and exit')
-    parser.add_argument('--mode', choices=['local', 'remote'], default='local',
+    parser.add_argument('-h', '--help', action='store_true', help='Show this help message and exit')
+    parser.add_argument('--mode', choices=['local', 'remote'],
                        help='Simulation mode: local (run simulator here) or remote (connect to remote simulator)')
     parser.add_argument('--no-curses', action='store_true',
                        help='Disable curses display (use standard logging)')
@@ -1220,9 +1236,16 @@ def main(args=None):
     # Parse known args to avoid conflicts with ROS2 args
     parsed_args, unknown_args = parser.parse_known_args(args)
     
-    # Handle --help option
+    # Handle --help option or missing mode argument
     if parsed_args.help:
         print_help()
+        sys.exit(0)
+    
+    if not parsed_args.mode:
+        print("ERROR: You must supply a mode argument.")
+        print("       Please choose either --mode local or --mode remote.")
+        print("       For more information, run with --help")
+        sys.exit(1)
     
     use_curses = not parsed_args.no_curses
     
