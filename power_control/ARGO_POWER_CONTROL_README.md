@@ -49,14 +49,14 @@ sudo apt-get install -y python3-gpiod
 ### Manual Installation
 1. **Install systemd service**:
    ```bash
-   sudo cp /home/orangepi/argo/launch/argo-power-control.service /etc/systemd/system/
+   sudo cp ~/argo/launch/argo-power-control.service /etc/systemd/system/
    sudo systemctl daemon-reload
    sudo systemctl enable argo-power-control
    ```
 
 2. **Make script executable**:
    ```bash
-   sudo chmod +x /home/orangepi/argo/launch/argo_power_control.py
+   sudo chmod +x ~/argo/launch/argo_power_control.py
    ```
 
 3. **Start the service**:
@@ -69,16 +69,16 @@ sudo apt-get install -y python3-gpiod
 ### Command Line Interface
 ```bash
 # Show help
-python3 /home/orangepi/argo/launch/argo_power_control.py --help
+python3 ~/argo/launch/argo_power_control.py --help
 
 # Normal operation
-sudo /home/orangepi/argo/launch/argo_power_control.py
+sudo ~/argo/launch/argo_power_control.py
 
 # Test mode (safe - no shutdown/power control)
-sudo /home/orangepi/argo/launch/argo_power_control.py --test-mode
+sudo ~/argo/launch/argo_power_control.py --test-mode
 
 # Custom button press threshold
-sudo /home/orangepi/argo/launch/argo_power_control.py --threshold 2.0
+sudo ~/argo/launch/argo_power_control.py --threshold 2.0
 ```
 
 ### Power Button Behavior
@@ -113,7 +113,7 @@ sudo systemctl stop argo-power-control
 ### 1. Test Mode (Recommended)
 ```bash
 # Safe testing with all functionality except actual shutdown
-sudo /home/orangepi/argo/launch/argo_power_control.py --test-mode
+sudo ~/argo/launch/argo_power_control.py --test-mode
 ```
 
 ### 2. Verify GPIO Pin Assignments
@@ -139,7 +139,7 @@ sudo gpioset gpiochip0 228=1  # Set green LED (PH4)
 ### Common Issues
 
 1. **GPIO Permission Denied**
-   - Ensure running as root: `sudo /home/orangepi/argo/launch/argo_power_control.py`
+   - Ensure running as root: `sudo ~/argo/launch/argo_power_control.py`
    - Check GPIO chip permissions
 
 2. **Power Button Not Responding**
@@ -156,7 +156,7 @@ sudo gpioset gpiochip0 228=1  # Set green LED (PH4)
    - Verify open drain configuration
    - Check PFET connections
    - Test relay operation manually
-   - Use test mode first: `sudo /home/orangepi/argo/launch/argo_power_control.py --test-mode`
+   - Use test mode first: `sudo ~/argo/launch/argo_power_control.py --test-mode`
 
 ### Log Analysis
 ```bash
@@ -182,7 +182,7 @@ sudo gpiomon gpiochip0 233  # Monitor power button
 ### Modify Button Press Threshold
 ```bash
 # Command line
-sudo /home/orangepi/argo/launch/argo_power_control.py --threshold 2.0
+sudo ~/argo/launch/argo_power_control.py --threshold 2.0
 
 # Or edit argo_power_control.py
 self.SHUTDOWN_THRESHOLD = 2.0  # Change to 2 seconds

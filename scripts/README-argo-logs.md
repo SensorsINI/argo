@@ -77,7 +77,7 @@ alog -n 100
 
 The `alog` alias is defined in `dotfiles/bash_aliases`:
 ```bash
-alias alog='/home/orangepi/argo/scripts/argo_logs.sh'
+alias alog='~/argo/scripts/argo_logs.sh'
 ```
 
 After updating dotfiles, reload with:

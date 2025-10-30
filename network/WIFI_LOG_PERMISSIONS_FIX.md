@@ -23,7 +23,7 @@ Changed the service to run as root instead of orangepi:
 Type=oneshot
 User=root
 Group=root
-ExecStart=/home/orangepi/argo/network/scripts/wifi_reconnect.sh
+ExecStart=~/argo/network/scripts/wifi_reconnect.sh
 Environment="HOME=/home/orangepi"
 Environment="USER=orangepi"
 ```

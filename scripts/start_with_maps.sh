@@ -1,11 +1,15 @@
 #!/bin/bash
 # Start Argo with sailing area map visualization
 
+# Determine Argo repository directory dynamically
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+ARGO_DIR="$(dirname "$SCRIPT_DIR")"
+
 echo "Starting Argo with sailing area map visualization..."
 
 # Convert KMZ files to GeoJSON if needed
 echo "Converting KMZ files to GeoJSON..."
-python3 /home/orangepi/argo/scripts/kmz_to_geojson.py
+python3 "$ARGO_DIR/scripts/kmz_to_geojson.py"
 
 # Start rosbridge for Foxglove connection
 echo "Starting rosbridge server..."
@@ -17,7 +21,7 @@ sleep 3
 
 # Start sailing area publisher
 echo "Starting sailing area publisher..."
-python3 /home/orangepi/argo/nodes/sailing_area_publisher.py &
+python3 "$ARGO_DIR/nodes/sailing_area_publisher.py" &
 SAILING_PUB_PID=$!
 
 # Wait a moment for publisher to start
@@ -25,7 +29,7 @@ sleep 2
 
 # Start Argo system
 echo "Starting Argo system..."
-sudo python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py start &
+sudo python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" start &
 ARGO_PID=$!
 
 echo ""
@@ -34,10 +38,10 @@ echo ""
 echo "To connect Foxglove:"
 echo "1. Open https://studio.foxglove.dev/"
 echo "2. Connect to: ws://$(hostname -I | awk '{print $1}'):9090"
-echo "3. Import layout: /home/orangepi/argo/foxglove/argo_maps_final.json"
+echo "3. Import layout: $ARGO_DIR/foxglove/argo_maps_final.json"
 echo ""
 echo "To test map visualization:"
-echo "python3 /home/orangepi/argo/scripts/test_map_visualization.py"
+echo "python3 $ARGO_DIR/scripts/test_map_visualization.py"
 echo ""
 echo "Press Ctrl+C to stop all services"
 

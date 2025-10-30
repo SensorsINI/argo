@@ -6,7 +6,11 @@ import sys
 from pathlib import Path
 
 # Add the nodes directory to the path
-sys.path.append('/home/orangepi/argo/nodes')
+script_path = Path(__file__).resolve()
+argo_dir = script_path.parents[1]
+nodes_dir = argo_dir / "nodes"
+sys.path.append(str(nodes_dir))
+
 
 # Import the constants from rudder_sail_radio
 from rudder_sail_radio import SYS_BASE_PATH, SERVO_RUDDER_PATH, SERVO_SAIL_PATH

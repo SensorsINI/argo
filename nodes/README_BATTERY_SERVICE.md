@@ -28,7 +28,7 @@ argo-launch.service         (Managed by lifecycle)
 
 ### Quick Install
 ```bash
-cd /home/orangepi/argo/nodes
+cd ~/argo/nodes
 sudo make install enable start
 ```
 
@@ -106,7 +106,7 @@ bash -c 'source /opt/ros/humble/setup.bash && ros2 service call /battery_status 
 The `argo_lifecycle_manager.py` status command now shows battery service status separately:
 
 ```bash
-python3 /home/orangepi/argo/launch/argo_lifecycle_manager.py status
+python3 ~/argo/launch/argo_lifecycle_manager.py status
 ```
 
 Output includes:
@@ -139,9 +139,9 @@ Before=argo-launch.service shutdown.target
 [Service]
 Type=simple
 User=orangepi
-WorkingDirectory=/home/orangepi/argo/nodes
+WorkingDirectory=~/argo/nodes
 Environment=ROS_DOMAIN_ID=0
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/nodes/argo_battery_water.py'
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 ~/argo/nodes/argo_battery_water.py'
 Restart=always
 RestartSec=5
 

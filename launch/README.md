@@ -135,7 +135,7 @@ python3 launch/argo_lifecycle_manager.py status
 ### **Service Management**
 ```bash
 # Install and start services
-sudo systemctl --user link /home/orangepi/argo/launch/argo-launch.service
+sudo systemctl --user link ~/argo/launch/argo-launch.service
 sudo systemctl --user start argo-launch
 
 # Check service status
@@ -193,9 +193,9 @@ make install_argo_power_control
 ### **Manual Installation**
 ```bash
 # Install services
-sudo systemctl --user link /home/orangepi/argo/launch/argo-launch.service
-sudo systemctl --user link /home/orangepi/argo/launch/recording (ROS2 service)
-sudo systemctl --user link /home/orangepi/argo/launch/argo-storage-monitor.service
+sudo systemctl --user link ~/argo/launch/argo-launch.service
+sudo systemctl --user link ~/argo/launch/recording (ROS2 service)
+sudo systemctl --user link ~/argo/launch/argo-storage-monitor.service
 
 # Install power control (requires sudo)
 sudo cp argo-power-control.service /etc/systemd/system/
@@ -232,7 +232,7 @@ sudo systemctl status argo-power-control
 ## 📚 **Documentation**
 
 - **Power Control**: See `ARGO_POWER_CONTROL_README.md` for detailed power control documentation
-- **Main Project**: See `/home/orangepi/argo/README.md` for overall project documentation
+- **Main Project**: See `~/argo/README.md` for overall project documentation
 - **Makefile Help**: Run `make help` from project root for available commands
 
 ## 🔄 **Maintenance**

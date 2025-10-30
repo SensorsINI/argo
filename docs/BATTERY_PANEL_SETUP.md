@@ -23,7 +23,7 @@ The battery status panel displays real-time battery information from the `argo_b
 
 1. Run the setup script:
    ```bash
-   cd /home/orangepi/argo
+   cd ~/argo
    ./scripts/setup_battery_panel.sh
    ```
 
@@ -38,7 +38,7 @@ The battery status panel displays real-time battery information from the `argo_b
 3. Choose "Generic Monitor" and click "Add"
 4. Right-click the new Generic Monitor and select "Properties"
 5. Configure the plugin:
-   - Command: `/home/orangepi/argo/scripts/battery_status_genmon_wrapper.sh`
+   - Command: `~/argo/scripts/battery_status_genmon_wrapper.sh`
    - Update interval: 10 seconds (or your preference)
    - Label: Leave empty or set to "Battery"
 6. Click "Close" to save
@@ -47,7 +47,7 @@ The battery status panel displays real-time battery information from the `argo_b
 
 You can always check battery status manually:
 ```bash
-/home/orangepi/argo/scripts/battery_status_wrapper.sh
+~/argo/scripts/battery_status_wrapper.sh
 ```
 
 ## Generic Monitor Plugin Features
@@ -91,7 +91,7 @@ The battery status displays with icons and text:
 
 2. Test the display manually:
    ```bash
-   /home/orangepi/argo/scripts/battery_status_wrapper.sh
+   ~/argo/scripts/battery_status_wrapper.sh
    ```
 
 3. Check ROS2 environment:
@@ -105,7 +105,7 @@ The battery status displays with icons and text:
 If the battery service is not available:
 1. Start the argo_battery_water node:
    ```bash
-   python3 /home/orangepi/argo/nodes/argo_battery_water.py
+   python3 ~/argo/nodes/argo_battery_water.py
    ```
 
 2. Or start the full Argo system:

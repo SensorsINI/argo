@@ -82,7 +82,7 @@ The MOTD script integrates with `argo_power_control.py` to detect critical batte
 
 ### MOTD Script Location
 
-- **Source**: `/home/orangepi/argo/scripts/15-argo-shutdown-status`
+- **Source**: `~/argo/scripts/15-argo-shutdown-status`
 - **Installed**: `/etc/update-motd.d/15-argo-shutdown-status`
 - **Execution Order**: Runs after system info (30-orangepi-sysinfo) but before tips (35-orangepi-tips)
 
