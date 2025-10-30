@@ -1,62 +1,49 @@
 # Argo Simulation Guide
 
-This guide explains how to run Argo in simulation mode, both locally and remotely, avoiding conflicts with hardware nodes.
+This guide explains how to run the Argo in local simulation mode using the robust ROS2 launch system.
 
 ## Overview
 
-When running simulation, several hardware nodes conflict with the simulator topics:
+When running simulation, several hardware nodes conflict with the simulator topics and are automatically excluded.
 
 **Conflicting Hardware Nodes (excluded in simulation):**
-- `gps.py` → publishes `/gps_cog`, `/gps_sog`, `/gps_velocity` (conflicts with simulator)
-- `imu.py` → publishes `/compass` (conflicts with simulator) 
-- `anem.py` → publishes `/anem_speed_angle_temp` (conflicts with simulator)
-- `rudder_sail_radio.py` → subscribes to `/rudder_sail_servo` (conflicts with simulator control)
+- `gps.py` → publishes `/gps_cog`, `/gps_sog`, `/gps_velocity`
+- `bno085.py` → publishes `/compass`
+- `anem.py` → publishes `/anem_speed_angle_temp`
+- `rudder_sail_radio.py` → subscribes to `/rudder_sail_servo`
 
-**Nodes that run in simulation:**
-- `argo_unified_simulator_bridge.py` → provides simulated sensor data + integrated keyboard control
-- `controller.py` → autonomous navigation
-- `argo_battery_water.py` → hardware monitoring (no conflicts)
-- `temp_monitor.py` → hardware monitoring (no conflicts)
+**Nodes launched in simulation:**
+- `argo_unified_simulator_bridge.py` → provides simulated sensor data
+- `controller.py` → handles autonomous navigation
+- `sailing_area_publisher.py` → provides map boundaries for visualization
+- `foxglove_bridge` → provides the websocket for Foxglove Studio
 
-## Simulation Modes
+## Local Simulation
 
-### 1. Local Simulation
+The local simulation runs all necessary components directly on the local machine. It uses the `sailboat-playground` simulator for realistic physics or falls back to a simpler mock simulator if needed.
 
-Runs the simulator directly on the Orange Pi.
+### Usage
 
-**Features:**
-- Uses sailboat-playground or mock simulator
-- Provides simulated sensor data
-- Handles control commands locally
-- No network dependencies
-
-**Usage:**
+The entire simulation environment is managed by a ROS2 launch file. To start it, simply use the `asim` alias in your terminal:
 
 ```bash
-# Method 1: Using lifecycle manager (includes keyboard control)
-python3 launch/argo_lifecycle_manager.py simulate_local
-
-# Method 2: Using launch script
-./scripts/launch_simulator_local.sh
-
-# Method 3: Manual launch
-python3 nodes/argo_unified_simulator_bridge.py --mode local &
-python3 nodes/controller.py --ros-args --params-file nodes/argo.yaml &
-python3 nodes/argo_battery_water.py &
-python3 nodes/temp_monitor.py &
+# Start the complete local simulation environment
+asim
 ```
 
-**Integrated Keyboard Control:**
-The simulator bridge includes integrated keyboard control with curses display:
-- **Arrow Keys**: Left/Right for rudder, Up/Down for sail
-- **8-step granular control** in each direction (full scale)
-- **Real-time curses display** with control visualization and logging
-- **Single keystroke input** (no need to hold keys)
-- **'c' key**: Center controls (rudder=0, sail=0)
-- **'q' key**: Quit the application
-- **Dual-window interface**: Control window on top, log window below
+This command will:
+1.  Launch the simulator bridge, controller, and sailing area publisher.
+2.  Start the `foxglove_bridge` automatically.
+3.  Ensure all processes are managed correctly and shut down cleanly with `Ctrl+C`.
 
-### 2. Remote Simulation
+This is now the only supported method for starting the local simulation. The previous methods using `argo_lifecycle_manager.py` or running nodes manually are deprecated due to stability issues.
+
+### Visualization
+
+Once the simulation is running, you can connect to it using Foxglove Studio.
+- **Connection URL:** `ws://localhost:8765`
+
+## Remote Simulation
 
 Connects to a remote simulator running on another machine.
 
@@ -163,14 +150,19 @@ config = load_config()
 
 ### Local Simulation Issues
 
-1. **sailboat-playground not available:**
+1. **`package 'argo_launch' not found` error:**
+   - This error occurred with the old launch system. The new `simulation_launch.py` uses `ExecuteProcess` and should not produce this error. Ensure you have the latest code.
+
+2. **`FileNotFoundError` for `naca0015.csv`:**
+   - This was an issue with relative paths. The bridge now calculates and passes an absolute path to the simulator's data files, which has resolved this.
+
+3. **`foxglove_bridge` doesn't start or `Bind Error`:**
+   - The `foxglove_bridge` is now included in the main launch file and starts automatically. If you see a `Bind Error`, it means a previous simulation did not shut down cleanly. Use `pkill -f foxglove_bridge` to terminate the old process. The new launch system should prevent this from happening in the future.
+
+4. **sailboat-playground not available:**
    - Check if simulator submodule is initialized: `make submodule-status`
    - Initialize if needed: `make submodule-init`
    - Verify sailboat-playground is in `simulator/sailboat-playground/` directory
-
-2. **Mock simulator fallback:**
-   - This is normal if sailboat-playground fails to load
-   - Mock simulator provides basic physics simulation
 
 ### Remote Simulation Issues
 
@@ -192,17 +184,14 @@ config = load_config()
 ### Debug Commands
 
 ```bash
-# Check node status
-python3 launch/argo_lifecycle_manager.py status
+# Check the status of running ROS2 nodes
+ros2 node list
 
-# Monitor system
-python3 launch/argo_lifecycle_manager.py monitor
+# Echo a topic to see if data is being published
+ros2 topic echo /pose
 
-# Debug remote connection
-./scripts/debug_remote_ros2.sh
-
-# Test simulator bridge
-python3 nodes/argo_unified_simulator_bridge.py --mode local --help
+# Check the definition of the asim alias
+alias asim
 ```
 
 ## Benefits
