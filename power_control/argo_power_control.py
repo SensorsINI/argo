@@ -399,10 +399,10 @@ class PowerController(ArgoBaseNode):
 
         # CRITICAL: Verify gpiod is available in production mode
         if not test_mode and not _HAS_GPIOD:
-            logger.critical("FATAL: gpiod library not available - required for production mode!")
-            logger.critical("This system CANNOT run safely without GPIO control.")
-            logger.critical("Install gpiod: sudo apt-get install python3-libgpiod")
-            logger.critical("If testing remotely, use --test-mode flag")
+            logger.error("FATAL: gpiod library not available - required for production mode!")
+            logger.error("This system CANNOT run safely without GPIO control.")
+            logger.error("Install gpiod: sudo apt-get install python3-libgpiod")
+            logger.error("If testing remotely, use --test-mode flag")
             raise RuntimeError("gpiod library not available - cannot run in production mode without GPIO control")
 
         if test_mode and not _HAS_GPIOD:
@@ -524,10 +524,8 @@ class PowerController(ArgoBaseNode):
         elif not ROS2_AVAILABLE:
             logger.warning("rclpy not found. ROS2 service calls will be disabled.")
 
-        # Setup signal handlers for graceful service shutdown
-        signal.signal(signal.SIGTERM, self.signal_handler)
-        signal.signal(signal.SIGINT, self.signal_handler)
-        signal.signal(signal.SIGQUIT, self.signal_handler)
+        # NOTE: Signal handlers removed - executor.spin() handles KeyboardInterrupt properly
+        # Signal handling is now done in main() function with try/except KeyboardInterrupt
 
         # Simple state tracking - initialize these early for test mode compatibility
         self.recording_active = False
@@ -1396,24 +1394,18 @@ class PowerController(ArgoBaseNode):
                 LED_HEARTBEAT_HZ * 2.0 if old_state_running else LED_HEARTBEAT_HZ)
 
     def signal_handler(self, signum, frame):
-        """Handle shutdown signals with graceful termination"""
-        self.get_logger().info(
-            f"Received signal {signum}, initiating graceful shutdown...")
-        self.running = False
-
-        # Give the main loop a few seconds to exit gracefully
-        self.get_logger().info("Waiting for graceful shutdown (5 seconds)...")
-        time.sleep(5)
-
-        # If we're still here, force exit
-        self.get_logger().warning("Graceful shutdown timeout - forcing exit")
-        try:
-            self.cleanup()
-        except Exception as e:
-            self.get_logger().error(f"Error during forced cleanup: {e}")
-
-        self.get_logger().info("Forcing process exit")
-        os._exit(0)
+        """
+        DEPRECATED: Signal handler not used in current executor-based architecture.
+        
+        Previously attempted to handle shutdown signals, but this interfered with
+        executor.spin() interrupt handling. Signal handling is now done in main()
+        via KeyboardInterrupt exception, which properly integrates with ROS2 executor.
+        
+        This method is kept for reference but is not actively registered.
+        """
+        self.get_logger().warning("signal_handler() called but is deprecated - shutdown via main() instead")
+        # Deprecated - do not use
+        pass
 
     def configure_button_for_interrupts(self):
         """Configure button line for interrupt-based monitoring (Rev3 PCB: active-high)"""
@@ -2571,7 +2563,7 @@ class PowerController(ArgoBaseNode):
             time.sleep(TEST_MODE_SHUTDOWN_DELAY_S)
             self.running = False  # Stop running after LED pattern demonstration
         else:
-            self.get_logger().critical("Executing shutdown command: shutdown -h now")
+            self.get_logger().error("Executing shutdown command: shutdown -h now")
             subprocess.run(['shutdown', '-h', 'now'], check=True)
             self.get_logger().info("Shutdown command executed successfully")
             # Don't set self.running = False here - let the system shutdown
@@ -2855,11 +2847,11 @@ class PowerController(ArgoBaseNode):
                         # Do NOT halt on invalid readings - they indicate hardware/communication problems, not battery issues
                         # Just log the error and continue monitoring
                         if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
-                            self.get_logger().critical(
+                            self.get_logger().error(
                                 f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings!")
-                            self.get_logger().critical(
+                            self.get_logger().error(
                                 f"This indicates a sensor/communication problem, NOT a battery problem!")
-                            self.get_logger().critical(
+                            self.get_logger().error(
                                 f"System will continue running - check argo_battery_water.service status")
                         continue
 
@@ -2903,7 +2895,7 @@ class PowerController(ArgoBaseNode):
                                     charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
                                 charging_str = f", {', '.join(charging_parts)}"
 
-                            self.get_logger().critical(
+                            self.get_logger().error(
                                 f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
                             self.critical_battery_detected = True
                             # Pause heartbeat for critical battery
@@ -2973,14 +2965,14 @@ class PowerController(ArgoBaseNode):
                             f"(grace period: {time_since_startup:.0f}s / {STARTUP_GRACE_PERIOD_S:.0f}s)")
                     elif not battery_service_ever_available and time_since_startup >= STARTUP_GRACE_PERIOD_S:
                         # Grace period expired but service never became available - log error but DO NOT HALT
-                        self.get_logger().critical(
+                        self.get_logger().error(
                             f"CRITICAL: Battery service never became available after {STARTUP_GRACE_PERIOD_S}s grace period!")
-                        self.get_logger().critical(
+                        self.get_logger().error(
                             "Battery monitoring is DISABLED - system will continue WITHOUT battery protection!")
-                        self.get_logger().critical(
+                        self.get_logger().error(
                             "Check if argo_battery_water.service is installed and enabled:")
-                        self.get_logger().critical("  sudo systemctl status argo_battery_water.service")
-                        self.get_logger().critical(
+                        self.get_logger().error("  sudo systemctl status argo_battery_water.service")
+                        self.get_logger().error(
                             "System will NOT halt - service unavailability is not a battery problem!")
                         # DO NOT HALT - missing service is a configuration problem, not a battery emergency
                     else:
@@ -2992,13 +2984,13 @@ class PowerController(ArgoBaseNode):
 
                         # After multiple consecutive service failures, log critical error but DO NOT HALT
                         if consecutive_service_failures >= MAX_CONSECUTIVE_FAILURES:
-                            self.get_logger().critical(
+                            self.get_logger().error(
                                 f"CRITICAL: Battery service failed {consecutive_service_failures} times consecutively!")
-                            self.get_logger().critical(
+                            self.get_logger().error(
                                 "Battery monitoring is NOT working - system continues WITHOUT battery protection!")
-                            self.get_logger().critical(
+                            self.get_logger().error(
                                 "Service failures indicate a monitoring problem, NOT a battery emergency!")
-                            self.get_logger().critical(
+                            self.get_logger().error(
                                 "Check argo_battery_water.service: sudo systemctl status argo_battery_water.service")
                             # DO NOT HALT - service failures are monitoring problems, not battery emergencies
 
@@ -3387,21 +3379,21 @@ class PowerController(ArgoBaseNode):
         """
         # Log critical battery mode based on configuration flag
         if CRITICAL_BATTERY_USE_SHUTDOWN:
-            self.get_logger().critical(
+            self.get_logger().error(
                 f"CRITICAL BATTERY SHUTDOWN: {battery_voltage:.3f}V - System will shutdown and CUT POWER")
-            self.get_logger().critical(
+            self.get_logger().error(
                 "⚠️  DEVELOPMENT MODE: Using normal shutdown (cuts power) instead of halt")
-            self.get_logger().critical(
+            self.get_logger().error(
                 "⚠️  CRITICAL_BATTERY_USE_SHUTDOWN=True - Power will be CUT, not preserved")
             shutdown_mode = "shutdown (power cut)"
         else:
-            self.get_logger().critical(
+            self.get_logger().error(
                 f"CRITICAL BATTERY HALT: {battery_voltage:.3f}V - System will halt to preserve power")
-            self.get_logger().critical(
+            self.get_logger().error(
                 "PRODUCTION MODE: Using halt to preserve power for manual sailing")
             shutdown_mode = "halt (power preserved)"
 
-        self.get_logger().critical(
+        self.get_logger().error(
             f"Showing confirmation dialog - timeout (no action) will proceed with {shutdown_mode}")
 
         # Set critical battery flag for shutdown hook ONLY if using halt mode
@@ -3473,14 +3465,14 @@ If you take no action within 30 seconds, the system will automatically
         # If we reach here, either:
         # 1. User clicked "Shutdown Now" (proceed immediately)
         # 2. Dialog timed out (proceed automatically - SAFE DEFAULT)
-        self.get_logger().critical(f"Proceeding with critical battery {shutdown_mode}")
-        self.get_logger().critical("Either user confirmed OR timeout occurred (automatic action for safety)")
+        self.get_logger().error(f"Proceeding with critical battery {shutdown_mode}")
+        self.get_logger().error("Either user confirmed OR timeout occurred (automatic action for safety)")
 
         # Stop battery monitoring to prevent repeated alerts
         self.battery_monitoring_active = False
 
         # CRITICAL POWER CONSERVATION: Pause Argo system to put sensors in shutdown state
-        self.get_logger().critical("Pausing Argo system to conserve battery power...")
+        self.get_logger().error("Pausing Argo system to conserve battery power...")
         pause_success = self._pause_argo_system_for_power_conservation()
 
         if pause_success:
@@ -3490,7 +3482,7 @@ If you take no action within 30 seconds, the system will automatically
             self.get_logger().warning("Could not pause sensors - proceeding with halt anyway")
 
         # Brief delay to allow final notifications
-        self.get_logger().critical("Waiting 3 seconds for final notifications...")
+        self.get_logger().error("Waiting 3 seconds for final notifications...")
         time.sleep(3)
 
         # Execute command based on configuration flag
@@ -3505,19 +3497,19 @@ If you take no action within 30 seconds, the system will automatically
                 self.get_logger().info("TEST MODE: Critical battery halt sequence completed - system would HALT and PRESERVE POWER NOW")
         else:
             if CRITICAL_BATTERY_USE_SHUTDOWN:
-                self.get_logger().critical(
+                self.get_logger().error(
                     "⚠️  DEVELOPMENT MODE: Executing shutdown command NOW - POWER WILL BE CUT")
-                self.get_logger().critical(
+                self.get_logger().error(
                     "⚠️  CRITICAL_BATTERY_USE_SHUTDOWN=True - Using shutdown instead of halt")
                 subprocess.run(['shutdown', '-h', 'now'], check=True)
-                self.get_logger().critical("Shutdown command executed - system will shutdown and cut power")
+                self.get_logger().error("Shutdown command executed - system will shutdown and cut power")
             else:
-                self.get_logger().critical(
+                self.get_logger().error(
                     "PRODUCTION MODE: Executing halt command NOW for critical battery preservation")
-                self.get_logger().critical(
+                self.get_logger().error(
                     "Power relay will be preserved for manual sailing - shutdown hook will NOT cut power")
                 subprocess.run(['sudo', 'halt'], check=True)
-                self.get_logger().critical("Halt command executed - system should halt immediately with power preserved")
+                self.get_logger().error("Halt command executed - system should halt immediately with power preserved")
 
     def _set_critical_battery_flag(self):
         """Set critical battery flag file for shutdown hook"""
@@ -3928,31 +3920,29 @@ def main():
     temp_logger.info("Starting power control system in ROS2 Node mode...")
     
     node = None
-    executor = None
     try:
         node = PowerController(
             test_mode=args.test_mode, threshold=args.threshold)
-
-        # The run() method now starts threads but doesn't block,
-        # so we spin the executor to handle callbacks.
-        node.run_threads()
-
-        executor = MultiThreadedExecutor()
-        executor.add_node(node)
-
-        try:
-            temp_logger.info("Spinning executor...")
-            executor.spin()
-        except KeyboardInterrupt:
-            temp_logger.info('Keyboard interrupt, shutting down.')
         
+        # Start background threads
+        node.run_threads()
+        
+        # Spin the node - standard ROS2 pattern
+        temp_logger.info("Spinning node...")
+        rclpy.spin(node)
+        
+    except KeyboardInterrupt:
+        temp_logger.info('Keyboard interrupt, shutting down.')
+    except rclpy.executors.ExternalShutdownException:
+        temp_logger.info('External shutdown requested.')
     finally:
-        if executor:
-            executor.shutdown()
+        temp_logger.info("Entering cleanup phase...")
         if node:
-            node.cleanup() # Ensure cleanup is called
+            temp_logger.info("Cleaning up node...")
+            node.cleanup()
             node.destroy_node()
         if ROS2_AVAILABLE and rclpy.ok():
+            temp_logger.info("Shutting down rclpy...")
             rclpy.shutdown()
         temp_logger.info("Power control node shutdown complete.")
 
