@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""
+Argo Device Checker
+Quick utility to verify all expected hardware devices are present and communicating.
+"""
+
+import subprocess
+import sys
+import serial
+import time
+import os
+
+# Expected I2C device addresses
+EXPECTED_I2C_DEVICES = [
+    (0x21, "Anemometer"),
+    (0x22, "Anemometer"),
+    (0x23, "Anemometer"),
+    (0x34, "Battery/Water"),
+    (0x44, "Temperature"),
+    (0x4a, "BNO085 IMU"),
+]
+
+MISSING_DEVICES = []
+
+
+def check_i2c_devices():
+    """Check for expected I2C devices via i2cdetect"""
+    try:
+        result = subprocess.run(
+            ['timeout', '2', 'i2cdetect', '-y', '0'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode != 0:
+            MISSING_DEVICES.append("I2C bus 0 not accessible")
+            return False
+        
+        i2c_output = result.stdout
+        
+        # Check each expected device
+        for addr, name in EXPECTED_I2C_DEVICES:
+            # Convert hex address to string format used by i2cdetect (e.g., "21" for 0x21)
+            addr_str = f"{addr:02x}"
+            
+            # Parse i2cdetect output to check if address is present
+            found = False
+            lines = i2c_output.split('\n')
+            for line in lines:
+                # Skip header and empty lines
+                if ':' not in line:
+                    continue
+                # Get the content after the colon (the hex addresses)
+                content = line.split(':')[1].strip()
+                # Split into individual addresses
+                addresses = content.split()
+                for address in addresses:
+                    # Check for exact match or "UU" (device in use)
+                    if address.lower() == addr_str or address == 'UU':
+                        found = True
+                        break
+                if found:
+                    break
+            
+            if not found:
+                MISSING_DEVICES.append(f"{name} (0x{addr:02x})")
+        
+        return True
+        
+    except FileNotFoundError:
+        MISSING_DEVICES.append("i2cdetect command not found")
+        return False
+    except subprocess.TimeoutExpired:
+        MISSING_DEVICES.append("i2cdetect timeout")
+        return False
+    except Exception as e:
+        MISSING_DEVICES.append(f"I2C check error: {e}")
+        return False
+
+
+def check_gps():
+    """Check GPS via serial port /dev/ttyS5"""
+    try:
+        ser = serial.Serial('/dev/ttyS5', baudrate=38400, timeout=1.0)
+        time.sleep(0.1)  # Brief pause for initialization
+        
+        # Try multiple commands like gps.py does
+        commands = [
+            b'$PMTK605*31\r\n',      # MTK version query
+            b'$PUBX,00*33\r\n',      # u-blox position query  
+            b'$PMTK414*30\r\n',      # MTK output rate query
+        ]
+        
+        for cmd in commands:
+            ser.reset_input_buffer()
+            ser.write(cmd)
+            time.sleep(0.2)
+            response = ser.readline()
+            if len(response) > 0:
+                ser.close()
+                return True
+        
+        ser.close()
+        MISSING_DEVICES.append("GPS (no response)")
+        return False
+            
+    except serial.SerialException:
+        MISSING_DEVICES.append("GPS (serial port error)")
+        return False
+    except Exception as e:
+        MISSING_DEVICES.append(f"GPS error: {e}")
+        return False
+
+
+def check_bno085():
+    """Check BNO085 IMU - already detected via I2C, no additional check needed"""
+    # BNO085 is detected via I2C in check_i2c_devices()
+    # The device requires special initialization to respond to register reads
+    return True
+
+
+def check_lora():
+    """Check LoRa module via SPI"""
+    try:
+        # Check if SPI device exists
+        if not os.path.exists('/dev/spidev1.0'):
+            MISSING_DEVICES.append("LoRa (SPI device not found)")
+            return False
+        
+        # Try to use spidev and gpiod libraries if available
+        try:
+            import spidev
+            import gpiod
+            
+            # GPIO line numbers for gpiod
+            LORA_SEL_LINE = 266  # PI10 (Pin 27) - Chip Select
+            LORA_RST_LINE = 256  # PI0 (Pin 29) - Reset
+            
+            # Open GPIO chip
+            gpio_chip = gpiod.Chip("/dev/gpiochip0")
+            
+            # Configure CS and RST lines
+            lora_sel_line = gpio_chip.get_line(LORA_SEL_LINE)
+            lora_sel_line.request(consumer="adevcheck", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[1])
+            
+            lora_rst_line = gpio_chip.get_line(LORA_RST_LINE)
+            lora_rst_line.request(consumer="adevcheck", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[1])
+            
+            # Reset module
+            lora_rst_line.set_value(0)
+            time.sleep(0.01)
+            lora_rst_line.set_value(1)
+            time.sleep(0.1)
+            
+            # Initialize SPI
+            spi = spidev.SpiDev()
+            spi.open(1, 0)
+            spi.max_speed_hz = 100000
+            spi.mode = 0
+            
+            # Read version register (0x42) from SX1276
+            # SX1276 version should be 0x12
+            lora_sel_line.set_value(0)
+            result = spi.xfer2([0x42 & 0x7F, 0x00])
+            lora_sel_line.set_value(1)
+            
+            # Cleanup
+            spi.close()
+            lora_sel_line.release()
+            lora_rst_line.release()
+            gpio_chip.close()
+            
+            version = result[1]
+            if version == 0x12:
+                return True
+            else:
+                MISSING_DEVICES.append(f"LoRa (unexpected version 0x{version:02x})")
+                return False
+                
+        except ImportError:
+            MISSING_DEVICES.append("LoRa (spidev or gpiod library not available)")
+            return False
+        except Exception as e:
+            MISSING_DEVICES.append(f"LoRa error: {e}")
+            return False
+            
+    except Exception as e:
+        MISSING_DEVICES.append(f"LoRa check error: {e}")
+        return False
+
+
+def main():
+    """Main function"""
+    global MISSING_DEVICES
+    MISSING_DEVICES = []
+    
+    # Run all checks
+    check_i2c_devices()
+    check_gps()
+    check_bno085()
+    check_lora()
+    
+    # Report results
+    if not MISSING_DEVICES:
+        print("All devices OK")
+        return 0
+    else:
+        print("Missing devices:")
+        for device in MISSING_DEVICES:
+            print(f"  - {device}")
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+

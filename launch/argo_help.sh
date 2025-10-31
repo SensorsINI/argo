@@ -25,6 +25,7 @@ echo "  am   - Monitor mode (watch for failures)"
 echo "  alog - Follow argo launch logs"
 echo "  asim - Start argo in LOCAL simulation mode"
 echo "  asimr - Start argo in REMOTE simulation mode"
+echo "  adevcheck - Check for expected hardware devices"
 
 echo "Recording Control:"
 echo "  ar   - Start data recording"

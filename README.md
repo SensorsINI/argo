@@ -408,9 +408,12 @@ To plot recorded bag file data, see [argo-plots-2025.py](develop/analysis/argo-p
 ### Debug Commands
 ```bash
 # Check system health
-sudo i2cdetect -y 0
+ah # show aliases
+adevcheck # check for argo devices present and communicating
+alog # follow argo logs - see help options
+sudo i2cdetect -y 0 # check i2c bus
 ros2 topic list
-ros2 node list
+ros2 node list # check nodes
 systemctl status argo-launch.service
 ```
 
