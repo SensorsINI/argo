@@ -149,7 +149,12 @@ TEST_DEFAULT_PW = 1500
 
 
 def cmd_to_pw_us(cmd: float) -> int:
-    """Converts a normalized command (-1 to +1) to a pulse width in microseconds (1000 to 2000)."""
+    """Converts a normalized command (-1 to +1) to a pulse width in microseconds (1000 to 2000).
+    
+    Rudder convention: -1 = full left, 0 = center, +1 = full right (looking down at boat)
+    Sail convention: -1 = pulled in fully, 0 = half out, +1 = let out fully
+    PWM convention: 1000us = -1, 1500us = 0, 2000us = +1
+    """
     # Clamp command to [-1, 1]
     cmd = max(-1.0, min(1.0, cmd))
     # Linear interpolation: 1500 is center, 500 is range on each side
@@ -158,7 +163,12 @@ def cmd_to_pw_us(cmd: float) -> int:
 
 
 def pw_us_to_cmd(pw_us: float) -> float:
-    """Converts a pulse width in microseconds (1000 to 2000) to a normalized command (-1 to +1)."""
+    """Converts a pulse width in microseconds (1000 to 2000) to a normalized command (-1 to +1).
+    
+    Rudder convention: -1 = full left, 0 = center, +1 = full right (looking down at boat)
+    Sail convention: -1 = pulled in fully, 0 = half out, +1 = let out fully
+    PWM convention: 1000us = -1, 1500us = 0, 2000us = +1
+    """
     # Clamp pulse width to [1000, 2000] for stable conversion
     pw_us = max(1000.0, min(2000.0, pw_us))
     # Linear interpolation
@@ -516,10 +526,10 @@ class RudderSailRadioNode(ArgoBaseNode):
             self.set_unhealthy(failure_reason)
             return False
 
-        # The original script inverted the rudder command. Let's preserve that.
-        # 1000us -> +1 (right), 2000us -> -1 (left)
-        self.radio_rudder = -pw_us_to_cmd(radio_rudder_pw_us)
-        # 1000us -> -1 (in), 2000us -> +1 (out)
+        # Convert radio inputs using standard servo convention:
+        # Rudder: 1000us -> -1 (full left), 1500us -> 0 (center), 2000us -> +1 (full right)
+        self.radio_rudder = pw_us_to_cmd(radio_rudder_pw_us)
+        # Sail: 1000us -> -1 (pulled in), 1500us -> 0 (half out), 2000us -> +1 (let out)
         self.radio_sail = pw_us_to_cmd(radio_sail_pw_us)
 
         self.last_radio_update = time.time()
@@ -764,13 +774,21 @@ HIGH IMPEDANCE SAFETY MODE:
 TOPICS:
   Publishes:
     /rudder_sail_radio: Vector3 - Normalized radio inputs from hardware
+      x: rudder (-1=full left, +1=full right, looking down at boat)
+      y: sail (-1=pulled in fully, +1=let out fully)
+      z: reserved (0)
     /rudder_sail_servo: Vector3 - Final commands sent to hardware
+      x: rudder (-1=full left, +1=full right, looking down at boat)
+      y: sail (-1=pulled in fully, +1=let out fully)
+      z: reserved (0)
     /human_controlled: Bool - Current control authority status (default QoS)
     /control_authority: Vector3 - Detailed control status (authority, time_since_human, time_since_auto)
     /rudder_sail_radio_health: Bool - Node health status (ArgoBaseNode)
 
   Subscribes:
     /rudder_sail_cmd: Vector3 - Autonomous commands from controller.py
+      x: rudder (-1=full left, +1=full right, looking down at boat)
+      y: sail (-1=pulled in fully, +1=let out fully)
 
 SERVICES:
   /rudder_sail_radio_node/health: Trigger - Health status service endpoint
