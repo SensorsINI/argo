@@ -110,6 +110,9 @@ import signal
 import tty
 import termios
 import select
+import cProfile
+import pstats
+from datetime import datetime
 
 # --- Hardware Configuration ---
 SYS_BASE_PATH = Path("/sys/kernel/argo_radio_servo")
@@ -137,8 +140,10 @@ DEFAULT_SAFETY_MAX_RUDDER = 1.0 # limit rudder comamnd to this magnitude in case
 DEFAULT_SAFETY_MAX_SAIL = 1.0 # limit sail comamnd to this magnitude in case of mechanical constraints
 
 # Control loop timing constants
-DEFAULT_CONTROL_LOOP_PERIOD = 0.05  # 20 Hz for responsive control
-DEFAULT_STATUS_PERIOD = 0.1  # 10 Hz status updates
+DEFAULT_CONTROL_LOOP_PERIOD = 0.05  # 20 Hz for responsive control (active)
+DEFAULT_CONTROL_LOOP_PERIOD_IDLE = 0.20  # 5 Hz when idle (reduces executor overhead)
+DEFAULT_STATUS_PERIOD = 0.1  # 10 Hz status updates (active)
+DEFAULT_STATUS_PERIOD_IDLE = 1.0  # 1 Hz when idle (reduces executor overhead)
 
 # Test mode configuration
 TEST_MIN_PW = 900
@@ -398,6 +403,41 @@ class RudderSailRadioNode(ArgoBaseNode):
 
         # Throttling for outlier radio PWM warning logs
         self.last_outlier_warning_time = 0.0
+        
+        # Track previous radio health state for change detection
+        self.prev_radio_healthy = None  # None = unknown, True = healthy, False = unhealthy
+        
+        # Change detection for publishing optimization
+        self.prev_published_radio_rudder = None
+        self.prev_published_radio_sail = None
+        self.prev_published_servo_rudder = None
+        self.prev_published_servo_sail = None
+        self.last_radio_publish_time = 0.0
+        self.last_servo_publish_time = 0.0
+        self.last_status_publish_time = 0.0
+        self.prev_published_human_controlled = None
+        self.prev_published_control_authority = None
+        
+        # Minimum change threshold for publishing (1% of full range)
+        self.PUBLISH_CHANGE_THRESHOLD = 0.01  # 1% of -1 to +1 range
+        # Maximum time between publishes even if no change (ensure subscribers know we're alive)
+        self.MAX_PUBLISH_INTERVAL = 1.0  # 1 second
+        
+        # Cache message objects to avoid allocation overhead
+        self._radio_msg_cache = Vector3()
+        self._servo_msg_cache = Vector3()
+        self._human_msg_cache = Bool()
+        self._authority_msg_cache = Vector3()
+        self._prev_authority_cache = Vector3()  # For comparison
+        
+        # Sysfs read caching to reduce file I/O overhead
+        self._cached_radio_rudder_pw_us = 0.0
+        self._cached_radio_sail_pw_us = 0.0
+        self._last_sysfs_read_time = 0.0
+        self._last_radio_value_change_time = 0.0
+        # Adaptive read interval: faster when values changing, slower when stable
+        self.SYSFS_READ_INTERVAL_ACTIVE = 0.05  # 20Hz when active (50ms)
+        self.SYSFS_READ_INTERVAL_IDLE = 0.20    # 5Hz when idle (200ms) - reduces I/O by 75%
 
         # --- QoS Profiles ---
 
@@ -431,11 +471,16 @@ class RudderSailRadioNode(ArgoBaseNode):
         # Set initial health status as unhealthy (no radio input yet)
         self.set_unhealthy("No radio input detected yet")
 
-
         # Status publishing timer
         self.status_period = DEFAULT_STATUS_PERIOD  # 10 Hz status updates
         self.status_timer = self.create_timer(
             self.status_period, self.publish_status)
+        
+        # Adaptive timer frequency tracking
+        self._last_activity_time = time.time()
+        self._is_idle_mode = False
+        self._timer_adjustment_interval = 5.0  # Check for idle mode every 5 seconds
+        self._last_timer_adjustment = time.time()
 
         # Initialize servos to high impedance mode for safety
         self.set_servo_high_impedance()
@@ -447,11 +492,20 @@ class RudderSailRadioNode(ArgoBaseNode):
         atexit.register(self._ensure_safe_exit)
 
     def read_sysfs_pw(self, path: Path) -> float:
-        """Reads a pulse width from a sysfs file."""
+        """Reads a pulse width from a sysfs file using optimized file I/O."""
         try:
-            return float(path.read_text().strip())
+            # Use lower-level file operations for better performance
+            # sysfs files are small (<20 bytes), so reading directly is faster
+            with open(path, 'r') as f:
+                return float(f.read().strip())
         except (IOError, FileNotFoundError, ValueError) as e:
-            self.get_logger().warn(f"Could not read or parse {path}: {e}")
+            # Throttle error logging to prevent spam
+            now = time.time()
+            if not hasattr(self, '_last_sysfs_error_time'):
+                self._last_sysfs_error_time = {}
+            if path not in self._last_sysfs_error_time or (now - self._last_sysfs_error_time[path]) > 60.0:
+                self.get_logger().warn(f"Could not read or parse {path}: {e}")
+                self._last_sysfs_error_time[path] = now
             return 0.0  # Return a safe, invalid value
 
     def write_sysfs_pw(self, path: Path, value: int):
@@ -486,7 +540,7 @@ class RudderSailRadioNode(ArgoBaseNode):
 
         try:
             path.write_text(str(value))
-            self.get_logger().debug(f"Wrote {value}µs to {path}")
+            # Removed debug logging to reduce CPU overhead (runs at 20Hz)
         except IOError as e:
             self.get_logger().error(f"Error writing to {path}: {e}")
 
@@ -499,30 +553,62 @@ class RudderSailRadioNode(ArgoBaseNode):
         self.get_logger().info("Servo outputs set to HIGH IMPEDANCE mode (radio control active)")
 
     def read_radio_inputs(self):
-        """Read and process radio inputs from hardware."""
-        # Read radio inputs from sysfs
-        radio_rudder_pw_us = self.read_sysfs_pw(RADIO_RUDDER_PATH)
-        radio_sail_pw_us = self.read_sysfs_pw(RADIO_SAIL_PATH)
+        """Read and process radio inputs from hardware with adaptive caching to reduce I/O overhead."""
+        current_time = time.time()
+        
+        # Determine read interval based on activity: faster when values changing, slower when idle
+        time_since_last_change = current_time - self._last_radio_value_change_time
+        is_active = time_since_last_change < 2.0  # Active if changed in last 2 seconds
+        read_interval = self.SYSFS_READ_INTERVAL_ACTIVE if is_active else self.SYSFS_READ_INTERVAL_IDLE
+        
+        # Only read from sysfs if cache is stale (adaptive interval reduces I/O when idle)
+        if (current_time - self._last_sysfs_read_time) >= read_interval:
+            # Batch read both sysfs files together for better performance
+            try:
+                # Read rudder
+                with open(RADIO_RUDDER_PATH, 'r') as f:
+                    self._cached_radio_rudder_pw_us = float(f.read().strip())
+                # Read sail
+                with open(RADIO_SAIL_PATH, 'r') as f:
+                    self._cached_radio_sail_pw_us = float(f.read().strip())
+                self._last_sysfs_read_time = current_time
+            except (IOError, FileNotFoundError, ValueError) as e:
+                # Fallback to individual read methods for error handling
+                self._cached_radio_rudder_pw_us = self.read_sysfs_pw(RADIO_RUDDER_PATH)
+                self._cached_radio_sail_pw_us = self.read_sysfs_pw(RADIO_SAIL_PATH)
+                self._last_sysfs_read_time = current_time
+        
+        # Use cached values
+        radio_rudder_pw_us = self._cached_radio_rudder_pw_us
+        radio_sail_pw_us = self._cached_radio_sail_pw_us
 
         # Validate and normalize radio inputs
         if not (500 < radio_rudder_pw_us < 2500 and 500 < radio_sail_pw_us < 2500):
             # Determine the specific cause of health failure
+            # Use normalized messages to prevent log spam from changing values
             if radio_rudder_pw_us == 0.0 and radio_sail_pw_us == 0.0:
                 failure_reason = "Radio transmitter off or disconnected (both channels 0.0us)"
             elif radio_rudder_pw_us == 0.0:
-                failure_reason = f"Radio rudder channel off/disconnected (0.0us), sail={radio_sail_pw_us:.1f}us"
+                failure_reason = "Radio rudder channel off/disconnected (0.0us)"
             elif radio_sail_pw_us == 0.0:
-                failure_reason = f"Radio sail channel off/disconnected (0.0us), rudder={radio_rudder_pw_us:.1f}us"
+                failure_reason = "Radio sail channel off/disconnected (0.0us)"
             else:
                 failure_reason = f"Outlier radio PWM: rudder={radio_rudder_pw_us:.1f}us, sail={radio_sail_pw_us:.1f}us"
 
-            # Throttle warning logs to once every 10 seconds
+            # Check if health state changed
+            health_state_changed = self.prev_radio_healthy is not False
             now = time.time()
-            if now - self.last_outlier_warning_time > OUTLIER_LOG_THROTTLE_S:
+            
+            # Log immediately on state change, otherwise throttle to 1 per minute
+            if health_state_changed or (now - self.last_outlier_warning_time > OUTLIER_LOG_THROTTLE_S):
                 self.get_logger().warn(
                     f"Radio input validation failed: {failure_reason}")
                 self.last_outlier_warning_time = now
-
+            
+            # Update health state tracking
+            self.prev_radio_healthy = False
+            
+            # Update health status (ArgoBaseNode will only log if status/details changed)
             self.set_unhealthy(failure_reason)
             return False
 
@@ -540,16 +626,25 @@ class RudderSailRadioNode(ArgoBaseNode):
 
         if rudder_change > self.deadband_threshold or sail_change > self.deadband_threshold:
             self.last_human_activity = time.time()
+            self._last_radio_value_change_time = time.time()  # Track for adaptive read frequency
+            self._last_activity_time = time.time()  # Track for adaptive timer frequencies (wake up!)
             if not self.human_controlled:
                 self.get_logger().info(
                     f"Human activity detected (rudder: {rudder_change:.3f}, sail: {sail_change:.3f})")
+        elif rudder_change > 0.001 or sail_change > 0.001:  # Small changes also update timestamp
+            self._last_radio_value_change_time = time.time()  # Track any change for adaptive reads
+            self._last_activity_time = time.time()  # Even small radio changes wake up timers
 
         # Update previous values for next comparison
         self.prev_radio_rudder = self.radio_rudder
         self.prev_radio_sail = self.radio_sail
 
         # Set health status to healthy when radio inputs are valid
+        # ArgoBaseNode will log automatically when state changes from unhealthy to healthy
         self.set_healthy("Radio inputs within valid range")
+        
+        # Update health state tracking
+        self.prev_radio_healthy = True
 
         return True
 
@@ -559,6 +654,7 @@ class RudderSailRadioNode(ArgoBaseNode):
         self.auto_rudder = msg.x
         self.auto_sail = msg.y
         self.last_auto_update = time.time()
+        self._last_activity_time = time.time()  # Track activity for adaptive timers
 
     def determine_control_authority(self):
         """
@@ -614,24 +710,79 @@ class RudderSailRadioNode(ArgoBaseNode):
 
     # Health status publishing is now handled by ArgoBaseNode
 
+    def _adjust_timer_frequencies(self, current_time):
+        """Adjust timer frequencies based on system activity to reduce executor overhead."""
+        # Only check periodically to avoid overhead
+        if (current_time - self._last_timer_adjustment) < self._timer_adjustment_interval:
+            return
+        
+        self._last_timer_adjustment = current_time
+        
+        # Determine if system is idle (no recent activity)
+        time_since_activity = current_time - self._last_activity_time
+        should_be_idle = time_since_activity > 5.0  # Idle if no activity for 5 seconds
+        
+        # Adjust timers if state changed
+        if should_be_idle != self._is_idle_mode:
+            self._is_idle_mode = should_be_idle
+            
+            if self._is_idle_mode:
+                # Switch to idle frequencies (reduces executor overhead by ~75%)
+                new_control_period = DEFAULT_CONTROL_LOOP_PERIOD_IDLE
+                new_status_period = DEFAULT_STATUS_PERIOD_IDLE
+                self.get_logger().debug(f"Switching to idle mode: control={1/new_control_period:.1f}Hz, status={1/new_status_period:.1f}Hz")
+            else:
+                # Switch to active frequencies
+                new_control_period = DEFAULT_CONTROL_LOOP_PERIOD
+                new_status_period = DEFAULT_STATUS_PERIOD
+                self.get_logger().debug(f"Switching to active mode: control={1/new_control_period:.1f}Hz, status={1/new_status_period:.1f}Hz")
+            
+            # Update timer periods (must cancel and recreate)
+            if abs(self.control_loop_period - new_control_period) > 0.001:
+                self.timer.cancel()
+                self.control_loop_period = new_control_period
+                self.timer = self.create_timer(self.control_loop_period, self.timer_callback)
+            
+            if abs(self.status_period - new_status_period) > 0.001:
+                self.status_timer.cancel()
+                self.status_period = new_status_period
+                self.status_timer = self.create_timer(self.status_period, self.publish_status)
+
     def timer_callback(self):
         """Main control arbitration and hardware interface loop."""
         # Removed pause functionality - rudder_sail_radio runs continuously
+        current_time = time.time()
+        
+        # Adjust timer frequencies based on activity (reduces executor overhead when idle)
+        self._adjust_timer_frequencies(current_time)
 
         # 1. Read radio inputs from hardware
         if not self.read_radio_inputs():
             return  # Skip this cycle if radio inputs are invalid
 
-        # 2. Publish normalized radio inputs
-        radio_msg = Vector3(x=self.radio_rudder, y=self.radio_sail, z=0.0)
-        self.pub_rudder_sail_radio.publish(radio_msg)
+        # 2. Publish normalized radio inputs (only on significant change or timeout)
+        radio_changed = (
+            self.prev_published_radio_rudder is None or
+            abs(self.radio_rudder - self.prev_published_radio_rudder) > self.PUBLISH_CHANGE_THRESHOLD or
+            abs(self.radio_sail - self.prev_published_radio_sail) > self.PUBLISH_CHANGE_THRESHOLD or
+            (current_time - self.last_radio_publish_time) > self.MAX_PUBLISH_INTERVAL
+        )
+        
+        if radio_changed:
+            self._radio_msg_cache.x = self.radio_rudder
+            self._radio_msg_cache.y = self.radio_sail
+            self._radio_msg_cache.z = 0.0
+            self.pub_rudder_sail_radio.publish(self._radio_msg_cache)
+            self.prev_published_radio_rudder = self.radio_rudder
+            self.prev_published_radio_sail = self.radio_sail
+            self.last_radio_publish_time = current_time
+            self._last_activity_time = current_time  # Track activity for adaptive timers
 
         # 3. Determine control authority
         new_human_controlled, authority_reason = self.determine_control_authority()
 
         # 4. Log control mode changes with detailed reason
         if new_human_controlled != self.last_logged_control_mode:
-            current_time = time.time()
             time_since_last_switch = current_time - self.last_control_switch_time
 
             if new_human_controlled:
@@ -644,6 +795,7 @@ class RudderSailRadioNode(ArgoBaseNode):
             self.last_logged_control_mode = new_human_controlled
             self.last_control_switch_time = current_time
             self.control_switch_reason = authority_reason
+            self._last_activity_time = current_time  # Track activity for adaptive timers
 
         self.human_controlled = new_human_controlled
 
@@ -652,18 +804,10 @@ class RudderSailRadioNode(ArgoBaseNode):
             # Use radio commands
             cmd_rudder = self.radio_rudder
             cmd_sail = self.radio_sail
-
-            self.get_logger().debug(
-                f"Human control: rudder={cmd_rudder:.3f}, sail={cmd_sail:.3f}"
-            )
         else:
             # Use autonomous commands
             cmd_rudder = self.auto_rudder
             cmd_sail = self.auto_sail
-
-            self.get_logger().debug(
-                f"Robot control: rudder={cmd_rudder:.3f}, sail={cmd_sail:.3f}"
-            )
 
         # 6. Apply safety limits
         cmd_rudder, cmd_sail = self.apply_safety_limits(cmd_rudder, cmd_sail)
@@ -675,9 +819,23 @@ class RudderSailRadioNode(ArgoBaseNode):
         self.write_sysfs_pw(SERVO_RUDDER_PATH, servo_rudder_pw_us)
         self.write_sysfs_pw(SERVO_SAIL_PATH, servo_sail_pw_us)
 
-        # 8. Publish actual servo commands
-        servo_msg = Vector3(x=cmd_rudder, y=cmd_sail, z=0.0)
-        self.pub_rudder_sail_servo.publish(servo_msg)
+        # 8. Publish actual servo commands (only on significant change or timeout)
+        servo_changed = (
+            self.prev_published_servo_rudder is None or
+            abs(cmd_rudder - self.prev_published_servo_rudder) > self.PUBLISH_CHANGE_THRESHOLD or
+            abs(cmd_sail - self.prev_published_servo_sail) > self.PUBLISH_CHANGE_THRESHOLD or
+            (current_time - self.last_servo_publish_time) > self.MAX_PUBLISH_INTERVAL
+        )
+        
+        if servo_changed:
+            self._servo_msg_cache.x = cmd_rudder
+            self._servo_msg_cache.y = cmd_sail
+            self._servo_msg_cache.z = 0.0
+            self.pub_rudder_sail_servo.publish(self._servo_msg_cache)
+            self.prev_published_servo_rudder = cmd_rudder
+            self.prev_published_servo_sail = cmd_sail
+            self.last_servo_publish_time = current_time
+            self._last_activity_time = current_time  # Track activity for adaptive timers
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals by ensuring safe exit."""
@@ -723,23 +881,46 @@ class RudderSailRadioNode(ArgoBaseNode):
         self._ensure_safe_exit()
 
     def publish_status(self):
-        """Publish control status for other nodes."""
-        # Publish human control status
-        human_msg = Bool(data=self.human_controlled)
-        self.pub_human_controlled.publish(human_msg)
-
-        # Publish detailed control authority info
+        """Publish control status for other nodes (only on change or timeout)."""
         current_time = time.time()
         time_since_human = current_time - self.last_human_activity
         time_since_auto = current_time - self.last_auto_update
-
-        authority_msg = Vector3(
-            # Current authority (1=human, 0=robot)
-            x=1.0 if self.human_controlled else 0.0,
-            y=time_since_human,                       # Time since human activity
-            z=time_since_auto                         # Time since auto command
+        
+        # Publish human control status (only on change or timeout)
+        human_changed = (
+            self.prev_published_human_controlled is None or
+            self.human_controlled != self.prev_published_human_controlled or
+            (current_time - self.last_status_publish_time) > self.MAX_PUBLISH_INTERVAL
         )
-        self.pub_control_authority.publish(authority_msg)
+        
+        if human_changed:
+            self._human_msg_cache.data = self.human_controlled
+            self.pub_human_controlled.publish(self._human_msg_cache)
+            self.prev_published_human_controlled = self.human_controlled
+
+        # Publish detailed control authority info (only on change or timeout)
+        authority_x = 1.0 if self.human_controlled else 0.0
+        authority_changed = (
+            self.prev_published_control_authority is None or
+            abs(authority_x - self._prev_authority_cache.x) > 0.01 or
+            abs(time_since_human - self._prev_authority_cache.y) > 0.5 or
+            abs(time_since_auto - self._prev_authority_cache.z) > 0.5 or
+            (current_time - self.last_status_publish_time) > self.MAX_PUBLISH_INTERVAL
+        )
+        
+        if authority_changed:
+            self._authority_msg_cache.x = authority_x
+            self._authority_msg_cache.y = time_since_human
+            self._authority_msg_cache.z = time_since_auto
+            self.pub_control_authority.publish(self._authority_msg_cache)
+            
+            # Update previous values for comparison
+            self._prev_authority_cache.x = authority_x
+            self._prev_authority_cache.y = time_since_human
+            self._prev_authority_cache.z = time_since_auto
+            self.prev_published_control_authority = True  # Mark as initialized
+            
+            self.last_status_publish_time = current_time
 
         # Note: Health status is now managed only in read_radio_inputs() to prevent toggling
 
@@ -824,6 +1005,8 @@ TEST MODE:
     
     parser.add_argument('--test', action='store_true',
                         help='Run in test mode: sweep servo outputs and display radio inputs (no ROS2)')
+    parser.add_argument('--profile', action='store_true',
+                        help='Enable CPU profiling and save results to profile file')
 
     # Parse known args to allow ROS2 arguments to pass through
     parsed_args, unknown_args = parser.parse_known_args(args)
@@ -853,8 +1036,25 @@ TEST MODE:
         run_test_mode()
         return
 
+    # Setup CPU profiling if requested
+    profiler = None
+    profile_file = None
+    if parsed_args.profile:
+        profiler = cProfile.Profile()
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        profile_file = f"rudder_sail_radio_profile_{timestamp}.prof"
+        print(f"🔍 CPU profiling enabled. Results will be saved to: {profile_file}")
+        print("   Run for at least 30 seconds to get meaningful results.")
+        print("   Press Ctrl+C to stop and save profile.")
+
     try:
-        ArgoBaseNode.run_node(RudderSailRadioNode, args, parser)
+        if profiler:
+            # Run with profiling - wrap the entire execution
+            profiler.enable()
+            ArgoBaseNode.run_node(RudderSailRadioNode, args, parser)
+        else:
+            # Normal run
+            ArgoBaseNode.run_node(RudderSailRadioNode, args, parser)
     except Exception as e:
         # Handle rudder/sail radio specific errors
         print(f"CRITICAL: Failed to initialize Rudder/Sail Radio node: {e}")
@@ -869,6 +1069,19 @@ TEST MODE:
         except Exception as emergency_e:
             print(f"CRITICAL: Could not set high impedance mode during emergency: {emergency_e}")
         sys.exit(1)
+    finally:
+        # Save profiling data if enabled
+        if profiler:
+            profiler.disable()
+            if profile_file:
+                profiler.dump_stats(profile_file)
+                print(f"\n📊 Profile data saved to: {profile_file}")
+                print(f"\n🔍 To analyze the profile, run:")
+                print(f"   python3 -m pstats {profile_file}")
+                print(f"\n   Or use this command for top 30 functions:")
+                print(f"   python3 -c \"import pstats; p=pstats.Stats('{profile_file}'); p.sort_stats('cumulative').print_stats(30)\"")
+                print(f"\n   Or sort by time per call:")
+                print(f"   python3 -c \"import pstats; p=pstats.Stats('{profile_file}'); p.sort_stats('tottime').print_stats(30)\"")
 
 
 if __name__ == '__main__':
