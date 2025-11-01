@@ -25,15 +25,12 @@ if [[ -z "$ARGO_MOTD_SHOWN" ]]; then
     fi
 fi
 
-# Argo service status check and warning (deprecated - use argo_status instead)
-argo_status_check() {
-    echo "⚠️  argo_status_check() is deprecated. Use 'argo_status' instead."
-    argo_status
+argo_status() {
+    python3 "$ARGO_DIR/launch/argo_status.py"
 }
 
-# Manual status check (always shows full details)
-argo_status() {
-    python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" status
+argo_quick_status() {
+    python3 "$ARGO_DIR/launch/argo_status.py" --quick
 }
 
 # Quick timer for automatic status checks
@@ -81,10 +78,21 @@ argo_quick_timer() {
         # Clear the "please wait" message before showing status
         echo -ne "\r\033[K"
         
-        # Show condensed status using optimized quick_status command with --quiet flag
-        python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" quick_status --quiet
+        # Show condensed status using the new standard status script
+        python3 "$ARGO_DIR/launch/argo_status.py" --quick
     fi
 }
+
+# For this to work, you will need to install autojump first.
+# It is available on most package managers.
+# For example:
+#   Debian/Ubuntu: sudo apt install autojump
+#   Arch: sudo pacman -S autojump
+#   etc.
+[ -f /usr/share/autojump/autojump.sh ] && . /usr/share/autojump/autojump.sh
+
+# Set ROS_DOMAIN_ID for consistent ROS2 communication
+export ROS_DOMAIN_ID=0
 
 PATH="$ARGO_DIR/launch:$ARGO_DIR/nodes:$ARGO_DIR/scripts:$ARGO_DIR/power_control:$PATH"
 

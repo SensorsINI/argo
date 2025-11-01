@@ -3,7 +3,8 @@
 
 # Service configuration
 SERVICE_DIR = /etc/systemd/system
-LAUNCH_SERVICE = argo_launch.service
+LAUNCH_SERVICE_LEGACY = argo_launch.service
+LAUNCH_SERVICE_STANDARD = argo_launch_standard.service
 BAGFILES_DIR = $(HOME)/bagfiles
 ARGO_DIR = $(HOME)/argo
 
@@ -14,47 +15,109 @@ REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 
 # Power control configuration moved to power_control/ directory
 
-.PHONY: help install uninstall enable disable start stop restart clean install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor install_thermal_monitor enable_thermal_monitor start_thermal_monitor stop_thermal_monitor status_thermal_monitor disable_thermal_monitor uninstall_thermal_monitor install_battery_water_monitor install_bno085
+.PHONY: help install uninstall enable disable start stop restart clean install-legacy uninstall-legacy enable-legacy disable-legacy install-standard uninstall-standard enable-standard disable-standard start-standard stop-standard restart-standard install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor install_thermal_monitor enable_thermal_monitor start_thermal_monitor stop_thermal_monitor status_thermal_monitor disable_thermal_monitor uninstall_thermal_monitor install_battery_water_monitor install_bno085
 
 # Default target
 all: install
 
-# ==================== SERVICE MANAGEMENT ====================
+# ==================== SERVICE MANAGEMENT (New Standard ROS2 Launch) ====================
 
-install: install_storage_monitor install_thermal_monitor install_battery_water_monitor install_bno085
-	@echo "Installing Argo services..."
+install: install-standard
+
+uninstall: uninstall-standard
+
+enable: enable-standard
+
+disable: disable-standard
+
+start: start-standard
+
+stop: stop-standard
+
+restart: restart-standard
+
+install-standard:
+	@echo "Installing Argo STANDARD ROS2 launch service..."
 	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
 	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
 	    -e "s#^WorkingDirectory=.*#WorkingDirectory=$(REPO_DIR)#" \
 	    -e "s#^EnvironmentFile=.*#EnvironmentFile=$(REPO_DIR)/launch/argo.env#" \
 	    -e "s#/home/orangepi/argo#$(REPO_DIR)#g" \
-	    $(LAUNCH_SERVICE) > /tmp/$(LAUNCH_SERVICE)
-	@sudo cp /tmp/$(LAUNCH_SERVICE) $(SERVICE_DIR)/
-	@rm -f /tmp/$(LAUNCH_SERVICE)
+	    $(LAUNCH_SERVICE_STANDARD) > /tmp/$(LAUNCH_SERVICE_STANDARD)
+	@sudo cp /tmp/$(LAUNCH_SERVICE_STANDARD) $(SERVICE_DIR)/
+	@rm -f /tmp/$(LAUNCH_SERVICE_STANDARD)
 	sudo systemctl daemon-reload
-	mkdir -p $(BAGFILES_DIR)
-	@echo "Services installed successfully!"
+	@echo "Standard service installed successfully!"
 	@echo "Run 'make enable' to enable automatic startup"
 
-uninstall: uninstall_storage_monitor uninstall_thermal_monitor
-	@echo "Uninstalling Argo services..."
-	sudo systemctl stop $(LAUNCH_SERVICE) 2>/dev/null || true
-	sudo systemctl disable $(LAUNCH_SERVICE) 2>/dev/null || true
-	sudo rm -f $(SERVICE_DIR)/$(LAUNCH_SERVICE)
+uninstall-standard:
+	@echo "Uninstalling Argo STANDARD ROS2 launch service..."
+	sudo systemctl stop $(LAUNCH_SERVICE_STANDARD) 2>/dev/null || true
+	sudo systemctl disable $(LAUNCH_SERVICE_STANDARD) 2>/dev/null || true
+	sudo rm -f $(SERVICE_DIR)/$(LAUNCH_SERVICE_STANDARD)
 	sudo systemctl daemon-reload
-	@echo "Services uninstalled successfully!"
+	@echo "Standard service uninstalled successfully!"
 
-enable: enable_storage_monitor enable_thermal_monitor
-	@echo "Enabling Argo services for automatic startup..."
-	sudo systemctl enable $(LAUNCH_SERVICE)
-	@echo "Services enabled!"
+enable-standard:
+	@echo "Enabling Argo STANDARD service for automatic startup..."
+	sudo systemctl enable $(LAUNCH_SERVICE_STANDARD)
+	@echo "Standard service enabled!"
 
-disable: disable_storage_monitor disable_thermal_monitor
-	@echo "Disabling automatic startup..."
-	sudo systemctl disable $(LAUNCH_SERVICE)
-	@echo "Automatic startup disabled!"
+disable-standard:
+	@echo "Disabling automatic startup for STANDARD service..."
+	sudo systemctl disable $(LAUNCH_SERVICE_STANDARD)
+	@echo "Automatic startup disabled for standard service!"
+
+start-standard:
+	@echo "Starting Argo STANDARD ROS2 launch service..."
+	@sudo systemctl start $(LAUNCH_SERVICE_STANDARD)
+	@echo "Standard service started."
+
+stop-standard:
+	@echo "Stopping Argo STANDARD ROS2 launch service..."
+	@sudo systemctl stop $(LAUNCH_SERVICE_STANDARD)
+	@echo "Standard service stopped."
+
+restart-standard:
+	@echo "Restarting Argo STANDARD ROS2 launch service..."
+	@sudo systemctl restart $(LAUNCH_SERVICE_STANDARD)
+	@echo "Standard service restarted."
 
 
+# ==================== SERVICE MANAGEMENT (Old Legacy Lifecycle Manager) ====================
+
+install-legacy: install_storage_monitor install_thermal_monitor install_battery_water_monitor install_bno085
+	@echo "Installing Argo LEGACY services..."
+	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
+	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
+	    -e "s#^WorkingDirectory=.*#WorkingDirectory=$(REPO_DIR)#" \
+	    -e "s#^EnvironmentFile=.*#EnvironmentFile=$(REPO_DIR)/launch/argo.env#" \
+	    -e "s#/home/orangepi/argo#$(REPO_DIR)#g" \
+	    $(LAUNCH_SERVICE_LEGACY) > /tmp/$(LAUNCH_SERVICE_LEGACY)
+	@sudo cp /tmp/$(LAUNCH_SERVICE_LEGACY) $(SERVICE_DIR)/
+	@rm -f /tmp/$(LAUNCH_SERVICE_LEGACY)
+	sudo systemctl daemon-reload
+	mkdir -p $(BAGFILES_DIR)
+	@echo "LEGACY services installed successfully!"
+	@echo "Run 'make enable-legacy' to enable automatic startup"
+
+uninstall-legacy: uninstall_storage_monitor uninstall_thermal_monitor
+	@echo "Uninstalling Argo LEGACY services..."
+	sudo systemctl stop $(LAUNCH_SERVICE_LEGACY) 2>/dev/null || true
+	sudo systemctl disable $(LAUNCH_SERVICE_LEGACY) 2>/dev/null || true
+	sudo rm -f $(SERVICE_DIR)/$(LAUNCH_SERVICE_LEGACY)
+	sudo systemctl daemon-reload
+	@echo "LEGACY services uninstalled successfully!"
+
+enable-legacy: enable_storage_monitor enable_thermal_monitor
+	@echo "Enabling Argo LEGACY services for automatic startup..."
+	sudo systemctl enable $(LAUNCH_SERVICE_LEGACY)
+	@echo "LEGACY services enabled!"
+
+disable-legacy: disable_storage_monitor disable_thermal_monitor
+	@echo "Disabling automatic startup for LEGACY services..."
+	sudo systemctl disable $(LAUNCH_SERVICE_LEGACY)
+	@echo "Automatic startup disabled for LEGACY services!"
 
 clean:
 	@echo "Cleaning old bag files (>7 days)..."
@@ -224,34 +287,27 @@ uninstall_thermal_monitor: stop_thermal_monitor disable_thermal_monitor
 help:
 	@echo "Argo Launch Services Makefile"
 	@echo ""
-	@echo "Service Management:"
-	@echo "  install              - Install ALL services (launch, storage monitor)"
-	@echo "  uninstall            - Remove ALL services from systemd"
-	@echo "  enable               - Enable ALL services for automatic startup"
-	@echo "  disable              - Disable automatic startup for ALL services"
-	@echo "  start                - Start argo-launch service with 30s monitoring"
-	@echo "  stop                 - Stop ALL argo services"
-	@echo "  restart              - Restart argo-launch service"
+	@echo "Primary Service Management (Standard ROS2 Launch):"
+	@echo "  install              - Install the standard ROS2 launch service"
+	@echo "  uninstall            - Remove the standard service from systemd"
+	@echo "  enable               - Enable standard service for automatic startup"
+	@echo "  disable              - Disable automatic startup for standard service"
+	@echo "  start                - Start the standard ROS2 launch service"
+	@echo "  stop                 - Stop the standard ROS2 launch service"
+	@echo "  restart              - Restart the standard ROS2 launch service"
+	@echo ""
+	@echo "Legacy Service Management (Old Lifecycle Manager):"
+	@echo "  install-legacy       - Install the legacy lifecycle manager service"
+	@echo "  uninstall-legacy     - Remove the legacy service from systemd"
+	@echo "  enable-legacy        - Enable legacy service for automatic startup"
+	@echo "  disable-legacy       - Disable automatic startup for legacy service"
+	@echo ""
+	@echo "Other Commands:"
 	@echo "  clean                - Clean old bag files (>7 days)"
 	@echo ""
-	@echo "Storage Monitoring System:"
+	@echo "Component Services:"
 	@echo "  install_storage_monitor     - Install storage monitor systemd service"
-	@echo "  enable_storage_monitor      - Enable storage monitor for automatic startup"
-	@echo "  start_storage_monitor       - Start storage monitor service"
-	@echo "  stop_storage_monitor        - Stop storage monitor service"
-	@echo "  restart_storage_monitor     - Restart storage monitor service"
-	@echo "  status_storage_monitor      - Show storage monitor service status"
-	@echo "  disable_storage_monitor     - Disable automatic startup"
-	@echo "  uninstall_storage_monitor   - Complete removal of storage monitor service"
-	@echo ""
-	@echo "Thermal Monitoring System:"
-	@echo "  install_thermal_monitor     - Install thermal monitor systemd service"
-	@echo "  enable_thermal_monitor      - Enable thermal monitor for automatic startup"
-	@echo "  start_thermal_monitor       - Start thermal monitor service"
-	@echo "  stop_thermal_monitor        - Stop thermal monitor service"
-	@echo "  status_thermal_monitor      - Show thermal monitor service status"
-	@echo "  disable_thermal_monitor     - Disable automatic startup"
-	@echo "  uninstall_thermal_monitor   - Complete removal of thermal monitor service"
+	@echo "  (see other targets for storage, thermal, power, etc.)"
 	@echo ""
 	@echo "Power Control System:"
 	@echo "  (Power control has been moved to power_control/ directory)"
@@ -259,8 +315,9 @@ help:
 	@echo "  make -C ../power_control help     - Show power control help"
 	@echo ""
 	@echo "Usage examples:"
-	@echo "  make install                   # Install launch services"
-	@echo "  make start                     # Start with monitoring"
+	@echo "  make install                   # Install standard ROS2 launch service"
+	@echo "  make start                     # Start standard service"
+	@echo "  make install-legacy            # Install old lifecycle manager service"
 	@echo "  make -C ../power_control install # Install power control"
 	@echo "  make help                      # Show this help"
 

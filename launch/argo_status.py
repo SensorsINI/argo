@@ -27,7 +27,7 @@ except ImportError:
     ROS2_AVAILABLE = False
 
 
-def call_ros2_service(service_name: str, service_type: str = 'std_srvs/srv/Trigger', timeout: float = 5.0) -> tuple[bool, str]:
+def call_ros2_service(service_name: str, service_type: str = 'std_srvs/srv/Trigger', timeout: float = 10.0) -> tuple[bool, str]:
     """Call a ROS2 service and return (success, message)"""
     try:
         result = subprocess.run(
@@ -63,7 +63,7 @@ def get_node_list() -> list[str]:
             ['ros2', 'node', 'list'],
             capture_output=True,
             text=True,
-            timeout=2.0
+            timeout=5.0
         )
         
         if result.returncode == 0:
@@ -80,7 +80,7 @@ def get_topic_list() -> list[str]:
             ['ros2', 'topic', 'list'],
             capture_output=True,
             text=True,
-            timeout=2.0
+            timeout=5.0
         )
         
         if result.returncode == 0:
@@ -111,7 +111,7 @@ def print_full_status():
     # Check systemd services
     print("\n📋 SYSTEMD SERVICES:")
     services = [
-        'argo_launch.service',
+        'argo_launch_standard.service',
         'argo_power_control.service',
         'argo_battery_water.service',
         'argo_bno085.service'
@@ -185,7 +185,7 @@ def print_quick_status():
     # Check if launch service is running
     try:
         result = subprocess.run(
-            ['systemctl', 'is-active', 'argo_launch.service'],
+            ['systemctl', 'is-active', 'argo_launch_standard.service'],
             capture_output=True,
             timeout=1.0
         )

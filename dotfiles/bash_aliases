@@ -13,19 +13,19 @@ alias mount1="mount | grep -E '^/'|grep -v snapd"
 
 
 # Argo Robot Control Aliases - Improved ROS2 Native Approach
-alias al='$ARGO_DIR/launch/argo_start.sh'           # Start Argo nodes
-alias aq='$ARGO_DIR/launch/argo_stop.sh'            # Stop Argo nodes  
-alias ars='$ARGO_DIR/launch/argo_restart.sh'        # Restart Argo nodes
-alias as='$ARGO_DIR/launch/argo_status.sh'          # Show Argo status
+alias al='$ARGO_DIR/launch/argo_start_standard.sh'      # Start Argo nodes using standard launch
+alias aq='$ARGO_DIR/launch/argo_stop_standard.sh'       # Stop Argo nodes using standard launch
+alias ars='sudo systemctl restart argo_launch_standard.service' # Restart Argo nodes
+alias as='python3 $ARGO_DIR/launch/argo_status.py'      # Show Argo status (new standard)
+alias asq='python3 $ARGO_DIR/launch/argo_status.py --quick'  # Quick status (new standard)
 alias am='$ARGO_DIR/launch/argo_monitor.sh'  # Monitor mode - continuous status display
-alias ap='if systemctl is-active --quiet argo_launch.service; then current_state=$(timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: null" 2>/dev/null | grep -o "paused\|unpaused" || echo "unknown"); if [ "$current_state" = "paused" ]; then timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: false" && echo "✅ Controller UNPAUSED - autonomous control resumed" || echo "❌ Failed to unpause controller"; else timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: true" && echo "✅ Controller PAUSED - human control takes over" || echo "❌ Failed to pause controller"; fi; else echo "❌ Error: argo_launch.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch.service)"; fi'  # Toggle controller pause state
-alias ar='if systemctl is-active --quiet argo_launch.service; then timeout 30 ros2 service call /argo/recording/start std_srvs/srv/Trigger; else echo "❌ Error: argo_launch.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch.service)"; fi'  # Start recording
-alias ac='if systemctl is-active --quiet argo_launch.service; then timeout 30 ros2 service call /argo/recording/stop std_srvs/srv/Trigger; else echo "❌ Error: argo_launch.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch.service)"; fi'   # Stop recording
+alias ap='if systemctl is-active --quiet argo_launch_standard.service; then current_state=$(timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: null" 2>/dev/null | grep -o "paused\|unpaused" || echo "unknown"); if [ "$current_state" = "paused" ]; then timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: false" && echo "✅ Controller UNPAUSED - autonomous control resumed" || echo "❌ Failed to unpause controller"; else timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: true" && echo "✅ Controller PAUSED - human control takes over" || echo "❌ Failed to pause controller"; fi; else echo "❌ Error: argo_launch_standard.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch_standard.service)"; fi'  # Toggle controller pause state
+alias ar='if systemctl is-active --quiet argo_launch_standard.service; then timeout 30 ros2 service call /argo/recording/start std_srvs/srv/Trigger; else echo "❌ Error: argo_launch_standard.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch_standard.service)"; fi'  # Start recording
+alias ac='if systemctl is-active --quiet argo_launch_standard.service; then timeout 30 ros2 service call /argo/recording/stop std_srvs/srv/Trigger; else echo "❌ Error: argo_launch_standard.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch_standard.service)"; fi'   # Stop recording
 alias ah='bash $ARGO_DIR/launch/argo_help.sh' # show argo help
 alias ag='sudo python3 $ARGO_DIR/launch/argo_gui.py' # start argo gui
-alias alog='$ARGO_DIR/scripts/argo_logs.sh' # show argo system logs (argo_launch, battery, power)
-alias asim='$ARGO_DIR/scripts/launch_simulation.sh' # start argo in LOCAL simulation mode
-alias asimr='python3 $ARGO_DIR/launch/argo_lifecycle_manager.py simulate_remote' # start argo in REMOTE simulation mode
+alias alog='sudo journalctl -u argo_launch_standard.service -f' # show argo system logs
+alias asim='(cd $ARGO_DIR && source /opt/ros/humble/setup.bash && ros2 launch launch/argo_launch.py mode:=simulation)' # start argo in LOCAL simulation mode
 alias cleanbags='find $ARGO_DIR/bags -type f -mtime +3 -exec rm -f {} \;' # clean old bags
 # handy shutdown and reboot aliases with confirmation
 alias sd='read -p "Shutdown now? (y/N): " -n 1 -r; echo; if [[ $REPLY =~ ^[Yy]$ ]]; then sudo shutdown now; fi'
