@@ -12,48 +12,52 @@ from std_msgs.msg import ColorRGBA, Header
 import os
 from pathlib import Path
 import math
+import argparse
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 
 
 class SailingAreaPublisher(Node):
-    def __init__(self):
+    def __init__(self, map_name=None):
         super().__init__('sailing_area_publisher')
-        
-        # Create publishers for different types of markers
-        self.waypoint_pub = self.create_publisher(MarkerArray, '/sailing_waypoints', 10)
-        self.boundary_pub = self.create_publisher(MarkerArray, '/sailing_boundaries', 10)
-        self.hazard_pub = self.create_publisher(MarkerArray, '/sailing_hazards', 10)
-        
-        # Define origin for coordinate conversion (from 'home' waypoint in GeoJSON)
-        self.origin_lon = 8.5448386
-        self.origin_lat = 47.3981555
-        self.earth_radius = 6378137.0  # meters
+        self.map_name = map_name  # Specific map to use for origin (matches simulator bridge)
         
         # Determine Argo repository directory dynamically
         script_path = Path(__file__).resolve()
         self.argo_dir = script_path.parents[1]  # nodes -> argo
         self.maps_dir = self.argo_dir / "foxglove" / "maps"
+        self.earth_radius = 6378137.0  # meters
 
         self.get_logger().info(f"Using maps directory: {self.maps_dir}")
 
+        # Use TRANSIENT_LOCAL durability so late subscribers get the last published message
+        # MUST set QoS when creating publisher, not after
         qos_profile = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.VOLATILE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,  # Allows late subscribers to receive last message
             depth=10
         )
-        self.waypoint_pub.qos_profile = qos_profile
-        self.boundary_pub.qos_profile = qos_profile
-        self.hazard_pub.qos_profile = qos_profile
         
-        # Load sailing area data
+        # Create publishers with TRANSIENT_LOCAL QoS profile
+        self.waypoint_pub = self.create_publisher(MarkerArray, '/sailing_waypoints', qos_profile)
+        self.boundary_pub = self.create_publisher(MarkerArray, '/sailing_boundaries', qos_profile)
+        self.hazard_pub = self.create_publisher(MarkerArray, '/sailing_hazards', qos_profile)
+        
+        # Load sailing area data first
         self.sailing_areas = self.load_sailing_areas()
+        
+        # Find origin from 'home' waypoint in loaded maps (same as simulator bridge)
+        self.origin_lon = 8.5448386  # Default fallback
+        self.origin_lat = 47.3981555
+        self._find_origin_from_maps()
         
         # Publish markers at startup
         self.publish_all_markers()
         
         # Create a timer to republish periodically (in case of reconnection)
-        self.timer = self.create_timer(60.0, self.periodic_republish)
+        # Use shorter interval initially to ensure subscribers receive data
+        self.republish_count = 0
+        self.timer = self.create_timer(5.0, self.periodic_republish)  # Republish every 5 seconds initially
         
         # Log comprehensive startup information
         self.log_startup_info()
@@ -138,6 +142,42 @@ class SailingAreaPublisher(Node):
         self.get_logger().info("Sailing area publisher ready for Foxglove visualization")
         self.get_logger().info("=" * 60)
     
+    def _find_origin_from_maps(self):
+        """Find the 'home' waypoint from loaded maps to use as coordinate origin.
+        If map_name is specified, use that map's home waypoint; otherwise use the first one found."""
+        # If a specific map is requested, search it first
+        if self.map_name and self.map_name in self.sailing_areas:
+            geojson_data = self.sailing_areas[self.map_name]
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                if props.get('name') == 'home' and props.get('type') == 'waypoint':
+                    coords = feature['geometry']['coordinates']
+                    # GeoJSON format: [longitude, latitude, altitude]
+                    self.origin_lon = coords[0]
+                    self.origin_lat = coords[1]
+                    self.get_logger().info(f"Found origin from '{self.map_name}' map home waypoint: "
+                                         f"lat={self.origin_lat:.6f}, lon={self.origin_lon:.6f}")
+                    return
+            self.get_logger().warn(f"Map '{self.map_name}' specified but no 'home' waypoint found in it")
+        
+        # Search all maps (prioritizing specified map if found above)
+        for area_name, geojson_data in self.sailing_areas.items():
+            # Skip if we already checked the specified map
+            if self.map_name and area_name == self.map_name:
+                continue
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                if props.get('name') == 'home' and props.get('type') == 'waypoint':
+                    coords = feature['geometry']['coordinates']
+                    # GeoJSON format: [longitude, latitude, altitude]
+                    self.origin_lon = coords[0]
+                    self.origin_lat = coords[1]
+                    self.get_logger().info(f"Found origin from '{area_name}' map home waypoint: "
+                                         f"lat={self.origin_lat:.6f}, lon={self.origin_lon:.6f}")
+                    return
+        self.get_logger().warn(f"No 'home' waypoint found in maps, using default origin: "
+                              f"lat={self.origin_lat:.6f}, lon={self.origin_lon:.6f}")
+    
     def lonlat_to_xy(self, lon, lat):
         """Converts longitude/latitude to local x/y meters using an equirectangular projection."""
         x = (math.radians(lon) - math.radians(self.origin_lon)) * self.earth_radius * math.cos(math.radians(self.origin_lat))
@@ -169,8 +209,21 @@ class SailingAreaPublisher(Node):
     
     def periodic_republish(self):
         """Periodic republish with logging"""
-        self.get_logger().info("Periodic republish of sailing area markers (every 60 seconds)")
-        self.publish_all_markers()
+        self.republish_count += 1
+        # Republish frequently for first 12 iterations (60 seconds), then less frequently
+        if self.republish_count <= 12:
+            # First minute: republish every 5 seconds
+            self.publish_all_markers()
+            if self.republish_count % 12 == 0:  # Every minute
+                self.get_logger().info(f"Periodic republish of sailing area markers (minute {self.republish_count // 12})")
+        else:
+            # After first minute: republish every 60 seconds
+            if self.republish_count % 12 == 0:  # Every 60 seconds (12 * 5s)
+                self.get_logger().info(f"Periodic republish of sailing area markers (every 60 seconds)")
+                self.publish_all_markers()
+                # Reset timer to 60 seconds for future republishes
+                self.timer.cancel()
+                self.timer = self.create_timer(60.0, self.periodic_republish)
     
     def create_waypoint_marker(self, feature, marker_id):
         """Create a marker for a waypoint"""
@@ -229,14 +282,20 @@ class SailingAreaPublisher(Node):
             point.z = coord[2] if len(coord) > 2 else 0.0  # altitude
             marker.points.append(point)
         
-        # Scale (line width)
-        marker.scale.x = 0.2  # 20cm thick line
+        # Scale (line width) - make thicker for visibility  
+        marker.scale.x = 1.0  # 1 meter thick line for better visibility
+        marker.scale.y = 0.0  # Not used for LINE_STRIP
+        marker.scale.z = 0.0  # Not used for LINE_STRIP
         
-        # Color based on type
+        # Lifetime - set to 0 (infinite) so markers persist
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+        
+        # Color based on type - fully opaque for better visibility
         if feature_type == "sailing_boundary":
-            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.8)  # Green
+            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)  # Green, fully opaque
         elif feature_type == "sailing_area":
-            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.8)  # Blue
+            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)  # Blue, fully opaque
         else:
             marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Red
         
@@ -275,16 +334,22 @@ class SailingAreaPublisher(Node):
             point.z = coords[0][2] if len(coords[0]) > 2 else 0.0
             marker.points.append(point)
         
-        # Scale (line width)
-        marker.scale.x = 0.2  # 20cm thick line
+        # Scale (line width) - make thicker for visibility  
+        marker.scale.x = 1.0  # 1 meter thick line for better visibility
+        marker.scale.y = 0.0  # Not used for LINE_STRIP
+        marker.scale.z = 0.0  # Not used for LINE_STRIP
+        
+        # Lifetime - set to 0 (infinite) so markers persist
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         # Color based on type
         if feature_type == "sailing_area":
-            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.8)  # Blue
+            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)  # Blue, fully opaque
         elif feature_type == "hazard":
-            marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Red
+            marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)  # Red, fully opaque
         else:
-            marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.8)  # Yellow
+            marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)  # Yellow, fully opaque
         
         return marker
     
@@ -296,7 +361,18 @@ class SailingAreaPublisher(Node):
         
         marker_id = 0
         
-        for area_name, geojson_data in self.sailing_areas.items():
+        # If a specific map is requested, only publish markers from that map
+        # This ensures coordinates use the correct origin
+        maps_to_publish = []
+        if self.map_name and self.map_name in self.sailing_areas:
+            maps_to_publish = [self.map_name]
+            self.get_logger().info(f"Publishing markers only from '{self.map_name}' map (to ensure correct coordinate origin)")
+        else:
+            maps_to_publish = list(self.sailing_areas.keys())
+            self.get_logger().info(f"Publishing markers from all {len(maps_to_publish)} maps")
+        
+        for area_name in maps_to_publish:
+            geojson_data = self.sailing_areas[area_name]
             self.get_logger().debug(f"Publishing markers for {area_name}")
             
             for feature in geojson_data.get('features', []):
@@ -333,9 +409,25 @@ class SailingAreaPublisher(Node):
                               f"(total: {total_markers} markers)")
 
 def main(args=None):
-    rclpy.init(args=args)
+    parser = argparse.ArgumentParser(
+        description='Publish sailing area data from GeoJSON files as ROS2 markers for Foxglove visualization',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 sailing_area_publisher.py
+  python3 sailing_area_publisher.py --map "Argo Irchel pond sailing area"
+        """
+    )
+    parser.add_argument('--map', type=str, default=None,
+                       help='Map name (without .geojson extension) to use for coordinate origin. '
+                            'If not specified, uses the first map with a "home" waypoint found.')
     
-    publisher = SailingAreaPublisher()
+    # Parse known args (ROS2 will handle the rest)
+    parsed_args, remaining_args = parser.parse_known_args(args)
+    
+    rclpy.init(args=remaining_args)
+    
+    publisher = SailingAreaPublisher(map_name=parsed_args.map)
     
     try:
         rclpy.spin(publisher)

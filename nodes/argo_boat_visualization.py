@@ -49,6 +49,7 @@ import sys
 import os
 import argparse
 import argcomplete
+import copy
 
 # Import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
@@ -71,6 +72,23 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.create_subscription(Vector3, '/anem_speed_angle_temp', self.wind_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(NavSatFix, '/fix', self.gps_callback, 10)
+        
+        # Subscribe to sailing area markers for 3D visualization
+        # Use TRANSIENT_LOCAL QoS to receive last published message even if subscribing late
+        from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
+        transient_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            depth=10
+        )
+        
+        self.sailing_boundaries = []
+        self.sailing_waypoints = []
+        self.sailing_hazards = []
+        self.create_subscription(MarkerArray, '/sailing_boundaries', self.sailing_boundaries_callback, transient_qos)
+        self.create_subscription(MarkerArray, '/sailing_waypoints', self.sailing_waypoints_callback, transient_qos)
+        self.create_subscription(MarkerArray, '/sailing_hazards', self.sailing_hazards_callback, transient_qos)
         
         # State variables
         self.boat_heading = 0.0  # degrees
@@ -96,6 +114,30 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.publish_failure_count = 0
         
         self.get_logger().info("Argo boat visualization started")
+    
+    def sailing_boundaries_callback(self, msg):
+        """Store sailing boundary markers for inclusion in visualization."""
+        self.sailing_boundaries = msg.markers
+        if len(msg.markers) > 0:
+            self.get_logger().info(f"✅ Received {len(msg.markers)} sailing boundary markers")
+            # Log first marker's coordinates for debugging
+            if len(msg.markers) > 0 and len(msg.markers[0].points) > 0:
+                first_point = msg.markers[0].points[0]
+                self.get_logger().info(f"First boundary point: x={first_point.x:.2f}, y={first_point.y:.2f}, z={first_point.z:.2f}")
+        else:
+            self.get_logger().warn("Received empty sailing_boundaries message")
+    
+    def sailing_waypoints_callback(self, msg):
+        """Store sailing waypoint markers for inclusion in visualization."""
+        self.sailing_waypoints = msg.markers
+        if len(msg.markers) > 0:
+            self.get_logger().debug(f"Received {len(msg.markers)} sailing waypoint markers")
+    
+    def sailing_hazards_callback(self, msg):
+        """Store sailing hazard markers for inclusion in visualization."""
+        self.sailing_hazards = msg.markers
+        if len(msg.markers) > 0:
+            self.get_logger().debug(f"Received {len(msg.markers)} sailing hazard markers")
     
     def pose_callback(self, msg):
         """Update boat heading from pose topic"""
@@ -389,7 +431,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         try:
             marker_array = MarkerArray()
             
-            # Add all markers
+            # Add boat visualization markers
             marker_array.markers.append(self.create_boat_hull_marker())
             marker_array.markers.append(self.create_mast_marker())
             marker_array.markers.append(self.create_rudder_indicator_marker())
@@ -397,6 +439,54 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_wind_vector_marker())
             marker_array.markers.append(self.create_velocity_vector_marker())
             marker_array.markers.append(self.create_heading_arrow_marker())
+            
+            # Add sailing area markers (boundaries, waypoints, hazards) for 3D visualization
+            # Note: These come from sailing_area_publisher and may be empty initially
+            # Copy markers to avoid ID conflicts and ensure they're properly included
+            if self.sailing_boundaries:
+                for marker in self.sailing_boundaries:
+                    # Create a copy to avoid modifying the original
+                    marker_copy = copy.deepcopy(marker)
+                    # Offset marker IDs to avoid conflicts (boat markers use 1-7)
+                    marker_copy.id += 100
+                    # Ensure frame_id is set correctly
+                    if not marker_copy.header.frame_id:
+                        marker_copy.header.frame_id = "map"
+                    # Ensure markers are visible - verify scale is set
+                    if marker_copy.scale.x == 0.0:
+                        marker_copy.scale.x = 1.0  # Ensure line has width
+                    marker_array.markers.append(marker_copy)
+            if self.sailing_waypoints:
+                for marker in self.sailing_waypoints:
+                    marker_copy = copy.deepcopy(marker)
+                    marker_copy.id += 200  # Offset waypoint IDs
+                    if not marker_copy.header.frame_id:
+                        marker_copy.header.frame_id = "map"
+                    marker_array.markers.append(marker_copy)
+            if self.sailing_hazards:
+                for marker in self.sailing_hazards:
+                    marker_copy = copy.deepcopy(marker)
+                    marker_copy.id += 300  # Offset hazard IDs
+                    if not marker_copy.header.frame_id:
+                        marker_copy.header.frame_id = "map"
+                    marker_array.markers.append(marker_copy)
+            
+            # Log marker counts periodically for debugging
+            if hasattr(self, '_debug_counter'):
+                self._debug_counter += 1
+            else:
+                self._debug_counter = 0
+            
+            # Log marker counts every 10 seconds for better debugging
+            if self._debug_counter % 10 == 0:  # Every 10 seconds at 1Hz
+                boundary_count = len(self.sailing_boundaries)
+                waypoint_count = len(self.sailing_waypoints)
+                hazard_count = len(self.sailing_hazards)
+                total_sailing = boundary_count + waypoint_count + hazard_count
+                self.get_logger().info(f"Publishing {len(marker_array.markers)} total markers "
+                                     f"({boundary_count} boundaries, {waypoint_count} waypoints, {hazard_count} hazards)")
+                if total_sailing == 0:
+                    self.get_logger().warn("No sailing area markers received - check sailing_area_publisher is running")
             
             # Publish marker array
             self.marker_array_pub.publish(marker_array)
