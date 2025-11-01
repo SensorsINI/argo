@@ -140,7 +140,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Viewer activity tracking for CPU optimization
         self.last_viewer_request_time = time.time()  # Track last HTTP request
         self.viewer_timeout = 30.0  # Enter low-power mode after 30s of no requests
-        self.low_power_mode = False  # Track current power mode
+        self.low_power_mode = True  # Start in low-power mode (lazy subscriptions)
         self.status_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
         self.status_timer_period_idle = 30.0  # 30 seconds when idle (low-power)
         self.health_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
@@ -162,16 +162,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Store subscription references for mass unsubscribe/resubscribe
         # Use _topic_subscriptions to avoid conflict with ROS2 Node's subscriptions property
+        # Start with empty list - subscriptions created lazily on first viewer access
         self._topic_subscriptions = []
         
-        # Create all subscriptions
-        self._create_all_subscriptions()
+        # Lazy subscriptions: Don't subscribe to topics until a viewer accesses the dashboard
+        # This minimizes startup CPU usage when dashboard is not being used
         
-        # Timer for periodic status updates (will be adjusted based on viewer activity)
-        self.status_timer = self.create_timer(self.status_timer_period_active, self.update_system_status)
+        # Timer for periodic status updates (start with idle frequency since we're in low-power mode)
+        self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
         
-        # Timer for periodic health status checks (will be adjusted based on viewer activity)
-        self.health_timer = self.create_timer(self.health_timer_period_active, self._check_health_status)
+        # Timer for periodic health status checks (start with idle frequency since we're in low-power mode)
+        self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
         
         # Timer to check viewer activity and adjust power mode
         self.viewer_activity_timer = self.create_timer(5.0, self._check_viewer_activity)
@@ -744,10 +745,12 @@ class ArgoWebDashboard(ArgoBaseNode):
         """Enter low-power mode: unsubscribe from all topics and reduce timer frequencies."""
         self.low_power_mode = True
         
-        # Destroy all subscriptions to eliminate callback overhead
-        subscription_count = len(self._topic_subscriptions)
-        self.get_logger().info(f"Unsubscribing from {subscription_count} topics")
-        self._destroy_all_subscriptions()
+        # Destroy all subscriptions to eliminate callback overhead (if they exist)
+        if self._topic_subscriptions:
+            subscription_count = len(self._topic_subscriptions)
+            self.get_logger().info(f"Unsubscribing from {subscription_count} topics")
+            self._destroy_all_subscriptions()
+        # If no subscriptions exist yet, we're already in the optimal state (lazy initialization)
         
         # Adjust status timer to run less frequently
         self.status_timer.cancel()
@@ -758,7 +761,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
     
     def _exit_low_power_mode(self, source_ip=None):
-        """Exit low-power mode: resubscribe to all topics and restore normal timer frequencies."""
+        """Exit low-power mode: subscribe/resubscribe to all topics and restore normal timer frequencies."""
         self.low_power_mode = False
         
         # Log exit with source IP if available
@@ -767,9 +770,14 @@ class ArgoWebDashboard(ArgoBaseNode):
         else:
             self.get_logger().info("👁️  Exiting low-power mode (viewer activity detected)")
         
-        # Recreate all subscriptions to resume receiving messages
-        self.get_logger().info("Resubscribing to all topics")
-        self._create_all_subscriptions()
+        # Create subscriptions if they don't exist yet (lazy initialization)
+        # or recreate them if they were previously destroyed
+        if not self._topic_subscriptions:
+            self.get_logger().info("Subscribing to all topics (lazy initialization)")
+            self._create_all_subscriptions()
+        else:
+            self.get_logger().info("Resubscribing to all topics")
+            self._create_all_subscriptions()
         
         # Restore status timer to normal frequency
         self.status_timer.cancel()
