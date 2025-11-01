@@ -56,10 +56,10 @@ class ArgoHealthMonitor(Node):
             Trigger, '/argo/health/status', self.status_callback)
         
         # Timer for periodic health checks (every 2 seconds)
-        self.timer = self.create_timer(2.0, self.check_node_health)
+        self.timer = self.create_timer(30.0, self.check_node_health)
         
         # Timer for status publishing (every 5 seconds)
-        self.status_timer = self.create_timer(5.0, self.publish_status)
+        self.status_timer = self.create_timer(30.0, self.publish_status)
         
         self.get_logger().info("Argo Health Monitor started")
         self.get_logger().info(f"Monitoring {len(self.node_configs)} nodes")
@@ -74,7 +74,7 @@ class ArgoHealthMonitor(Node):
                 ['ros2', 'node', 'list'],
                 capture_output=True,
                 text=True,
-                timeout=2.0
+                timeout=5.0
             )
             
             if result.returncode == 0:
