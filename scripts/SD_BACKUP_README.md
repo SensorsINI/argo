@@ -40,24 +40,16 @@ nohup ./argo_sd_backup.sh tobi@sensors-tobidh87.lan.ini.uzh.ch -y &
 nohup ./argo_sd_backup.sh tobi@sensors-tobidh87.lan.ini.uzh.ch -y --rm-local &
 ```
 
-### Restore from Backup
-
-```bash
-# Restore from local file
-sudo ./argo_sd_restore.sh ~/sd_backups/argo_img.gz
-
-# Restore from remote
-sudo ./argo_sd_restore.sh user@host:~/backup.img.gz
-```
+This documentation is now out of date.
 
 ## Backup Process
 
 ### Step-by-Step Process
 
-1. **Create compressed image** - Uses `dd` to read entire SD card
-2. **Compress with gzip** - Reduces 30GB to ~10-15GB
-3. **Transfer to remote** - Uses `scp` to copy to remote storage
-4. **Optional cleanup** - Can remove local copy after successful transfer
+1.  **Create compressed image** - Uses `dd` to read entire SD card
+2.  **Compress with gzip** - Reduces 30GB to ~10-15GB
+3.  **Transfer to remote** - Uses `scp` to copy to remote storage
+4.  **Optional cleanup** - Can remove local copy after successful transfer
 
 ### Time Estimates
 

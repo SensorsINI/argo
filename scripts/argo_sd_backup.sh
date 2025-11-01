@@ -30,9 +30,15 @@ NC='\033[0m' # No Color
 
 # Cleanup function to run on exit/interrupt
 cleanup() {
-    echo -e "\n${YELLOW}⚠️  Backup interrupted. Cleaning up partial files...${NC}"
-    rm -f "$LOCAL_DIR/$BACKUP_NAME"
-    echo "   Removed partial backup: $LOCAL_DIR/$BACKUP_NAME"
+    echo -e "\n${YELLOW}⚠️  Backup interrupted. Cleaning up...${NC}"
+    # For local backups, a partial file might exist.
+    if [ "$LOCAL_ONLY" = true ]; then
+        echo "   Removing partial local backup: $LOCAL_DIR/$BACKUP_NAME"
+        rm -f "$LOCAL_DIR/$BACKUP_NAME"
+    else
+        echo "   For remote backups, you may need to manually remove the partial file on the remote host:"
+        echo "   $DESTINATION:~/$BACKUP_NAME"
+    fi
     exit 1
 }
 
@@ -117,7 +123,7 @@ check_not_root() {
     fi
 }
 
-# Check for sufficient disk space
+# Check for sufficient disk space (only for local backups)
 check_disk_space() {
     # 7z has better compression, so we can lower the required space estimate
     REQUIRED_SPACE_GB=12
@@ -198,8 +204,8 @@ check_not_root
 # Create local backup directory
 mkdir -p "$LOCAL_DIR"
 
-# Check disk space before starting
-if [ "$SKIP_SPACE_CHECK" = false ]; then
+# Check disk space before starting (local only)
+if [ "$LOCAL_ONLY" = true ] && [ "$SKIP_SPACE_CHECK" = false ]; then
     check_disk_space
 fi
 
@@ -259,53 +265,25 @@ if [ "$LOCAL_ONLY" = true ]; then
     sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | 7z a -t7z -mx=9 -si "$LOCAL_DIR/$BACKUP_NAME"
     
     echo ""
-    echo -e "${GREEN}✅ Backup completed successfully!${NC}"
+    echo -e "${GREEN}✅ Local backup completed successfully!${NC}"
     echo "Location: $LOCAL_DIR/$BACKUP_NAME"
     ls -lh "$LOCAL_DIR/$BACKUP_NAME"
 else
-    # Remote backup with network transfer
-    echo "Saving to: $LOCAL_DIR/$BACKUP_NAME"
-    echo "Then transferring to: $DESTINATION"
+    # Remote backup streamed over SSH
+    echo "Streaming backup directly to: $DESTINATION:~/$BACKUP_NAME"
+    echo "This process will not use significant local disk space."
     echo "Compression with 7z (ultra) will be slow but space-efficient."
     echo ""
     
-    # Create backup locally first
-    echo "Step 1/2: Creating local backup..."
-    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | 7z a -t7z -mx=9 -si "$LOCAL_DIR/$BACKUP_NAME"
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}❌ Local backup failed${NC}"
-        exit 1
-    fi
-    
-    echo ""
-    echo "Step 2/2: Transferring to remote destination..."
-    scp "$LOCAL_DIR/$BACKUP_NAME" "$DESTINATION:~/"
-    
+    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | 7z a -t7z -mx=9 -si -so | ssh "$DESTINATION" "cat > ~/$BACKUP_NAME"
+
     if [ $? -eq 0 ]; then
         echo ""
-        echo -e "${GREEN}✅ Backup transferred successfully!${NC}"
-        echo "Remote location: $DESTINATION:~/"
-        echo "Local copy kept at: $LOCAL_DIR/$BACKUP_NAME"
-
-        # Optionally remove local copy to save space
-        REMOVE_LOCAL="no"
-        if [ "$NON_INTERACTIVE" = true ]; then
-            if [ "$REMOVE_LOCAL_AFTER_TRANSFER" = true ]; then
-                REMOVE_LOCAL="yes"
-            fi
-        else
-            echo ""
-            read -p "Remove local backup to save space? (yes/no): " REMOVE_LOCAL_INPUT
-            REMOVE_LOCAL=$REMOVE_LOCAL_INPUT
-        fi
-
-        if [ "$REMOVE_LOCAL" = "yes" ]; then
-            rm "$LOCAL_DIR/$BACKUP_NAME"
-            echo "Local backup removed."
-        fi
+        echo -e "${GREEN}✅ Remote backup streamed successfully!${NC}"
+        echo "Remote location: $DESTINATION:~/$BACKUP_NAME"
     else
-        echo -e "${YELLOW}⚠️  Transfer failed, but local backup is available at: $LOCAL_DIR/$BACKUP_NAME${NC}"
+        echo -e "${RED}❌ Remote backup failed.${NC}"
+        echo "   You may need to manually remove the partial file on the remote host."
         exit 1
     fi
 fi
