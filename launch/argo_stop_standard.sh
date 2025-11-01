@@ -5,9 +5,6 @@ echo "🛑 Stopping Argo ROS2 nodes..."
 
 # Determine service name (support both old and new)
 SERVICE_NAME="argo_launch_standard.service"
-if [ ! -f "/etc/systemd/system/$SERVICE_NAME" ]; then
-    SERVICE_NAME="argo_launch.service"
-fi
 
 # Try to stop the service
 if sudo systemctl stop "$SERVICE_NAME" 2>/dev/null; then

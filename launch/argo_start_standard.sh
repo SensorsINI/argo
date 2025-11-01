@@ -5,9 +5,6 @@ echo "🚀 Starting Argo ROS2 nodes via standard ROS2 launch..."
 
 # Determine service name (support both old and new)
 SERVICE_NAME="argo_launch_standard.service"
-if [ ! -f "/etc/systemd/system/$SERVICE_NAME" ]; then
-    SERVICE_NAME="argo_launch.service"
-fi
 
 # Check if service is already running
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then

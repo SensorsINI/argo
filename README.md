@@ -324,7 +324,23 @@ The repository includes a comprehensive Makefile system for easy management:
 - `al` - Launch Argo service with monitoring
 - `aq` - Quit/stop Argo service
 - `ars` - Restart Argo service
-- `as` - Show Argo status
+- `as` - Show Status
+Shows a comprehensive status of the Argo system, including:
+- Service status (`argo_launch_standard.service`, `argo_power_control.service`, etc.)
+- Running ROS2 nodes and their health
+- System diagnostics (CPU, memory, temperature, battery)
+
+### `al` / `aq` / `ars` - Service Control
+- `al`: Start the `argo_launch_standard.service`
+- `aq`: Stop the `argo_launch_standard.service`
+- `ars`: Restart the `argo_launch_standard.service`
+
+### `alog` - View Logs
+Tails the logs for all major Argo services with color-coding.
+
+### `asim` - Local Simulation
+Starts the Argo system in local simulation mode using `ros2 launch`.
+
 - `ar` - Start data recording (via ROS2 service)
 - `ac` - Stop data recording (via ROS2 service)
 - `am` - Monitor mode for lifecycle management

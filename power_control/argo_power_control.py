@@ -1047,7 +1047,7 @@ class PowerController(ArgoBaseNode):
 
             # Fallback to systemctl check (less frequent, shorter timeout)
             result = subprocess.run(
-                ['sudo', 'systemctl', 'is-active', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'is-active', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=2
             )
             is_running = result.returncode == 0 and result.stdout.strip() == 'active'
@@ -1076,7 +1076,7 @@ class PowerController(ArgoBaseNode):
                 return True
             self.get_logger().info("Starting Argo launch service...")
             result = subprocess.run(
-                ['sudo', 'systemctl', 'start', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'start', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
@@ -1115,7 +1115,7 @@ class PowerController(ArgoBaseNode):
                 return True
 
             result = subprocess.run(
-                ['sudo', 'systemctl', 'stop', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'stop', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
@@ -1265,7 +1265,7 @@ class PowerController(ArgoBaseNode):
 
             # Stop service first
             result = subprocess.run(
-                ['sudo', 'systemctl', 'stop', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'stop', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode != 0:
@@ -1284,7 +1284,7 @@ class PowerController(ArgoBaseNode):
 
             # Start service
             result = subprocess.run(
-                ['sudo', 'systemctl', 'start', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'start', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=15
             )
 

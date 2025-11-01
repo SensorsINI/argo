@@ -33,7 +33,7 @@ COLOR_ERROR='\e[1;91m'             # Bold bright red for ERROR
 COLOR_WARN='\e[1;33m'              # Bold dark yellow for WARN
 
 # Service names
-SERVICE_ARGO="argo_launch.service"
+SERVICE_ARGO="argo_launch_standard.service"
 SERVICE_BATTERY="argo_battery_water.service"
 SERVICE_POWER="argo_power_control.service"
 SERVICE_IMU="argo_bno085.service"
@@ -148,7 +148,7 @@ else
     echo "📄 Static Mode: Last $LINES lines per service"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${COLOR_ARGO_LAUNCH}●${RESET} argo-launch.service (cyan)"
+echo -e "${COLOR_ARGO_LAUNCH}●${RESET} ${SERVICE_ARGO:-argo_launch service} (cyan)"
 echo -e "${COLOR_BATTERY}●${RESET} argo_battery_water.service (yellow)"
 echo -e "${COLOR_POWER}●${RESET} argo_power_control.service (green)"
 echo -e "${COLOR_IMU}●${RESET} argo_bno085.service (magenta)"
@@ -214,7 +214,7 @@ if [ "$ERROR_CHECK" = true ]; then
                 echo -e "${COLOR_ERROR}${line}${RESET}"
             elif echo "$line" | grep -qi "WARN"; then
                 echo -e "${COLOR_WARN}${line}${RESET}"
-            elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
+            elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch\|argo_health_monitor"; then
                 echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
             elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
                 echo -e "${COLOR_BATTERY}${line}${RESET}"
@@ -274,7 +274,7 @@ if [ "$ERROR_CHECK" = true ]; then
                 echo -e "${COLOR_ERROR}${line}${RESET}"
             elif echo "$line" | grep -qi "WARN"; then
                 echo -e "${COLOR_WARN}${line}${RESET}"
-            elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
+            elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch\|argo_health_monitor"; then
                 echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
             elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
                 echo -e "${COLOR_BATTERY}${line}${RESET}"
@@ -289,7 +289,7 @@ if [ "$ERROR_CHECK" = true ]; then
     fi
 elif [ "$ALL_LOGS" = true ]; then
     # All logs mode - show logs from current and previous boot for shutdown/boot debugging
-    echo -e "${COLOR_ARGO_LAUNCH}=== argo-launch.service ===${RESET}"
+    echo -e "${COLOR_ARGO_LAUNCH}=== ${SERVICE_ARGO:-argo_launch service} ===${RESET}"
     if [ -n "$GREP_PATTERN" ]; then
         journalctl -u "$SERVICE_ARGO" --boot=-1..0 --no-pager 2>/dev/null | \
             grep "$GREP_PATTERN" | \
@@ -413,7 +413,7 @@ elif [ "$FOLLOW" = true ]; then
         elif echo "$line" | grep -qi "WARN"; then
             echo -e "${COLOR_WARN}${line}${RESET}"
         # Then check for service names in the log line (they appear in different formats)
-        elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
+        elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch\|argo_health_monitor"; then
             # Color the entire line cyan for argo-launch
             echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
         elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
@@ -432,7 +432,7 @@ elif [ "$FOLLOW" = true ]; then
     done
 elif [ -n "$GREP_PATTERN" ]; then
     # Pattern search mode - scan ALL logs (no line limit) for the pattern
-    echo -e "${COLOR_ARGO_LAUNCH}=== argo-launch.service ===${RESET}"
+    echo -e "${COLOR_ARGO_LAUNCH}=== ${SERVICE_ARGO:-argo_launch service} ===${RESET}"
     journalctl -u "$SERVICE_ARGO" --no-pager 2>/dev/null | \
         grep "$GREP_PATTERN" | \
         while IFS= read -r line; do
@@ -488,7 +488,7 @@ elif [ -n "$GREP_PATTERN" ]; then
         done
 else
     # Non-follow, non-pattern mode - just show last N lines from each service
-    echo -e "${COLOR_ARGO_LAUNCH}=== argo-launch.service ===${RESET}"
+    echo -e "${COLOR_ARGO_LAUNCH}=== ${SERVICE_ARGO:-argo_launch service} ===${RESET}"
     journalctl -u "$SERVICE_ARGO" -n "$LINES" --no-pager 2>/dev/null | \
         while IFS= read -r line; do
             if echo "$line" | grep -qi "ERROR"; then

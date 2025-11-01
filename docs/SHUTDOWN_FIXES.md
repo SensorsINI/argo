@@ -241,3 +241,18 @@ Other ROS2 nodes in the system should follow this same pattern if they show shut
 4. **Debuggable** - Clear, predictable shutdown sequence
 5. **Robust** - Handles edge cases (double signals, quick Ctrl+C, etc.)
 
+To start the system, use the `al` alias, which is configured to run `sudo systemctl start argo_launch_standard.service`.
+```bash
+al
+```
+
+Check the status with the `as` alias.
+```bash
+as
+```
+
+To stop the system, use `aq`.
+```bash
+aq
+```
+

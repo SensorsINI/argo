@@ -1,10 +1,10 @@
 [Unit]
-Description=Argo BNO085 IMU Sensor Service
+Description=Argo BNO085 IMU Driver Service
 Documentation=file://%h/argo/nodes/README_BNO085.md
-After=basic.target sysinit.target
-Wants=basic.target
+After=network.target argo_power_control.service
+Wants=argo_power_control.service
 DefaultDependencies=no
-Before=argo_launch.service shutdown.target
+Before=argo_launch_standard.service shutdown.target
 
 [Service]
 Type=simple

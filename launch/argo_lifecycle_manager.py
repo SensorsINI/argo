@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
 """
-Argo ROS2 Lifecycle Manager
-===========================
+Argo Status and Simulation Manager
+==================================
 
-A comprehensive lifecycle manager for Argo ROS2 nodes that provides:
-- Continuous health monitoring and fault detection
-- Graceful shutdown handling
-- Detailed status reporting with system diagnostics
-- Simulation mode support (local and remote)
-- Node pause/unpause control
-- Battery and power monitoring integration
-- ROS2 service interface for runtime control
+A tool for checking system status and managing simulations for the Argo sailboat.
+This script provides detailed diagnostics and is the backend for the 'as' and 'asq' aliases.
+
+It uses argo_nodes.yaml as the single source of truth for node configuration.
+
+Node lifecycle (start/stop/restart) is now managed by the systemd service
+'argo_launch_standard.service' and the aliases 'al', 'aq', 'ars'.
 
 Commands:
-    help             Show detailed help message (-h, --help also available)
-    run              Start all nodes and keep running (for systemd service)
-    stop             Stop all nodes and clean up processes
-    restart          Restart all nodes (stop + start)
-    status           Show comprehensive system status with diagnostics
-    quick_status     Show condensed one-line status (fast check)
-    simulate_local   Start local simulation mode
-    simulate_remote  Start remote simulation mode
+    status           (Default) Show comprehensive system status with diagnostics.
+    quick_status     Show condensed one-line status (fast check).
+    simulate_local   Start local simulation mode.
+    simulate_remote  Start remote simulation mode.
+    help             Show this help message.
 
 Options:
-    --toggle_pause   Toggle controller pause state (pauses autonomous navigation)
-    --debug          Enable debug output for troubleshooting
-    --quiet          Suppress initialization messages
+    --toggle_pause   Toggle controller pause state (pauses autonomous navigation).
+    --debug          Enable debug output for troubleshooting.
+    --quiet          Suppress initialization messages.
 
 Examples:
-    python3 argo_lifecycle_manager.py help
-    python3 argo_lifecycle_manager.py run
-    python3 argo_lifecycle_manager.py status
-    python3 argo_lifecycle_manager.py simulate_local
-    python3 argo_lifecycle_manager.py --toggle_pause
+    # Show detailed status (default command)
+    python3 argo_lifecycle_manager.py
+    argo_lifecycle_manager.py status
+
+    # Show quick, one-line status
+    argo_lifecycle_manager.py quick_status
+
+    # Start local simulation
+    argo_lifecycle_manager.py simulate_local
 """
 
 import os
