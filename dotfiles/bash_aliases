@@ -24,7 +24,7 @@ alias ar='if systemctl is-active --quiet argo_launch_standard.service; then time
 alias ac='if systemctl is-active --quiet argo_launch_standard.service; then timeout 30 ros2 service call /argo/recording/stop std_srvs/srv/Trigger; else echo "❌ Error: argo_launch_standard.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch_standard.service)"; fi'   # Stop recording
 alias ah='bash $ARGO_DIR/launch/argo_help.sh' # show argo help
 alias ag='sudo python3 $ARGO_DIR/launch/argo_gui.py' # start argo gui
-alias alog='sudo journalctl -u argo_launch_standard.service -f' # show argo system logs
+alias alog='$ARGO_DIR/scripts/argo_logs.sh' # show argo system logs
 alias asim='(cd $ARGO_DIR && source /opt/ros/humble/setup.bash && ros2 launch launch/argo_launch.py mode:=simulation)' # start argo in LOCAL simulation mode
 alias cleanbags='find $ARGO_DIR/bags -type f -mtime +3 -exec rm -f {} \;' # clean old bags
 # handy shutdown and reboot aliases with confirmation
