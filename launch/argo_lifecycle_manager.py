@@ -48,6 +48,7 @@ import json
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import select
+import yaml  # Add YAML import
 
 # Import centralized node utilities
 from argo_node_utils import ArgoNodeManager
@@ -108,6 +109,9 @@ class ArgoLifecycleManager:
         self.node_health_status = {}  # Track health status for each node
         self.health_subscribers = {}  # ROS2 subscribers for health topics
         
+        # --- NEW: Load all node configuration from argo_nodes.yaml ---
+        self._load_nodes_from_yaml()
+        
         if ROS2_AVAILABLE:
             try:
                 if not rclpy.ok():
@@ -124,7 +128,7 @@ class ArgoLifecycleManager:
                 self.controller_pause_sub = self.ros2_node.create_subscription(
                     Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
                 
-                # Initialize health status monitoring
+                # Initialize health status monitoring (uses self.all_expected_nodes from YAML)
                 self._setup_health_monitoring()
             except Exception as e:
                 if not quiet:
@@ -134,7 +138,7 @@ class ArgoLifecycleManager:
                 self.battery_service_client = None
                 self.controller_pause_client = None
         
-        # Initialize node manager for discovery
+        # Initialize node manager, but only for process management, not discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
         
         # Query initial controller pause state after a brief delay to allow ROS2 to initialize
@@ -145,55 +149,60 @@ class ArgoLifecycleManager:
                 self._query_controller_pause_state()
             threading.Thread(target=query_initial_pause_state, daemon=True).start()
         
-        # Discover expected nodes dynamically (exclude simulation-only nodes for normal operation)
-        discovered_nodes = self.node_manager.discover_nodes(exclude_simulation_only=True)
-
-        # Nodes to exclude (running as independent services)
-        # - argo_battery_water: Runs as independent service for critical battery monitoring
-        # - bno085: Runs as independent service when argo_bno085.service is active
-        self.excluded_nodes = ['argo_battery_water']
-        
-        # Check if BNO085 service is running and exclude bno085 node to avoid conflicts
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_bno085.service'],
-                                    capture_output=True, text=True, timeout=2)
-            if result.returncode == 0 and result.stdout.strip() == 'active':
-                self.excluded_nodes.append('bno085')
-        except Exception:
-            pass  # If we can't check service status, don't exclude
-        
-        # Convert to .py format for process matching and handle special nodes
-        self.expected_nodes = []
-        self.special_nodes = []
-        
-        for node in discovered_nodes:
-            if node in self.excluded_nodes:
-                if node == 'bno085':
-                    # BNO085 is excluded from launch but should be monitored for health
-                    self.special_nodes.append(node)
-                continue  # Skip other excluded nodes
-            elif node == 'foxglove_bridge':
-                self.special_nodes.append(node)  # Special handling needed
-            else:
-                self.expected_nodes.append(
-                    f"{node}.py")  # Regular Python nodes
-
         # Log excluded nodes for visibility (only if not in quiet mode)
         if self.excluded_nodes and not quiet:
             print(
                 f"ℹ️  Excluded nodes (critical services or hardware not ready): {', '.join(self.excluded_nodes)}")
         
-        # Combine all expected nodes for monitoring
-        self.all_expected_nodes = self.expected_nodes + self.special_nodes
-        
-        # Define critical nodes (essential for boat operation)
-        self.critical_nodes = ['pwm.py', 'controller.py']
-
-        # Remove old pause node definitions - only controller supports pausing now
-        
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _load_nodes_from_yaml(self):
+        """Load and parse node definitions from argo_nodes.yaml."""
+        print("ℹ️  Loading node configuration from argo_nodes.yaml...")
+        config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+        except (IOError, yaml.YAMLError) as e:
+            print(f"❌ CRITICAL: Could not load or parse argo_nodes.yaml: {e}")
+            # Exit if the config is essential and cannot be loaded
+            sys.exit(1)
+
+        self.expected_nodes = []
+        self.special_nodes = []
+        self.excluded_nodes = []
+        self.critical_nodes = []
+        self.all_expected_nodes = []
+
+        all_node_configs = config.get('nodes', [])
+        
+        for node_cfg in all_node_configs:
+            name = node_cfg.get('name')
+            if not name:
+                continue
+
+            # Convert to the script name format used by the manager (e.g., 'anem.py' or 'foxglove_bridge')
+            script_name = name
+            if not node_cfg.get('special', False):
+                 # Assuming non-special nodes follow the pattern 'node_name.py'
+                 # We need to find the executable to get the script name
+                 executable = node_cfg.get('executable', '')
+                 script_name = os.path.basename(executable) if executable else f"{name}.py"
+
+            if node_cfg.get('excluded', False):
+                self.excluded_nodes.append(script_name)
+            elif node_cfg.get('special', False):
+                self.special_nodes.append(script_name)
+            else:
+                self.expected_nodes.append(script_name)
+            
+            if node_cfg.get('critical', False):
+                self.critical_nodes.append(script_name)
+
+        # all_expected_nodes for monitoring should include all non-excluded nodes
+        self.all_expected_nodes = self.expected_nodes + self.special_nodes
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
@@ -1544,7 +1553,7 @@ class ArgoLifecycleManager:
         # Check if argo_launch.service is running
         service_running = False
         try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_launch.service'], 
+            result = subprocess.run(['systemctl', 'is-active', 'argo_launch_standard.service'], 
                                   capture_output=True, text=True, timeout=2)
             service_running = result.returncode == 0 and result.stdout.strip() == 'active'
         except Exception:
@@ -1620,7 +1629,7 @@ class ArgoLifecycleManager:
             try:
                 # Get recent error messages from systemd journal
                 result = subprocess.run([
-                    'journalctl', '-u', 'argo_launch.service', '--since', '5 minutes ago',
+                    'journalctl', '-u', 'argo_launch_standard.service', '--since', '5 minutes ago',
                     '--grep', '(FATAL|ERROR|CRITICAL)', '--no-pager'
                 ], capture_output=True, text=True, timeout=5)
                 
@@ -2170,7 +2179,7 @@ class ArgoLifecycleManager:
             # Get recent FATAL messages from systemd journal for argo_launch.service
             # Look back further to catch initial startup failures
             result = subprocess.run([
-                'journalctl', '-u', 'argo_launch.service', '--since', self.journal_since,
+                'journalctl', '-u', 'argo_launch_standard.service', '--since', self.journal_since,
                 '--grep', 'FATAL', '--no-pager', '-o', 'short-precise'
             ], capture_output=True, text=True, timeout=5)
             
@@ -2421,136 +2430,49 @@ class ArgoLifecycleManager:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Argo ROS2 Lifecycle Manager - Comprehensive node management for Argo sailboat control system',
+        description='Argo Status and Simulation Manager - Check status and manage simulations for the Argo sailboat.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 COMMANDS:
-  help             Show this help message and exit
-                   - Also available with -h or --help flags
-                   - Displays complete command reference and examples
+  status           Show comprehensive status of Argo system. This is the default command.
+                   - Displays service status, node health, and system diagnostics.
+                   - Extracts and displays recent error messages from systemd journal.
 
-  run              Start all Argo ROS2 nodes and keep running (for systemd service)
-                   - Launches all discovered nodes except excluded ones
-                   - Monitors node health continuously
-                   - Provides fault tolerance and status reporting
-                   - Use this for production operation
+  quick_status     Show condensed one-line status, optimized for quick checks.
+                   - Ideal for shell prompts and frequent checks.
 
-  stop             Stop all Argo ROS2 nodes and related processes
-                   - Terminates all node processes gracefully
-                   - Cleans up remote simulation processes if running
-                   - Stops both regular and special nodes (foxglove_bridge)
+  simulate_local   Start Argo in local simulation mode.
+                   - Runs sailboat simulator directly on the Orange Pi.
+                   - Excludes conflicting hardware nodes.
 
-  restart          Restart all Argo ROS2 nodes
-                   - Performs stop followed by start
-                   - Useful for applying configuration changes
+  simulate_remote  Start Argo in remote simulation mode.
+                   - Connects to a simulator running on a remote machine.
 
-  status           Show comprehensive status of Argo system
-                   - Displays service status (power control, battery monitor, launch service)
-                   - Shows individual node status with error details
-                   - Provides system health info (CPU, memory, temperature, battery)
-                   - Shows I2C bus health when nodes are not running
-                   - Extracts and displays recent error messages from systemd journal
+  help             Show this help message and exit.
 
-  quick_status     Show condensed one-line status (optimized for quick checks)
-                   - Fast status check with minimal overhead
-                   - Shows node count and battery summary only
-                   - Skips expensive CPU/memory/disk checks
-                   - Ideal for shell prompts and frequent checks
-
-  simulate_local   Start Argo in local simulation mode
-                   - Runs sailboat simulator directly on Orange Pi
-                   - Excludes conflicting hardware nodes (gps.py, bno085.py, anem.py, rudder_sail_radio.py)
-                   - Includes simulator bridge, controller, and monitoring nodes
-                   - Provides keyboard control via curses interface
-                   - Enables Foxglove visualization at ws://localhost:9090
-
-  simulate_remote  Start Argo in remote simulation mode
-                   - Connects to simulator running on remote machine via SSH
-                   - Requires manual setup of remote simulator and SSH tunnel
-                   - Better performance for resource-constrained hardware
-                   - Same node exclusions as local simulation
-
-CONTROLLER PAUSE:
-  The autonomous controller (controller.py) supports pause/resume functionality.
-  When paused, the controller stops publishing autonomous commands, allowing manual control.
-  
-  Command Line Options:
-    # Via lifecycle manager
-    python3 argo_lifecycle_manager.py --toggle_pause
-    
-    # Via shell alias (bash_aliases)
-    ap    # Toggle controller pause state
-    
-  ROS2 Service (Direct):
-    Service: /controller_node/pause (std_srvs/srv/SetBool)
-    Usage: ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: true}"   # Pause
-           ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: false}"  # Resume
-    
-  Status Monitoring:
-    Topic: /controller_pause_state (std_msgs/msg/Bool)
-    - Published by controller.py
-    - Subscribed by lifecycle manager for status display
-    
-  Behavior:
-    - When paused: Controller stops autonomous navigation, human takes control
-    - When resumed: Controller resumes autonomous navigation
-    - Pause state persists across service restarts
-    - Only controller.py supports pause functionality
-
-NODE MANAGEMENT:
-  Excluded Nodes:
-    - argo_battery_water and argo_power_control: Run as independent systemd services for critical monitoring
-  
-  Critical Nodes (Essential for Operation):
-    - pwm.py: Servo control for rudder and sail
-    - controller.py: Autonomous navigation logic
-  
-  Special Nodes:
-    - foxglove_bridge: ROS2 package launched via 'ros2 run'
-
-MONITORING:
-  - Continuous health monitoring during operation
-  - Automatic failure detection and reporting
-  - Systemd journal integration for error tracking
-  - I2C bus health diagnostics
-  - Battery and power status monitoring
-  - CPU, memory, and temperature monitoring
+LIFECYCLE MANAGEMENT:
+  The lifecycle of Argo nodes is now managed by the 'argo_launch_standard.service' 
+  and controlled via the following aliases:
+    al - Start Argo nodes
+    aq - Stop Argo nodes
+    ars - Restart Argo nodes
 
 EXAMPLES:
-  # Show help
-  python3 argo_lifecycle_manager.py help
-  python3 argo_lifecycle_manager.py -h
-  python3 argo_lifecycle_manager.py --help
-  
-  # Start Argo system
-  python3 argo_lifecycle_manager.py run
-  
-  # Check system status (detailed)
+  # Show detailed system status
   python3 argo_lifecycle_manager.py status
-  
-  # Check system status (quick one-line)
+  argo_lifecycle_manager.py
+
+  # Show quick one-line status
   python3 argo_lifecycle_manager.py quick_status
-  
+
   # Start local simulation
   python3 argo_lifecycle_manager.py simulate_local
-  
-  # Toggle controller pause (command line)
-  python3 argo_lifecycle_manager.py --toggle_pause
-  
-  # Toggle controller pause (shell alias)
-  ap
-  
-  # Pause controller directly (ROS2 service)
-  ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: true}"
-  
-  # Stop all nodes
-  python3 argo_lifecycle_manager.py stop
         """)
 
     parser.add_argument('command',
-                        choices=['run', 'stop', 'restart', 'status', 'quick_status',
-                                 'simulate_local', 'simulate_remote', 'help'],
+                        choices=['status', 'quick_status', 'simulate_local', 'simulate_remote', 'help'],
                         nargs='?',  # Make command optional
+                        default='status', # Default to 'status'
                         help='Command to execute (see detailed descriptions below)')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug output for troubleshooting')
@@ -2570,8 +2492,8 @@ EXAMPLES:
     
     # Validate that either a command or --toggle_pause is provided
     if not args.command and not args.toggle_pause:
-        parser.error(
-            "Either a command or --toggle_pause option must be provided")
+        # Default to status if no command is given
+        args.command = 'status'
     
     manager = ArgoLifecycleManager(quiet=args.quiet)
     if args.debug:
@@ -2579,20 +2501,7 @@ EXAMPLES:
     
     try:
         # Execute the command first (if provided)
-        if args.command == 'run':
-            # continuous() handles its own cleanup
-            success = manager.continuous()
-            sys.exit(0 if success else 1)
-        elif args.command == 'stop':
-            success = manager.stop()
-            # Clean up ROS2 for non-continuous commands
-            manager._cleanup_ros2()
-            sys.exit(0 if success else 1)
-        elif args.command == 'restart':
-            success = manager.restart()
-            manager._cleanup_ros2()
-            sys.exit(0 if success else 1)
-        elif args.command == 'status':
+        if args.command == 'status':
             manager.status()
             manager._cleanup_ros2()
         elif args.command == 'quick_status':

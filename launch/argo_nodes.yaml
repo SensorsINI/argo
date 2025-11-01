@@ -71,6 +71,13 @@ nodes:
     critical: false
     description: "Boat state visualization node"
     
+  - name: argo_power_control
+    executable: power_control/argo_power_control.py
+    required: false
+    critical: false
+    description: "Power control, button monitoring, and LED status"
+    excluded: true # Runs as an independent systemd service
+    
   # Special Nodes (not launched directly but monitored)
   - name: foxglove_bridge
     executable: ros2 run foxglove_bridge foxglove_bridge
@@ -81,6 +88,7 @@ nodes:
     
   # Excluded Nodes (run as independent systemd services)
   # These are monitored but not launched by this system:
+  # - argo_power_control (runs as argo_power_control.service)
   # - argo_battery_water (runs as argo_battery_water.service)
   # - bno085 (runs as argo_bno085.service when available)
 

@@ -26,11 +26,11 @@ if [[ -z "$ARGO_MOTD_SHOWN" ]]; then
 fi
 
 argo_status() {
-    python3 "$ARGO_DIR/launch/argo_status.py"
+    python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" status
 }
 
 argo_quick_status() {
-    python3 "$ARGO_DIR/launch/argo_status.py" --quick
+    python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" quick_status
 }
 
 # Quick timer for automatic status checks
@@ -79,7 +79,10 @@ argo_quick_timer() {
         echo -ne "\r\033[K"
         
         # Show condensed status using the new standard status script
-        python3 "$ARGO_DIR/launch/argo_status.py" --quick
+        python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" quick_status
+        
+        # IMPORTANT: Update the timestamp *after* the check is done
+        echo "$(date +%s)" > "$last_check_file"
     fi
 }
 

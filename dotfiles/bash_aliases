@@ -16,8 +16,8 @@ alias mount1="mount | grep -E '^/'|grep -v snapd"
 alias al='$ARGO_DIR/launch/argo_start_standard.sh'      # Start Argo nodes using standard launch
 alias aq='$ARGO_DIR/launch/argo_stop_standard.sh'       # Stop Argo nodes using standard launch
 alias ars='sudo systemctl restart argo_launch_standard.service' # Restart Argo nodes
-alias as='python3 $ARGO_DIR/launch/argo_status.py'      # Show Argo status (new standard)
-alias asq='python3 $ARGO_DIR/launch/argo_status.py --quick'  # Quick status (new standard)
+alias as='python3 $ARGO_DIR/launch/argo_lifecycle_manager.py status'      # Show Argo status (restored rich output)
+alias asq='python3 $ARGO_DIR/launch/argo_lifecycle_manager.py quick_status'  # Quick status (restored rich output)
 alias am='$ARGO_DIR/launch/argo_monitor.sh'  # Monitor mode - continuous status display
 alias ap='if systemctl is-active --quiet argo_launch_standard.service; then current_state=$(timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: null" 2>/dev/null | grep -o "paused\|unpaused" || echo "unknown"); if [ "$current_state" = "paused" ]; then timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: false" && echo "✅ Controller UNPAUSED - autonomous control resumed" || echo "❌ Failed to unpause controller"; else timeout 5 ros2 service call /controller_node/pause std_srvs/srv/SetBool "data: true" && echo "✅ Controller PAUSED - human control takes over" || echo "❌ Failed to pause controller"; fi; else echo "❌ Error: argo_launch_standard.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch_standard.service)"; fi'  # Toggle controller pause state
 alias ar='if systemctl is-active --quiet argo_launch_standard.service; then timeout 30 ros2 service call /argo/recording/start std_srvs/srv/Trigger; else echo "❌ Error: argo_launch_standard.service is not running"; echo "   Start it first with: al (or: sudo systemctl start argo_launch_standard.service)"; fi'  # Start recording
