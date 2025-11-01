@@ -1,0 +1,22 @@
+[Unit]
+Description=Argo Robot ROS2 Launch Service (Standard ROS2 Launch)
+After=network.target argo_power_control.service
+Wants=argo_power_control.service
+
+[Service]
+Type=simple
+User=orangepi
+Group=orangepi
+Environment=ROS_DOMAIN_ID=0
+WorkingDirectory=/home/orangepi/argo
+# Use standard ROS2 launch system (health monitor is launched by the launch file)
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && ros2 launch launch/argo_launch.py'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

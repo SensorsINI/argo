@@ -1,0 +1,133 @@
+# Argo ROS2 Node Configuration
+# =============================
+# Human-readable configuration file defining all Argo ROS2 nodes.
+# This file is loaded by the ROS2 launch system - no compilation required.
+#
+# Node Configuration Format:
+#   - name: ROS2 node name (as it appears in 'ros2 node list')
+#   - executable: Python script path relative to ARGO_DIR
+#   - package: Not used for Python nodes (leave empty)
+#   - parameters: Optional parameter files
+#   - required: true/false - if false, system continues if node fails
+#   - critical: true/false - if true, missing node is considered system failure
+#   - description: Human-readable description
+
+nodes:
+  # Core Control Nodes (Critical for operation)
+  - name: rudder_sail_radio_node
+    executable: nodes/rudder_sail_radio.py
+    required: true
+    critical: true
+    description: "Radio control interface and servo output (PWM control)"
+    
+  - name: controller_node
+    executable: nodes/controller.py
+    required: true
+    critical: true
+    description: "Autonomous navigation controller"
+    
+  # Sensor Nodes (Important but system can operate with some missing)
+  - name: gps_node
+    executable: nodes/gps.py
+    required: false
+    critical: false
+    description: "GPS navigation via UART5"
+    
+  - name: anem_node
+    executable: nodes/anem.py
+    required: false
+    critical: false
+    description: "Wind speed and direction sensor (I2C)"
+    
+  - name: temp_monitor_node
+    executable: nodes/temp_monitor.py
+    required: false
+    critical: false
+    description: "System temperature monitoring"
+    
+  - name: lora_node
+    executable: nodes/lora.py
+    required: false
+    critical: false
+    description: "Long range radio communication"
+    
+  # Monitoring and Recording Nodes
+  - name: record_node
+    executable: nodes/record.py
+    required: false
+    critical: false
+    description: "Data recording management"
+    
+  # Visualization and Transform Nodes
+  - name: argo_transform_publisher
+    executable: nodes/argo_transform_publisher.py
+    required: false
+    critical: false
+    description: "TF transform publisher for visualization"
+    
+  - name: argo_boat_visualization
+    executable: nodes/argo_boat_visualization.py
+    required: false
+    critical: false
+    description: "Boat state visualization node"
+    
+  # Special Nodes (not launched directly but monitored)
+  - name: foxglove_bridge
+    executable: ros2 run foxglove_bridge foxglove_bridge
+    required: false
+    critical: false
+    description: "Foxglove Studio bridge (ROS2 package)"
+    special: true  # Launched via ros2 run, not direct Python
+    
+  # Excluded Nodes (run as independent systemd services)
+  # These are monitored but not launched by this system:
+  # - argo_battery_water (runs as argo_battery_water.service)
+  # - bno085 (runs as argo_bno085.service when available)
+
+# Simulation Mode Configuration
+simulation_nodes:
+  - name: argo_unified_simulator_bridge
+    executable: nodes/argo_unified_simulator_bridge.py
+    required: true
+    critical: true
+    description: "Unified simulator bridge for simulated sensor data"
+    args: ["--mode", "local"]  # Can be "local" or "remote"
+    
+  - name: controller_node
+    executable: nodes/controller.py
+    required: true
+    critical: true
+    description: "Autonomous navigation controller"
+    
+  - name: sailing_area_publisher
+    executable: nodes/sailing_area_publisher.py
+    required: false
+    critical: false
+    description: "Sailing area visualization markers"
+    
+  - name: foxglove_bridge
+    executable: ros2 run foxglove_bridge foxglove_bridge
+    required: false
+    critical: false
+    description: "Foxglove Studio bridge"
+    special: true
+
+# Node Groups for organization
+groups:
+  critical:
+    - rudder_sail_radio_node
+    - controller_node
+    
+  sensors:
+    - gps_node
+    - anem_node
+    - temp_monitor_node
+    
+  communication:
+    - lora_node
+    
+  visualization:
+    - argo_transform_publisher
+    - argo_boat_visualization
+    - foxglove_bridge
+
