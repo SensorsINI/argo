@@ -118,16 +118,29 @@ simulation_nodes:
     
   - name: sailing_area_publisher
     executable: nodes/sailing_area_publisher.py
-    required: false
+    required: true
     critical: false
     description: "Sailing area visualization markers"
     
   - name: foxglove_bridge
     executable: ros2 run foxglove_bridge foxglove_bridge
-    required: false
-    critical: false
+    required: true
+    critical: true
     description: "Foxglove Studio bridge"
     special: true
+  
+  - name: argo_transform_publisher
+    executable: nodes/argo_transform_publisher.py
+    required: true
+    critical: true
+    description: "TF transform publisher for visualization"
+    
+  - name: argo_boat_visualization
+    executable: nodes/argo_boat_visualization.py
+    required: true
+    critical: true
+    description: "Boat state visualization node"
+
 
 # Node Groups for organization
 groups:

@@ -175,6 +175,12 @@ class ArgoLifecycleManager:
         self.excluded_nodes = []
         self.critical_nodes = []
         self.all_expected_nodes = []
+        
+        # Simulation node configuration (loaded but not used until simulation mode)
+        self.simulation_expected_nodes = []
+        self.simulation_special_nodes = []
+        self.simulation_critical_nodes = []
+        self.simulation_node_args = {}  # Map of script_name -> args list
 
         all_node_configs = config.get('nodes', [])
         
@@ -203,6 +209,31 @@ class ArgoLifecycleManager:
 
         # all_expected_nodes for monitoring should include all non-excluded nodes
         self.all_expected_nodes = self.expected_nodes + self.special_nodes
+        
+        # Load simulation nodes configuration
+        simulation_node_configs = config.get('simulation_nodes', [])
+        for node_cfg in simulation_node_configs:
+            name = node_cfg.get('name')
+            if not name:
+                continue
+            
+            # Convert to the script name format used by the manager
+            script_name = name
+            if not node_cfg.get('special', False):
+                executable = node_cfg.get('executable', '')
+                script_name = os.path.basename(executable) if executable else f"{name}.py"
+            
+            # Store args if present (for nodes like simulator bridge that need --mode)
+            if node_cfg.get('args'):
+                self.simulation_node_args[script_name] = node_cfg.get('args', [])
+            
+            if node_cfg.get('special', False):
+                self.simulation_special_nodes.append(script_name)
+            else:
+                self.simulation_expected_nodes.append(script_name)
+            
+            if node_cfg.get('critical', False):
+                self.simulation_critical_nodes.append(script_name)
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
@@ -533,8 +564,13 @@ class ArgoLifecycleManager:
                 # Launch each node with proper ROS2 environment
                 # Use None for stdout/stderr so output goes directly to systemd journal
                 cmd_str = f'source /opt/ros/humble/setup.bash && python3 {script_path}'
-                if script == 'argo_unified_simulator_bridge.py' and hasattr(self, 'simulation_mode'):
-                    cmd_str += f' --mode {self.simulation_mode}'
+                
+                # Add args from YAML configuration if available (for simulation nodes)
+                if hasattr(self, 'simulation_node_args') and script in self.simulation_node_args:
+                    args = self.simulation_node_args[script]
+                    if args:
+                        cmd_str += ' ' + ' '.join(args)
+                
                 cmd = ['bash', '-c', cmd_str]
                 proc = subprocess.Popen(
                     cmd,
@@ -1325,27 +1361,47 @@ class ArgoLifecycleManager:
         print("Simulation mode includes visualization:")
         print("  - foxglove_bridge (Foxglove Studio at ws://localhost:9090)")
 
-        # Check if simulator bridge exists
+        # Use simulation nodes from YAML configuration
+        if not self.simulation_expected_nodes and not self.simulation_special_nodes:
+            print("❌ No simulation nodes configured in argo_nodes.yaml")
+            print("   Please add a 'simulation_nodes' section to the YAML file")
+            return False
+
+        # Check if simulator bridge exists (it should be in simulation nodes)
         simulator_bridge_path = os.path.join(
             self.argo_dir, "nodes", "argo_unified_simulator_bridge.py")
         if not os.path.exists(simulator_bridge_path):
             print(f"❌ Simulator bridge not found: {simulator_bridge_path}")
             return False
 
-        # Define simulation mode node scripts (exclude conflicting hardware nodes)
-        # Note: argo_battery_water.py and temp_monitor.py run as independent systemd services
-        self.expected_nodes = [
-            # Provides simulated sensor data + keyboard control
-            "argo_unified_simulator_bridge.py",
-            "controller.py",                     # Autonomous navigation
-            "sailing_area_publisher.py",         # Sailing area visualization
-        ]
+        # Use simulation nodes from YAML configuration
+        self.expected_nodes = self.simulation_expected_nodes.copy()
+        self.special_nodes = self.simulation_special_nodes.copy()
+        self.critical_nodes = self.simulation_critical_nodes.copy()
+        # Update all_expected_nodes for simulation mode monitoring
+        self.all_expected_nodes = self.expected_nodes + self.special_nodes
 
-        # Add foxglove_bridge to special nodes for simulation mode
-        self.special_nodes = ["foxglove_bridge"]
-
-        # Critical nodes for simulation (simulator bridge is critical)
-        self.critical_nodes = ["argo_unified_simulator_bridge.py"]
+        # Update simulator bridge args to use the correct mode and add --no-curses
+        if 'argo_unified_simulator_bridge.py' in self.simulation_node_args:
+            # Replace --mode local/remote with the actual mode
+            args = self.simulation_node_args['argo_unified_simulator_bridge.py'].copy()
+            # Replace any --mode argument with the current mode
+            mode_found = False
+            for i, arg in enumerate(args):
+                if arg == '--mode' and i + 1 < len(args):
+                    args[i + 1] = mode
+                    mode_found = True
+                    break
+            # If --mode wasn't found in args, add it
+            if not mode_found:
+                args.extend(['--mode', mode])
+            # Ensure --no-curses is present (required for non-interactive launch)
+            if '--no-curses' not in args:
+                args.append('--no-curses')
+            self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
+        else:
+            # If simulator bridge doesn't have args configured, add --mode and --no-curses
+            self.simulation_node_args['argo_unified_simulator_bridge.py'] = ['--mode', mode, '--no-curses']
 
         print(f"Expected simulation nodes: {', '.join(self.expected_nodes)}")
         print(f"Special simulation nodes: {', '.join(self.special_nodes)}")
