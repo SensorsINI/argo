@@ -1,7 +1,7 @@
 [Unit]
 Description=Argo Power Control System
-After=multi-user.target argo-launch.service
-Wants=argo-launch.service
+After=multi-user.target argo_launch_standard.service
+Wants=argo_launch_standard.service
 Documentation=file:///root/argo/launch/ARGO_POWER_CONTROL_README.md
 
 [Service]

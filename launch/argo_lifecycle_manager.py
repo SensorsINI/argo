@@ -152,7 +152,7 @@ class ArgoLifecycleManager:
         # Log excluded nodes for visibility (only if not in quiet mode)
         if self.excluded_nodes and not quiet:
             print(
-                f"ℹ️  Excluded nodes (critical services or hardware not ready): {', '.join(self.excluded_nodes)}")
+                f"ℹ️  Excluded nodes (critical services): {', '.join(self.excluded_nodes)}")
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -160,7 +160,7 @@ class ArgoLifecycleManager:
     
     def _load_nodes_from_yaml(self):
         """Load and parse node definitions from argo_nodes.yaml."""
-        print("ℹ️  Loading node configuration from argo_nodes.yaml...")
+        # print("ℹ️  Loading node configuration from argo_nodes.yaml...")
         config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
         try:
             with open(config_path, 'r') as f:

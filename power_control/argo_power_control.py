@@ -367,17 +367,28 @@ LOG_DIR = Path("/var/log.hdd/persistent")
 LOG_FILE = LOG_DIR / "argo-power-control.log"
 
 def setup_logging(debug=False):
-    """Setup logging configuration"""
-    handlers = [logging.StreamHandler()]
+    """Setup logging configuration to stream to stdout for journalctl."""
+    # Get the root logger
+    root_logger = logging.getLogger()
+
+    # Remove any existing handlers to prevent duplicate logs or logging to files
+    # This is important to override any default logging configured by rclpy.
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
 
     # Set logging level based on debug flag
     log_level = logging.DEBUG if debug else logging.INFO
+    root_logger.setLevel(log_level)
 
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=handlers
-    )
+    # Add a stream handler to log to stdout
+    # This is important for systemd services to capture logs in journalctl
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+
+    # Add the new handler to the root logger
+    root_logger.addHandler(handler)
 
 
 # setup_logging() will be called in main() after parsing arguments
@@ -3845,6 +3856,9 @@ def main():
     argcomplete.autocomplete(parser)
     # Use the filtered arguments for argparse
     args = parser.parse_args(rclpy.utilities.remove_ros_args(args=sys.argv)[1:])
+
+    # Setup logging to stdout for journalctl compatibility
+    setup_logging(debug=args.debug)
 
     # Create a temporary logger for the main function before the node is fully initialized
     temp_logger = rclpy.logging.get_logger('argo_power_control_main')

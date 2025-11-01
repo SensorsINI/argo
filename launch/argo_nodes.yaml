@@ -13,20 +13,36 @@
 #   - description: Human-readable description
 
 nodes:
-  # Core Control Nodes (Critical for operation)
+  # Core System Nodes (Critical for operation)
   - name: rudder_sail_radio_node
     executable: nodes/rudder_sail_radio.py
     required: true
     critical: true
     description: "Radio control interface and servo output (PWM control)"
     
+  - name: argo_power_control
+    executable: power_control/argo_power_control.py
+    required: true
+    critical: true
+    description: "Power control, button monitoring, and LED status"
+    excluded: true # Runs as an independent systemd service
+    
+  - name: argo_battery_water
+    executable: nodes/argo_battery_water.py
+    required: true
+    critical: true
+    description: "Battery water monitoring"
+    excluded: true # Runs as an independent systemd service
+    
+
+    
+  # Control and Sensor Nodes (Important but system can operate with some missing)
   - name: controller_node
     executable: nodes/controller.py
     required: true
-    critical: true
+    critical: false
     description: "Autonomous navigation controller"
-    
-  # Sensor Nodes (Important but system can operate with some missing)
+
   - name: gps_node
     executable: nodes/gps.py
     required: false
@@ -70,13 +86,6 @@ nodes:
     required: false
     critical: false
     description: "Boat state visualization node"
-    
-  - name: argo_power_control
-    executable: power_control/argo_power_control.py
-    required: false
-    critical: false
-    description: "Power control, button monitoring, and LED status"
-    excluded: true # Runs as an independent systemd service
     
   # Special Nodes (not launched directly but monitored)
   - name: foxglove_bridge
@@ -124,6 +133,10 @@ simulation_nodes:
 groups:
   critical:
     - rudder_sail_radio_node
+    - argo_power_control
+    - argo_battery_water  
+    
+  control:
     - controller_node
     
   sensors:
