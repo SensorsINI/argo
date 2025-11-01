@@ -181,6 +181,7 @@ class ArgoLifecycleManager:
         self.simulation_special_nodes = []
         self.simulation_critical_nodes = []
         self.simulation_node_args = {}  # Map of script_name -> args list
+        self.simulation_map_name = None  # Map name for simulation start location
 
         all_node_configs = config.get('nodes', [])
         
@@ -209,6 +210,10 @@ class ArgoLifecycleManager:
 
         # all_expected_nodes for monitoring should include all non-excluded nodes
         self.all_expected_nodes = self.expected_nodes + self.special_nodes
+        
+        # Load simulation configuration (map name, etc.)
+        simulation_config = config.get('simulation_config', {})
+        self.simulation_map_name = simulation_config.get('map_name')
         
         # Load simulation nodes configuration
         simulation_node_configs = config.get('simulation_nodes', [])
@@ -1086,11 +1091,13 @@ class ArgoLifecycleManager:
     
     def stop(self) -> bool:
         """Stop the Argo launch process and all related nodes"""
+        # Set shutdown flag immediately to prevent loops
+        self.shutdown_requested = True
+        
         print("🛑 Stopping Argo ROS2 nodes...")
         
         # New: Terminate the entire process group
         try:
-            print(f"DEBUG: Terminating process group {self.pgid}...")
             os.killpg(self.pgid, signal.SIGTERM)
             # Wait a moment for processes to terminate
             time.sleep(2)
@@ -1398,10 +1405,27 @@ class ArgoLifecycleManager:
             # Ensure --no-curses is present (required for non-interactive launch)
             if '--no-curses' not in args:
                 args.append('--no-curses')
+            # Add map name if configured
+            if self.simulation_map_name:
+                if '--map' not in args:
+                    args.extend(['--map', self.simulation_map_name])
             self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
         else:
             # If simulator bridge doesn't have args configured, add --mode and --no-curses
-            self.simulation_node_args['argo_unified_simulator_bridge.py'] = ['--mode', mode, '--no-curses']
+            args = ['--mode', mode, '--no-curses']
+            if self.simulation_map_name:
+                args.extend(['--map', self.simulation_map_name])
+            self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
+        
+        # Also pass map name to sailing_area_publisher so it uses the same coordinate origin
+        if self.simulation_map_name:
+            if 'sailing_area_publisher.py' not in self.simulation_node_args:
+                self.simulation_node_args['sailing_area_publisher.py'] = []
+            args = self.simulation_node_args['sailing_area_publisher.py'].copy()
+            # Add --map if not already present
+            if '--map' not in args:
+                args.extend(['--map', self.simulation_map_name])
+                self.simulation_node_args['sailing_area_publisher.py'] = args
 
         print(f"Expected simulation nodes: {', '.join(self.expected_nodes)}")
         print(f"Special simulation nodes: {', '.join(self.special_nodes)}")
@@ -1502,50 +1526,66 @@ class ArgoLifecycleManager:
 
             # Start continuous monitoring with proper cleanup
             try:
-                while True:
-                    time.sleep(30)  # Check every 30 seconds
+                last_status_check = time.time()
+                status_check_interval = 30.0  # Check status every 30 seconds
+                
+                while not self.shutdown_requested:
+                    # Check for shutdown request frequently
+                    current_time = time.time()
+                    time_since_check = current_time - last_status_check
+                    
+                    # Sleep in small increments to check shutdown frequently
+                    sleep_interval = min(1.0, status_check_interval - time_since_check)
+                    if sleep_interval > 0:
+                        time.sleep(sleep_interval)
+                    
+                    # Check if it's time for status check
+                    if current_time - last_status_check >= status_check_interval:
+                        last_status_check = current_time
+                        
+                        # Check node status
+                        node_status = self._get_node_status()
+                        running_nodes = [
+                            node for node, status in node_status.items() if "RUNNING" in status]
+                        stopped_nodes = [
+                            node for node, status in node_status.items() if "STOPPED" in status]
 
-                    # Check node status
-                    node_status = self._get_node_status()
-                    running_nodes = [
-                        node for node, status in node_status.items() if "RUNNING" in status]
-                    stopped_nodes = [
-                        node for node, status in node_status.items() if "STOPPED" in status]
+                        if stopped_nodes:
+                            print(
+                                f"⚠️  {len(stopped_nodes)} simulation nodes stopped: {', '.join(stopped_nodes)}")
 
-                    if stopped_nodes:
-                        print(
-                            f"⚠️  {len(stopped_nodes)} simulation nodes stopped: {', '.join(stopped_nodes)}")
+                            # Check if critical nodes are still running
+                            critical_running = [
+                                n for n in self.critical_nodes if n in running_nodes]
+                            critical_stopped = [
+                                n for n in self.critical_nodes if n in stopped_nodes]
 
-                        # Check if critical nodes are still running
-                        critical_running = [
-                            n for n in self.critical_nodes if n in running_nodes]
-                        critical_stopped = [
-                            n for n in self.critical_nodes if n in stopped_nodes]
+                            if critical_stopped:
+                                print(
+                                    f"❌ CRITICAL SIMULATION NODES STOPPED: {', '.join(critical_stopped)}")
+                                print(
+                                    f"   Simulation will continue with remaining nodes")
+                            else:
+                                print(
+                                    f"✅ Critical simulation nodes operational: {', '.join(critical_running)}")
 
-                        if critical_stopped:
-                            print(
-                                f"❌ CRITICAL SIMULATION NODES STOPPED: {', '.join(critical_stopped)}")
-                            print(
-                                f"   Simulation will continue with remaining nodes")
-                        else:
-                            print(
-                                f"✅ Critical simulation nodes operational: {', '.join(critical_running)}")
-
-                        # Show system status
-                        if len(running_nodes) >= 2:
-                            print(
-                                f"✅ Simulation operational with {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes")
-                        else:
-                            print(
-                                f"⚠️  Low node count: {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes running")
+                            # Show system status
+                            if len(running_nodes) >= 2:
+                                print(
+                                    f"✅ Simulation operational with {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes")
+                            else:
+                                print(
+                                    f"⚠️  Low node count: {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes running")
 
             except KeyboardInterrupt:
                 print("\n🛑 Stopping simulation and cleaning up all nodes...")
+                self.shutdown_requested = True
                 self.stop()
                 print("✅ All simulation nodes terminated")
                 return True
             except Exception as e:
                 print(f"❌ Error in simulation mode: {e}")
+                self.shutdown_requested = True
                 self.stop()
                 return False
         else:

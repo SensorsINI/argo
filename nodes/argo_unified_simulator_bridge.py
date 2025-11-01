@@ -30,6 +30,8 @@ import curses
 import queue
 import signal
 import traceback
+import json
+from pathlib import Path
 
 # Try to import sailboat-playground for local simulation
 SIMULATOR_AVAILABLE = False
@@ -601,7 +603,7 @@ class MockSailboatSimulator:
 class ArgoUnifiedSimulatorBridge(Node):
     """Unified bridge for local and remote sailboat simulation."""
     
-    def __init__(self, mode='local', use_curses=True):
+    def __init__(self, mode='local', use_curses=True, map_name=None):
         super().__init__('argo_unified_simulator_bridge')
         self.mode = mode
         self.use_curses = use_curses
@@ -619,6 +621,13 @@ class ArgoUnifiedSimulatorBridge(Node):
         else:
             self.get_logger().info(f'Argo Unified Simulator Bridge starting in {mode.upper()} mode...')
         
+        # --- GPS Base Location (for NavSatFix) ---
+        # Load from map GeoJSON if specified, otherwise use default
+        self.base_latitude = 47.3769  # Default: Zurich, Switzerland
+        self.base_longitude = 8.5417
+        if map_name:
+            self._load_map_home_location(map_name)
+        
         # Initialize simulator based on mode
         if mode == 'local':
             self._init_local_simulator()
@@ -631,10 +640,6 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.human_controlled = True  # Start in human control
         self.mock_human_input = True
         self.human_input_time = 0.0
-        
-        # --- GPS Base Location (for NavSatFix) ---
-        self.base_latitude = 47.3769  # Zurich, Switzerland
-        self.base_longitude = 8.5417
         
         # Remote mode specific state
         if mode == 'remote':
@@ -671,6 +676,13 @@ class ArgoUnifiedSimulatorBridge(Node):
         
         # Monitor control authority
         self.create_subscription(Bool, '/human_controlled', self.human_control_callback, 10)
+        
+        # Reset service for simulation state reset
+        from std_srvs.srv import Trigger
+        self.reset_service = self.create_service(Trigger, '/simulator/reset', self.reset_simulation_callback)
+        
+        # Store initial boat state for reset capability
+        self.initial_boat_state = None
         
         # --- Simulation Parameters ---
         self.simulation_rate = 10.0  # Hz
@@ -965,6 +977,68 @@ class ArgoUnifiedSimulatorBridge(Node):
         radio_msg = Vector3(x=rudder, y=sail, z=0.0)
         self.pub_radio.publish(radio_msg)
 
+    def _load_map_home_location(self, map_name):
+        """Load the 'home' waypoint from a GeoJSON map file to set the start location."""
+        try:
+            # Determine maps directory (foxglove/maps contains GeoJSON files)
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[1]  # nodes -> argo
+            maps_dir = argo_dir / "foxglove" / "maps"
+            geojson_path = maps_dir / f"{map_name}.geojson"
+            
+            if not geojson_path.exists():
+                self.get_logger().warn(f"Map file not found: {geojson_path}, using default location")
+                return
+            
+            with open(geojson_path, 'r') as f:
+                geojson_data = json.load(f)
+            
+            # Find the "home" waypoint
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                if props.get('name') == 'home' and props.get('type') == 'waypoint':
+                    coords = feature['geometry']['coordinates']
+                    # GeoJSON format: [longitude, latitude, altitude]
+                    self.base_longitude = coords[0]
+                    self.base_latitude = coords[1]
+                    self.get_logger().info(f"Loaded start location from map '{map_name}': "
+                                         f"lat={self.base_latitude:.6f}, lon={self.base_longitude:.6f}")
+                    return
+            
+            # If no "home" waypoint found, try to calculate center of sailing area
+            self.get_logger().warn(f"No 'home' waypoint found in map '{map_name}', calculating center")
+            self._calculate_map_center(geojson_data)
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to load map '{map_name}': {e}, using default location")
+    
+    def _calculate_map_center(self, geojson_data):
+        """Calculate the center of all coordinates in the map as fallback."""
+        all_lons = []
+        all_lats = []
+        
+        for feature in geojson_data.get('features', []):
+            geom = feature.get('geometry', {})
+            coords = geom.get('coordinates', [])
+            
+            if geom.get('type') == 'Point':
+                all_lons.append(coords[0])
+                all_lats.append(coords[1])
+            elif geom.get('type') == 'LineString':
+                for coord in coords:
+                    all_lons.append(coord[0])
+                    all_lats.append(coord[1])
+            elif geom.get('type') == 'Polygon':
+                for ring in coords:
+                    for coord in ring:
+                        all_lons.append(coord[0])
+                        all_lats.append(coord[1])
+        
+        if all_lons and all_lats:
+            self.base_longitude = sum(all_lons) / len(all_lons)
+            self.base_latitude = sum(all_lats) / len(all_lats)
+            self.get_logger().info(f"Calculated map center: lat={self.base_latitude:.6f}, lon={self.base_longitude:.6f}")
+    
     def xy_to_latlon(self, x, y):
         """Convert XY meters from base lat/lon to new lat/lon."""
         R = 6378137.0  # Earth radius in meters
@@ -974,10 +1048,77 @@ class ArgoUnifiedSimulatorBridge(Node):
         lon = self.base_longitude + dLon * 180 / math.pi
         return lat, lon
 
+    def reset_simulation_callback(self, request, response):
+        """Reset simulation to initial state (home waypoint, zero speed/heading)."""
+        try:
+            self.get_logger().info("Resetting simulation to initial state...")
+            
+            # Reset real sailboat-playground simulator state
+            if not self.use_mock and hasattr(self, 'sim_manager') and self.sim_manager:
+                try:
+                    import numpy as np
+                    # Reset boat position to origin (home waypoint)
+                    self.sim_manager.boat.set_position(np.array([0.0, 0.0]))
+                    self.sim_manager.boat.set_heading(0.0)
+                    # Reset boat velocity
+                    self.sim_manager.boat._speed = np.array([0.0, 0.0])
+                    self.sim_manager.boat._angular_speed = 0.0
+                    self.get_logger().info("Real simulator reset to origin")
+                except Exception as e:
+                    self.get_logger().warn(f"Failed to reset real simulator: {e}")
+            
+            # Reset mock simulator state
+            if self.use_mock and hasattr(self.simulator, 'boat_x'):
+                self.simulator.boat_x = 0.0
+                self.simulator.boat_y = 0.0
+                self.simulator.boat_heading = 0.0
+                self.simulator.boat_speed = 0.0
+                self.simulator.rudder_angle = 0.0
+                self.simulator.sail_angle = 0.0
+                self.get_logger().info("Mock simulator reset to origin")
+            
+            # Reset boat_state to origin (home waypoint at base_latitude/base_longitude)
+            # Always reset to (0,0) in local coordinates, which maps to home waypoint
+            wind_speed = self.simulator.wind_speed if hasattr(self.simulator, 'wind_speed') else 8.0
+            wind_direction = self.simulator.wind_direction if hasattr(self.simulator, 'wind_direction') else 45.0
+            self.boat_state = {
+                'x': 0.0,  # Always reset to origin (home waypoint)
+                'y': 0.0,
+                'heading': 0.0,
+                'speed': 0.0,
+                'wind_speed': wind_speed,
+                'wind_direction': wind_direction,
+                'rudder': 0.0,
+                'sail': 0.0
+            }
+            # Update initial_boat_state so future resets use this as reference
+            self.initial_boat_state = self.boat_state.copy()
+            
+            # Reset control state
+            self.last_control_time = time.time()
+            self.human_controlled = True
+            
+            response.success = True
+            response.message = "Simulation reset to initial state (home waypoint)"
+            self.get_logger().info("✅ Simulation reset successful")
+            return response
+            
+        except Exception as e:
+            self.get_logger().error(f"Error resetting simulation: {e}")
+            import traceback
+            self.get_logger().error(f"Traceback: {traceback.format_exc()}")
+            response.success = False
+            response.message = f"Reset failed: {str(e)}"
+            return response
+    
     def publish_navsat_fix(self):
         """Publish a NavSatFix message."""
         if not self.boat_state:
             return
+        
+        # Store initial state on first valid boat_state for reset capability
+        if self.initial_boat_state is None:
+            self.initial_boat_state = self.boat_state.copy()
 
         lat, lon = self.xy_to_latlon(self.boat_state['x'], self.boat_state['y'])
 
@@ -1215,6 +1356,8 @@ def main(args=None):
                        help='Simulation mode: local (run simulator here) or remote (connect to remote simulator)')
     parser.add_argument('--no-curses', action='store_true',
                        help='Disable curses display (use standard logging)')
+    parser.add_argument('--map', type=str,
+                       help='Map name (without .geojson extension) - start location will be at the "home" waypoint')
     
     # Parse known args to avoid conflicts with ROS2 args
     parsed_args, unknown_args = parser.parse_known_args(args)
@@ -1270,7 +1413,7 @@ def main(args=None):
     rclpy.init(args=unknown_args)
     bridge = None
     try:
-        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, use_curses=use_curses)
+        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, use_curses=use_curses, map_name=parsed_args.map)
         rclpy.spin(bridge)
     except KeyboardInterrupt:
         if not use_curses:

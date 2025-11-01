@@ -106,10 +106,33 @@ def generate_launch_description():
             else:
                 executable_path = executable
             
+            # Get args and add --no-curses for simulator bridge (required for non-interactive launch)
+            node_args = node_cfg.get('args', []).copy()
+            
+            # Add map name from simulation_config if available (for simulator bridge and sailing_area_publisher)
+            if mode == 'simulation':
+                simulation_config = config.get('simulation_config', {})
+                map_name = simulation_config.get('map_name')
+                if map_name:
+                    # Add to simulator bridge
+                    if 'argo_unified_simulator_bridge' in node_name or 'argo_unified_simulator_bridge.py' in executable:
+                        if '--no-curses' not in node_args:
+                            node_args.append('--no-curses')
+                        if '--map' not in node_args:
+                            node_args.extend(['--map', map_name])
+                    # Add to sailing_area_publisher so it uses the same coordinate origin
+                    elif 'sailing_area_publisher' in node_name or 'sailing_area_publisher.py' in executable:
+                        if '--map' not in node_args:
+                            node_args.extend(['--map', map_name])
+            elif 'argo_unified_simulator_bridge' in node_name or 'argo_unified_simulator_bridge.py' in executable:
+                # Add --no-curses even in normal mode if simulator bridge is present
+                if '--no-curses' not in node_args:
+                    node_args.append('--no-curses')
+            
             # Create ROS2 node action using ExecuteProcess for Python scripts
             # Note: For non-package nodes, we use ExecuteProcess instead of Node
             node_action = ExecuteProcess(
-                cmd=['python3', executable_path] + node_cfg.get('args', []),
+                cmd=['python3', executable_path] + node_args,
                 output='screen',
                 name=node_name,
                 respawn=not critical,  # Only respawn non-critical nodes

@@ -106,6 +106,7 @@ bags/
 # Log files  
 **/lora_logs/
 shore/lora_logs/
+logs/
 
 # Build artifacts
 *_build/

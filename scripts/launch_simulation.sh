@@ -1,23 +1,45 @@
 #!/bin/bash
-#
-# This script launches the Argo simulation environment using the ROS2 launch system.
-# It ensures that all simulation nodes are started and managed correctly.
-#
+# Launch simulation with output logging to file
+# Usage: ./scripts/launch_simulation.sh [local|remote]
 
-# Set script to exit immediately if a command exits with a non-zero status.
-set -e
+# Set default mode
+MODE=${1:-local}
 
-# --- Source ROS2 Environment ---
-# This is critical for ensuring that 'ros2' commands are available.
+# Create logs directory if it doesn't exist
+LOG_DIR="$HOME/argo/logs"
+mkdir -p "$LOG_DIR"
+
+# Generate log filename with timestamp
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="$LOG_DIR/simulation_${MODE}_${TIMESTAMP}.log"
+
+# Change to Argo directory
+cd "$HOME/argo" || exit 1
+
+# Source ROS2 environment
 source /opt/ros/humble/setup.bash
 
-# --- Get Project Directory ---
-# This finds the root of the 'argo' project directory.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-ARGO_DIR="$(dirname "$SCRIPT_DIR")"
+echo "🚢 Starting Argo simulation (${MODE} mode)..."
+echo "📝 Logging output to: $LOG_FILE"
+echo "💡 To view log: tail -f $LOG_FILE"
+echo "💡 To grep log: grep 'pattern' $LOG_FILE"
+echo ""
 
-# --- Launch the Simulation ---
-# We use 'ros2 launch' to start the simulation_launch.py file.
-# The launch file defines all the nodes needed for the simulation.
-echo "🚢 Launching Argo Simulation Environment..."
-ros2 launch "$ARGO_DIR/launch/simulation_launch.py"
+# Trap Ctrl+C to show log location
+trap 'echo ""; echo "📝 Full log saved to: $LOG_FILE"; echo "💡 Grep with: grep \"pattern\" $LOG_FILE"' INT TERM
+
+# Launch simulation and log everything
+if [ "$MODE" = "local" ]; then
+    ros2 launch launch/argo_launch.py mode:=simulation 2>&1 | tee "$LOG_FILE"
+else
+    python3 launch/argo_lifecycle_manager.py simulate_remote 2>&1 | tee "$LOG_FILE"
+fi
+
+EXIT_CODE=${PIPESTATUS[0]}
+
+# Show log location on exit
+echo ""
+echo "📝 Full log saved to: $LOG_FILE"
+echo "💡 Grep with: grep \"pattern\" $LOG_FILE"
+
+exit $EXIT_CODE
