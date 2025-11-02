@@ -54,6 +54,14 @@ import yaml  # Add YAML import
 from argo_node_utils import ArgoNodeManager
 import psutil
 
+# Color codes for terminal output
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DARK_GREEN = '\033[32m'  # Dark green for healthy nodes
+    RED = '\033[31m'         # Red for unhealthy nodes
+    DIM = '\033[2m'          # Dim/Gray for stopped nodes
+
 # ROS2 imports for service client
 try:
     import rclpy
@@ -112,34 +120,50 @@ class ArgoLifecycleManager:
         # --- NEW: Load all node configuration from argo_nodes.yaml ---
         self._load_nodes_from_yaml()
         
-        if ROS2_AVAILABLE:
-            try:
-                if not rclpy.ok():
-                    rclpy.init()
-                self.ros2_node = Node('argo_lifecycle_manager')
-                self.battery_service_client = self.ros2_node.create_client(
-                    Trigger, '/battery_status')
-
-                # Create controller pause service client
-                self.controller_pause_client = self.ros2_node.create_client(
-                    SetBool, '/controller_node/pause')
-                
-                # Subscribe to controller pause state
-                self.controller_pause_sub = self.ros2_node.create_subscription(
-                    Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
-                
-                # Initialize health status monitoring (uses self.all_expected_nodes from YAML)
-                self._setup_health_monitoring()
-            except Exception as e:
-                if not quiet:
-                    print(
-                        f"Warning: Could not initialize ROS2 service client: {e}")
-                self.ros2_node = None
-                self.battery_service_client = None
-                self.controller_pause_client = None
+        # ROS2 node will be created lazily when needed
+        # This prevents creating a node for simple commands that don't need ROS2
         
         # Initialize node manager, but only for process management, not discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
+        
+        # ROS2 node initialization deferred until actually needed
+    
+    def _ensure_ros2_node(self):
+        """Lazily create ROS2 node and clients if not already created"""
+        if self.ros2_node is not None:
+            return  # Already initialized
+        
+        if not ROS2_AVAILABLE:
+            return
+        
+        try:
+            if not rclpy.ok():
+                rclpy.init()
+            self.ros2_node = Node('argo_lifecycle_manager')
+            
+            # Declare a dummy parameter to prevent foxglove_bridge errors when querying parameters
+            # (foxglove_bridge tries to discover parameters from all nodes)
+            self.ros2_node.declare_parameter('node_type', 'lifecycle_manager')
+            
+            self.battery_service_client = self.ros2_node.create_client(
+                Trigger, '/battery_status')
+
+            # Create controller pause service client
+            self.controller_pause_client = self.ros2_node.create_client(
+                SetBool, '/controller_node/pause')
+            
+            # Subscribe to controller pause state
+            self.controller_pause_sub = self.ros2_node.create_subscription(
+                Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
+            
+            # Initialize health status monitoring (uses self.all_expected_nodes from YAML)
+            self._setup_health_monitoring()
+        except Exception as e:
+            if not self.quiet:
+                print(f"Warning: Could not initialize ROS2 service client: {e}")
+            self.ros2_node = None
+            self.battery_service_client = None
+            self.controller_pause_client = None
         
         # Query initial controller pause state after a brief delay to allow ROS2 to initialize
         if self.controller_pause_client:
@@ -150,7 +174,7 @@ class ArgoLifecycleManager:
             threading.Thread(target=query_initial_pause_state, daemon=True).start()
         
         # Log excluded nodes for visibility (only if not in quiet mode)
-        if self.excluded_nodes and not quiet:
+        if self.excluded_nodes and not self.quiet:
             print(
                 f"ℹ️  Excluded nodes (critical services): {', '.join(self.excluded_nodes)}")
         
@@ -176,6 +200,13 @@ class ArgoLifecycleManager:
         self.critical_nodes = []
         self.all_expected_nodes = []
         
+        # Mapping from script name (e.g., 'gps.py') to ROS2 node name (e.g., 'gps_node')
+        # Used to generate health service paths like /gps_node/health
+        self.script_to_node_name = {}
+        
+        # Mapping from script name to health_topic for legacy health publishers
+        self.script_to_health_topic = {}
+        
         # Simulation node configuration (loaded but not used until simulation mode)
         self.simulation_expected_nodes = []
         self.simulation_special_nodes = []
@@ -197,6 +228,13 @@ class ArgoLifecycleManager:
                  # We need to find the executable to get the script name
                  executable = node_cfg.get('executable', '')
                  script_name = os.path.basename(executable) if executable else f"{name}.py"
+
+            # Store mapping from script name to ROS2 node name
+            self.script_to_node_name[script_name] = name
+            
+            # Store health_topic if present (for legacy health publishers)
+            if node_cfg.get('health_topic'):
+                self.script_to_health_topic[script_name] = node_cfg.get('health_topic')
 
             if node_cfg.get('excluded', False):
                 self.excluded_nodes.append(script_name)
@@ -227,6 +265,9 @@ class ArgoLifecycleManager:
             if not node_cfg.get('special', False):
                 executable = node_cfg.get('executable', '')
                 script_name = os.path.basename(executable) if executable else f"{name}.py"
+            
+            # Store mapping from script name to ROS2 node name for simulation nodes too
+            self.script_to_node_name[script_name] = name
             
             # Store args if present (for nodes like simulator bridge that need --mode)
             if node_cfg.get('args'):
@@ -277,32 +318,16 @@ class ArgoLifecycleManager:
 
     def _setup_health_monitoring(self):
         """Setup health status monitoring for nodes that publish health topics"""
+        self._ensure_ros2_node()
         if not self.ros2_node:
             return
             
-        # Define health services for each node (new ArgoBaseNode approach)
-        health_services = {
-            'gps.py': '/gps_node/health',
-            'lora.py': '/lora_node/health', 
-            'anem.py': '/anem_node/health',
-            'argo_battery_water.py': '/battery_water_node/health',
-            'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
-            'temp_monitor.py': '/temp_monitor_node/health',
-            'argo_transform_publisher.py': '/argo_transform_publisher/health',
-            'argo_boat_visualization.py': '/argo_boat_visualization/health',
-            'bno085.py': '/bno085_bridge/health'  # BNO085 bridge health service
-        }
+        # Use health_topics from loaded configuration (legacy health publishers)
+        health_topics = self.script_to_health_topic.copy()
         
-        # Also keep health topics for backward compatibility
-        health_topics = {
-            'gps.py': '/gps_node_health',
-            'lora.py': '/lora_node_health',
-            'anem.py': '/anem_node_health',
-            'argo_battery_water.py': '/battery_water_node_health',
-            'rudder_sail_radio.py': '/rudder_sail_radio_node_health',
-            'temp_monitor.py': '/temp_monitor_node_health',
-            'bno085.py': '/imu_health'  # BNO085 IMU health status
-        }
+        # Add special cases that might not be in YAML
+        if 'bno085.py' not in health_topics:
+            health_topics['bno085.py'] = '/imu_health'
         
         # Create subscribers for health topics
         for node_name, health_topic in health_topics.items():
@@ -326,25 +351,61 @@ class ArgoLifecycleManager:
                     print(f"Warning: Could not subscribe to health topic {health_topic}: {e}")
 
     def _query_node_health_services(self) -> Dict[str, Dict]:
-        """Query health status from all nodes via services"""
+        """Query health status from all nodes via services
+        
+        Fast path: Try aggregated health monitor service first (1 service call)
+        Fallback: Query individual node health services (10+ service calls)
+        """
+        self._ensure_ros2_node()
         health_data = {}
         
         # Check if ROS2 node is available
         if not self.ros2_node:
             return health_data
         
-        # Define health services for each node
-        health_services = {
-            'gps.py': '/gps_node/health',
-            'lora.py': '/lora_node/health', 
-            'anem.py': '/anem_node/health',
-            'argo_battery_water.py': '/battery_water_node/health',
-            'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
-            'temp_monitor.py': '/temp_monitor_node/health',
-            'argo_transform_publisher.py': '/argo_transform_publisher/health',
-            'argo_boat_visualization.py': '/argo_boat_visualization/health',
-            'bno085.py': '/bno085_bridge/health'  # Monitor BNO085 health even when excluded from launch
-        }
+        # FAST PATH: Try to use health monitor aggregated service
+        try:
+            health_monitor_client = self.ros2_node.create_client(Trigger, '/argo/health/status')
+            if health_monitor_client.wait_for_service(timeout_sec=0.5):
+                request = Trigger.Request()
+                future = health_monitor_client.call_async(request)
+                rclpy.spin_until_future_complete(
+                    self.ros2_node, future, timeout_sec=2.0)
+                
+                if future.done():
+                    response = future.result()
+                    if response.success:
+                        try:
+                            monitor_data = json.loads(response.message)
+                            # Convert health monitor format to lifecycle manager format
+                            # Health monitor uses YAML node names (which are .py filenames) as keys
+                            if 'nodes' in monitor_data:
+                                for node_name, node_info in monitor_data['nodes'].items():
+                                    # node_name is like 'gps.py', 'record.py', etc.
+                                    health_data[node_name] = {
+                                        'healthy': node_info.get('healthy'),
+                                        'last_seen': node_info.get('last_seen', 0.0)
+                                    }
+                            # If we got data from health monitor, return it (fast path succeeded)
+                            if health_data:
+                                return health_data
+                        except json.JSONDecodeError:
+                            # JSON parse error, fall through to individual calls
+                            pass
+        except Exception:
+            # Health monitor unavailable or error, fall through to individual calls
+            pass
+        
+        # SLOW PATH: Query individual node health services (fallback)
+        
+        # Generate health services dynamically from loaded node configuration
+        health_services = {}
+        for script_name, node_name in self.script_to_node_name.items():
+            health_services[script_name] = f'/{node_name}/health'
+        
+        # Add special cases that might not be in YAML
+        if 'bno085.py' not in health_services:
+            health_services['bno085.py'] = '/bno085_bridge/health'
         
         for node_name, service_name in health_services.items():
             try:
@@ -417,6 +478,7 @@ class ArgoLifecycleManager:
 
     def _query_controller_pause_state(self):
         """Query the current controller pause state via service call."""
+        self._ensure_ros2_node()
         try:
             if not self.controller_pause_client:
                 return
@@ -1757,42 +1819,56 @@ class ArgoLifecycleManager:
         else:
             print(f"🎮 CONTROLLER: 🔴 STOPPED")
         
-        print('Querying health status from all nodes via services...',end='',flush=True)
-        # Query health status from all nodes via services
-        health_data = self._query_node_health_services()
-        # Erase 'Querying health status...' and replace with dynamic query output
-        import sys
-        sys.stdout.write('\r' + ' ' * 60 + '\r')  # Clear the current line
-        print(f"Health Services Queried: {len(health_data)} node{'s' if len(health_data)!=1 else ''} responded")
+        # Only query health status if nodes are running
+        health_data = {}
+        if running_count > 0:
+            print('Querying health status from all nodes via services...',end='',flush=True)
+            # Query health status from all nodes via services
+            health_data = self._query_node_health_services()
+            # Erase 'Querying health status...' and replace with dynamic query output
+            sys.stdout.write('\r' + ' ' * 60 + '\r')  # Clear the current line
+            print(f"Health Services Queried: {len(health_data)} node{'s' if len(health_data)!=1 else ''} responded")
+        else:
+            # No nodes running - skip health query
+            print("No nodes running - skipping health status query")
         # Display nodes in tabular format
         # print("📋 NODE STATUS TABLE:")
-        print("┌" + "─" * 25 + "┬" + "─" * 12 + "┬" + "─" * 12 + "┐")
-        print("│ " + "NODE NAME".ljust(23) + " │ " + "RUNNING".ljust(10) + " │ " + "HEALTH".ljust(10) + " │")
-        print("├" + "─" * 25 + "┼" + "─" * 12 + "┼" + "─" * 12 + "┤")
+        print("┌" + "─" * 30 + "┬" + "─" * 12 + "┐")
+        print("│ " + "NODE NAME".ljust(28) + " │ " + "HEALTH".ljust(10) + " │")
+        print("├" + "─" * 30 + "┼" + "─" * 12 + "┤")
         
         stopped_nodes = []
         for node, status in node_status.items():
             # Get health status for this node (prefer service data)
             health_status = self._get_node_health_status(node, health_data)
             
-            # Format running status
-            if "RUNNING" in status:
-                running_display = "🟢 RUNNING"
-            else:
-                running_display = "🔴 STOPPED"
+            # Track stopped nodes for error reporting
+            if "STOPPED" in status:
                 stopped_nodes.append(node)
             
             # Format node name (remove .py extension for display)
             display_name = node.replace('.py', '')
             
-            # Add error message if available
-            error_suffix = ""
-            if "STOPPED" in status and node in node_fatal_messages:
-                error_suffix = f" - {node_fatal_messages[node]}"
+            # Pad the display name first, then wrap with color codes for proper table alignment
+            padded_display_name = display_name.ljust(28)
             
-            print(f"│ {display_name.ljust(23)} │ {running_display.ljust(10)} │ {health_status.ljust(10)} │")
+            # Color node name based on health and running status
+            if "STOPPED" in status:
+                # Node is not running - gray/dim
+                colored_name = f"{Colors.DIM}{padded_display_name}{Colors.RESET}"
+            elif health_status == "🟢":
+                # Node is running and healthy - dark green
+                colored_name = f"{Colors.DARK_GREEN}{padded_display_name}{Colors.RESET}"
+            elif health_status == "🔴":
+                # Node is running but unhealthy - red
+                colored_name = f"{Colors.RED}{padded_display_name}{Colors.RESET}"
+            else:
+                # Health status unknown - no color
+                colored_name = padded_display_name
+            
+            print(f"│ {colored_name} │ {health_status.ljust(10)} │")
         
-        print("└" + "─" * 25 + "┴" + "─" * 12 + "┴" + "─" * 12 + "┘")
+        print("└" + "─" * 30 + "┴" + "─" * 12 + "┘")
         
         # Show key error messages for stopped nodes
         if stopped_nodes:
@@ -2483,6 +2559,7 @@ class ArgoLifecycleManager:
 
     def toggle_pause_nodes(self, debug: bool = False) -> bool:
         """Toggle pause state of controller node via ROS2 service call."""
+        self._ensure_ros2_node()
         print("🔄 Toggling controller pause state...")
 
         # Toggle controller pause state
@@ -2499,6 +2576,9 @@ class ArgoLifecycleManager:
     def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool], Optional[float], Optional[float]]:
         """Get battery info, alerts, charging status, USB power status, and lifetime estimates using the battery Trigger service client"""
         try:
+            # Ensure ROS2 node is initialized (required for service calls)
+            self._ensure_ros2_node()
+            
             # Use ROS2 service client if available, otherwise fallback to subprocess
             if self.battery_service_client and ROS2_AVAILABLE:
                 battery_data = self._call_battery_service_client()
@@ -2541,8 +2621,11 @@ class ArgoLifecycleManager:
             return None
 
     def _call_battery_service_subprocess(self) -> Optional[Dict[str, Any]]:
-        """Fallback: Call battery service using inline ROS2 client"""
+        """Fallback: Call battery service using subprocess ros2 service call"""
         try:
+            # Ensure ROS2 node is initialized (may have been called without it)
+            self._ensure_ros2_node()
+            
             # Use centralized Trigger service call with longer timeout
             # Battery service may be slow to respond during sensor re-initialization
             success, message = self._call_trigger_service(

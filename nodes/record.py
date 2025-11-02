@@ -22,27 +22,26 @@ Usage:
 
 import os
 import sys
-import time
-import signal
 import subprocess
 import threading
 import logging
 from datetime import datetime
-from typing import Optional
 
 import rclpy
-from rclpy.node import Node
-
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
 
+# Import the base node (must be after ROS2 imports)
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from argo_base_node import ArgoBaseNode
 
-class ArgoRecordingNode(Node):
+
+class ArgoRecordingNode(ArgoBaseNode):
     """ROS2 node for managing Argo bag recording"""
 
     def __init__(self):
-        super().__init__('record')
+        super().__init__('record_node')
 
         # Setup file logging for detailed debugging
         self._setup_file_logging()
@@ -102,10 +101,6 @@ class ArgoRecordingNode(Node):
         # Timer for periodic status updates
         self.status_timer = self.create_timer(5.0, self.publish_status)
 
-        # Setup signal handlers for graceful shutdown
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-
         self._log_info("🚀 Argo Recording Node started")
         self._log_info(f"📁 Bagfiles directory: {self.bagfiles_dir}")
         self._log_info("🎮 Services available:")
@@ -120,6 +115,9 @@ class ArgoRecordingNode(Node):
         self._log_info("   /argo/recording/info - Recording info (String)")
         self._log_info(
             "   /argo/recording/control - Recording control (Twist)")
+
+        # Set initial health status - record node is only healthy when recording
+        self.set_unhealthy("Recording inactive")
 
         # Publish initial status
         self.publish_status()
@@ -191,13 +189,6 @@ class ArgoRecordingNode(Node):
         if self.file_logger:
             self.file_logger.error(message)
 
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully"""
-        self._log_info(f"🛑 Received signal {signum}, shutting down...")
-        self.stop_recording()
-        self._cleanup_resources()
-        rclpy.shutdown()
-        sys.exit(0)
 
     def generate_bag_name(self) -> str:
         """Generate a unique bag name with timestamp"""
@@ -324,6 +315,9 @@ class ArgoRecordingNode(Node):
             self.is_recording = True
             self._log_debug("Setting is_recording = True")
 
+            # Update health status - record node is only healthy when recording
+            self.set_healthy(f"Recording active: {self.current_bag_name}")
+
             # Publish status updates
             self.publish_status()
             self.publish_info(f"Recording started - ~/argo/bags/{self.current_bag_name}")
@@ -344,7 +338,7 @@ class ArgoRecordingNode(Node):
             self._log_error(f"❌ Error starting recording: {e}")
             return False
 
-    def _cleanup_resources(self):
+    def _cleanup_on_exit(self):
         """Clean up any remaining resources"""
         try:
             if self.recording_process:
@@ -418,6 +412,9 @@ class ArgoRecordingNode(Node):
             self.current_bag_name = None
             self.bag_path = None
 
+            # Update health status - record node is only healthy when recording
+            self.set_unhealthy("Recording inactive")
+
             # Publish status updates
             self.publish_status()
 
@@ -470,18 +467,21 @@ class ArgoRecordingNode(Node):
                 self._log_error(
                     f"❌ Recording process ended with code {return_code}")
                 self.is_recording = False
+                self.set_unhealthy("Recording failed")
                 self.publish_status()
                 self.publish_info(
                     f"Recording failed (exit code {return_code})")
             else:
                 self._log_info("✅ Recording process completed normally")
                 self.is_recording = False
+                self.set_unhealthy("Recording completed")
                 self.publish_status()
                 self.publish_info("Recording completed")
 
         except Exception as e:
             self._log_error(f"❌ Error monitoring recording: {e}")
             self.is_recording = False
+            self.set_unhealthy("Recording monitoring error")
             self.publish_status()
 
     def publish_status(self):
@@ -506,29 +506,8 @@ class ArgoRecordingNode(Node):
 
 def main(args=None):
     """Main function"""
-    rclpy.init(args=args)
-
-    try:
-        node = ArgoRecordingNode()
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        print("\nRecording node stopped by user.")
-    except rclpy.executors.ExternalShutdownException:
-        print("External shutdown signal received, exiting gracefully.")
-    except Exception as e:
-        print(f"❌ Error in main: {e}")
-    finally:
-        try:
-            if node:
-                node._cleanup_resources()
-                node.destroy_node()
-        except Exception:
-            pass  # Ignore errors during shutdown
-        try:
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            pass  # Ignore errors during shutdown
+    # Use ArgoBaseNode's standardized runner
+    ArgoBaseNode.run_node(ArgoRecordingNode, args)
 
 
 if __name__ == '__main__':

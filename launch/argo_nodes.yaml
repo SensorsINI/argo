@@ -19,6 +19,7 @@ nodes:
     required: true
     critical: true
     description: "Radio control interface and servo output (PWM control)"
+    health_topic: "/rudder_sail_radio_node_health"
     
   - name: argo_power_control
     executable: power_control/argo_power_control.py
@@ -27,12 +28,13 @@ nodes:
     description: "Power control, button monitoring, and LED status"
     excluded: true # Runs as an independent systemd service
     
-  - name: argo_battery_water
+  - name: battery_water_node
     executable: nodes/argo_battery_water.py
     required: true
     critical: true
     description: "Battery water monitoring"
     excluded: true # Runs as an independent systemd service
+    health_topic: "/battery_water_node_health"
     
 
     
@@ -42,30 +44,35 @@ nodes:
     required: true
     critical: false
     description: "Autonomous navigation controller"
+    health_topic: "/controller_node_health"
 
   - name: gps_node
     executable: nodes/gps.py
     required: false
     critical: false
     description: "GPS navigation via UART5"
+    health_topic: "/gps_node_health"
     
   - name: anem_node
     executable: nodes/anem.py
     required: false
     critical: false
     description: "Wind speed and direction sensor (I2C)"
+    health_topic: "/anem_node_health"
     
   - name: temp_monitor_node
     executable: nodes/temp_monitor.py
     required: false
     critical: false
     description: "System temperature monitoring"
+    health_topic: "/temp_monitor_node_health"
     
   - name: lora_node
     executable: nodes/lora.py
     required: false
     critical: false
     description: "Long range radio communication"
+    health_topic: "/lora_node_health"
     
   # Monitoring and Recording Nodes
   - name: record_node
@@ -73,6 +80,7 @@ nodes:
     required: false
     critical: false
     description: "Data recording management"
+    health_topic: "/record_node_health"
     
   # Visualization and Transform Nodes
   - name: argo_transform_publisher
@@ -80,12 +88,14 @@ nodes:
     required: false
     critical: false
     description: "TF transform publisher for visualization"
+    health_topic: "/argo_transform_publisher_health"
     
   - name: argo_boat_visualization
     executable: nodes/argo_boat_visualization.py
     required: false
     critical: false
     description: "Boat state visualization node"
+    health_topic: "/argo_boat_visualization_health"
     
   # Special Nodes (not launched directly but monitored)
   - name: foxglove_bridge
@@ -152,7 +162,7 @@ groups:
   critical:
     - rudder_sail_radio_node
     - argo_power_control
-    - argo_battery_water  
+    - battery_water_node  
     
   control:
     - controller_node
@@ -169,4 +179,3 @@ groups:
     - argo_transform_publisher
     - argo_boat_visualization
     - foxglove_bridge
-
