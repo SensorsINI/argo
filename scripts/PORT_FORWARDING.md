@@ -20,20 +20,7 @@ This guide explains how to forward port 8765 from WSL2 to Windows so that Foxglo
 3. Select "Run as Administrator"
 4. Follow the prompts
 
-### Method 3: Using PowerShell Directly
-
-**If you get execution policy errors**, use one of these:
-
-```powershell
-# Option A: Bypass for this execution (requires Admin PowerShell)
-powershell -ExecutionPolicy Bypass -File "\\wsl.localhost\Ubuntu-22.04\home\tobi\argo\scripts\wsl_port_forward.ps1"
-
-# Option B: Temporarily change policy (requires Admin PowerShell)
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
-.\scripts\wsl_port_forward.ps1
-```
-
-### Method 4: Manual Commands
+### Method 3: Manual Commands
 
 From PowerShell (as Administrator):
 

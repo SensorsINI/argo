@@ -22,7 +22,7 @@ REM Get the directory where this batch file is located
 set SCRIPT_DIR=%~dp0
 
 REM Run PowerShell script with execution policy bypass
-powershell.exe -ExecutionPolicy Bypass -File "%SCRIPT_DIR%wsl_port_forward.ps1"
+powershell.exe -ExecutionPolicy Bypass -NoProfile -File "%SCRIPT_DIR%wsl_port_forward.ps1"
 
 if %errorLevel% equ 0 (
     echo.

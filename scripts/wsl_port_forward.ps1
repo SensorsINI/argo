@@ -1,10 +1,5 @@
 # WSL Port Forwarding Script for Windows
-# Run this script in PowerShell as Administrator to forward port 8765 from WSL to Windows host
-#
-# Usage:
-#   1. Open PowerShell as Administrator
-#   2. Run: .\scripts\wsl_port_forward.ps1
-#   3. Or copy the commands below and run manually
+# Called by wsl_port_forward.bat - do not run directly
 
 Write-Host "Setting up WSL port forwarding for Foxglove Bridge (port 8765)..." -ForegroundColor Cyan
 
