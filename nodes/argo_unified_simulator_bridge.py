@@ -17,7 +17,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float64, String, UInt8
 from geometry_msgs.msg import Vector3
-from sensor_msgs.msg import NavSatFix, NavSatStatus
+from sensor_msgs.msg import NavSatFix, NavSatStatus, Joy
 import numpy as np
 import time
 import math
@@ -26,8 +26,6 @@ import argparse
 import argcomplete
 import sys
 import os
-import curses
-import queue
 import signal
 import traceback
 import json
@@ -106,433 +104,6 @@ except Exception as e:
     print(f'Stack trace for initialization failure:\n{tb_str}')
     SIMULATOR_AVAILABLE = False
 
-class CursesDisplayManager:
-    """Manages curses-based display with control window on top and log window below."""
-    
-    def __init__(self, stdscr):
-        self.stdscr = stdscr
-        self.log_queue = queue.Queue()
-        self.control_data = {
-            'rudder': 0.0,
-            'sail': 0.0,
-            'heading': 0.0,
-            'speed': 0.0,
-            'wind_speed': 0.0,
-            'wind_direction': 0.0,
-            'mode': 'HUMAN',
-            'last_cmd': 0.0
-        }
-        self._cleanup_called = False
-        
-        # Setup curses
-        try:
-            curses.curs_set(0)  # Hide cursor
-            curses.noecho()     # Don't echo keystrokes
-            curses.cbreak()     # Immediate key input
-            stdscr.keypad(True)  # Enable keypad
-            stdscr.nodelay(True)  # Enable non-blocking input for continuous keyboard handling
-            
-            # Initialize colors if supported
-            if curses.has_colors():
-                curses.start_color()
-                # Define color pairs
-                curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)      # Error
-                curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # Warning
-                curses.init_pair(3, curses.COLOR_GREEN, curses.COLOR_BLACK)    # Info
-                curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)     # Debug
-                curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)     # Control title
-                self.colors_available = True
-            else:
-                self.colors_available = False
-        except curses.error:
-            # If curses setup fails, we'll handle it gracefully
-            self.colors_available = False
-        
-        # Get screen dimensions
-        self.height, self.width = stdscr.getmaxyx()
-        
-        # Calculate window sizes (ensure minimum height)
-        self.control_height = 12  # Increased for better spacing (was 10, now 12)
-        self.log_height = max(10, self.height - self.control_height - 2)  # Leave 2 lines buffer
-        
-        # Create windows
-        self.control_win = stdscr.subwin(self.control_height, self.width, 0, 0)
-        self.log_win = stdscr.subwin(self.log_height, self.width, self.control_height, 0)
-        
-        # Enable scrolling for log window
-        self.log_win.scrollok(True)
-        self.log_win.idlok(True)
-        
-        # Log buffer
-        self.log_lines = []
-        self.max_log_lines = self.log_height - 2
-        
-        # Setup signal handlers for clean exit
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGWINCH, self._signal_handler)  # Handle terminal resize
-        
-        # Keyboard control state
-        self.keyboard_control_enabled = True
-        self.rudder_position = 0.0  # -1.0 to +1.0
-        self.sail_position = 0.0    # -1.0 to +1.0
-        self.step_size = 1.0 / 8.0  # 8 steps for full scale (0.125)
-        
-        self.running = True
-    
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully."""
-        if signum == signal.SIGWINCH:
-            # Handle terminal resize
-            self._handle_resize()
-        else:
-            # Handle shutdown signals
-            self.running = False
-            self.cleanup()
-            # Signal ROS2 to shutdown gracefully
-            if rclpy.ok():
-                rclpy.shutdown()
-    
-    def cleanup(self):
-        """Restore terminal to default state."""
-        if self._cleanup_called:
-            return  # Prevent multiple cleanup calls
-        self._cleanup_called = True
-        
-        try:
-            # Restore curses window settings
-            if hasattr(self, 'stdscr') and self.stdscr:
-                self.stdscr.keypad(False)
-                self.stdscr.nodelay(False)
-            
-            # Restore terminal to normal mode (with error handling)
-            try:
-                curses.nocbreak()      # Disable cbreak mode
-            except curses.error:
-                pass
-            try:
-                curses.echo()          # Re-enable echo
-            except curses.error:
-                pass
-            try:
-                curses.curs_set(1)     # Show cursor
-            except curses.error:
-                pass
-            try:
-                curses.noraw()         # Disable raw mode (if it was enabled)
-            except curses.error:
-                pass
-            try:
-                curses.endwin()        # End curses session
-            except curses.error:
-                pass
-            
-        except Exception as e:
-            # If curses cleanup fails, try basic terminal restoration
-            try:
-                import termios
-                import tty
-                # This is a fallback - restore to cooked mode
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, termios.tcgetattr(sys.stdin))
-            except:
-                pass
-    
-    def __del__(self):
-        """Destructor to ensure cleanup is called."""
-        if not self._cleanup_called:
-            self.cleanup()
-    
-    def _handle_resize(self):
-        """Handle terminal resize event."""
-        try:
-            # Get new screen dimensions
-            new_height, new_width = self.stdscr.getmaxyx()
-            
-            # Check if dimensions actually changed
-            if new_height == self.height and new_width == self.width:
-                return
-            
-            # Update dimensions
-            self.height = new_height
-            self.width = new_width
-            
-            # Recalculate window sizes
-            self.control_height = 12  # Keep control window height fixed
-            self.log_height = max(10, self.height - self.control_height - 2)
-            
-            # Recreate windows with new dimensions
-            self.control_win = self.stdscr.subwin(self.control_height, self.width, 0, 0)
-            self.log_win = self.stdscr.subwin(self.log_height, self.width, self.control_height, 0)
-            
-            # Re-enable scrolling for log window
-            self.log_win.scrollok(True)
-            self.log_win.idlok(True)
-            
-            # Update max log lines
-            self.max_log_lines = self.log_height - 2
-            
-            # Clear and redraw
-            self.stdscr.clear()
-            self.update_display()
-            
-        except Exception as e:
-            # If resize fails, just continue with current dimensions
-            pass
-    
-    def update_control_data(self, **kwargs):
-        """Update control display data."""
-        self.control_data.update(kwargs)
-    
-    def log_message(self, message, level="info"):
-        """Add message to log queue with level."""
-        self.log_queue.put((message, level))
-    
-    def get_log_icon(self, level):
-        """Get colored icon for log level."""
-        if not self.colors_available:
-            # Fallback to text icons
-            icons = {
-                "error": "❌",
-                "warning": "⚠️",
-                "info": "ℹ️",
-                "debug": "🔍",
-                "success": "✅"
-            }
-            return icons.get(level, "ℹ️")
-        
-        # Colored icons
-        icons = {
-            "error": ("❌", curses.color_pair(1)),
-            "warning": ("⚠️", curses.color_pair(2)),
-            "info": ("ℹ️", curses.color_pair(3)),
-            "debug": ("🔍", curses.color_pair(4)),
-            "success": ("✅", curses.color_pair(3))
-        }
-        return icons.get(level, ("ℹ️", curses.color_pair(3)))
-    
-    def create_control_bar(self, value, label, width=20):
-        """Create ASCII bar visualization for control position."""
-        # Normalize value to 0-1 range for bar calculation
-        normalized = (value + 1.0) / 2.0  # -1..+1 -> 0..1
-        
-        # Create bar with specified width
-        filled_length = int(normalized * width)
-        
-        # Create bar string
-        bar = "[" + "█" * filled_length + "░" * (width - filled_length) + "]"
-        
-        # Add direction indicators
-        if value < -0.1:
-            direction = "← LEFT"
-        elif value > 0.1:
-            direction = "RIGHT →"
-        else:
-            direction = "CENTER"
-        
-        return f"{bar} {direction}"
-    
-    def draw_control_window(self):
-        """Draw the control window with rudder/sail status."""
-        try:
-            self.control_win.clear()
-            self.control_win.border()
-        except curses.error:
-            # Window might be invalid due to resize, skip this update
-            return
-        
-        # Title (with proper spacing)
-        title = "🚢 ARGO SIMULATOR CONTROL"
-        self.control_win.addstr(1, (self.width - len(title)) // 2, title)
-        
-        # Empty line for spacing
-        self.control_win.addstr(2, 1, " " * (self.width - 2))
-        
-        # Rudder visualization
-        rudder_bar = self.create_control_bar(self.control_data['rudder'], "RUDDER", 16)
-        self.control_win.addstr(3, 2, f"Rudder: {rudder_bar} ({self.control_data['rudder']:+.3f})")
-        
-        # Sail visualization  
-        sail_bar = self.create_control_bar(self.control_data['sail'], "SAIL", 16)
-        self.control_win.addstr(4, 2, f"Sail:   {sail_bar} ({self.control_data['sail']:+.3f})")
-        
-        # Empty line for spacing
-        self.control_win.addstr(5, 1, " " * (self.width - 2))
-        
-        # Status info
-        status_line = f"Mode: {self.control_data['mode']} | Heading: {self.control_data['heading']:.1f}° | Speed: {self.control_data['speed']:.1f}m/s | Wind: {self.control_data['wind_speed']:.1f}m/s @ {self.control_data['wind_direction']:.0f}°"
-        if len(status_line) > self.width - 4:
-            status_line = status_line[:self.width - 7] + "..."
-        self.control_win.addstr(6, 2, status_line)
-        
-        # Keyboard controls
-        controls_line = "Controls: ←→ Rudder | ↑↓ Sail | C=Center | Q=Quit"
-        if len(controls_line) > self.width - 4:
-            controls_line = controls_line[:self.width - 7] + "..."
-        self.control_win.addstr(7, 2, controls_line)
-        
-        # Empty line for spacing
-        self.control_win.addstr(8, 1, " " * (self.width - 2))
-        
-        self.control_win.refresh()
-    
-    def draw_log_window(self):
-        """Draw the log window with recent messages."""
-        try:
-            self.log_win.clear()
-            self.log_win.border()
-        except curses.error:
-            # Window might be invalid due to resize, skip this update
-            return
-        
-        # Title
-        title = "SIMULATION LOG"
-        self.log_win.addstr(0, (self.width - len(title)) // 2, title)
-        
-        # Display log lines
-        start_line = max(0, len(self.log_lines) - self.max_log_lines)
-        for i, line_data in enumerate(self.log_lines[start_line:]):
-            if i < self.max_log_lines:
-                if isinstance(line_data, tuple):
-                    line, color = line_data
-                else:
-                    line, color = line_data, curses.color_pair(0)
-                
-                # Truncate line if too long
-                display_line = line[:self.width - 4]
-                try:
-                    if self.colors_available and color != curses.color_pair(0):
-                        self.log_win.addstr(i + 1, 2, display_line, color)
-                    else:
-                        self.log_win.addstr(i + 1, 2, display_line)
-                except curses.error:
-                    # Handle line too long or other curses errors
-                    pass
-        
-        self.log_win.refresh()
-    
-    def process_log_queue(self):
-        """Process messages from log queue."""
-        while not self.log_queue.empty():
-            try:
-                message_data = self.log_queue.get_nowait()
-                if isinstance(message_data, tuple):
-                    message, level = message_data
-                else:
-                    message, level = message_data, "info"
-                
-                # Add timestamp and icon
-                timestamp = time.strftime('%H:%M:%S')
-                icon_data = self.get_log_icon(level)
-                if isinstance(icon_data, tuple):
-                    icon, color = icon_data
-                else:
-                    icon, color = icon_data, curses.color_pair(0)
-                formatted_message = f"[{timestamp}] {icon} {message}"
-                
-                self.log_lines.append((formatted_message, color))
-                
-                # Keep only recent log lines
-                if len(self.log_lines) > self.max_log_lines * 2:
-                    self.log_lines = self.log_lines[-self.max_log_lines:]
-            except queue.Empty:
-                break
-    
-    def update_display(self):
-        """Update the entire display."""
-        if not self.running:
-            return
-        
-        try:
-            # Check for terminal resize
-            new_height, new_width = self.stdscr.getmaxyx()
-            if new_height != self.height or new_width != self.width:
-                self._handle_resize()
-                return  # Skip this update cycle, let resize handle redraw
-            
-            # Handle keyboard input
-            self.handle_keyboard_input()
-            
-            # Process log messages
-            self.process_log_queue()
-            
-            # Draw windows
-            self.draw_control_window()
-            self.draw_log_window()
-            
-            # Refresh main screen
-            self.stdscr.refresh()
-            
-        except curses.error as e:
-            # Handle terminal resize or other curses errors
-            # Try to recover by checking for resize
-            try:
-                new_height, new_width = self.stdscr.getmaxyx()
-                if new_height != self.height or new_width != self.width:
-                    self._handle_resize()
-            except:
-                pass
-    
-    def get_key(self):
-        """Get a key press (non-blocking)."""
-        try:
-            # Set nodelay mode for non-blocking input
-            self.stdscr.nodelay(True)
-            key = self.stdscr.getch()
-            # Keep nodelay mode for continuous input
-            return key
-        except:
-            return -1
-    
-    def handle_keyboard_input(self):
-        """Handle keyboard input for control."""
-        if not self.keyboard_control_enabled:
-            return
-        
-        key = self.get_key()
-        if key == -1:
-            return
-        
-        # Debug: Log key presses (uncomment for debugging)
-        # try:
-        #     key_name = curses.keyname(key).decode('utf-8') if key > 0 else 'unknown'
-        #     self.log_message(f"Key: {key} ({key_name})", "debug")
-        # except:
-        #     self.log_message(f"Key: {key}", "debug")
-        
-        # Handle arrow keys
-        if key == curses.KEY_UP:
-            self.adjust_sail(1)  # Sail out
-        elif key == curses.KEY_DOWN:
-            self.adjust_sail(-1)  # Sail in
-        elif key == curses.KEY_RIGHT:
-            self.adjust_rudder(1)  # Rudder right
-        elif key == curses.KEY_LEFT:
-            self.adjust_rudder(-1)  # Rudder left
-        elif key == ord('c') or key == ord('C'):
-            self.center_controls()
-        elif key == ord('q') or key == ord('Q'):
-            self.running = False
-        elif key == 3:  # Ctrl+C
-            self.running = False
-    
-    def adjust_rudder(self, direction):
-        """Adjust rudder position by one step."""
-        self.control_data['rudder'] += direction * self.step_size
-        self.control_data['rudder'] = max(-1.0, min(1.0, self.control_data['rudder']))
-        self.log_message(f"Rudder adjusted to {self.control_data['rudder']:+.3f}", "info")
-    
-    def adjust_sail(self, direction):
-        """Adjust sail position by one step."""
-        self.control_data['sail'] += direction * self.step_size
-        self.control_data['sail'] = max(-1.0, min(1.0, self.control_data['sail']))
-        self.log_message(f"Sail adjusted to {self.control_data['sail']:+.3f}", "info")
-    
-    def center_controls(self):
-        """Center both rudder and sail."""
-        self.control_data['rudder'] = 0.0
-        self.control_data['sail'] = 0.0
-        self.log_message("Controls centered")
-
 class MockSailboatSimulator:
     """Mock simulator for testing when sailboat-playground is not available."""
     
@@ -603,23 +174,11 @@ class MockSailboatSimulator:
 class ArgoUnifiedSimulatorBridge(Node):
     """Unified bridge for local and remote sailboat simulation."""
     
-    def __init__(self, mode='local', use_curses=True, map_name=None):
+    def __init__(self, mode='local', map_name=None):
         super().__init__('argo_unified_simulator_bridge')
         self.mode = mode
-        self.use_curses = use_curses
-        self.display_manager = None
         
-        if self.use_curses:
-            # Initialize curses display
-            self.stdscr = curses.initscr()
-            self.display_manager = CursesDisplayManager(self.stdscr)
-            self.display_manager.log_message(f'Argo Unified Simulator Bridge starting in {mode.upper()} mode...')
-            
-            # Override the logger to send messages to curses display
-            self._original_logger = self.get_logger()
-            self._setup_curses_logger()
-        else:
-            self.get_logger().info(f'Argo Unified Simulator Bridge starting in {mode.upper()} mode...')
+        self.get_logger().info(f'Argo Unified Simulator Bridge starting in {mode.upper()} mode...')
         
         # --- GPS Base Location (for NavSatFix) ---
         # Load from map GeoJSON if specified, otherwise use default
@@ -638,8 +197,13 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.last_control_time = time.time()
         self.simulation_running = True
         self.human_controlled = True  # Start in human control
-        self.mock_human_input = True
+        self.mock_human_input = False  # Disable mock input - use real control
         self.human_input_time = 0.0
+        
+        # External control state (for Foxglove Teleop, etc.)
+        self.external_rudder = 0.0  # -1 to +1
+        self.external_sail = 0.0    # -1 to +1
+        self.last_external_control_time = 0.0
         
         # Remote mode specific state
         if mode == 'remote':
@@ -652,10 +216,6 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.pub_pose = self.create_publisher(Vector3, '/pose', 10)
         self.pub_compass = self.create_publisher(Vector3, '/compass', 10)
         
-        # Keyboard control (if curses enabled)
-        if self.use_curses:
-            self.pub_rudder_sail_radio = self.create_publisher(Vector3, '/rudder_sail_radio', 10)
-        
         # GPS data
         self.pub_gps_cog = self.create_publisher(Float64, '/gps_cog', 10)
         self.pub_gps_sog = self.create_publisher(Float64, '/gps_sog', 10)
@@ -667,12 +227,58 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Wind data
         self.pub_wind = self.create_publisher(Vector3, '/anem_speed_angle_temp', 10)
         
-        # Simulated radio input (for testing human control)
-        self.pub_radio = self.create_publisher(Vector3, '/rudder_sail_radio', 10)
-        
         # --- Subscribers (Argo → Simulator) ---
-        # Control commands from Argo
+        # Control commands from Argo (final servo commands)
         self.create_subscription(Vector3, '/rudder_sail_servo', self.control_callback, 10)
+        
+        # External radio control input (from Foxglove Teleop, keyboard, or other sources)
+        # This allows external tools to control the simulator
+        # NOTE: We only subscribe, not publish, to avoid schema conflicts in Foxglove
+        self.create_subscription(Vector3, '/rudder_sail_radio', self.radio_control_callback, 10)
+        
+        # Joystick input (from Foxglove Joystick panel or physical gamepad)
+        # Converts Joy messages to rudder/sail control
+        self.create_subscription(Joy, '/joy', self.joy_control_callback, 10)
+        
+        # Advertise /joy topic so Foxglove can publish to it
+        # Publish a few initial messages to help foxglove_bridge learn the schema, then stop
+        # This allows Foxglove to be the primary publisher without interference
+        self.pub_joy_dummy = self.create_publisher(Joy, '/joy', 10)
+        self.joy_schema_published = False
+        self.joy_schema_publish_count = 0
+        
+        # Publish a few initial messages to teach foxglove_bridge the schema
+        # Then stop so Foxglove can be the primary publisher
+        def publish_schema_messages():
+            if self.joy_schema_publish_count < 3:  # Publish only 3 messages total
+                joy_msg = Joy()
+                joy_msg.header.stamp = self.get_clock().now().to_msg()
+                joy_msg.header.frame_id = 'joy'
+                # Provide at least 2 axes for rudder/sail control
+                joy_msg.axes = [0.0, 0.0, 0.0, 0.0]  # 4 axes total (some gamepads have more)
+                joy_msg.buttons = [0, 0, 0, 0]  # 4 buttons (some gamepads have more)
+                try:
+                    self.pub_joy_dummy.publish(joy_msg)
+                    self.joy_schema_publish_count += 1
+                    if self.joy_schema_publish_count >= 3:
+                        # Stop the timer after 3 messages
+                        self.joy_schema_timer.cancel()
+                        self.joy_schema_published = True
+                        self.get_logger().info('Published /joy schema messages (3 total), stopped dummy publisher - Foxglove can now publish')
+                except Exception as e:
+                    # Publisher might not be ready yet, ignore
+                    pass
+        
+        # Publish a few schema messages with short delays, then automatically stop
+        # This teaches foxglove_bridge the message format without interfering with Foxglove publishing
+        self.joy_schema_timer = self.create_timer(0.2, publish_schema_messages)  # Publish every 0.2s, auto-stops after 3 messages
+        
+        # Joystick axis mapping configuration
+        # Default mapping: axis 0 = rudder (left/right), axis 1 = sail (up/down, inverted)
+        self.declare_parameter('joy_rudder_axis', 0)  # Axis index for rudder control
+        self.declare_parameter('joy_sail_axis', 1)    # Axis index for sail control
+        self.declare_parameter('joy_rudder_invert', False)  # Invert rudder axis
+        self.declare_parameter('joy_sail_invert', True)      # Invert sail axis (typically up=out, so invert)
         
         # Monitor control authority
         self.create_subscription(Bool, '/human_controlled', self.human_control_callback, 10)
@@ -697,10 +303,6 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Status timer
         self.status_timer = self.create_timer(1.0, self.print_status)
         
-        # Keyboard control timer (if curses enabled)
-        if self.use_curses:
-            self.keyboard_timer = self.create_timer(0.1, self.publish_keyboard_control)
-        
         # Control arbitration publishers (simulate rudder_sail_radio.py functionality)
         self.pub_human_controlled = self.create_publisher(Bool, '/human_controlled', 10)
         self.pub_control_authority = self.create_publisher(Vector3, '/control_authority', 10)
@@ -717,71 +319,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.get_logger().info(f'Unified simulator bridge ready ({mode} mode)')
         self.get_logger().info('Publishing simulated sensor data to Argo topics')
         
-        # Test colored logging if curses is enabled
-        if self.use_curses and self.display_manager:
-            self.display_manager.log_message("Simulator bridge initialized successfully", "success")
-            self.display_manager.log_message("Keyboard control enabled - use arrow keys", "info")
-            self.display_manager.log_message("Press 'c' to center controls, 'q' to quit", "info")
-        
         # Initial state
         self.boat_state = None
-    
-    def _setup_curses_logger(self):
-        """Setup logger to send messages to curses display."""
-        class CursesLogger:
-            def __init__(self, display_manager, original_logger):
-                self.display_manager = display_manager
-                self.original_logger = original_logger
-            
-            def info(self, msg):
-                self.display_manager.log_message(f"INFO: {msg}")
-                self.original_logger.info(msg)
-            
-            def warn(self, msg):
-                self.display_manager.log_message(f"WARN: {msg}")
-                self.original_logger.warn(msg)
-            
-            def error(self, msg):
-                self.display_manager.log_message(f"ERROR: {msg}")
-                self.original_logger.error(msg)
-            
-            def debug(self, msg):
-                self.display_manager.log_message(f"DEBUG: {msg}")
-                self.original_logger.debug(msg)
-        
-        # Replace the logger
-        self.get_logger = lambda: CursesLogger(self.display_manager, self._original_logger)
-    
-    def publish_keyboard_control(self):
-        """Publish keyboard control commands."""
-        if not self.use_curses or not self.display_manager:
-            return
-        
-        # Get current control positions from display manager
-        rudder = self.display_manager.control_data['rudder']
-        sail = self.display_manager.control_data['sail']
-        
-        # Check for human activity (keyboard input changes)
-        if hasattr(self, 'last_rudder') and hasattr(self, 'last_sail'):
-            rudder_change = abs(rudder - self.last_rudder)
-            sail_change = abs(sail - self.last_sail)
-            
-            # If there's significant change, update human activity
-            if rudder_change > 0.01 or sail_change > 0.01:  # Small threshold for keyboard input
-                self.last_human_activity = time.time()
-                self.human_controlled = True
-        
-        # Store current values for next comparison
-        self.last_rudder = rudder
-        self.last_sail = sail
-        
-        # Create control message in same format as hardware radio
-        control_msg = Vector3()
-        control_msg.x = rudder  # Rudder: -1=left, +1=right
-        control_msg.y = sail    # Sail: -1=in, +1=out
-        control_msg.z = 0.0     # Reserved
-        
-        self.pub_rudder_sail_radio.publish(control_msg)
     
     def publish_control_arbitration(self):
         """Publish control arbitration status (simulate rudder_sail_radio.py functionality)."""
@@ -882,15 +421,30 @@ class ArgoUnifiedSimulatorBridge(Node):
             if self.mock_human_input and self.human_controlled:
                 self.publish_mock_human_input()
             
+            # Determine which control source to use
+            # Priority: External control (Teleop/keyboard) > Robot control
+            if self.human_controlled and (time.time() - self.last_external_control_time) < 2.0:
+                # Use external control if recent
+                current_rudder = self.external_rudder
+                current_sail = self.external_sail
+            else:
+                # Use stored robot control values (from control_callback)
+                current_rudder = getattr(self, 'last_rudder_angle', 0.0) / 30.0  # Convert back from degrees
+                current_sail = getattr(self, 'last_sail_angle', 0.0) / 45.0     # Convert back from degrees
+            
             # Update simulator physics
             if self.use_mock:
                 self.boat_state = self.simulator.step()
             else:
                 # Handle real sailboat-playground API
                 try:
-                    # Get current rudder and sail angles (default to 0 if no control received)
-                    rudder_angle = getattr(self, 'last_rudder_angle', 0.0)
-                    sail_angle = getattr(self, 'last_sail_angle', 0.0)
+                    # Convert normalized values to degrees for sailboat-playground
+                    rudder_angle = current_rudder * 30.0  # Convert to degrees (-30 to +30)
+                    sail_angle = current_sail * 45.0      # Convert to degrees (-45 to +45)
+                    
+                    # Store for reference
+                    self.last_rudder_angle = rudder_angle
+                    self.last_sail_angle = sail_angle
                     
                     # Step the simulation with control inputs
                     self.sim_manager.step([sail_angle, rudder_angle])
@@ -906,8 +460,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                         'speed': np.linalg.norm(state['velocity']) if 'velocity' in state else 2.0,
                         'wind_speed': state.get('wind_speed', 8.0),
                         'wind_direction': state.get('wind_direction', 45.0),
-                        'rudder': rudder_angle,
-                        'sail': sail_angle
+                        'rudder': current_rudder,  # Store normalized values
+                        'sail': current_sail
                     }
                 except Exception as e:
                     self.get_logger().warn(f'Simulator step failed: {e}')
@@ -967,15 +521,10 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.publish_mock_nmea()
 
     def publish_mock_human_input(self):
-        """Generate mock human radio input for testing."""
-        self.human_input_time += 1.0 / self.simulation_rate
-        
-        # Generate some human-like control input
-        rudder = 0.3 * math.sin(self.human_input_time * 0.5)
-        sail = 0.2 + 0.2 * math.cos(self.human_input_time * 0.3)
-        
-        radio_msg = Vector3(x=rudder, y=sail, z=0.0)
-        self.pub_radio.publish(radio_msg)
+        """Generate mock human radio input for testing (deprecated - use external control instead)."""
+        # This function is kept for backwards compatibility but mock input is disabled
+        # External control via /rudder_sail_radio topic should be used instead
+        pass
 
     def _load_map_home_location(self, map_name):
         """Load the 'home' waypoint from a GeoJSON map file to set the start location."""
@@ -1169,14 +718,78 @@ class ArgoUnifiedSimulatorBridge(Node):
         
         self.pub_gps_data.publish(String(data=nmea_sentence))
 
-    def control_callback(self, msg):
-        """Receive control commands from Argo and apply to simulator."""
-        self.last_control_time = time.time()
+    def joy_control_callback(self, msg):
+        """Receive joystick control commands (from Foxglove Joystick panel or gamepad) and convert to rudder/sail control."""
+        # Get joystick axis mapping parameters
+        rudder_axis = self.get_parameter('joy_rudder_axis').get_parameter_value().integer_value
+        sail_axis = self.get_parameter('joy_sail_axis').get_parameter_value().integer_value
+        rudder_invert = self.get_parameter('joy_rudder_invert').get_parameter_value().bool_value
+        sail_invert = self.get_parameter('joy_sail_invert').get_parameter_value().bool_value
         
-        # Apply control to simulator
-        rudder = msg.x  # -1 to +1
-        sail = msg.y    # -1 to +1
+        # Extract axis values (clamp to valid range)
+        if len(msg.axes) == 0:
+            # No axes available
+            return
         
+        if len(msg.axes) > max(rudder_axis, sail_axis):
+            rudder_value = msg.axes[rudder_axis] if rudder_axis < len(msg.axes) else 0.0
+            sail_value = msg.axes[sail_axis] if sail_axis < len(msg.axes) else 0.0
+            
+            # Apply inversion if configured
+            if rudder_invert:
+                rudder_value = -rudder_value
+            if sail_invert:
+                sail_value = -sail_value
+            
+            # Clamp to -1.0 to 1.0 range
+            rudder_value = max(-1.0, min(1.0, rudder_value))
+            sail_value = max(-1.0, min(1.0, sail_value))
+            
+            # Create Vector3 message and forward to radio_control_callback
+            control_msg = Vector3()
+            control_msg.x = rudder_value
+            control_msg.y = sail_value
+            control_msg.z = 0.0
+            
+            self.radio_control_callback(control_msg)
+            
+            self.get_logger().debug(f'Joy control: axis[{rudder_axis}]={rudder_value:.3f} (rudder), axis[{sail_axis}]={sail_value:.3f} (sail)')
+        else:
+            self.get_logger().warn(f'Joy message has {len(msg.axes)} axes, but need at least {max(rudder_axis, sail_axis) + 1} axes')
+    
+    def radio_control_callback(self, msg):
+        """Receive external radio control commands (from Foxglove Teleop, keyboard, etc.) and apply to simulator."""
+        current_time = time.time()
+        self.last_external_control_time = current_time
+        self.last_human_activity = current_time
+        
+        # Store external control values
+        self.external_rudder = msg.x  # -1 to +1
+        self.external_sail = msg.y    # -1 to +1
+        
+        # Mark as human controlled when receiving external input
+        self.human_controlled = True
+        
+        # Apply control to simulator immediately
+        self._apply_control_to_simulator(self.external_rudder, self.external_sail)
+        
+        # Check for significant changes to update human activity
+        if hasattr(self, 'prev_external_rudder') and hasattr(self, 'prev_external_sail'):
+            rudder_change = abs(self.external_rudder - self.prev_external_rudder)
+            sail_change = abs(self.external_sail - self.prev_external_sail)
+            
+            # Update human activity if there's significant change
+            if rudder_change > 0.01 or sail_change > 0.01:
+                self.last_human_activity = current_time
+        
+        # Store for next comparison
+        self.prev_external_rudder = self.external_rudder
+        self.prev_external_sail = self.external_sail
+        
+        self.get_logger().debug(f'External control: rudder={self.external_rudder:.3f}, sail={self.external_sail:.3f}')
+    
+    def _apply_control_to_simulator(self, rudder, sail):
+        """Apply control commands to the simulator."""
         if self.mode == 'local':
             if self.use_mock:
                 self.simulator.set_control(rudder, sail)
@@ -1189,8 +802,18 @@ class ArgoUnifiedSimulatorBridge(Node):
             # In remote mode, we just forward the control command
             # The actual remote simulator will handle the control
             pass
+    
+    def control_callback(self, msg):
+        """Receive control commands from Argo (final servo commands) and apply to simulator."""
+        self.last_control_time = time.time()
         
-        self.get_logger().debug(f'Applied control: rudder={rudder:.3f}, sail={sail:.3f}')
+        # Only apply if we're not in human control mode (external control takes priority)
+        if not self.human_controlled:
+            # Apply control to simulator
+            rudder = msg.x  # -1 to +1
+            sail = msg.y    # -1 to +1
+            self._apply_control_to_simulator(rudder, sail)
+            self.get_logger().debug(f'Robot control: rudder={rudder:.3f}, sail={sail:.3f}')
     
     def human_control_callback(self, msg):
         """Monitor human control status."""
@@ -1241,10 +864,10 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.pub_wind.publish(msg)
     
     def radio_callback(self, msg):
-        """Receive radio input from remote simulator"""
+        """Receive radio input from remote simulator (deprecated - use radio_control_callback instead)"""
         if self.mode == 'remote':
-            self.last_remote_data_time = time.time()
-            self.pub_radio.publish(msg)
+            # Forward to radio_control_callback for consistent handling
+            self.radio_control_callback(msg)
     
     def check_remote_connection(self):
         """Check if remote simulator is still connected"""
@@ -1279,28 +902,6 @@ class ArgoUnifiedSimulatorBridge(Node):
                 control_age = time.time() - self.last_auto_update
             mode = "HUMAN" if self.human_controlled else "ROBOT"
             
-            # Update curses display if available
-            if self.display_manager:
-                # Use keyboard control values if curses is enabled, otherwise use boat state
-                if self.use_curses:
-                    rudder = self.display_manager.control_data['rudder']
-                    sail = self.display_manager.control_data['sail']
-                else:
-                    rudder = self.boat_state.get('rudder', 0.0)
-                    sail = self.boat_state.get('sail', 0.0)
-                
-                self.display_manager.update_control_data(
-                    rudder=rudder,
-                    sail=sail,
-                    heading=self.boat_state['heading'],
-                    speed=self.boat_state['speed'],
-                    wind_speed=self.boat_state['wind_speed'],
-                    wind_direction=self.boat_state['wind_direction'],
-                    mode=mode,
-                    last_cmd=control_age
-                )
-                self.display_manager.update_display()
-            
             # Log status message
             self.get_logger().info(
                 f'Boat: heading={self.boat_state["heading"]:.1f}°, '
@@ -1315,8 +916,6 @@ class ArgoUnifiedSimulatorBridge(Node):
     
     def destroy_node(self):
         """Clean up when node is destroyed."""
-        if self.display_manager:
-            self.display_manager.cleanup()
         super().destroy_node()
 
 def print_help():
@@ -1354,8 +953,6 @@ def main(args=None):
     parser.add_argument('-h', '--help', action='store_true', help='Show this help message and exit')
     parser.add_argument('--mode', choices=['local', 'remote'],
                        help='Simulation mode: local (run simulator here) or remote (connect to remote simulator)')
-    parser.add_argument('--no-curses', action='store_true',
-                       help='Disable curses display (use standard logging)')
     parser.add_argument('--map', type=str,
                        help='Map name (without .geojson extension) - start location will be at the "home" waypoint')
     
@@ -1373,64 +970,44 @@ def main(args=None):
         print("       For more information, run with --help")
         sys.exit(1)
     
-    # --- Check if running interactively and provide guidance ---
-    # The launch file passes '--no-curses'. If this flag is missing, we can
-    # assume the user is running the script directly and guide them to the correct method.
-    if not parsed_args.no_curses:
-        print("🚢 INFO: This script is part of the Argo simulation launch system and is not intended to be run directly.")
-        print("         Running it this way will only start the bridge, not the full simulation environment.")
-        print("\n✅ To start the complete local simulation, please use the 'asim' alias:")
-        print("   asim")
-        print("\n   Alternatively, you can use the ROS2 launch command:")
-        print("   ros2 launch argo_launch simulation_launch.py")
-        print("\nThis method ensures all required nodes (controller, etc.) are launched and managed correctly.")
-        sys.exit(0)
-
-    use_curses = not parsed_args.no_curses
+    print(f"Starting Argo Unified Simulator Bridge in {parsed_args.mode.upper()} mode...")
+    print("This node bridges between Argo control system and sailboat simulator")
+    print(f"\nMode: {parsed_args.mode.upper()}")
+    if parsed_args.mode == 'local':
+        print("  - Running simulator locally")
+        print("  - Using sailboat-playground or mock simulator")
+    else:
+        print("  - Connecting to remote simulator")
+        print("  - Forwarding sensor data and control commands")
     
-    if not use_curses:
-        print(f"Starting Argo Unified Simulator Bridge in {parsed_args.mode.upper()} mode...")
-        print("This node bridges between Argo control system and sailboat simulator")
-        print(f"\nMode: {parsed_args.mode.upper()}")
-        if parsed_args.mode == 'local':
-            print("  - Running simulator locally")
-            print("  - Using sailboat-playground or mock simulator")
-        else:
-            print("  - Connecting to remote simulator")
-            print("  - Forwarding sensor data and control commands")
-        
-        print("\nPublished topics (Simulator → Argo):")
-        print("  /pose - IMU compass heading")
-        print("  /compass - Raw compass data") 
-        print("  /gps_cog, /gps_sog, /gps_velocity - GPS navigation")
-        print("  /anem_speed_angle_temp - Wind data")
-        print("  /rudder_sail_radio - Mock human input (when enabled)")
-        print("\nSubscribed topics (Argo → Simulator):")
-        print("  /rudder_sail_servo - Control commands from Argo")
-        print("  /human_controlled - Control mode status")
-        print("\nPress Ctrl+C to stop\n")
+    print("\nPublished topics (Simulator → Argo):")
+    print("  /pose - IMU compass heading")
+    print("  /compass - Raw compass data") 
+    print("  /gps_cog, /gps_sog, /gps_velocity - GPS navigation")
+    print("  /anem_speed_angle_temp - Wind data")
+    print("\nSubscribed topics (Argo → Simulator):")
+    print("  /rudder_sail_radio - External control input (Vector3, x=rudder, y=sail)")
+    print("  /joy - Joystick control input (Joy message from Foxglove Joystick panel)")
+    print("  /rudder_sail_servo - Final servo commands from Argo")
+    print("  /human_controlled - Control mode status")
+    print("\nExternal Control:")
+    print("  1. Keyboard Control (separate node):")
+    print("     python3 nodes/argo_keyboard_control.py")
+    print("  2. Terminal (Vector3):")
+    print("     ros2 topic pub /rudder_sail_radio geometry_msgs/msg/Vector3 '{x: 0.5, y: -0.3, z: 0.0}'")
+    print("\nPress Ctrl+C to stop\n")
     
     rclpy.init(args=unknown_args)
     bridge = None
     try:
-        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, use_curses=use_curses, map_name=parsed_args.map)
+        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, map_name=parsed_args.map)
         rclpy.spin(bridge)
     except KeyboardInterrupt:
-        if not use_curses:
-            print(f"\nUnified simulator bridge ({parsed_args.mode} mode) stopped by user.")
+        print(f"\nUnified simulator bridge ({parsed_args.mode} mode) stopped by user.")
     except Exception as e:
-        if not use_curses:
-            print(f"Error: {e}")
-        else:
-            # Clean up curses before printing error
-            if bridge and bridge.display_manager:
-                bridge.display_manager.cleanup()
-            print(f"Error: {e}")
+        print(f"Error: {e}")
     finally:
-        # Ensure proper cleanup in all cases
         if bridge:
-            if bridge.display_manager:
-                bridge.display_manager.cleanup()
             bridge.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
