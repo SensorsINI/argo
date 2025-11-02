@@ -611,16 +611,92 @@ class ArgoLifecycleManager:
                 # Launch foxglove_bridge as a ROS2 package
                 cmd = [
                     'bash', '-c', f'source /opt/ros/humble/setup.bash && ros2 run foxglove_bridge foxglove_bridge']
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=self.argo_dir,
-                    stdout=None,  # Let output go to systemd journal
-                    stderr=None,  # Let errors go to systemd journal
-                    universal_newlines=True
-                )
-                # Store process with node name for easier debugging
-                self.node_processes.append({'proc': proc, 'name': special_node})
-                print(f"✅ Launched {special_node} (PID: {proc.pid})")
+                try:
+                    # First, verify the package exists by trying to get package info
+                    import shutil
+                    check_cmd = ['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 pkg executables foxglove_bridge']
+                    check_proc = subprocess.run(
+                        check_cmd,
+                        cwd=self.argo_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    
+                    if check_proc.returncode != 0:
+                        print(f"❌ FAILED to start {special_node}!")
+                        print("")
+                        print("   ERROR: foxglove-bridge package not found!")
+                        print("")
+                        if "package" in check_proc.stderr.lower() or "not found" in check_proc.stderr.lower():
+                            print("   The foxglove-bridge package is not installed.")
+                            print("")
+                            print("   To fix this, run:")
+                            print("     make install-foxglove-bridge")
+                            print("")
+                            print("   Or install all dependencies:")
+                            print("     make install-deps")
+                            print("")
+                        else:
+                            print(f"   Error: {check_proc.stderr[:200]}")
+                        raise RuntimeError(f"foxglove-bridge package not found: {check_proc.stderr}")
+                    
+                    # Package exists, now launch it
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=self.argo_dir,
+                        stdout=None,  # Let output go to systemd journal
+                        stderr=None,  # Let errors go to systemd journal
+                        universal_newlines=True
+                    )
+                    # Wait a moment to see if it fails immediately
+                    import time
+                    time.sleep(2)
+                    
+                    # Check if process is still running
+                    if proc.poll() is not None:
+                        # Process exited immediately - likely an error
+                        print(f"❌ FAILED to start {special_node}!")
+                        print(f"   Exit code: {proc.returncode}")
+                        print("")
+                        print("   ERROR: foxglove-bridge started but exited immediately!")
+                        print("")
+                        print("   This usually means:")
+                        print("   - The package is installed but there's a runtime error")
+                        print("   - Check system logs for details: journalctl -u argo_launch_standard.service -n 50")
+                        print("")
+                        print("   Or try running manually to see the error:")
+                        print("     ros2 run foxglove_bridge foxglove_bridge")
+                        print("")
+                        raise RuntimeError(f"foxglove_bridge exited with code {proc.returncode}")
+                    
+                    # Store process with node name for easier debugging
+                    self.node_processes.append({'proc': proc, 'name': special_node})
+                    print(f"✅ Launched {special_node} (PID: {proc.pid})")
+                    
+                    # Verify it's actually running by checking for the process
+                    import psutil
+                    foxglove_running = False
+                    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+                        try:
+                            cmdline = ' '.join(p.info['cmdline'] or [])
+                            if 'foxglove_bridge' in cmdline and 'ros2 run' in cmdline:
+                                foxglove_running = True
+                                break
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                    
+                    if not foxglove_running:
+                        print(f"❌ WARNING: {special_node} process not found after launch!")
+                        print("   The launch may have failed silently.")
+                        # Don't fail immediately - let monitoring catch it
+                    
+                except subprocess.SubprocessError as e:
+                    print(f"❌ ERROR launching {special_node}: {e}")
+                    print("")
+                    print("   foxglove-bridge may not be installed.")
+                    print("   Run: make install-foxglove-bridge")
+                    raise
             elif special_node == 'bno085':
                 # BNO085 is excluded from launch but should be monitored for health
                 print(f"ℹ️  Monitoring {special_node} (running as independent service)")
