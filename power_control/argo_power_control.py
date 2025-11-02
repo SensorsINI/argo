@@ -339,6 +339,9 @@ BATTERY_LOG_THRESHOLD_V = 0.05     # Only log battery voltage if it changes by m
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 
+# SOS Pattern Configuration
+SOS_PATTERN_DURATION_S = 2.0       # Total duration of one SOS pattern cycle (seconds)
+
 # WiFi Monitoring
 WIFI_MONITORING_INTERVAL_S = 10     # Check WiFi status interval (seconds)
 WIFI_CONNECTIVITY_TIMEOUT_S = 5     # Timeout for WiFi connectivity tests (seconds)
@@ -448,6 +451,7 @@ class PowerController(ArgoBaseNode):
         # Heartbeat control
         self.heartbeat_frequency_hz = 1.0/3.0  # 3-second cycle
         self.heartbeat_duty_cycle = 0.1    # 10% duty cycle per slot
+        self.heartbeat_paused = False  # Flag to pause heartbeat for special patterns
         
         # LED pattern logging
         self.last_logged_pattern = None
@@ -937,43 +941,14 @@ class PowerController(ArgoBaseNode):
 
     def _check_critical_nodes_running(self) -> bool:
         """Check if critical nodes are running before allowing recording."""
-        try:
-            # Get node status from lifecycle manager
-            success, message = self._call_trigger_service(
-                '/argo/lifecycle/status', timeout_sec=3.0)
-            
-            if not success:
-                self.get_logger().warning("Could not retrieve node status for critical nodes check")
-                return False
-            
-            # Parse the status response
-            import json
-            status_data = json.loads(message)
-            nodes = status_data.get('nodes', {})
-            
-            # Check critical nodes
-            critical_nodes = ['controller.py', 'pwm.py']
-            running_critical = 0
-            
-            for node in critical_nodes:
-                if node in nodes and "RUNNING" in nodes[node]:
-                    running_critical += 1
-            
-            self.get_logger().info(f"Critical nodes status: {running_critical}/{len(critical_nodes)} running")
-            
-            # Require at least half of critical nodes to be running
-            if running_critical >= len(critical_nodes) // 2:
-                return True
-            else:
-                self.get_logger().warning(f"Not enough critical nodes running: {running_critical}/{len(critical_nodes)}")
-                return False
-                
-        except json.JSONDecodeError as e:
-            self.get_logger().warning(f"Could not parse node status JSON: {e}")
+        # Simply check if the Argo launch service is running
+        # The launch system handles critical node management
+        if not self.argo_service_running:
+            self.get_logger().warning("Argo service not running for recording")
             return False
-        except Exception as e:
-            self.get_logger().warning(f"Could not check critical nodes: {e}")
-            return False
+        
+        # Service is running, allow recording
+        return True
 
     def query_current_recording_status(self):
         """Query current recording status by calling the get_status service."""
@@ -1024,39 +999,9 @@ class PowerController(ArgoBaseNode):
         return current_state
 
     def check_argo_service_status(self):
-        """Check if the Argo launch service is running via ROS2 service call"""
+        """Check if the Argo launch service is running via systemctl"""
         try:
-            # Use ROS2 service call instead of systemctl for better integration
-            if rclpy.ok():
-                success, message = self._call_trigger_service('/argo/lifecycle/status', timeout_sec=1.0)
-                if success:
-                    # Parse the status response to determine if system is running
-                    import json
-                    try:
-                        status_data = json.loads(message)
-                        running_count = status_data.get('running_count', 0)
-                        total_count = status_data.get('total_count', 0)
-                        # Consider system running if at least 3 nodes are active
-                        is_running = running_count >= 3
-
-                        if is_running != self.argo_service_running:
-                            self.argo_service_running = is_running
-                            self.get_logger().info(
-                                f"Argo service status changed: {'RUNNING' if is_running else 'STOPPED'} ({running_count}/{total_count} nodes)")
-                            # Update LED heartbeat when Argo service state changes
-                            self._update_led_heartbeat_for_pause_state()
-
-                            # When Argo service stops, recording service is not available
-                            if not is_running:
-                                self.recording_service_available = False
-                                self.get_logger().info("Recording service marked as unavailable")
-
-                        return is_running
-                    except (json.JSONDecodeError, KeyError):
-                        # Fallback to systemctl if ROS2 service fails
-                        pass
-
-            # Fallback to systemctl check (less frequent, shorter timeout)
+            # Check service status via systemctl
             result = subprocess.run(
                 ['sudo', 'systemctl', 'is-active', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=2
@@ -1200,6 +1145,8 @@ class PowerController(ArgoBaseNode):
                     "critical"
                 )
         except Exception as e:
+            # Always stop service wait pattern on exception
+            self.service_wait_active = False
             self.get_logger().error(f"Error toggling controller pause: {e}")
             self.send_desktop_notification(
                 "Controller Pause Error",
@@ -1323,6 +1270,8 @@ class PowerController(ArgoBaseNode):
                 )
                 return False
         except Exception as e:
+            # Always stop service wait pattern on exception
+            self.service_wait_active = False
             self.get_logger().error(f"Error restarting Argo service: {e}")
             self.send_desktop_notification(
                 "Argo Service Error",
@@ -1608,6 +1557,11 @@ class PowerController(ArgoBaseNode):
             # Check network status periodically (only one that needs active checking)
             self._check_network_status()
 
+            # Skip heartbeat if paused (for SOS, service wait, or other special patterns)
+            if self.heartbeat_paused:
+                time.sleep(0.1)
+                continue
+
             # Generate LED pattern for this cycle
             pattern = self._generate_led_pattern()
             
@@ -1778,31 +1732,35 @@ class PowerController(ArgoBaseNode):
         self.sos_led_active = True
 
         # SOS in Morse code: ... --- ... (short-short-short, long-long-long, short-short-short)
-        # Timing: short = 0.2s, long = 0.6s, pause between letters = 0.6s, pause between SOS = 1.8s
+        # Base timing: short = 0.2s, long = 0.6s, pause between letters = 0.6s, pause between SOS = 1.8s
+        # Total base duration: 3.6s (scaled to SOS_PATTERN_DURATION_S to maintain duty cycle)
+        base_duration = 3.6
+        scale_factor = SOS_PATTERN_DURATION_S / base_duration
+        
         sos_pattern = [
             # S: ... (short-short-short)
-            (0.2, True),   # Short on
-            (0.2, False),  # Short off
-            (0.2, True),   # Short on
-            (0.2, False),  # Short off
-            (0.2, True),   # Short on
-            (0.6, False),  # Long pause between letters
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.6 * scale_factor, False),  # Long pause between letters
 
             # O: --- (long-long-long)
-            (0.6, True),   # Long on
-            (0.2, False),  # Short off
-            (0.6, True),   # Long on
-            (0.2, False),  # Short off
-            (0.6, True),   # Long on
-            (0.6, False),  # Long pause between letters
+            (0.6 * scale_factor, True),   # Long on
+            (0.2 * scale_factor, False),  # Short off
+            (0.6 * scale_factor, True),   # Long on
+            (0.2 * scale_factor, False),  # Short off
+            (0.6 * scale_factor, True),   # Long on
+            (0.6 * scale_factor, False),  # Long pause between letters
 
             # S: ... (short-short-short)
-            (0.2, True),   # Short on
-            (0.2, False),  # Short off
-            (0.2, True),   # Short on
-            (0.2, False),  # Short off
-            (0.2, True),   # Short on
-            (1.8, False),  # Long pause between SOS cycles
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (1.8 * scale_factor, False),  # Long pause between SOS cycles
         ]
 
         while self.running and self.sos_led_active and self.low_battery_detected and not self.critical_battery_detected:
@@ -3556,6 +3514,9 @@ If you take no action within 30 seconds, the system will automatically
             # Stop SOS LED pattern if active
             self.sos_led_active = False
 
+            # Stop service wait pattern if active
+            self.service_wait_active = False
+
 
             # Clear critical battery flag if set
             if self.critical_battery_detected:
@@ -3591,6 +3552,16 @@ If you take no action within 30 seconds, the system will automatically
             self.heartbeat_frequency_hz = frequency_hz
         else:
             self.get_logger().warning(f"Invalid heartbeat frequency: {frequency_hz}")
+
+    def pause_heartbeat(self):
+        """Pause the heartbeat to allow special LED patterns to be visible"""
+        self.heartbeat_paused = True
+        self.get_logger().debug("Heartbeat paused for special LED pattern")
+
+    def resume_heartbeat(self):
+        """Resume the heartbeat after special LED patterns are done"""
+        self.heartbeat_paused = False
+        self.get_logger().debug("Heartbeat resumed")
 
     def _update_led_heartbeat_for_pause_state(self):
         """Update LED heartbeat frequency based on controller pause state and Argo service state"""
