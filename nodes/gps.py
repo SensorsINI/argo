@@ -73,6 +73,48 @@ class GpsNode(ArgoBaseNode):
     - Enables power management for continuous operation
     - Reduces cold start delays when power is maintained
 
+    GPS Reset Mechanisms and Startup Modes:
+    
+    The NEO-M9N supports multiple reset types and startup modes:
+    
+    1. Cold Start (navBbrMask=0x0004):
+       - Clears ALL data: ephemeris, almanac, position, and time
+       - GPS must search entire time/frequency space and all satellite numbers
+       - Time-To-First-Fix (TTFF): ~24-36 seconds under good conditions
+       - Used when GPS has been without fix for extended periods (10+ minutes)
+       - Automatic cold start reset after 10 minutes without fix (configurable)
+    
+    2. Warm Start (navBbrMask=0x0002):
+       - Clears ephemeris and almanac, but keeps position and time
+       - GPS has approximate location and time, but needs fresh satellite data
+       - TTFF: ~15-30 seconds (faster than cold start)
+       - Used when GPS has valid time but satellite data is stale (4+ hours)
+    
+    3. Hot Start (navBbrMask=0x0001):
+       - Clears ephemeris only, keeps almanac, position, and time
+       - GPS knows its location, time, and which satellites should be visible
+       - TTFF: ~2 seconds (fastest acquisition)
+       - Requires backup battery to maintain data during power cycles
+       - Used when GPS was recently powered down (<4 hours)
+    
+    4. GNSS-Only Restart (resetType=0x02):
+       - Restarts only GNSS tasks without reloading configuration
+       - Fastest reset option, doesn't clear any data
+       - Useful for recovering from temporary GNSS task errors
+    
+    Automatic Reset:
+    - If GPS runs without a fix for 10 minutes, automatic cold start reset is triggered
+    - Minimum 2 minutes between resets to prevent reset loops
+    - Resets clear stale data that may prevent satellite acquisition
+    - After reset, GPS reinitializes and should acquire satellites within 30-60 seconds
+    
+    Why GPS May Fail to Acquire Satellites After Extended No-Fix:
+    - Stale ephemeris data becomes invalid after ~4 hours
+    - Stale almanac data becomes invalid after several days
+    - GPS search algorithms may get stuck in ineffective search patterns
+    - Power management states may interfere with acquisition attempts
+    - Solution: Cold start reset clears all stale data and forces fresh acquisition
+
     For 3D Visualization:
     The /fix topic provides GPS coordinates that can be used directly in Foxglove's
     3D panel for mapping. Combined with /gps_velocity and /gps_cog topics, this
@@ -189,6 +231,12 @@ class GpsNode(ArgoBaseNode):
         self.last_data_received_time = time.time()
         self.gps_timeout_seconds = 30.0  # Fail if no data received for 30 seconds
 
+        # GPS reset tracking for extended no-fix periods
+        self.last_fix_time = time.time()  # Initialize to startup time (will be cleared when fix acquired)
+        self.no_fix_reset_timeout_seconds = 600.0  # Auto-reset after 10 minutes without fix
+        self.last_reset_time = None  # Track when we last reset to avoid reset loops
+        self.min_reset_interval_seconds = 120.0  # Minimum 2 minutes between resets
+
         # Timer for the main loop to read from the serial port
         self.timer = self.create_timer(0.1, self.read_and_publish)  # 10 Hz
         self.get_logger().info("GPS node ready. Listening for NMEA data on /gps_data topic...")
@@ -201,6 +249,9 @@ class GpsNode(ArgoBaseNode):
         
         # Timer to periodically publish NavSatFix at 1Hz (for consistent visualization rate)
         self.navsat_timer = self.create_timer(1.0, self.publish_navsat_fix)  # 1 Hz
+
+        # Timer to check for extended no-fix condition and trigger reset if needed
+        self.reset_check_timer = self.create_timer(60.0, self.check_and_reset_if_needed)  # Check every 60 seconds
 
         # Track pause state to manage power save transitions (PSMOO)
         self._prev_paused = False
@@ -276,6 +327,94 @@ class GpsNode(ArgoBaseNode):
             self.enable_nmea_sentences()
         except Exception as e:
             self.get_logger().warn(f"Failed to restore GPS continuous mode: {e}")
+
+    # --- UBX reset mechanisms (CFG-RST) ---
+    def gps_reset(self, reset_type: int = 0x00, nav_bbr_mask: int = 0x0000, reset_mode: int = 0x08) -> bool:
+        """
+        Send UBX-CFG-RST to reset the GPS module.
+        
+        Args:
+            reset_type: Reset type (0x00=HW reset, 0x01=controlled SW reset, 0x02=controlled SW reset GNSS only)
+            nav_bbr_mask: Navigation BBR (battery-backed RAM) mask:
+                          - 0x0001: Hot start (clear ephemeris, keep almanac/position/time)
+                          - 0x0002: Warm start (clear ephemeris/almanac, keep position/time)
+                          - 0x0004: Cold start (clear all data)
+            reset_mode: Reset mode (0x08=controlled reset, 0x09=HW reset immediately)
+        
+        Returns:
+            True if reset command was sent successfully (note: GPS will reset, so ACK may not be received)
+        """
+        if not (self.serial_port and self.serial_port.is_open):
+            return False
+        
+        # For controlled software reset, set resetType in resetMode
+        actual_reset_mode = reset_mode
+        if reset_type == 0x01:  # Controlled SW reset
+            actual_reset_mode = 0x08 | 0x00  # Controlled reset, GNSS stop then start
+        elif reset_type == 0x02:  # Controlled SW reset GNSS only
+            actual_reset_mode = 0x08 | 0x01  # Controlled reset, GNSS only
+        
+        # UBX-CFG-RST payload: navBbrMask (2 bytes), resetMode (1 byte), reserved1 (1 byte)
+        payload = bytes([
+            (nav_bbr_mask >> 8) & 0xFF,  # navBbrMask MSB
+            nav_bbr_mask & 0xFF,          # navBbrMask LSB
+            actual_reset_mode,            # resetMode
+            0x00                          # reserved1
+        ])
+        
+        # Send reset command (don't wait for ACK as GPS will reset)
+        ok = self._send_ubx(0x06, 0x04, payload, expect_ack=False, timeout=0.1)
+        return ok
+
+    def gps_cold_start(self) -> bool:
+        """Perform a cold start reset - clears all data (ephemeris, almanac, position, time)."""
+        self.get_logger().info("Performing GPS cold start reset (clearing all data)...")
+        return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0004, reset_mode=0x08)
+
+    def gps_warm_start(self) -> bool:
+        """Perform a warm start reset - clears ephemeris and almanac, keeps position and time."""
+        self.get_logger().info("Performing GPS warm start reset (clearing ephemeris/almanac)...")
+        return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0002, reset_mode=0x08)
+
+    def gps_hot_start_reset(self) -> bool:
+        """Perform a hot start reset - clears ephemeris only, keeps almanac, position, and time."""
+        self.get_logger().info("Performing GPS hot start reset (clearing ephemeris only)...")
+        return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0001, reset_mode=0x08)
+
+    def gps_gnss_restart(self) -> bool:
+        """Perform a GNSS-only restart - restarts GNSS tasks without reloading configuration."""
+        self.get_logger().info("Performing GPS GNSS-only restart...")
+        return self.gps_reset(reset_type=0x02, nav_bbr_mask=0x0000, reset_mode=0x08)
+
+    def check_and_reset_if_needed(self):
+        """Check if GPS has been without a fix for too long and trigger reset if needed."""
+        current_time = time.time()
+        
+        # Only check if we don't have a fix
+        if not self.gps_fix_valid:
+            # Calculate time without fix (from last fix time or startup)
+            time_without_fix = current_time - self.last_fix_time
+            
+            # Check if we need to reset (only if enough time has passed since last reset)
+            if time_without_fix >= self.no_fix_reset_timeout_seconds:
+                if (self.last_reset_time is None or 
+                    (current_time - self.last_reset_time) >= self.min_reset_interval_seconds):
+                    self.get_logger().warn(
+                        f"GPS has been without fix for {time_without_fix/60:.1f} minutes. "
+                        f"Performing cold start reset to clear stale data...")
+                    if self.gps_cold_start():
+                        self.last_reset_time = current_time
+                        # Reset last_fix_time to current time to track from reset
+                        self.last_fix_time = current_time
+                        # Re-enable NMEA sentences after reset (GPS will need ~30 seconds to reinitialize)
+                        time.sleep(2.0)  # Give GPS time to process reset
+                        self.enable_nmea_sentences()
+                        self.get_logger().info("GPS reset completed. Waiting for satellite acquisition...")
+                    else:
+                        self.get_logger().error("Failed to send GPS reset command")
+        else:
+            # We have a fix - we already updated last_fix_time when fix was acquired
+            pass
 
     # Health status publishing is now handled by ArgoBaseNode
 
@@ -660,6 +799,7 @@ class GpsNode(ArgoBaseNode):
                     # We have a valid fix
                     if not self.gps_fix_valid:
                         self.gps_fix_valid = True
+                        self.last_fix_time = time.time()  # Record fix acquisition time
                         # Handle immediate logging for fix status change
                         self.handle_fix_status_change(True)
                     
@@ -805,6 +945,7 @@ class GpsNode(ArgoBaseNode):
                     # Update NavSat status and GPS fix validity based on fix quality
                     if not self.gps_fix_valid:  # Only update health if fix status changed
                         self.gps_fix_valid = True
+                        self.last_fix_time = time.time()  # Record fix acquisition time
                         # Handle immediate logging for fix status change
                         self.handle_fix_status_change(True)
                         self.set_healthy(f"GPS fix valid - {self.satellites_used} satellites")
