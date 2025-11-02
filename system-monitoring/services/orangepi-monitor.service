@@ -4,8 +4,9 @@ After=multi-user.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -c 'orangepimonitor -m >> /var/log.hdd/persistent/orangepi-monitor-$(date +%%Y%%m%%d).log 2>&1'
-Restart=no
+ExecStart=/bin/bash -c 'while true; do orangepimonitor -m >> /var/log.hdd/persistent/orangepi-monitor-$(date +%%Y%%m%%d).log 2>&1; sleep 5; done'
+Restart=always
+RestartSec=5
 User=root
 
 [Install]

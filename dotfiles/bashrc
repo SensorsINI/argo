@@ -1,9 +1,18 @@
 
-source ~/argo/dotfiles/bash_aliases
+# Determine Argo repository directory dynamically
+# This allows the dotfiles to work regardless of where the repo is cloned.
+if [ -z "$ARGO_DIR" ]; then
+    # Get the directory of this script, resolving symlinks
+    ARGO_DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # The Argo directory is one level up from the dotfiles directory
+    export ARGO_DIR="$(dirname "$ARGO_DOTFILES_DIR")"
+fi
+
+source "$ARGO_DIR/dotfiles/bash_aliases"
 
 # Enable bash completion for Argo Python scripts
-if [ -f ~/argo/dotfiles/.bash_completion_argo ]; then
-    source ~/argo/dotfiles/.bash_completion_argo
+if [ -f "$ARGO_DIR/dotfiles/.bash_completion_argo" ]; then
+    source "$ARGO_DIR/dotfiles/.bash_completion_argo"
 fi
 
 # Run Argo shutdown status check once per terminal session
@@ -11,8 +20,8 @@ fi
 if [[ -z "$ARGO_MOTD_SHOWN" ]]; then
     export ARGO_MOTD_SHOWN=1
     # Check if the shutdown status script exists
-    if [[ -f ~/argo/scripts/15-argo-shutdown-status ]]; then
-        bash ~/argo/scripts/15-argo-shutdown-status
+    if [[ -f "$ARGO_DIR/scripts/15-argo-shutdown-status" ]]; then
+        bash "$ARGO_DIR/scripts/15-argo-shutdown-status"
     fi
 fi
 
@@ -24,7 +33,7 @@ argo_status_check() {
 
 # Manual status check (always shows full details)
 argo_status() {
-    python3 ~/argo/launch/argo_lifecycle_manager.py status
+    python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" status
 }
 
 # Quick timer for automatic status checks
@@ -73,11 +82,11 @@ argo_quick_timer() {
         echo -ne "\r\033[K"
         
         # Show condensed status using optimized quick_status command with --quiet flag
-        python3 ~/argo/launch/argo_lifecycle_manager.py quick_status --quiet
+        python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" quick_status --quiet
     fi
 }
 
-PATH="$HOME/argo/launch:$HOME/argo/nodes:$HOME/argo/scripts:$HOME/argo/power_control:$PATH"
+PATH="$ARGO_DIR/launch:$ARGO_DIR/nodes:$ARGO_DIR/scripts:$ARGO_DIR/power_control:$PATH"
 
 # Add argo_quick_timer to PROMPT_COMMAND for continuous status monitoring
 # This will check status before each prompt (throttled to 5-minute intervals)

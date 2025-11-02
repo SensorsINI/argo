@@ -27,7 +27,7 @@ This is a custom Foxglove panel extension specifically designed for visualizing 
 ### Setup
 1. Navigate to the panel directory:
    ```bash
-   cd /home/orangepi/argo/foxglove/custom-argo-panel
+   cd ~/argo/foxglove/custom-argo-panel
    ```
 
 2. Install dependencies:

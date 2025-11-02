@@ -266,7 +266,7 @@ user_overlays=argo_radio_servo_overlay
 
 #### Install PWM Capture Module
 ```bash
-cd /home/orangepi/argo/nodes/pwm_capture_module
+cd ~/argo/nodes/pwm_capture_module
 make all
 # Reboot or load the module manually after install
 sudo modprobe argo_radio_servo_module
@@ -336,7 +336,7 @@ The repository includes a comprehensive Makefile system for easy management:
 
 ### Manual Launch (Recommended for Testing)
 ```bash
-cd /home/orangepi/argo
+cd ~/argo
 source /opt/ros/humble/setup.bash
 python3 launch/argo_lifecycle_manager.py run
 ```
@@ -408,9 +408,12 @@ To plot recorded bag file data, see [argo-plots-2025.py](develop/analysis/argo-p
 ### Debug Commands
 ```bash
 # Check system health
-sudo i2cdetect -y 0
+ah # show aliases
+adevcheck # check for argo devices present and communicating
+alog # follow argo logs - see help options
+sudo i2cdetect -y 0 # check i2c bus
 ros2 topic list
-ros2 node list
+ros2 node list # check nodes
 systemctl status argo-launch.service
 ```
 

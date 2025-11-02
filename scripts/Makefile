@@ -1,7 +1,7 @@
 # Argo Battery Status Monitor Installation Makefile
 # Installs and configures battery status monitoring for XFCE4 desktop
 
-.PHONY: install-battery-monitor install-genmon-plugin setup-battery-panel test-battery-status clean-battery-monitor help
+.PHONY: install-battery-monitor install-genmon-plugin setup-battery-panel test-battery-status clean-battery-monitor backup-sd restore-sd help backup-help
 
 # Default target
 all: install-battery-monitor
@@ -67,6 +67,36 @@ clean-battery-monitor:
 	@rm -f /tmp/argo_battery_status.txt
 	@echo "✅ Battery monitor cleanup complete"
 
+# SD Card Backup and Restore
+backup-sd:
+	@echo "💾 Starting SD card backup..."
+	@./argo_sd_backup.sh
+
+restore-sd:
+	@echo "⚠️  Starting SD card restore..."
+	@echo "⚠️  This will OVERWRITE the SD card!"
+	@echo "⚠️  See scripts/SD_BACKUP_README.md for details"
+	@echo ""
+	@read -p "Enter backup file path: " backup_file; \
+	 sudo ./argo_sd_restore.sh "$$backup_file"
+
+backup-help:
+	@echo "SD Card Backup and Restore Commands"
+	@echo ""
+	@echo "Available commands:"
+	@echo "  make backup-sd           - Create backup of SD card (interactive)"
+	@echo "  make restore-sd          - Restore backup to SD card (interactive)"
+	@echo "  make backup-help         - Show this help message"
+	@echo ""
+	@echo "Manual usage:"
+	@echo "  ./argo_sd_backup.sh                    # Interactive backup"
+	@echo "  ./argo_sd_backup.sh user@host          # Backup to remote"
+	@echo "  ./argo_sd_backup.sh --local            # Local backup only"
+	@echo ""
+	@echo "  sudo ./argo_sd_restore.sh backup.img.gz"
+	@echo ""
+	@echo "See scripts/SD_BACKUP_README.md for complete documentation"
+
 # Show help
 help:
 	@echo "Argo Battery Status Monitor Makefile"
@@ -79,9 +109,13 @@ help:
 	@echo "  test-battery-status      - Test battery status scripts"
 	@echo "  test-battery-service     - Test ROS2 battery service"
 	@echo "  clean-battery-monitor    - Clean up temporary files"
+	@echo "  backup-sd                - Create SD card backup (⚠️  takes 30-60 minutes)"
+	@echo "  restore-sd               - Restore SD card from backup (⚠️  destructive!)"
+	@echo "  backup-help              - Show SD backup/restore commands"
 	@echo "  help                     - Show this help message"
 	@echo ""
 	@echo "Quick start:"
 	@echo "  make install-battery-monitor  # Install everything"
 	@echo "  make setup-battery-panel      # Configure XFCE4 panel"
 	@echo "  make test-battery-status      # Test functionality"
+	@echo "  make backup-sd                # Backup SD card"

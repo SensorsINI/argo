@@ -90,15 +90,15 @@ python3 power_control/argo_power_control.py --test-mode
 ### Step 1: Copy Files
 ```bash
 # From development machine
-scp power_control/argo_power_control.py orangepi@argo:/home/orangepi/argo/power_control/
-scp power_control/argo_power_control.service orangepi@argo:/home/orangepi/argo/power_control/
+scp power_control/argo_power_control.py orangepi@argo:~/argo/power_control/
+scp power_control/argo_power_control.service orangepi@argo:~/argo/power_control/
 ```
 
 ### Step 2: Update Systemd
 ```bash
 # On Argo
 sudo systemctl stop argo_power_control.service
-sudo cp /home/orangepi/argo/power_control/argo_power_control.service /etc/systemd/system/
+sudo cp ~/argo/power_control/argo_power_control.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl start argo_power_control.service
 ```

@@ -176,9 +176,9 @@ Wants=argo_power_control.service
 Type=simple
 User=orangepi
 Group=orangepi
-WorkingDirectory=/home/orangepi/argo/power_control
+WorkingDirectory=~/argo/power_control
 Environment=ROS_DOMAIN_ID=0
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/power_control/argo_critical_battery_monitor.py'
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 ~/argo/power_control/argo_critical_battery_monitor.py'
 Restart=always
 RestartSec=10
 
@@ -322,9 +322,9 @@ Wants=argo_power_control.service
 Type=simple
 User=orangepi
 Group=orangepi
-WorkingDirectory=/home/orangepi/argo/power_control
+WorkingDirectory=~/argo/power_control
 Environment=ROS_DOMAIN_ID=0
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/power_control/argo_critical_battery_monitor.py'
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 ~/argo/power_control/argo_critical_battery_monitor.py'
 Restart=always
 RestartSec=10
 
@@ -20960,7 +20960,7 @@ Therefore, there needs to be a special shutdown mode that prevents the normal sh
 
 ## Install
 ```bash
-cd /home/orangepi/argo/power_control
+cd ~/argo/power_control
 make check_deps
 make install_service enable_service
 make install_shutdown_hook
@@ -20970,11 +20970,11 @@ make install_shutdown_hook
 ## Test
 - Manual hook pulse (poweroff mode):
 ```bash
-/home/orangepi/argo/power_control/argo_poweroff.shutdown poweroff
+~/argo/power_control/argo_poweroff.shutdown poweroff
 ```
 - Manual hook test (reboot mode - should exit without pulse):
 ```bash
-/home/orangepi/argo/power_control/argo_poweroff.shutdown reboot
+~/argo/power_control/argo_poweroff.shutdown reboot
 ```
 - Shutdown test (watch PI3 on pin 40):
 ```bash
@@ -20992,13 +20992,13 @@ System should reboot normally without triggering power cut.
 ## CLI for the daemon
 ```bash
 # help
-python3 /home/orangepi/argo/launch/argo_power_control.py --help
+python3 ~/argo/launch/argo_power_control.py --help
 # run normally
-sudo /home/orangepi/argo/launch/argo_power_control.py
+sudo ~/argo/launch/argo_power_control.py
 # test mode (no shutdown)
-sudo /home/orangepi/argo/launch/argo_power_control.py --test-mode
+sudo ~/argo/launch/argo_power_control.py --test-mode
 # custom threshold
-sudo /home/orangepi/argo/launch/argo_power_control.py --threshold 2.0
+sudo ~/argo/launch/argo_power_control.py --threshold 2.0
 ```
 
 ## GPIO quick refs (H616)
@@ -46737,7 +46737,7 @@ sudo systemctl status argo-power-control.service
 ### **2. Critical Battery Simulation (Safe):**
 ```bash
 # Test the halt sequence without actually halting
-sudo python3 /home/orangepi/argo/power_control/argo_power_control.py --simulate-critical-battery
+sudo python3 ~/argo/power_control/argo_power_control.py --simulate-critical-battery
 ```
 
 ### **3. Real Critical Battery Testing:**
@@ -46766,6 +46766,6 @@ sudo systemctl status argo-power-control.service
 
 ```shellscript
 # Test the halt sequence without actually halting
-sudo python3 /home/orangepi/argo/power_control/argo_power_control.py --simulate-critical-battery
+sudo python3 ~/argo/power_control/argo_power_control.py --simulate-critical-battery
 ```
 

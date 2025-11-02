@@ -13,7 +13,7 @@ sudo apt install -y ros-humble-rosbridge-suite
 ### 2. Start Argo with Foxglove support
 ```bash
 # Option A: Use the combined launch file (recommended)
-ros2 launch /home/orangepi/argo/foxglove/argo_with_foxglove_launch.py
+ros2 launch ~/argo/foxglove/argo_with_foxglove_launch.py
 
 # Option B: Start argo normally, then rosbridge separately
 make start  # or your usual argo startup
@@ -90,7 +90,7 @@ ros2 launch rosbridge_server rosbridge_websocket_launch.xml
 
 Run the test publisher to verify Foxglove can receive data:
 ```bash
-ros2 run argo /home/orangepi/argo/foxglove/test_connection.py
+ros2 run argo ~/argo/foxglove/test_connection.py
 ```
 
 You should see a "foxglove_test" topic in Foxglove with incrementing messages.
@@ -141,7 +141,7 @@ You can add Foxglove support to your existing Makefile aliases:
 
 ```bash
 # Add to your ~/.bash_aliases after running 'make aliases'
-alias af='ros2 launch /home/orangepi/argo/foxglove/argo_with_foxglove_launch.py'
+alias af='ros2 launch ~/argo/foxglove/argo_with_foxglove_launch.py'
 alias afb='ros2 launch rosbridge_server rosbridge_websocket_launch.xml'
 ```
 

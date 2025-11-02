@@ -1,53 +1,36 @@
 {
   "configById": {
-    "map!argo_sailing": {
-      "center": {
-        "lat": 47.37691174326479,
-        "lon": 8.540983248587132
-      },
-      "customTileUrl": "",
-      "disabledTopics": [],
-      "followTopic": "/fix",
-      "layer": "map",
-      "topicColors": {
-        "/fix": "rgba(0, 255, 0, 0.8)",
-        "/gps_velocity": "rgba(255, 255, 0, 0.8)",
-        "/sailing_waypoints": "rgba(0, 255, 0, 0.8)",
-        "/sailing_boundaries": "rgba(0, 0, 255, 0.8)",
-        "/sailing_hazards": "rgba(255, 0, 0, 0.8)"
-      },
-      "zoomLevel": 18,
-      "maxNativeZoom": 18,
-      "topicConfig": {
-        "/fix": {
-          "pointDisplayMode": "pin",
-          "historyMode": "all",
-          "pointSize": 8
-        },
-        "/gps_velocity": {
-          "pointDisplayMode": "arrow",
-          "historyMode": "all",
-          "pointSize": 6
-        }
-      },
-      "followFrame": ""
-    },
     "3D!argo_enhanced": {
       "cameraState": {
-        "distance": 2000,
-        "perspective": true,
-        "phi": 60,
-        "target": [0, 0, 0],
-        "targetOffset": [0, 0, 0],
-        "targetOrientation": [0, 0, 0, 1],
-        "thetaOffset": 45,
+        "perspective": false,
+        "distance": 201.12578754291815,
+        "phi": 138.33327603500626,
+        "thetaOffset": 65.21598272139296,
+        "targetOffset": [
+          142.9759226267261,
+          10.053372041257457,
+          0.000004014757806467642
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
         "fovy": 45,
         "near": 0.5,
         "far": 10000
       },
-      "followMode": "follow-pose",
+      "followMode": "follow-none",
       "followTf": "base_link",
-      "scene": {},
+      "scene": {
+        "labelScaleFactor": 0.2
+      },
       "transforms": {},
       "topics": {
         "/visualization_marker_array": {
@@ -103,8 +86,16 @@
           "divisions": 10,
           "lineWidth": 1,
           "color": "#248eff",
-          "position": [0, 0, 0],
-          "rotation": [0, 0, 0]
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ]
         },
         "axes": {
           "visible": true,
@@ -116,8 +107,16 @@
           "size": 5,
           "lineWidth": 2,
           "color": "#ffffff",
-          "position": [0, 0, 0],
-          "rotation": [0, 0, 0]
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ]
         }
       },
       "publish": {
@@ -130,6 +129,32 @@
         "poseEstimateThetaDeviation": 0.26179939
       },
       "imageMode": {}
+    },
+    "map!argo_sailing": {
+      "center": {
+        "lat": 47.39841716666667,
+        "lon": 8.550806
+      },
+      "customTileUrl": "",
+      "disabledTopics": [],
+      "followTopic": "/fix",
+      "layer": "map",
+      "topicColors": {},
+      "zoomLevel": 19,
+      "maxNativeZoom": 18,
+      "topicConfig": {
+        "/fix": {
+          "historyMode": "all",
+          "pointDisplayMode": "dot",
+          "pointSize": 10
+        },
+        "/lora/fix": {
+          "historyMode": "all",
+          "pointDisplayMode": "dot",
+          "pointSize": 6
+        }
+      },
+      "followFrame": ""
     },
     "Plot!gps_data": {
       "paths": [
@@ -155,25 +180,49 @@
       "xAxisVal": "timestamp",
       "sidebarDimension": 240
     },
+    "Plot!2lg2on1": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/compass.z",
+          "enabled": true,
+          "color": "#4e98e2",
+          "id": "da4c8931-d6eb-428e-98ac-375c0f7b8148",
+          "label": "deg (0=N)"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": false,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "Compass heading"
+    },
     "Plot!wind_data": {
       "paths": [
         {
           "timestampMethod": "receiveTime",
           "value": "/anem_speed_angle_temp.x",
           "enabled": true,
-          "color": "#00e676"
+          "color": "#00e676",
+          "label": "speed (m/s)"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/anem_speed_angle_temp.y",
           "enabled": true,
-          "color": "#ff1744"
+          "color": "#ff1744",
+          "label": "angle (deg CW from top)"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/anem_speed_angle_temp.z",
           "enabled": true,
-          "color": "#2979ff"
+          "color": "#2979ff",
+          "label": "air temp (C)"
         }
       ],
       "showXAxisLabels": true,
@@ -183,7 +232,8 @@
       "isSynced": true,
       "xAxisVal": "timestamp",
       "showPlotValuesInLegend": false,
-      "sidebarDimension": 240
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "Wind"
     },
     "Plot!control_data": {
       "paths": [
@@ -191,31 +241,36 @@
           "timestampMethod": "receiveTime",
           "value": "/rudder_sail_cmd.x",
           "enabled": true,
-          "color": "#d50000"
+          "color": "#d50000",
+          "label": "Rudder (+ starboard)"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/rudder_sail_cmd.y",
           "enabled": true,
-          "color": "#00c853"
+          "color": "#00c853",
+          "label": "Sail (+ in)"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/rudder_sail_radio.x",
           "enabled": true,
-          "color": "#2962ff"
+          "color": "#2962ff",
+          "label": "Radio rudder"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/rudder_sail_radio.y",
           "enabled": true,
-          "color": "#ff6d00"
+          "color": "#ff6d00",
+          "label": "Radio Sail"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/human_controlled.data",
           "enabled": true,
-          "color": "#aa00ff"
+          "color": "#aa00ff",
+          "label": "Human controlled"
         }
       ],
       "showXAxisLabels": true,
@@ -225,7 +280,21 @@
       "isSynced": true,
       "xAxisVal": "timestamp",
       "showPlotValuesInLegend": false,
-      "sidebarDimension": 240
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "Rudder/Sail/Radio"
+    },
+    "Gauge!battery": {
+      "path": "/battery_remaining_pct.data",
+      "minValue": 0,
+      "maxValue": 100,
+      "colorMap": "red-yellow-green",
+      "colorMode": "colormap",
+      "gradient": [
+        "#0000ff",
+        "#ff00ff"
+      ],
+      "reverse": false,
+      "reverseDirection": false
     },
     "Plot!imu_data": {
       "paths": [
@@ -287,25 +356,29 @@
           "timestampMethod": "receiveTime",
           "value": "/battery_voltage.data",
           "enabled": true,
-          "color": "#00c853"
+          "color": "#00c853",
+          "label": "Batt volt (V)"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/battery_remaining_pct.data",
           "enabled": true,
-          "color": "#ff1744"
+          "color": "#ff1744",
+          "label": "Batt remaining (%)"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/sail_current.data",
           "enabled": true,
-          "color": "#ff6d00"
+          "color": "#ff6d00",
+          "label": "Sail winch current (A)"
         },
         {
           "timestampMethod": "receiveTime",
           "value": "/saltwater_voltage.data",
           "enabled": true,
-          "color": "#2962ff"
+          "color": "#2962ff",
+          "label": "Saltwater (V)"
         }
       ],
       "showXAxisLabels": true,
@@ -315,24 +388,8 @@
       "isSynced": true,
       "xAxisVal": "timestamp",
       "showPlotValuesInLegend": false,
-      "sidebarDimension": 240
-    },
-    "Gauge!battery": {
-      "path": "/battery_remaining_pct.data",
-      "minValue": 0,
-      "maxValue": 100,
-      "colorMap": "red-yellow-green",
-      "colorMode": "colormap",
-      "gradient": ["#0000ff", "#ff00ff"],
-      "reverse": false,
-      "reverseDirection": false
-    },
-    "Text!status": {
-      "path": "/human_controlled.data",
-      "color": "#ffffff",
-      "backgroundColor": "rgba(0, 0, 0, 0.5)",
-      "fontSize": 24,
-      "fontFamily": "monospace"
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "Health"
     }
   },
   "globalVariables": {},
@@ -352,7 +409,11 @@
       "direction": "column",
       "first": {
         "direction": "row",
-        "first": "Plot!gps_data",
+        "first": {
+          "first": "Plot!gps_data",
+          "second": "Plot!2lg2on1",
+          "direction": "column"
+        },
         "second": "Plot!wind_data"
       },
       "second": {
@@ -366,10 +427,11 @@
           "direction": "column",
           "first": "Plot!imu_data",
           "second": "Plot!power_data"
-        }
+        },
+        "splitPercentage": 48.300837942932255
       },
       "splitPercentage": 50
     },
-    "splitPercentage": 60
+    "splitPercentage": 57.027463651050084
   }
 }

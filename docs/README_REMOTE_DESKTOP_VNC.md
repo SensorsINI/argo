@@ -28,7 +28,7 @@ sudo apt install tightvncserver
 The VNC server is configured to run on display `:2` with Xfce4 desktop environment.
 
 **Configuration files:**
-- **Startup script**: `/home/orangepi/argo/scripts/start_vnc_xfce.sh`
+- **Startup script**: `~/argo/scripts/start_vnc_xfce.sh`
 - **VNC startup**: `/home/orangepi/.vnc/xstartup`
 - **Password file**: `/home/orangepi/.vnc/passwd`
 
@@ -299,14 +299,14 @@ DISPLAY=:2 xfce4-panel &
 ### Monitoring and Control
 1. Connect to VNC desktop
 2. Open system monitor to check resources
-3. Use Argo GUI: `sudo python3 /home/orangepi/argo/launch/argo_gui.py`
+3. Use Argo GUI: `sudo python3 ~/argo/launch/argo_gui.py`
 4. Monitor logs: `journalctl -u argo-launch.service -f`
 5. Check system status: `argo_status`
 
 ### File Management
 1. Connect to VNC desktop
 2. Open Thunar file manager
-3. Navigate to `/home/orangepi/argo/`
+3. Navigate to `~/argo/`
 4. Edit configuration files
 5. Manage data logs and recordings
 

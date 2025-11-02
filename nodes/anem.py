@@ -70,9 +70,6 @@
 #   x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
 #   y: differential pressure from I2C_CW (0x22, 120°) in Pascals
 #   z: differential pressure from I2C_CCW (0x23, 240°) in Pascals
-# /anem_health (std_msgs/Bool):
-#   data: true when node is healthy, false when unhealthy or shutting down
-#   Published only on state changes, startup, and shutdown
 
 # Import the shared pause service
 import sys
@@ -87,11 +84,13 @@ import argcomplete
 import numpy as np
 import time
 import smbus
-# Removed toggle_pause_service import - anem node doesn't need pause functionality
+# Import ArgoBaseNode for standardized functionality
+from argo_base_node import ArgoBaseNode
 import rclpy
-from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Vector3
 from std_msgs.msg import Bool, Float32
+from std_srvs.srv import Trigger
 
 # I2C sensor addresses
 I2C_CTR = 0x21  # Center sensor (0° - front/back)
@@ -303,14 +302,9 @@ def calculate_speed_mps(dp_ctr, dp_cw, dp_ccw, temp_celsius):
     return wind_speed
 
 
-class AnemNode(Node):
-    def __init__(self, debug_mode: bool = False):
+class AnemNode(ArgoBaseNode):
+    def __init__(self, debug_mode: bool = False, debug_visually: bool = False):
         super().__init__('anem_node')
-
-        # Initialize pause service with namespaced name
-        # Removed pause service - anem node doesn't need pause functionality
-        # Track pause state to manage sensor sleep/wake transitions
-        self._prev_paused = False
 
         self.get_logger().info('Initializing Anemometer node...')
 
@@ -321,12 +315,9 @@ class AnemNode(Node):
             Vector3, 'anem_speed_angle_temp', 10)
         self.pub_temperature_air = self.create_publisher(
             Float32, 'temperature_air', 10)
-        self.pub_health = self.create_publisher(
-            Bool, 'anem_health', 10)
-        self.health_status = False  # Track current health status
 
         # Visual debug mode flag
-        self.debug_visually = debug_mode
+        self.debug_visually = debug_visually
 
         # CRC error logging throttling
         self._last_crc_error_log_time = 0.0
@@ -339,42 +330,28 @@ class AnemNode(Node):
         self._last_recovery_attempt_time = 0.0
         self._recovery_attempt_count = 0
         
+        # Add a throttle for the "no valid samples" warning
+        self._last_no_valid_samples_log_time = 0.0
+
         # Temperature publishing at low rate (1 per minute)
         self._last_temperature_publish_time = 0.0
         self._temperature_publish_interval = 60.0  # 60 seconds
 
         # I2C setup
-        # CTR is center (0° - front/back), CW is 120° from front, CCW is 240° from front (looking down on mast)
         self.i2cAddr = (I2C_CTR, I2C_CW, I2C_CCW)
         self.bus = None
         self.sensors_ready = False
         self._last_error_log_time = 0.0
+        self.retry_timer = None
+        self.main_timer = None
 
-        try:
-            self.bus = smbus.SMBus(0)  # The default i2c bus
-            self.get_logger().info('Opened i2c SMBus')
-        except FileNotFoundError:
-            self.get_logger().error("CRITICAL: I2C bus not found. Is I2C enabled? Exiting.")
-            self._publish_health_status(False)
-            sys.exit(1)
-
-        if self.bus is not None:
-            if not self.setup_sensors():
-                self.get_logger().fatal("FATAL: Failed to setup anemometer sensors. Exiting.")
-                self._publish_health_status(False)
-                sys.exit(1)
-            else:
-                self.sensors_ready = True
-
-        # ROS2 timer runs at publishing rate - reads multiple samples per callback
-        self.timer = self.create_timer(
-            1.0 / PUBLISHING_RATE, self.publish_callback)
-
-        # Report actual sensor status
-        if self.sensors_ready:
-            self.get_logger().info("Initialization of anemometer wind sensor completed successfully.")
-            # Publish initial health status
-            self._publish_health_status(True)
+        # Attempt initial sensor setup
+        if not self._initial_setup():
+            self._start_retry_timer()
+        else:
+            # If setup is successful, start the main publisher timer
+            self.main_timer = self.create_timer(
+                1.0 / PUBLISHING_RATE, self.publish_callback)
 
         # Visual mode init
         self._vis_initialized = False
@@ -386,18 +363,58 @@ class AnemNode(Node):
         if self.debug_visually:
             self._init_visual()
 
-    def _publish_health_status(self, is_healthy: bool):
-        """Publish health status and update internal state"""
-        if self.health_status != is_healthy:
-            self.health_status = is_healthy
-            health_msg = Bool()
-            health_msg.data = is_healthy
-            self.pub_health.publish(health_msg)
+    def _initial_setup(self):
+        """Attempts to initialize I2C bus and sensors, returns True on success."""
+        try:
+            if not self.bus:
+                self.bus = smbus.SMBus(0)
+                self.get_logger().info('Opened I2C SMBus')
+        except FileNotFoundError:
+            # Only log this error on the first attempt in a retry cycle
+            if not hasattr(self, '_is_first_retry_log') or self._is_first_retry_log:
+                self.get_logger().error("I2C bus not found. Is I2C enabled?")
+            return False
 
-            if is_healthy:
-                self.get_logger().info("Anemometer health status: HEALTHY")
+        if self.bus:
+            if self.setup_sensors():
+                self.sensors_ready = True
+                self.set_healthy("Sensors operating normally.")
+                return True
             else:
-                self.get_logger().warn("Anemometer health status: FAILED")
+                # Only log this error on the first attempt in a retry cycle
+                if not hasattr(self, '_is_first_retry_log') or self._is_first_retry_log:
+                    # Pass log_on_fail=True to get detailed error on first attempt
+                    self.setup_sensors(log_on_fail=True)
+                return False
+        return False
+
+    def _start_retry_timer(self):
+        """Starts a timer to periodically retry sensor setup."""
+        if self.retry_timer is None or self.retry_timer.is_canceled():
+            self.get_logger().info("Starting sensor setup retry timer (0.1 Hz).")
+            self.retry_timer = self.create_timer(10.0, self._retry_setup_callback)
+            self._is_first_retry_log = True
+            self._last_retry_log_time = 0.0
+
+    def _retry_setup_callback(self):
+        """Callback for the retry timer."""
+        current_time = time.time()
+        log_now = self._is_first_retry_log or (current_time - self._last_retry_log_time > 60.0)
+
+        if log_now:
+            self.get_logger().warn("Attempting to connect to anemometer sensors...")
+            self._last_retry_log_time = current_time
+        
+        if self._initial_setup():
+            self.get_logger().info("Successfully connected to anemometer sensors after retries.")
+            self._is_first_retry_log = True # Reset for next potential failure
+            if self.retry_timer:
+                self.retry_timer.cancel()
+            self.main_timer = self.create_timer(1.0 / PUBLISHING_RATE, self.publish_callback)
+        else:
+            self.set_unhealthy("Sensors not detected on I2C bus. Retrying...")
+            if log_now:
+                self._is_first_retry_log = False
 
     def _init_visual(self):
         # Setup terminal for in-place drawing (no scrolling)
@@ -514,7 +531,7 @@ class AnemNode(Node):
         except Exception:
             pass
 
-    def setup_sensors(self):
+    def setup_sensors(self, log_on_fail=False):
         # First try to communicate with sensors to see if they exist
         # SDP3x sensors don't respond to read_byte(), so we use write_i2c_block_data instead
         sensors_detected = []
@@ -528,10 +545,13 @@ class AnemNode(Node):
                 pass  # Sensor not detected, continue checking others
 
         if sensors_detected:
-            self.get_logger().info(
-                f'Stopping existing continuous measurements on detected sensors: {sensors_detected}')
+            # Only log this if we are also logging failures, to reduce noise
+            if log_on_fail:
+                self.get_logger().info(
+                    f'Stopping existing continuous measurements on detected sensors: {sensors_detected}')
         else:
-            self.get_logger().warn('Wind sensor not detected on I2C bus')
+            if log_on_fail:
+                self.get_logger().warn('Wind sensor not detected on I2C bus')
             return False
 
         for a in self.i2cAddr:
@@ -539,8 +559,9 @@ class AnemNode(Node):
                 # Stop any cont measurement
                 self.bus.write_i2c_block_data(a, 0x3F, [0xF9])
             except IOError as e:
-                self.get_logger().error(
-                    f"Failed to communicate with sensor at address {hex(a)}: {e}")
+                if log_on_fail:
+                    self.get_logger().error(
+                        f"Failed to communicate with sensor at address {hex(a)}: {e}")
                 return False
 
         time.sleep(0.8)
@@ -563,16 +584,18 @@ class AnemNode(Node):
                 # time.sleep(0.1)
                 self.bus.write_i2c_block_data(a, 0x36, [0x15])
             except IOError as e:
-                self.get_logger().error(
-                    f"Failed to start measurement on sensor at address {hex(a)}: {e}")
+                if log_on_fail:
+                    self.get_logger().error(
+                        f"Failed to start measurement on sensor at address {hex(a)}: {e}")
                 return False
         time.sleep(0.1)
 
         return True
 
-    def _recover_sensors_with_reset(self):
+    def _recover_sensors_with_reset(self, log_on_fail=False):
         """Attempt sensor recovery with soft reset for severe I2C issues"""
-        self.get_logger().info("Attempting sensor recovery with soft reset...")
+        if log_on_fail:
+            self.get_logger().info("Attempting sensor recovery with soft reset...")
 
         try:
             # First, try to stop any existing measurements
@@ -594,10 +617,11 @@ class AnemNode(Node):
             time.sleep(0.2)
 
             # Now try normal setup
-            return self.setup_sensors()
+            return self.setup_sensors(log_on_fail=log_on_fail)
 
         except Exception as e:
-            self.get_logger().error(f"Sensor recovery with reset failed: {e}")
+            if log_on_fail:
+                self.get_logger().error(f"Sensor recovery with reset failed: {e}")
             return False
 
     def _read_sensor_data(self):
@@ -657,16 +681,16 @@ class AnemNode(Node):
         current_time = time.time()
         self._consecutive_io_errors += 1
 
-        # Log error with throttling (max once per 5 seconds)
-        if current_time - self._last_io_error_log_time >= 5.0:
+        # Log error with throttling (max once per 30 seconds)
+        if current_time - self._last_io_error_log_time >= 60.0:
             self.get_logger().warn(
-                f"Transient I2C read error (attempt {self._consecutive_io_errors}): {error}")
+                f"Transient I2C read error: {error} (Total consecutive errors: {self._consecutive_io_errors})")
             self._last_io_error_log_time = current_time
 
         # Mark node as unhealthy after first IO error
         if self.node_healthy:
             self.node_healthy = False
-            self._publish_health_status(False)
+            self.set_unhealthy("I2C read error")
             self.get_logger().warn(
                 "Node health set to UNHEALTHY due to I2C errors. Switching to 1Hz retry mode.")
             # Switch to low-frequency retry mode
@@ -674,9 +698,9 @@ class AnemNode(Node):
 
     def _switch_to_retry_mode(self):
         """Switch timer to low-frequency retry mode (1Hz)"""
-        if hasattr(self, 'timer'):
-            self.timer.destroy()
-        self.timer = self.create_timer(1.0, self.publish_callback)
+        if hasattr(self, 'main_timer') and self.main_timer:
+            self.main_timer.destroy()
+        self.main_timer = self.create_timer(1.0, self.publish_callback)
         self.get_logger().info("Switched to 1Hz retry mode for I2C recovery")
 
         # Reset consecutive error counter for recovery tracking
@@ -684,9 +708,9 @@ class AnemNode(Node):
 
     def _switch_to_normal_mode(self):
         """Switch timer back to normal frequency (3Hz)"""
-        if hasattr(self, 'timer'):
-            self.timer.destroy()
-        self.timer = self.create_timer(
+        if hasattr(self, 'main_timer') and self.main_timer:
+            self.main_timer.destroy()
+        self.main_timer = self.create_timer(
             1.0 / PUBLISHING_RATE, self.publish_callback)
         self.get_logger().info("Switched back to normal 3Hz mode - I2C communication recovered")
 
@@ -703,31 +727,34 @@ class AnemNode(Node):
 
             self._recovery_attempt_count += 1
             self._last_recovery_attempt_time = current_time
+            
+            # Throttle recovery attempt logging
+            log_now = (self._recovery_attempt_count == 1) or (current_time - self._last_recovery_log_time > 60.0)
+            if not hasattr(self, '_last_recovery_log_time'):
+                self._last_recovery_log_time = 0.0
 
-            # Re-initialize sensors after I2C recovery
-            self.get_logger().info(
-                f"Attempting sensor re-initialization (attempt {self._recovery_attempt_count})...")
-            if self.setup_sensors():
+            if log_now:
+                self.get_logger().info(f"Attempting sensor re-initialization (attempt {self._recovery_attempt_count})...")
+                self._last_recovery_log_time = current_time
+
+            if self.setup_sensors(log_on_fail=log_now):
                 self.node_healthy = True
-                self._publish_health_status(True)
+                self.set_healthy("I2C communication recovered")
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0  # Reset counter on success
-                self.get_logger().info(
-                    f"Sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
-            else:
+                self.get_logger().info(f"Sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
+            
+            elif log_now: # Only log failures if we logged the attempt
                 # Try more aggressive recovery with soft reset
-                self.get_logger().warn(
-                    f"Normal sensor re-initialization failed (attempt {self._recovery_attempt_count}), trying soft reset recovery...")
-                if self._recover_sensors_with_reset():
+                self.get_logger().warn(f"Normal sensor re-initialization failed, trying soft reset recovery...")
+                if self._recover_sensors_with_reset(log_on_fail=log_now):
                     self.node_healthy = True
-                    self._publish_health_status(True)
+                    self.set_healthy("I2C communication recovered after soft reset")
                     self._switch_to_normal_mode()
                     self._recovery_attempt_count = 0  # Reset counter on success
-                    self.get_logger().info(
-                        f"Sensor recovery with soft reset successful after {self._consecutive_io_errors} I2C errors")
+                    self.get_logger().info(f"Sensor recovery with soft reset successful after {self._consecutive_io_errors} I2C errors")
                 else:
-                    self.get_logger().error(
-                        f"All sensor recovery attempts failed (attempt {self._recovery_attempt_count}), staying in retry mode")
+                    self.get_logger().error(f"All sensor recovery attempts failed, staying in retry mode")
                     # Stay in retry mode and try again later
 
     def publish_callback(self):
@@ -757,8 +784,11 @@ class AnemNode(Node):
 
             # Check if we got any valid samples
             if not dp_samples:
-                self.get_logger().warn("No valid sensor samples in this cycle, skipping publish")
-                self._publish_health_status(False)
+                current_time = time.time()
+                if current_time - self._last_no_valid_samples_log_time > 60.0:
+                    self.get_logger().warn("No valid sensor samples in this cycle, skipping publish. Will retry.")
+                    self._last_no_valid_samples_log_time = current_time
+                self.set_unhealthy("No valid sensor samples")
                 return
 
             # Average differential pressures across all valid samples
@@ -799,7 +829,7 @@ class AnemNode(Node):
                 self._last_temperature_publish_time = current_time
 
             # Publish health status as healthy
-            self._publish_health_status(True)
+            self.set_healthy("Sensors operating normally.")
 
             self.get_logger().debug(
                 f"Anemometer: speed(m/s)={speed_mps:.2f} angle(deg)={angle_deg:.1f} "
@@ -813,7 +843,7 @@ class AnemNode(Node):
 
         except Exception as e:
             self.get_logger().error(f"Error in publish callback: {e}")
-            self._publish_health_status(False)
+            self.set_unhealthy(f"Error in publish callback: {e}")
 
     def _enter_sleep_mode(self):
         """Put all SDP3x sensors into sleep mode (command 0x3677).
@@ -847,7 +877,7 @@ class AnemNode(Node):
             # Any valid write wakes the sensor; setup_sensors configures 0x3615
             if self.setup_sensors():
                 self.node_healthy = True
-                self._publish_health_status(True)
+                self.set_healthy("Sensors reinitialized after pause")
                 self.get_logger().info("SDP3x sensors reinitialized after pause (continuous measurement)")
             else:
                 self.get_logger().error("Failed to reinitialize SDP3x sensors after pause")
@@ -860,10 +890,7 @@ class AnemNode(Node):
         self.get_logger().info('Stopping existing continuous measurements on shutdown.')
 
         # Publish health=false on shutdown
-        try:
-            self._publish_health_status(False)
-        except Exception:
-            pass  # Ignore errors during shutdown publishing
+        self.set_unhealthy("Node shutting down")
 
         if self.debug_visually:
             self._teardown_visual()
@@ -879,11 +906,12 @@ class AnemNode(Node):
 
 
 def main(args=None):
-    # Parse CLI args for this script first, pass the remainder to ROS 2
-    parser = argparse.ArgumentParser(
-        description='Anemometer Node for ROS2 - Wind Speed and Direction Sensor',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+    # This is a bit custom, so not using ArgoBaseNode.run_node directly
+    node = None
+    try:
+        parser = ArgoBaseNode.create_standard_parser(
+            'Anemometer Node for ROS2 - Wind Speed and Direction Sensor',
+            epilog="""
 This ROS2 node reads three Sensirion SDP3x differential pressure sensors over I2C
 to determine wind speed and direction using directional wind meter principles.
 
@@ -933,42 +961,43 @@ Topics Published:
     x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
     y: differential pressure from I2C_CW (0x22, 120°) in Pascals  
     z: differential pressure from I2C_CCW (0x23, 240°) in Pascals
-  /anem_health (std_msgs/Bool):
+  /anem_node_health (std_msgs/Bool):
     data: true when node is healthy, false when unhealthy or shutting down
     Published only on state changes, startup, and shutdown
         """
-    )
-    parser.add_argument('--debug', action='store_true',
-                        help='Log sensor values to the terminal')
-    parser.add_argument('--debug_visually', action='store_true',
-                        help='Show test-mode ASCII visualization of wind vector')
-    parsed_args, ros_args = parser.parse_known_args(args)
+        )
+        parser.add_argument('--debug_visually', action='store_true',
+                            help='Show test-mode ASCII visualization of wind vector')
+        
+        parsed_args, unknown_args = parser.parse_known_args(args)
+        argcomplete.autocomplete(parser)
 
-    rclpy.init(args=ros_args)
-    anem_node = AnemNode(debug_mode=parsed_args.debug)
+        rclpy.init(args=unknown_args)
 
-    if parsed_args.debug_visually:
-        # Suppress routine logs to avoid interfering with visual display
-        anem_node.get_logger().set_level(LoggingSeverity.WARN)
-    elif parsed_args.debug:
-        anem_node.get_logger().set_level(LoggingSeverity.DEBUG)
-        anem_node.get_logger().info('Debug logging enabled; sensor values will be printed.')
+        # Pass debug_visually to constructor
+        node = AnemNode(debug_mode=parsed_args.debug, 
+                        debug_visually=parsed_args.debug_visually)
 
-    if rclpy.ok():
-        try:
-            rclpy.spin(anem_node)
-        except KeyboardInterrupt:
-            print("\nKeyboard interrupt, shutting down anemometer node.")
-        except rclpy.executors.ExternalShutdownException:
-            print("External shutdown signal received, exiting gracefully.")
-        finally:
-            try:
-                # Cleanup is handled in destroy_node
-                anem_node.destroy_node()
-            except Exception:
-                pass  # Ignore errors during shutdown
-            # rclpy.shutdown() is not called here to avoid "context already shutdown" error
-            # when rclpy.spin is interrupted.
+        if parsed_args.debug_visually:
+            # Suppress routine logs to avoid interfering with visual display
+            node.get_logger().set_level(LoggingSeverity.WARN)
+        elif parsed_args.debug:
+            node.get_logger().set_level(LoggingSeverity.DEBUG)
+            node.get_logger().info('Debug logging enabled; sensor values will be printed.')
+        
+        rclpy.spin(node)
+
+    except KeyboardInterrupt:
+        if node:
+            node.get_logger().info("\nKeyboard interrupt, shutting down anemometer node.")
+    except ExternalShutdownException:
+        if node:
+            node.get_logger().info("External shutdown signal received, exiting gracefully.")
+    finally:
+        if node:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

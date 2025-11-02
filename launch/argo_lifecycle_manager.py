@@ -239,7 +239,7 @@ class ArgoLifecycleManager:
         health_services = {
             'gps.py': '/gps_node/health',
             'lora.py': '/lora_node/health', 
-            'anem.py': '/anemometer_node/health',
+            'anem.py': '/anem_node/health',
             'argo_battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',
@@ -250,12 +250,12 @@ class ArgoLifecycleManager:
         
         # Also keep health topics for backward compatibility
         health_topics = {
-            'gps.py': '/gps_health',
-            'lora.py': '/lora_health',  # Updated to use ArgoBaseNode health topic
-            'anem.py': '/anem_health',
-            'argo_battery_water.py': '/battery_water_health',
-            'rudder_sail_radio.py': '/rudder_sail_radio_health',
-            'temp_monitor.py': '/temp_monitor_health',
+            'gps.py': '/gps_node_health',
+            'lora.py': '/lora_node_health',
+            'anem.py': '/anem_node_health',
+            'argo_battery_water.py': '/battery_water_node_health',
+            'rudder_sail_radio.py': '/rudder_sail_radio_node_health',
+            'temp_monitor.py': '/temp_monitor_node_health',
             'bno085.py': '/imu_health'  # BNO085 IMU health status
         }
         
@@ -292,7 +292,7 @@ class ArgoLifecycleManager:
         health_services = {
             'gps.py': '/gps_node/health',
             'lora.py': '/lora_node/health', 
-            'anem.py': '/anemometer_node/health',
+            'anem.py': '/anem_node/health',
             'argo_battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',
@@ -1183,6 +1183,86 @@ class ArgoLifecycleManager:
             # If we can't check, assume not recording to be safe
             return False
     
+    def _check_simulation_prerequisites(self) -> bool:
+        """Check for simulation prerequisites and guide user if missing."""
+        print("🔍 Checking simulation prerequisites...")
+        
+        # 1. Check for sailboat-playground submodule
+        submodule_path = os.path.join(self.argo_dir, "simulator", "sailboat-playground")
+        if not os.path.exists(os.path.join(submodule_path, ".git")):
+            print("❌ sailboat-playground submodule not found!")
+            print("   The simulator depends on this submodule.")
+            
+            try:
+                response = input("   Would you like to initialize it now? (y/N): ").lower()
+                if response == 'y':
+                    print("🔄 Initializing submodule...")
+                    # Use absolute path for make to avoid ambiguity
+                    # Use -C to run make in the correct directory.
+                    subprocess.run(
+                        ['make', '-C', self.argo_dir, 'submodule-init'], check=True)
+                    print("✅ Submodule initialized successfully!")
+                else:
+                    print("   Aborting. Please run 'make submodule-init' to proceed.")
+                    return False
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"   Error initializing submodule: {e}")
+                print("   Please run 'make submodule-init' manually.")
+                return False
+
+        # 2. Check for foxglove-bridge
+        try:
+            ros_distro = os.environ.get("ROS_DISTRO")
+            if not ros_distro:
+                print("⚠️  ROS_DISTRO not set, cannot check for foxglove-bridge.")
+            else:
+                subprocess.run(
+                    ['dpkg', '-l', f'ros-{ros_distro}-foxglove-bridge'], 
+                    check=True, capture_output=True, text=True)
+                print("✅ foxglove-bridge is installed.")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("❌ foxglove-bridge is not installed!")
+            print("   The simulation uses foxglove-bridge for visualization.")
+            try:
+                response = input("   Would you like to install it now? (y/N): ").lower()
+                if response == 'y':
+                    print("🔧 Installing foxglove-bridge...")
+                    subprocess.run(
+                        ['make', '-C', self.argo_dir, 'install-foxglove-bridge'], 
+                        check=True)
+                    print("✅ foxglove-bridge installed successfully!")
+                else:
+                    print("   Aborting. Please run 'make install-foxglove-bridge' to proceed.")
+                    return False
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"   Error installing foxglove-bridge: {e}")
+                print("   Please run 'make install-foxglove-bridge' manually.")
+                return False
+                
+        # 3. Check for Python dependencies
+        try:
+            import rclpy  # Check a core ROS2 dependency
+        except ImportError:
+            print("❌ Python dependencies (rclpy) not found!")
+            print("   The simulation requires Python packages from requirements.txt.")
+            try:
+                response = input("   Would you like to install them now? (y/N): ").lower()
+                if response == 'y':
+                    print("🐍 Installing Python dependencies...")
+                    subprocess.run(
+                        ['make', '-C', self.argo_dir, 'install-python-deps'],
+                        check=True)
+                    print("✅ Python dependencies installed successfully!")
+                else:
+                    print("   Aborting. Please run 'make install-python-deps' to proceed.")
+                    return False
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                print(f"   Error installing Python dependencies: {e}")
+                print("   Please run 'make install-python-deps' manually.")
+                return False
+                
+        return True
+
     def simulate_local(self) -> bool:
         """Launch Argo in local simulation mode."""
         return self._simulate(mode='local')
@@ -1219,6 +1299,10 @@ class ArgoLifecycleManager:
         """
         self.simulation_mode = mode
         print(f"🚢 Starting Argo in SIMULATION mode ({mode.upper()})...")
+
+        if not self._check_simulation_prerequisites():
+            return False
+
         if mode == 'local':
             print("Local simulation runs the simulator on this machine.")
         else:

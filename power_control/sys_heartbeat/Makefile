@@ -45,8 +45,8 @@ install: $(DTBO_FILE) install_service
 # Install the permissions service
 install_service:
 	@echo "--- Installing permissions service ---"
-	sudo cp $(PWD)/argo-ph4-led-postinit.sh /usr/local/bin/
-	sudo cp $(PWD)/argo-ph4-led-perms.service /etc/systemd/system/
+	sudo cp ./argo-ph4-led-postinit.sh /usr/local/bin/
+	sudo cp ./argo-ph4-led-perms.service /etc/systemd/system/
 	sudo systemctl daemon-reload
 	sudo systemctl enable argo-ph4-led-perms.service
 	@echo "Permissions service installed and enabled."

@@ -71,11 +71,12 @@ check_deps:
 # Install systemd service
 install_service:
 	@echo "📋 Installing argo power control systemd service..."
-	@echo "🔧 Configuring service for user: $(INSTALL_USER)"
+	@echo "🔧 Configuring service for user: $(INSTALL_USER) in home: $(INSTALL_HOME)"
 	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
 	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
 	    -e "s#^WorkingDirectory=.*#WorkingDirectory=$(INSTALL_HOME)/argo/power_control#" \
-	    -e "s#/home/orangepi#$(INSTALL_HOME)#g" \
+	    -e "s#^Environment=HOME=.*#Environment=HOME=$(INSTALL_HOME)#" \
+	    -e "s#/home/orangepi/argo#$(INSTALL_HOME)/argo#g" \
 	    $(SCRIPT_DIR)/$(POWER_SERVICE_FILE) > /tmp/$(POWER_SERVICE_FILE)
 	@sudo cp /tmp/$(POWER_SERVICE_FILE) /etc/systemd/system/$(POWER_SERVICE_FILE)
 	@rm -f /tmp/$(POWER_SERVICE_FILE)

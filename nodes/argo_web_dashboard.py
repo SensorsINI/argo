@@ -137,6 +137,15 @@ class ArgoWebDashboard(ArgoBaseNode):
             'last_update': time.time()
         }
         
+        # Viewer activity tracking for CPU optimization
+        self.last_viewer_request_time = time.time()  # Track last HTTP request
+        self.viewer_timeout = 30.0  # Enter low-power mode after 30s of no requests
+        self.low_power_mode = True  # Start in low-power mode (lazy subscriptions)
+        self.status_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
+        self.status_timer_period_idle = 30.0  # 30 seconds when idle (low-power)
+        self.health_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
+        self.health_timer_period_idle = 60.0  # 60 seconds when idle (low-power)
+        
         # Timestamps for each data type
         self.last_wifi_update = {}
         self.last_lora_update = {}
@@ -147,45 +156,26 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # ROS2 Service clients
         self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
-        self.controller_pause_state_sub = self.create_subscription(
-            Bool, '/controller_pause_state', self.controller_pause_state_cb, 10)
         self.recording_start_client = self.create_client(Trigger, '/argo/recording/start')
         self.recording_stop_client = self.create_client(Trigger, '/argo/recording/stop')
         self.controller_switch_client = self.create_client(Trigger, '/controller_node/switch_controller')
         
-        # ROS2 Subscriptions for real-time data (WiFi sources)
-        self.create_subscription(Bool, '/human_controlled', lambda msg: self.human_control_cb(msg, 'wifi'), 10)
-        self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), 10)
-        self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), 10)
-        self.create_subscription(Bool, '/charging_status', self.charging_status_cb, 10)
-        self.create_subscription(Bool, '/ac_power_present', self.ac_power_cb, 10)
-        self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), 10)
-        self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), 10)
-        self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), 10)
-        self.create_subscription(Float64, '/gps_sog', lambda msg: self.gps_sog_cb(msg, 'wifi'), 10)
-        self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), 10)
-        self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), 10)
-        self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), 10)
-        self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
+        # Store subscription references for mass unsubscribe/resubscribe
+        # Use _topic_subscriptions to avoid conflict with ROS2 Node's subscriptions property
+        # Start with empty list - subscriptions created lazily on first viewer access
+        self._topic_subscriptions = []
         
-        # LoRa sources (fallback when WiFi unavailable)
-        self.create_subscription(Bool, 'lora/human_controlled', lambda msg: self.human_control_cb(msg, 'lora'), 10)
-        self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), 10)
-        self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), 10)
-        self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), 10)
-        self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), 10)
-        self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), 10)
-        self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), 10)
+        # Lazy subscriptions: Don't subscribe to topics until a viewer accesses the dashboard
+        # This minimizes startup CPU usage when dashboard is not being used
         
-        # LoRa-specific monitoring
-        self.create_subscription(Int32, 'lora/rssi', self.lora_rssi_cb, 10)
-        self.create_subscription(String, 'lora/last_contact', self.lora_contact_cb, 10)
+        # Timer for periodic status updates (start with idle frequency since we're in low-power mode)
+        self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
         
-        # Timer for periodic status updates
-        self.status_timer = self.create_timer(1/UPDATE_RATE, self.update_system_status)
+        # Timer for periodic health status checks (start with idle frequency since we're in low-power mode)
+        self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
         
-        # Timer for periodic health status checks
-        self.health_timer = self.create_timer(2.0, self._check_health_status)
+        # Timer to check viewer activity and adjust power mode
+        self.viewer_activity_timer = self.create_timer(5.0, self._check_viewer_activity)
         
         # Flask app setup
         self.app = Flask(__name__, 
@@ -240,6 +230,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                 self.status_timer.cancel()
             if hasattr(self, 'health_timer'):
                 self.health_timer.cancel()
+            if hasattr(self, 'viewer_activity_timer'):
+                self.viewer_activity_timer.cancel()
         except Exception:
             pass
         
@@ -296,10 +288,107 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.app.logger.addHandler(handler)
         self.app.logger.setLevel(logging.INFO)
     
+    # ==================== Subscription Management ====================
+    
+    def _create_all_subscriptions(self):
+        """Create all ROS2 subscriptions and store references for mass unsubscribe/resubscribe."""
+        # Clear existing subscriptions list
+        self._topic_subscriptions = []
+        
+        # Controller pause state subscription
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/controller_pause_state', self.controller_pause_state_cb, 10)
+        )
+        
+        # ROS2 Subscriptions for real-time data (WiFi sources)
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/human_controlled', lambda msg: self.human_control_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/charging_status', self.charging_status_cb, 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/ac_power_present', self.ac_power_cb, 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float64, '/gps_sog', lambda msg: self.gps_sog_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
+        )
+        
+        # LoRa sources (fallback when WiFi unavailable)
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, 'lora/human_controlled', lambda msg: self.human_control_cb(msg, 'lora'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), 10)
+        )
+        
+        # LoRa-specific monitoring
+        self._topic_subscriptions.append(
+            self.create_subscription(Int32, 'lora/rssi', self.lora_rssi_cb, 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(String, 'lora/last_contact', self.lora_contact_cb, 10)
+        )
+    
+    def _destroy_all_subscriptions(self):
+        """Destroy all ROS2 subscriptions to stop receiving messages."""
+        for sub in self._topic_subscriptions:
+            try:
+                self.destroy_subscription(sub)
+            except Exception as e:
+                self.get_logger().warn(f"Error destroying subscription: {e}")
+        self._topic_subscriptions = []
+    
     # ==================== ROS2 Callbacks ====================
     
     def human_control_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -320,6 +409,10 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def battery_voltage_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -341,6 +434,10 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def battery_pct_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -356,16 +453,28 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def charging_status_cb(self, msg):
         """Callback for battery charging status."""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         with self.state_lock:
             self.state['battery_charging'] = msg.data
     
     def ac_power_cb(self, msg):
         """Callback for AC/USB power present."""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         with self.state_lock:
             self.state['battery_usb_power'] = msg.data
     
     def compass_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -387,6 +496,10 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def pose_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -402,6 +515,10 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def gps_cog_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -423,6 +540,10 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def gps_sog_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -444,6 +565,10 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def wind_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -461,6 +586,8 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def gps_fix_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
+        # Skip processing in low-power mode (no viewers) - except home position detection
+        # We still want to detect home position even in low-power mode
         now = time.time()
         
         with self.state_lock:
@@ -479,7 +606,7 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
                     self.state['data_source'] = 'LoRa'
             
-            # Set home position on first valid fix
+            # Set home position on first valid fix (always do this, even in low-power mode)
             if (self.state['home_latitude'] is None and 
                 self.state['gps_latitude'] is not None):
                 self.state['home_latitude'] = self.state['gps_latitude']
@@ -488,7 +615,12 @@ class ArgoWebDashboard(ArgoBaseNode):
                     f"🏠 Home position set: {self.state['home_latitude']:.6f}°, "
                     f"{self.state['home_longitude']:.6f}°")
             
-            # Calculate distance and bearing to home
+            # In low-power mode, skip remaining processing after home position check
+            if self.low_power_mode:
+                self._update_data_age_indicators()
+                return
+            
+            # Calculate distance and bearing to home (skip expensive calculations in low-power mode)
             if (self.state['home_latitude'] is not None and 
                 self.state['gps_latitude'] is not None):
                 self.state['distance_to_home'] = self._calculate_distance(
@@ -500,11 +632,16 @@ class ArgoWebDashboard(ArgoBaseNode):
             
             self._update_data_age_indicators()
         
-        # Update health status - GPS fix data is boat data
-        self._update_boat_data_received(f"gps_fix_{source}")
+        # Update health status - GPS fix data is boat data (skip in low-power mode)
+        if not self.low_power_mode:
+            self._update_boat_data_received(f"gps_fix_{source}")
     
     def gps_satellites_cb(self, msg, source='wifi'):
         """Unified callback for GPS satellite count"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         now = time.time()
         
         with self.state_lock:
@@ -530,11 +667,19 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def lora_rssi_cb(self, msg):
         """Receive LoRa signal strength"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         with self.state_lock:
             self.state['lora_signal_strength'] = msg.data
     
     def lora_contact_cb(self, msg):
         """Receive LoRa last contact timestamp"""
+        # Skip processing in low-power mode (no viewers)
+        if self.low_power_mode:
+            return
+        
         with self.state_lock:
             # Parse timestamp and calculate age
             try:
@@ -572,11 +717,94 @@ class ArgoWebDashboard(ArgoBaseNode):
         now = time.time()
         self.last_boat_data_received = now
         
-        # Update health status based on data reception
-        self._check_health_status()
+        # Update health status based on data reception (skip in low-power mode)
+        if not self.low_power_mode:
+            self._check_health_status()
         
         if self.debug_mode:
             self.get_logger().debug(f"Boat data received: {data_type} at {now}")
+    
+    def _check_viewer_activity(self):
+        """Check viewer activity and adjust power mode accordingly."""
+        now = time.time()
+        time_since_last_request = now - self.last_viewer_request_time
+        
+        # Determine if we should be in low-power mode
+        should_be_low_power = time_since_last_request > self.viewer_timeout
+        
+        # Only log transitions to avoid spam
+        if should_be_low_power != self.low_power_mode:
+            if should_be_low_power:
+                self.get_logger().info(f"💤 Entering low-power mode (no viewers for {time_since_last_request:.1f}s)")
+                self._enter_low_power_mode()
+            else:
+                self.get_logger().info("👁️  Exiting low-power mode (viewer activity detected)")
+                self._exit_low_power_mode()
+    
+    def _enter_low_power_mode(self):
+        """Enter low-power mode: unsubscribe from all topics and reduce timer frequencies."""
+        self.low_power_mode = True
+        
+        # Destroy all subscriptions to eliminate callback overhead (if they exist)
+        if self._topic_subscriptions:
+            subscription_count = len(self._topic_subscriptions)
+            self.get_logger().info(f"Unsubscribing from {subscription_count} topics")
+            self._destroy_all_subscriptions()
+        # If no subscriptions exist yet, we're already in the optimal state (lazy initialization)
+        
+        # Adjust status timer to run less frequently
+        self.status_timer.cancel()
+        self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
+        
+        # Adjust health timer to run less frequently
+        self.health_timer.cancel()
+        self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
+    
+    def _exit_low_power_mode(self, source_ip=None):
+        """Exit low-power mode: subscribe/resubscribe to all topics and restore normal timer frequencies."""
+        self.low_power_mode = False
+        
+        # Log exit with source IP if available
+        if source_ip:
+            self.get_logger().info(f"👁️  Exiting low-power mode (viewer activity detected from {source_ip})")
+        else:
+            self.get_logger().info("👁️  Exiting low-power mode (viewer activity detected)")
+        
+        # Create subscriptions if they don't exist yet (lazy initialization)
+        # or recreate them if they were previously destroyed
+        if not self._topic_subscriptions:
+            self.get_logger().info("Subscribing to all topics (lazy initialization)")
+            self._create_all_subscriptions()
+        else:
+            self.get_logger().info("Resubscribing to all topics")
+            self._create_all_subscriptions()
+        
+        # Restore status timer to normal frequency
+        self.status_timer.cancel()
+        self.status_timer = self.create_timer(self.status_timer_period_active, self.update_system_status)
+        
+        # Restore health timer to normal frequency
+        self.health_timer.cancel()
+        self.health_timer = self.create_timer(self.health_timer_period_active, self._check_health_status)
+        
+        # Immediately update status when exiting low-power mode
+        self.update_system_status()
+        self._check_health_status()
+    
+    def _record_viewer_activity(self, source_ip=None):
+        """Record that a viewer made an HTTP request."""
+        was_in_low_power = self.low_power_mode
+        previous_request_time = self.last_viewer_request_time
+        self.last_viewer_request_time = time.time()
+        
+        # If we were in low-power mode, exit it immediately
+        if was_in_low_power:
+            self._exit_low_power_mode(source_ip)
+        elif self.debug_mode:
+            # In debug mode, log all viewer activity for troubleshooting
+            time_since_last = self.last_viewer_request_time - previous_request_time if previous_request_time > 0 else 0
+            ip_info = f" from {source_ip}" if source_ip else ""
+            self.get_logger().debug(f"Viewer activity detected{ip_info} (last request {time_since_last:.1f}s ago)")
     
     def _check_health_status(self):
         """Check health status based on boat data reception (with throttled logging)"""
@@ -680,7 +908,14 @@ class ArgoWebDashboard(ArgoBaseNode):
     def update_system_status(self):
         """Periodically update system status (nodes, battery, CPU temp)."""
         try:
-            # Update node status
+            # In low-power mode, skip expensive operations
+            if self.low_power_mode:
+                # Only update timestamp, skip node queries and CPU temp
+                with self.state_lock:
+                    self.state['last_update'] = time.time()
+                return
+            
+            # Update node status (expensive operation - skip in low-power mode)
             node_status = self.node_manager.get_node_status()
             running_nodes = [node for node, info in node_status.items() if info.get('running', False)]
             
@@ -693,7 +928,7 @@ class ArgoWebDashboard(ArgoBaseNode):
                 }
                 self.state['system_running'] = len(running_nodes) > 0
             
-            # Get CPU temperature
+            # Get CPU temperature (file I/O - skip in low-power mode)
             self._update_cpu_temp()
             
             with self.state_lock:
@@ -716,6 +951,17 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def setup_routes(self):
         """Setup Flask routes for web interface."""
+        
+        # Track viewer activity for all HTTP requests (except static files)
+        @self.app.before_request
+        def track_viewer_activity():
+            """Track viewer activity to optimize CPU usage."""
+            # Record activity for API endpoints and main page
+            # Skip static files (images, CSS, JS) to avoid false positives
+            if request.path.startswith('/api/') or request.path == '/':
+                # Extract source IP address
+                source_ip = request.remote_addr
+                self._record_viewer_activity(source_ip)
         
         @self.app.route('/')
         def index():

@@ -17,7 +17,7 @@ ssh -Y orangepi@YOUR_ORANGE_PI_IP
 
 ### Once connected, run the GUI:
 ```bash
-cd /home/orangepi/argo/launch
+cd ~/argo/launch
 ./argo_status_gui.sh
 ```
 
@@ -93,7 +93,7 @@ ssh -L 5901:localhost:5901 orangepi@YOUR_ORANGE_PI_IP
 
 ### Run GUI in VNC session:
 ```bash
-cd /home/orangepi/argo/launch
+cd ~/argo/launch
 ./argo_status_gui.sh
 ```
 
@@ -105,7 +105,7 @@ Since you already have Foxglove setup, consider creating a web-based status dash
 
 ```bash
 # Create simple web status server
-cat > /home/orangepi/argo/launch/web_status.py << 'EOF'
+cat > ~/argo/launch/web_status.py << 'EOF'
 #!/usr/bin/env python3
 """Simple web status server for remote monitoring"""
 
@@ -141,7 +141,7 @@ if __name__ == '__main__':
     server.serve_forever()
 EOF
 
-chmod +x /home/orangepi/argo/launch/web_status.py
+chmod +x ~/argo/launch/web_status.py
 ```
 
 ---
@@ -158,7 +158,7 @@ xclock
 ### Test GUI import:
 ```bash
 ssh -X orangepi@YOUR_IP
-cd /home/orangepi/argo/launch
+cd ~/argo/launch
 python3 -c "import tkinter; tkinter.Tk().mainloop()"
 # Should show empty window
 ```

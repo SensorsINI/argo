@@ -7,15 +7,15 @@ This guide shows how to use the new two-node control system that separates high-
 ### 1. Launch the System
 ```bash
 # Terminal 1: Low-level control and arbitration
-cd /home/orangepi/argo
+cd ~/argo
 python3 nodes/rudder_sail_radio.py --ros-args --params-file nodes/argo_two_node.yaml
 
 # Terminal 2: High-level autonomous control
-cd /home/orangepi/argo  
+cd ~/argo  
 python3 nodes/controller.py --ros-args --params-file nodes/argo_two_node.yaml
 
 # Terminal 3: Test the system (optional)
-cd /home/orangepi/argo
+cd ~/argo
 python3 nodes/test_two_node_system.py
 ```
 

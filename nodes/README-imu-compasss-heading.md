@@ -46,7 +46,7 @@ This README assumes Option A so you can test immediately without modifying `imu.
 
 1) Start the existing IMU node (raw data + built-in tilt heading):
 ```bash
-python3 /home/orangepi/argo/nodes/imu.py --debug
+python3 ~/argo/nodes/imu.py --debug
 ```
 
 2) Start a small Python converter that republishes in standard message types.
@@ -146,7 +146,7 @@ Symptoms you described (true north swings wildly with small orientation change) 
 ### Commands Summary
 ```bash
 # Start IMU
-python3 /home/orangepi/argo/nodes/imu.py --debug
+python3 ~/argo/nodes/imu.py --debug
 
 # Start Madgwick (after converter is running)
 ros2 run imu_filter_madgwick imu_filter_madgwick_node \

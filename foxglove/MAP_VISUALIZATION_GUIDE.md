@@ -13,11 +13,11 @@ Your KMZ files contain sailing area definitions for two locations:
 
 ### 1. Convert KMZ to GeoJSON
 ```bash
-cd /home/orangepi/argo
+cd ~/argo
 python3 scripts/kmz_to_geojson.py
 ```
 
-This creates GeoJSON files in `/home/orangepi/argo/foxglove/maps/` that Foxglove can use.
+This creates GeoJSON files in `~/argo/foxglove/maps/` that Foxglove can use.
 
 ### 2. Start Argo with Map Visualization
 ```bash
@@ -64,7 +64,7 @@ The map panel in Foxglove shows:
 
 ### Adding New Sailing Areas
 1. Create a KMZ file with your sailing area
-2. Place it in `/home/orangepi/argo/maps/`
+2. Place it in `~/argo/maps/`
 3. Run the conversion script: `python3 scripts/kmz_to_geojson.py`
 4. Restart the sailing area publisher
 
@@ -97,7 +97,7 @@ In the Foxglove layout, modify the map panel zoom level:
 
 2. Verify GeoJSON files exist:
    ```bash
-   ls -la /home/orangepi/argo/foxglove/maps/
+   ls -la ~/argo/foxglove/maps/
    ```
 
 3. Check for errors:
@@ -126,7 +126,7 @@ Your sailing areas can be used for:
 ## File Structure
 
 ```
-/home/orangepi/argo/
+~/argo/
 ├── maps/                                    # Original KMZ files
 │   ├── Hotel dei Pini.kmz
 │   └── Argo Irchel pond sailing area.kmz

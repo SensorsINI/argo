@@ -14,14 +14,14 @@ REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 
 # Power control configuration moved to power_control/ directory
 
-.PHONY: help install uninstall enable disable start stop restart clean install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor install_thermal_monitor enable_thermal_monitor start_thermal_monitor stop_thermal_monitor status_thermal_monitor disable_thermal_monitor uninstall_thermal_monitor
+.PHONY: help install uninstall enable disable start stop restart clean install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor install_thermal_monitor enable_thermal_monitor start_thermal_monitor stop_thermal_monitor status_thermal_monitor disable_thermal_monitor uninstall_thermal_monitor install_battery_water_monitor install_bno085
 
 # Default target
 all: install
 
 # ==================== SERVICE MANAGEMENT ====================
 
-install: install_storage_monitor install_thermal_monitor
+install: install_storage_monitor install_thermal_monitor install_battery_water_monitor install_bno085
 	@echo "Installing Argo services..."
 	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
 	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
@@ -121,6 +121,46 @@ uninstall_storage_monitor: stop_storage_monitor disable_storage_monitor
 	@sudo rm -f $(SERVICE_DIR)/$(STORAGE_SERVICE_NAME).service
 	@sudo systemctl daemon-reload
 	@echo "✅ Storage monitor service uninstalled"
+
+# ==================== BATTERY & WATER MONITORING SYSTEM ====================
+
+# Battery & Water monitoring service configuration
+BATTERY_WATER_SERVICE_NAME = argo_battery_water
+BATTERY_WATER_SERVICE_FILE = ../nodes/argo_battery_water.service
+
+# Install Battery & Water monitoring service
+install_battery_water_monitor:
+	@echo "📋 Installing argo battery & water monitor systemd service..."
+	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
+	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
+	    -e "s#^WorkingDirectory=.*#WorkingDirectory=$(REPO_DIR)/nodes#" \
+	    -e "s#/home/orangepi/argo#$(REPO_DIR)#g" \
+	    $(BATTERY_WATER_SERVICE_FILE) > /tmp/$(BATTERY_WATER_SERVICE_NAME).service
+	@sudo cp /tmp/$(BATTERY_WATER_SERVICE_NAME).service $(SERVICE_DIR)/
+	@rm -f /tmp/$(BATTERY_WATER_SERVICE_NAME).service
+	@sudo systemctl daemon-reload
+	@echo "✅ Battery & Water monitor service installed"
+
+# ==================== BNO085 IMU SYSTEM ====================
+
+# BNO085 service configuration
+BNO085_SERVICE_NAME = argo_bno085
+BNO085_SERVICE_FILE = ../nodes/argo_bno085.service
+
+# Install BNO085 service
+install_bno085:
+	@echo "📋 Installing argo_bno085 IMU systemd service..."
+	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
+		-e "s/^Group=.*/Group=$(INSTALL_USER)/" \
+		-e "s#^WorkingDirectory=.*#WorkingDirectory=$(REPO_DIR)/nodes#" \
+		-e "s#/home/orangepi/argo#$(REPO_DIR)#g" \
+		$(BNO085_SERVICE_FILE) > /tmp/$(BNO085_SERVICE_NAME).service
+	@sudo cp /tmp/$(BNO085_SERVICE_NAME).service $(SERVICE_DIR)/
+	@rm -f /tmp/$(BNO085_SERVICE_NAME).service
+	@# Also make the launcher script executable
+	@sudo chmod +x $(REPO_DIR)/nodes/bno085_driver_launcher.sh
+	@sudo systemctl daemon-reload
+	@echo "✅ BNO085 IMU service installed"
 
 # ==================== THERMAL MONITORING SYSTEM ====================
 

@@ -23,7 +23,7 @@ A lightweight desktop application for monitoring the Argo sailboat system status
 ### Quick Start
 ```bash
 # Navigate to launch directory
-cd /home/orangepi/argo/launch
+cd ~/argo/launch
 
 # Run the GUI (recommended method)
 ./argo_status_gui.sh
@@ -78,12 +78,12 @@ python3 -c "import tkinter"
 sudo apt-get install python3-tk
 
 # Check required modules
-cd /home/orangepi/argo/launch
+cd ~/argo/launch
 python3 -c "from argo_lifecycle_manager import ArgoLifecycleManager"
 ```
 
 ### No Status Data
-- Ensure you're running from the correct directory (`/home/orangepi/argo/launch`)
+- Ensure you're running from the correct directory (`~/argo/launch`)
 - Check that Argo system files are present
 - Verify ROS2 environment is properly sourced
 

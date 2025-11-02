@@ -193,6 +193,7 @@ import argcomplete
 import subprocess
 from datetime import datetime
 import collections
+from pathlib import Path
 
 # ============================================================================
 # BRIDGE MODE: Convert C++ driver output to Argo format
@@ -241,6 +242,10 @@ class BNO085Bridge(Node):
         self.get_logger().info("BNO085 Bridge: Converting C++ driver → Argo topics")
         self.get_logger().info("Publishing: /compass, /pose, /accel, /gyro, /imu_health")
         self.get_logger().info("I2C error recovery: Enabled with automatic C++ driver restart")
+
+        # Determine Argo repo dir for subprocess calls
+        script_path = Path(__file__).resolve()
+        self.argo_dir = str(script_path.parents[1])  # nodes -> argo
     
     def quaternion_to_euler(self, w, x, y, z):
         """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees."""
@@ -408,9 +413,11 @@ class BNO085Bridge(Node):
     def _debug_parameters(self):
         """Debug function to check driver parameters."""
         try:
+            cmd1 = (f'source /opt/ros/humble/setup.bash && '
+                    f'source {self.argo_dir}/nodes/argo_bno08x_driver_workspace/install/setup.bash && '
+                    f'ros2 param get /bno08x_ros publish.imu.rate')
             result = subprocess.run([
-                'bash', '-c', 
-                'source /opt/ros/humble/setup.bash && source /home/orangepi/argo/nodes/argo_bno08x_driver_workspace/install/setup.bash && ros2 param get /bno08x_ros publish.imu.rate'
+                'bash', '-c', cmd1
             ], capture_output=True, text=True, timeout=5)
             
             if result.returncode == 0:
@@ -419,9 +426,11 @@ class BNO085Bridge(Node):
                 self.get_logger().warn(f"DEBUG: Failed to get IMU rate parameter: {result.stderr}")
                 
             # Also check magnetic field rate
+            cmd2 = (f'source /opt/ros/humble/setup.bash && '
+                    f'source {self.argo_dir}/nodes/argo_bno08x_driver_workspace/install/setup.bash && '
+                    f'ros2 param get /bno08x_ros publish.magnetic_field.rate')
             result2 = subprocess.run([
-                'bash', '-c', 
-                'source /opt/ros/humble/setup.bash && source /home/orangepi/argo/nodes/argo_bno08x_driver_workspace/install/setup.bash && ros2 param get /bno08x_ros publish.magnetic_field.rate'
+                'bash', '-c', cmd2
             ], capture_output=True, text=True, timeout=5)
             
             if result2.returncode == 0:

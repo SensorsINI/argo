@@ -91,7 +91,7 @@ ros2 run argo gps.py --debug
 **Quick Start** (see [README_BNO085.md](README_BNO085.md) for details):
 ```bash
 # Install systemd service (first time)
-cd /home/orangepi/argo/nodes
+cd ~/argo/nodes
 make bno085-service-install
 
 # Service management

@@ -99,8 +99,8 @@ After=network.target
 [Service]
 Type=simple
 User=orangepi
-WorkingDirectory=/home/orangepi/argo
-ExecStart=/usr/bin/python3 /home/orangepi/argo/nodes/argo_web_dashboard.py
+WorkingDirectory=~/argo
+ExecStart=/usr/bin/python3 ~/argo/nodes/argo_web_dashboard.py
 Restart=on-failure
 RestartSec=10
 

@@ -11,7 +11,7 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote
 
 help:
 	@echo "Argo Robot Services Management"
@@ -21,6 +21,7 @@ help:
 	@echo "  install-deps         - Install all ROS2 dependencies (foxglove-bridge, etc.)"
 	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
 	@echo "  install-python-deps  - Install Python runtime dependencies (smbus2, pyserial, etc.)"
+	@echo "  install-simulation-deps - Install Python dependencies for the simulator"
 	@echo "  check-deps           - Check status of all dependencies"
 	@echo "  install-hardware     - Install PWM capture module and hardware configuration"
 	@echo "  install-all          - Install hardware and dependencies (complete setup)"
@@ -32,6 +33,10 @@ help:
 	@echo "  make -C launch restart     - Restart argo_launch service"
 	@echo "  make -C launch clean       - Clean old bag files (>7 days)"
 	@echo "  make -C launch help        - Show detailed service management help"
+	@echo ""
+	@echo "Simulation Management:"
+	@echo "  simulate-local       - Start Argo in local simulation mode"
+	@echo "  simulate-remote      - Start Argo in remote simulation mode"
 	@echo ""
 	@echo "CPU Governor Tuning:"
 	@echo "  install-cpu-tuning   - Install and enable CPU governor tuning service"
@@ -105,6 +110,16 @@ help:
 	@echo "  ac  - Close recording"
 	@echo "  af  - Launch argo with Foxglove visualization"
 
+# ==================== SIMULATION MANAGEMENT ====================
+
+simulate-local:
+	@echo "Starting Argo in LOCAL simulation mode via launch script..."
+	@./scripts/launch_simulation.sh
+
+simulate-remote:
+	@echo "Starting Argo in REMOTE simulation mode..."
+	@python3 launch/argo_lifecycle_manager.py simulate_remote
+
 # ==================== DEPENDENCY INSTALLATION ====================
 
 install-deps: install-foxglove-bridge
@@ -163,20 +178,38 @@ check-deps:
 	@echo "🔍 Quick Test:"
 	@echo "   Test foxglove-bridge: ros2 run foxglove_bridge foxglove_bridge --help"
 
+install-simulation-deps:
+	@echo "Installing system and Python dependencies for sailboat-playground simulator..."
+	@echo "--- Installing system libraries (requires sudo) ---"
+	sudo apt-get update
+	sudo apt-get install -y libglu1-mesa-dev
+	@echo "--- Installing Python packages ---"
+	@if [ -f simulator/sailboat-playground/requirements.txt ]; then \
+		pip3 install -r simulator/sailboat-playground/requirements.txt; \
+	else \
+		echo "❌ Error: simulator/sailboat-playground/requirements.txt not found!"; \
+		echo "   Have you initialized the submodule? Run: make submodule-init"; \
+		exit 1; \
+	fi
+	@echo "✅ Simulation dependencies installed successfully!"
+
 # ==================== SERVICE MANAGEMENT ====================
 # Service management targets are now in launch/Makefile
 # Use 'make -C launch <target>' to run service targets directly
 
 install-argo-cli:
 	@echo "Installing Argo CLI (aliases, functions, and dotfiles)..."
-	@if ! grep -q "source.*dotfiles.*bashrc" ~/.bashrc 2>/dev/null; then \
-		echo "" >> ~/.bashrc; \
-		echo "# Source Argo dotfiles" >> ~/.bashrc; \
-		echo "source ~/argo/dotfiles/bashrc" >> ~/.bashrc; \
-		echo "✅ Added dotfiles sourcing to ~/.bashrc"; \
-	else \
-		echo "✅ Dotfiles already sourced in ~/.bashrc"; \
-	fi
+	@# Remove existing Argo dotfiles sourcing to prevent duplicates and handle name changes.
+	@sed -i.bak \
+		-e '/^# Source Argo dotfiles$$/d' \
+		-e '/source.*dotfiles\/\.bashrc/d' \
+		-e '/source.*dotfiles\/bashrc/d' \
+		~/.bashrc
+	@# Add the correct sourcing line for the new dotfiles.
+	@echo "" >> ~/.bashrc
+	@echo "# Source Argo dotfiles" >> ~/.bashrc
+	@echo "source ~/argo/dotfiles/bashrc" >> ~/.bashrc
+	@echo "✅ Updated dotfiles sourcing in ~/.bashrc"
 	@if [ -f dotfiles/.tmux.conf ]; then \
 		cp dotfiles/.tmux.conf ~/.tmux.conf; \
 		echo "✅ Installed .tmux.conf"; \

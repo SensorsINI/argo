@@ -125,6 +125,7 @@ In **Windows PowerShell** (regular, not Administrator):
 # Install usbipd-win
 winget install --interactive --exact dorssel.usbipd-win
 ```
+You can also install the windows GUI for managing usbipd from https://gitlab.com/alelec/wsl-usb-gui
 
 **Important**: After installation, **close and reopen PowerShell** to refresh the PATH environment variable. The `usbipd` command won't be recognized in the current session.
 

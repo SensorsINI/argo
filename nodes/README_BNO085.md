@@ -95,7 +95,7 @@ The `argo_bno085.service` systemd service is **required for production use** and
 
 ### 1. Build and Install Service (First Time Setup)
 ```bash
-cd /home/orangepi/argo/nodes
+cd ~/argo/nodes
 
 # Build the C++ driver and install systemd service
 make bno085-service-install
@@ -509,9 +509,9 @@ Description=Argo BNO085 IMU Driver and Bridge
 After=network.target
 
 [Service]
-ExecStartPre=/bin/bash -c "source /opt/ros/humble/setup.bash && source /home/orangepi/argo_bno08x_ws/install/setup.bash"
-ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && source /home/orangepi/argo_bno08x_ws/install/setup.bash && ros2 run bno08x_driver bno08x_driver --ros-args --params-file /home/orangepi/argo/nodes/vendor/bno08x_driver/config/bno085_i2c.yaml & python3 /home/orangepi/argo/nodes/bno085.py bridge"
-WorkingDirectory=/home/orangepi/argo/nodes
+ExecStartPre=/bin/bash -c "source /opt/ros/humble/setup.bash && source ~/argo_bno08x_ws/install/setup.bash"
+ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && source ~/argo_bno08x_ws/install/setup.bash && ros2 run bno08x_driver bno08x_driver --ros-args --params-file ~/argo/nodes/vendor/bno08x_driver/config/bno085_i2c.yaml & python3 ~/argo/nodes/bno085.py bridge"
+WorkingDirectory=~/argo/nodes
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure
