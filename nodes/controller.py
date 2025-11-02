@@ -116,9 +116,11 @@ import os
 # Remove old pause service import - implementing new boolean pause service directly
 import psutil
 
-# Import safe publishing utilities
+# Import safe publishing utilities and ArgoBaseNode
 import sys
 import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
+from argo_base_node import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'support'))
 from safe_publish import safe_publish, safe_log, is_context_valid
 import threading
@@ -134,7 +136,6 @@ import argparse
 import argcomplete
 import yaml
 import rclpy
-from rclpy.node import Node
 # Removed QoS imports - using default QoS only
 from std_msgs.msg import Bool, Float64, Float32, String
 from geometry_msgs.msg import Vector3
@@ -554,12 +555,19 @@ class DataCollector:
             self.current_session_data.append(sample)
 
 
-class ControllerNode(Node):
+class ControllerNode(ArgoBaseNode):
     """High-level autonomous controller node."""
 
-    def __init__(self):
+    def __init__(self, debug_mode=False):
         super().__init__('controller_node')
         self.get_logger().info('Controller node starting...')
+        
+        # Set initial health status - controller is healthy when running
+        self.set_healthy("Controller node running")
+        
+        # Set log level if debug mode enabled
+        if debug_mode:
+            self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
 
         # Initialize boolean pause service
         self._is_paused = False
@@ -1160,11 +1168,18 @@ class ControllerNode(Node):
         except Exception as e:
             self.get_logger().error(f"Error reloading parameters: {e}")
 
+    def _cleanup_on_exit(self):
+        """Override ArgoBaseNode cleanup to stop data collection session"""
+        try:
+            if hasattr(self, 'data_collector'):
+                self.data_collector.stop_session()
+        except Exception:
+            pass  # Ignore errors during shutdown
+
 
 def main(args=None):
-    parser = argparse.ArgumentParser(
+    parser = ArgoBaseNode.create_standard_parser(
         description='Controller Node - High-level autonomous control for Argo',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 This ROS2 node implements high-level autonomous control for the Argo sailboat:
 
@@ -1182,6 +1197,7 @@ CONTROLLERS:
 TOPICS:
   Publishes:
     /rudder_sail_cmd: Vector3 - Autonomous control commands to rudder_sail_radio.py
+    /controller_node_health: Bool - Node health status (ArgoBaseNode)
 
   Subscribes:
     /human_controlled: Bool - Control authority status from rudder_sail_radio.py
@@ -1200,46 +1216,16 @@ CONTROL FLOW:
 2. During human control: Update target heading, collect training data
 3. During robot control: Generate autonomous commands via controller.generate_control()
 4. Commands sent to rudder_sail_radio.py for final arbitration and execution
+
+HEALTH MONITORING:
+  - Service: ros2 service call /controller_node/health std_srvs/srv/Trigger
+  - Topic: ros2 topic echo /controller_node_health
+  - Healthy when controller is running (currently always healthy when running)
         """
     )
 
-    parsed_args, unknown_args = parser.parse_known_args(args)
-
-    rclpy.init(args=unknown_args)
-    controller_node = None
-    try:
-        controller_node = ControllerNode()
-        rclpy.spin(controller_node)
-    except KeyboardInterrupt:
-        print("\nKeyboard interrupt, shutting down controller...")
-    except rclpy.executors.ExternalShutdownException:
-        print("External shutdown signal received, exiting gracefully.")
-    finally:
-        # Graceful shutdown sequence
-        try:
-            if controller_node and hasattr(controller_node, 'data_collector'):
-                controller_node.data_collector.stop_session()
-        except Exception:
-            pass  # Ignore errors during shutdown
-        
-        try:
-            if controller_node:
-                # Cancel all timers before destroying node
-                if hasattr(controller_node, 'timer'):
-                    controller_node.timer.cancel()
-                if hasattr(controller_node, 'pause_state_timer'):
-                    controller_node.pause_state_timer.cancel()
-                if hasattr(controller_node, 'param_timer') and controller_node.param_timer:
-                    controller_node.param_timer.cancel()
-                controller_node.destroy_node()
-        except Exception:
-            pass  # Ignore errors during shutdown
-        
-        try:
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            pass  # Ignore errors during shutdown
+    # Use ArgoBaseNode's standardized runner
+    ArgoBaseNode.run_node(ControllerNode, args, parser)
 
 
 if __name__ == '__main__':
