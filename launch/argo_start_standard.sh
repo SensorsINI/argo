@@ -44,11 +44,10 @@ if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     # Use the standard status reporter
     cd "$(dirname "$0")/.."
     source /opt/ros/humble/setup.bash
-    python3 launch/argo_status.py
+    python3 launch/argo_lifecycle_manager.py status
 else
     echo "❌ Argo launch service failed to start"
     echo "📋 Checking service logs..."
     sudo journalctl -u "$SERVICE_NAME" --no-pager -n 20
     exit 1
 fi
-
