@@ -41,7 +41,7 @@ class ArgoRecordingNode(ArgoBaseNode):
     """ROS2 node for managing Argo bag recording"""
 
     def __init__(self):
-        super().__init__('record_node')
+        super().__init__('record')
 
         # Setup file logging for detailed debugging
         self._setup_file_logging()

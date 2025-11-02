@@ -28,7 +28,7 @@ nodes:
     description: "Power control, button monitoring, and LED status"
     excluded: true # Runs as an independent systemd service
     
-  - name: battery_water_node
+  - name: argo_battery_water
     executable: nodes/argo_battery_water.py
     required: true
     critical: true
@@ -80,7 +80,7 @@ nodes:
     required: false
     critical: false
     description: "Data recording management"
-    health_topic: "/record_node_health"
+    health_topic: "/record_health"
     
   # Visualization and Transform Nodes
   - name: argo_transform_publisher
@@ -162,7 +162,7 @@ groups:
   critical:
     - rudder_sail_radio_node
     - argo_power_control
-    - battery_water_node  
+    - argo_battery_water  
     
   control:
     - controller_node

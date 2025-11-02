@@ -200,13 +200,6 @@ class ArgoLifecycleManager:
         self.critical_nodes = []
         self.all_expected_nodes = []
         
-        # Mapping from script name (e.g., 'gps.py') to ROS2 node name (e.g., 'gps_node')
-        # Used to generate health service paths like /gps_node/health
-        self.script_to_node_name = {}
-        
-        # Mapping from script name to health_topic for legacy health publishers
-        self.script_to_health_topic = {}
-        
         # Simulation node configuration (loaded but not used until simulation mode)
         self.simulation_expected_nodes = []
         self.simulation_special_nodes = []
@@ -228,13 +221,6 @@ class ArgoLifecycleManager:
                  # We need to find the executable to get the script name
                  executable = node_cfg.get('executable', '')
                  script_name = os.path.basename(executable) if executable else f"{name}.py"
-
-            # Store mapping from script name to ROS2 node name
-            self.script_to_node_name[script_name] = name
-            
-            # Store health_topic if present (for legacy health publishers)
-            if node_cfg.get('health_topic'):
-                self.script_to_health_topic[script_name] = node_cfg.get('health_topic')
 
             if node_cfg.get('excluded', False):
                 self.excluded_nodes.append(script_name)
@@ -265,9 +251,6 @@ class ArgoLifecycleManager:
             if not node_cfg.get('special', False):
                 executable = node_cfg.get('executable', '')
                 script_name = os.path.basename(executable) if executable else f"{name}.py"
-            
-            # Store mapping from script name to ROS2 node name for simulation nodes too
-            self.script_to_node_name[script_name] = name
             
             # Store args if present (for nodes like simulator bridge that need --mode)
             if node_cfg.get('args'):
@@ -322,12 +305,29 @@ class ArgoLifecycleManager:
         if not self.ros2_node:
             return
             
-        # Use health_topics from loaded configuration (legacy health publishers)
-        health_topics = self.script_to_health_topic.copy()
+        # Define health services for each node (new ArgoBaseNode approach)
+        health_services = {
+            'gps.py': '/gps_node/health',
+            'lora.py': '/lora_node/health', 
+            'anem.py': '/anem_node/health',
+            'argo_battery_water.py': '/battery_water_node/health',
+            'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
+            'temp_monitor.py': '/temp_monitor_node/health',
+            'argo_transform_publisher.py': '/argo_transform_publisher/health',
+            'argo_boat_visualization.py': '/argo_boat_visualization/health',
+            'bno085.py': '/bno085_bridge/health'  # BNO085 bridge health service
+        }
         
-        # Add special cases that might not be in YAML
-        if 'bno085.py' not in health_topics:
-            health_topics['bno085.py'] = '/imu_health'
+        # Also keep health topics for backward compatibility
+        health_topics = {
+            'gps.py': '/gps_node_health',
+            'lora.py': '/lora_node_health',
+            'anem.py': '/anem_node_health',
+            'argo_battery_water.py': '/battery_water_node_health',
+            'rudder_sail_radio.py': '/rudder_sail_radio_node_health',
+            'temp_monitor.py': '/temp_monitor_node_health',
+            'bno085.py': '/imu_health'  # BNO085 IMU health status
+        }
         
         # Create subscribers for health topics
         for node_name, health_topic in health_topics.items():
@@ -398,14 +398,20 @@ class ArgoLifecycleManager:
         
         # SLOW PATH: Query individual node health services (fallback)
         
-        # Generate health services dynamically from loaded node configuration
-        health_services = {}
-        for script_name, node_name in self.script_to_node_name.items():
-            health_services[script_name] = f'/{node_name}/health'
-        
-        # Add special cases that might not be in YAML
-        if 'bno085.py' not in health_services:
-            health_services['bno085.py'] = '/bno085_bridge/health'
+        # Define health services for each node
+        health_services = {
+            'gps.py': '/gps_node/health',
+            'lora.py': '/lora_node/health', 
+            'anem.py': '/anem_node/health',
+            'argo_battery_water.py': '/battery_water_node/health',
+            'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
+            'temp_monitor.py': '/temp_monitor_node/health',
+            'controller.py': '/controller_node/health',
+            'argo_transform_publisher.py': '/argo_transform_publisher/health',
+            'argo_boat_visualization.py': '/argo_boat_visualization/health',
+            'record.py': '/record/health',
+            'bno085.py': '/bno085_bridge/health'  # Monitor BNO085 health even when excluded from launch
+        }
         
         for node_name, service_name in health_services.items():
             try:
