@@ -28,7 +28,9 @@ Subscribed Topics
 -----------------
 - /pose (geometry_msgs/Vector3): Boat heading (z-component)
 - /accel (geometry_msgs/Vector3): IMU accelerometer for roll/pitch
-- /rudder_sail_cmd (geometry_msgs/Vector3): Rudder and sail commands
+- /rudder_sail_servo (geometry_msgs/Vector3): Final executed rudder and sail commands (preferred)
+- /rudder_sail_radio (geometry_msgs/Vector3): Raw keyboard/radio input (fallback for simulation)
+- /rudder_sail_cmd (geometry_msgs/Vector3): Autonomous rudder and sail commands (fallback)
 - /anem_speed_angle_temp (geometry_msgs/Vector3): Wind data
 - /gps_velocity (geometry_msgs/Vector3): GPS velocity vector
 - /fix (sensor_msgs/NavSatFix): GPS position
@@ -61,6 +63,14 @@ class ArgoBoatVisualization(ArgoBaseNode):
     def __init__(self, debug_mode=False):
         super().__init__('argo_boat_visualization')
         
+        # Declare parameters
+        self.declare_parameter('visualization_scale', 1.0)
+        self.visualization_scale = self.get_parameter('visualization_scale').get_parameter_value().double_value
+        
+        # Log scale setting for debugging
+        if self.visualization_scale != 1.0:
+            self.get_logger().info(f"Visualization scale set to {self.visualization_scale}x")
+        
         # Publishers
         self.marker_pub = self.create_publisher(Marker, '/visualization_marker', 10)
         self.marker_array_pub = self.create_publisher(MarkerArray, '/visualization_marker_array', 10)
@@ -68,6 +78,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # Subscribers
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
         self.create_subscription(Vector3, '/accel', self.accel_callback, 10)
+        # Subscribe to control topics (priority order: servo > radio > cmd)
+        # /rudder_sail_servo: Final executed commands (best, if rudder_sail_radio.py is running)
+        self.create_subscription(Vector3, '/rudder_sail_servo', self.control_callback, 10)
+        # /rudder_sail_radio: Raw keyboard/radio input (good fallback for simulation)
+        self.create_subscription(Vector3, '/rudder_sail_radio', self.control_callback, 10)
+        # /rudder_sail_cmd: Autonomous commands (lowest priority fallback)
         self.create_subscription(Vector3, '/rudder_sail_cmd', self.control_callback, 10)
         self.create_subscription(Vector3, '/anem_speed_angle_temp', self.wind_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
@@ -178,12 +194,19 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Create a simple boat hull marker"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
         marker.header.stamp = self.get_clock().now().to_msg()
-        
+        # Set unique identifier for this marker so visualization can update/delete it by ID
         marker.id = 1
+
+        # Specify the marker type as a cube to represent the boat hull's simple rectangular shape
         marker.type = Marker.CUBE
+
+        # Set action to ADD so this marker is added or updated in the visualization
         marker.action = Marker.ADD
+
+        # Place this marker in the "argo_boat" namespace so it doesn't conflict with other boat markers
+        marker.ns = "argo_boat"
         
         # Position at GPS location (simplified - in real implementation would convert lat/lon to map coordinates)
         marker.pose.position.x = 0.0
@@ -208,13 +231,17 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.orientation.y = cr * sp * cy + sr * cp * sy
         marker.pose.orientation.z = cr * cp * sy - sr * sp * cy
         
-        # Scale (boat dimensions in meters)
-        marker.scale.x = 0.65  # Dragonforce 65 hull length
-        marker.scale.y = 0.13  # hull width
-        marker.scale.z = 0.05  # hull height
+        # Scale (boat dimensions in meters) - apply visualization scale
+        marker.scale.x = 0.65 * self.visualization_scale  # Dragonforce 65 hull length
+        marker.scale.y = 0.13 * self.visualization_scale  # hull width
+        marker.scale.z = 0.05 * self.visualization_scale  # hull height
         
         # Color (blue for hull)
         marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.8)
+        
+        # Lifetime - infinite so marker persists
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         return marker
     
@@ -222,17 +249,18 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Create boat mast marker"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
         marker.header.stamp = self.get_clock().now().to_msg()
         
         marker.id = 2
         marker.type = Marker.CYLINDER
         marker.action = Marker.ADD
+        marker.ns = "argo_boat"
         
-        # Position at GPS location
+        # Position at GPS location - apply visualization scale to height
         marker.pose.position.x = 0.0
         marker.pose.position.y = 0.0
-        marker.pose.position.z = 0.25  # Half mast height
+        marker.pose.position.z = 0.25 * self.visualization_scale  # Half mast height
         
         # Orientation (mast is vertical regardless of boat roll/pitch for simplicity)
         marker.pose.orientation.w = 1.0
@@ -240,13 +268,17 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.orientation.y = 0.0
         marker.pose.orientation.z = 0.0
         
-        # Scale
-        marker.scale.x = 0.01  # mast diameter
-        marker.scale.y = 0.01
-        marker.scale.z = 0.5   # mast height
+        # Scale - apply visualization scale
+        marker.scale.x = 0.01 * self.visualization_scale  # mast diameter
+        marker.scale.y = 0.01 * self.visualization_scale
+        marker.scale.z = 0.5 * self.visualization_scale   # mast height
         
         # Color (brown for mast)
         marker.color = ColorRGBA(r=0.6, g=0.3, b=0.0, a=1.0)
+        
+        # Lifetime - infinite so marker persists
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         return marker
     
@@ -254,19 +286,20 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Create rudder position indicator"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
         marker.header.stamp = self.get_clock().now().to_msg()
         
         marker.id = 3
         marker.type = Marker.ARROW
         marker.action = Marker.ADD
+        marker.ns = "argo_boat"
         
-        # Position at stern of boat
-        marker.pose.position.x = -0.3  # Behind boat center
+        # Position at stern of boat (in base_link frame, +x is forward) - apply visualization scale
+        marker.pose.position.x = -0.3 * self.visualization_scale  # Behind boat center (stern)
         marker.pose.position.y = 0.0
         marker.pose.position.z = 0.0
         
-        # Orientation based on rudder command
+        # Orientation: rudder deflection relative to boat frame (boat heading is already in base_link transform)
         rudder_angle_deg = self.rudder_cmd * 30.0  # Max 30 degrees
         rudder_angle_rad = math.radians(rudder_angle_deg)
         
@@ -275,13 +308,17 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.orientation.y = 0.0
         marker.pose.orientation.z = math.sin(rudder_angle_rad * 0.5)
         
-        # Scale
-        marker.scale.x = 0.2  # arrow length
-        marker.scale.y = 0.02 # arrow width
-        marker.scale.z = 0.02
+        # Scale - apply visualization scale
+        marker.scale.x = 0.2 * self.visualization_scale  # arrow length
+        marker.scale.y = 0.02 * self.visualization_scale # arrow width
+        marker.scale.z = 0.02 * self.visualization_scale
         
         # Color (red for rudder)
         marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
+        
+        # Lifetime - infinite so marker persists
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         return marker
     
@@ -289,34 +326,43 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Create sail position indicator"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
         marker.header.stamp = self.get_clock().now().to_msg()
         
         marker.id = 4
         marker.type = Marker.ARROW
         marker.action = Marker.ADD
+        marker.ns = "argo_boat"
         
-        # Position at mast
+        # Position at mast (already at boat center, just raise up) - apply visualization scale
         marker.pose.position.x = 0.0
         marker.pose.position.y = 0.0
-        marker.pose.position.z = 0.4  # Up the mast
+        marker.pose.position.z = 0.4 * self.visualization_scale  # Up the mast
         
-        # Orientation based on sail command (sail trim angle)
+        # Orientation: sail trim angle relative to boat frame (boat heading is already in base_link transform)
+        # Sail is perpendicular to boat (+y is port side) plus trim angle
         sail_angle_deg = self.sail_cmd * 45.0  # Max 45 degrees
         sail_angle_rad = math.radians(sail_angle_deg)
         
-        marker.pose.orientation.w = math.cos(sail_angle_rad * 0.5)
+        # Sail extends perpendicular to boat (90 degrees from +x forward) plus trim
+        total_angle_rad = math.pi / 2.0 + sail_angle_rad
+        
+        marker.pose.orientation.w = math.cos(total_angle_rad * 0.5)
         marker.pose.orientation.x = 0.0
-        marker.pose.orientation.y = math.sin(sail_angle_rad * 0.5)
+        marker.pose.orientation.y = math.sin(total_angle_rad * 0.5)
         marker.pose.orientation.z = 0.0
         
-        # Scale
-        marker.scale.x = 0.3  # sail length
-        marker.scale.y = 0.05 # sail width
-        marker.scale.z = 0.01
+        # Scale - apply visualization scale
+        marker.scale.x = 0.3 * self.visualization_scale  # sail length
+        marker.scale.y = 0.05 * self.visualization_scale # sail width
+        marker.scale.z = 0.01 * self.visualization_scale
         
         # Color (white for sail)
         marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.8)
+        
+        # Lifetime - infinite so marker persists
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         return marker
     
@@ -324,36 +370,40 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Create wind vector arrow"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
         marker.header.stamp = self.get_clock().now().to_msg()
         
         marker.id = 5
         marker.type = Marker.ARROW
         marker.action = Marker.ADD
+        marker.ns = "argo_boat"
         
-        # Position above boat
+        # Position above boat - apply visualization scale
         marker.pose.position.x = 0.0
         marker.pose.position.y = 0.0
-        marker.pose.position.z = 0.6  # Above mast
+        marker.pose.position.z = 1.0 * self.visualization_scale  # Above mast
         
-        # Wind direction relative to boat heading
-        wind_absolute_angle = self.boat_heading + self.wind_angle
-        wind_angle_rad = math.radians(wind_absolute_angle)
+        # Wind direction relative to boat (wind_angle is already relative to boat heading)
+        wind_angle_rad = math.radians(self.wind_angle)
         
         marker.pose.orientation.w = math.cos(wind_angle_rad * 0.5)
         marker.pose.orientation.x = 0.0
         marker.pose.orientation.y = 0.0
         marker.pose.orientation.z = math.sin(wind_angle_rad * 0.5)
         
-        # Scale based on wind speed (max 2m arrow length)
-        wind_scale = min(self.wind_speed * 0.5, 2.0)  # Scale factor
-        marker.scale.x = wind_scale
-        marker.scale.y = 0.05
-        marker.scale.z = 0.05
+        # Scale based on wind speed (max 2m arrow length, min 0.1m for visibility) - apply visualization scale
+        wind_scale = min(max(self.wind_speed * 0.5, 0.1), 2.0)  # Scale factor with minimum
+        marker.scale.x = wind_scale * self.visualization_scale
+        marker.scale.y = 0.05 * self.visualization_scale
+        marker.scale.z = 0.05 * self.visualization_scale
         
-        # Color (green for wind, intensity based on speed)
-        wind_intensity = min(self.wind_speed / 10.0, 1.0)  # Normalize to 0-1
+        # Color (green for wind, intensity based on speed, but always visible)
+        wind_intensity = min(max(self.wind_speed / 10.0, 0.3), 1.0)  # Normalize to 0.3-1.0 for visibility
         marker.color = ColorRGBA(r=0.0, g=wind_intensity, b=0.0, a=1.0)
+        
+        # Lifetime - infinite so marker persists
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         return marker
     
@@ -361,17 +411,18 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Create GPS velocity vector arrow"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
         marker.header.stamp = self.get_clock().now().to_msg()
         
         marker.id = 6
         marker.type = Marker.ARROW
         marker.action = Marker.ADD
+        marker.ns = "argo_boat"
         
-        # Position at boat center
+        # Position at boat center - apply visualization scale
         marker.pose.position.x = 0.0
         marker.pose.position.y = 0.0
-        marker.pose.position.z = 0.1  # Slightly above hull
+        marker.pose.position.z = 0.1 * self.visualization_scale  # Slightly above hull
         
         # Velocity direction
         velocity_heading = math.atan2(self.gps_velocity_east, self.gps_velocity_north)
@@ -381,14 +432,18 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.orientation.y = 0.0
         marker.pose.orientation.z = math.sin(velocity_heading * 0.5)
         
-        # Scale based on speed (max 1m arrow length)
+        # Scale based on speed (max 1m arrow length) - apply visualization scale
         velocity_scale = min(self.gps_velocity_speed * 0.1, 1.0)  # Scale factor
-        marker.scale.x = velocity_scale
-        marker.scale.y = 0.03
-        marker.scale.z = 0.03
+        marker.scale.x = velocity_scale * self.visualization_scale
+        marker.scale.y = 0.03 * self.visualization_scale
+        marker.scale.z = 0.03 * self.visualization_scale
         
         # Color (yellow for velocity)
         marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
+        
+        # Lifetime - infinite so marker persists
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         return marker
     
@@ -396,33 +451,166 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Create boat heading direction arrow"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"
+        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
         marker.header.stamp = self.get_clock().now().to_msg()
         
         marker.id = 7
         marker.type = Marker.ARROW
         marker.action = Marker.ADD
+        marker.ns = "argo_boat"
         
-        # Position at bow of boat
-        marker.pose.position.x = 0.35  # Front of boat
+        # Position at bow of boat (in base_link frame, +x is forward) - apply visualization scale
+        marker.pose.position.x = 0.35 * self.visualization_scale  # Front of boat
         marker.pose.position.y = 0.0
-        marker.pose.position.z = 0.1
+        marker.pose.position.z = 0.1 * self.visualization_scale
         
-        # Heading direction
-        heading_rad = math.radians(self.boat_heading)
-        
-        marker.pose.orientation.w = math.cos(heading_rad * 0.5)
+        # Heading direction arrow points forward (+x direction in base_link)
+        marker.pose.orientation.w = 1.0  # Identity quaternion (points in +x direction)
         marker.pose.orientation.x = 0.0
         marker.pose.orientation.y = 0.0
-        marker.pose.orientation.z = math.sin(heading_rad * 0.5)
+        marker.pose.orientation.z = 0.0
         
-        # Scale
-        marker.scale.x = 0.2  # arrow length
-        marker.scale.y = 0.03 # arrow width
-        marker.scale.z = 0.03
+        # Scale - apply visualization scale
+        marker.scale.x = 0.2 * self.visualization_scale  # arrow length
+        marker.scale.y = 0.03 * self.visualization_scale # arrow width
+        marker.scale.z = 0.03 * self.visualization_scale
         
         # Color (cyan for heading)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
+        
+        # Lifetime - infinite so marker persists
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+        
+        return marker
+    
+    def create_rudder_label_marker(self):
+        """Create optional text label for rudder indicator"""
+        marker = Marker()
+        marker.header = Header()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        
+        marker.id = 10  # Separate ID range for labels (10-16)
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.ns = "argo_boat_labels"  # Separate namespace for labels (can be toggled independently)
+        
+        # Position near rudder indicator (slightly offset) - apply visualization scale
+        marker.pose.position.x = -0.3 * self.visualization_scale  # At stern
+        marker.pose.position.y = 0.15 * self.visualization_scale  # Offset to the side
+        marker.pose.position.z = 0.1 * self.visualization_scale  # Slightly above
+        
+        # Text content with value
+        rudder_angle_deg = self.rudder_cmd * 30.0  # Max 30 degrees
+        marker.text = f"Rudder: {rudder_angle_deg:.1f}°"
+        
+        # Scale (text size) - apply visualization scale
+        marker.scale.z = 0.15 * self.visualization_scale  # Text height in meters
+        
+        # Color matching rudder indicator (red)
+        marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
+        
+        # Lifetime
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+        
+        return marker
+    
+    def create_sail_label_marker(self):
+        """Create optional text label for sail indicator"""
+        marker = Marker()
+        marker.header = Header()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        
+        marker.id = 11
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.ns = "argo_boat_labels"
+        
+        # Position near sail indicator (at mast) - apply visualization scale
+        marker.pose.position.x = 0.0
+        marker.pose.position.y = 0.2 * self.visualization_scale  # Offset to the side
+        marker.pose.position.z = 0.5 * self.visualization_scale  # Above sail
+        
+        # Text content with value
+        sail_angle_deg = self.sail_cmd * 45.0  # Max 45 degrees
+        marker.text = f"Sail: {sail_angle_deg:.1f}°"
+        
+        # Scale - apply visualization scale
+        marker.scale.z = 0.15 * self.visualization_scale
+        
+        # Color matching sail indicator (white, but darker for visibility)
+        marker.color = ColorRGBA(r=0.9, g=0.9, b=0.9, a=1.0)
+        
+        # Lifetime
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+        
+        return marker
+    
+    def create_wind_label_marker(self):
+        """Create optional text label for wind vector"""
+        marker = Marker()
+        marker.header = Header()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        
+        marker.id = 12
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.ns = "argo_boat_labels"
+        
+        # Position near wind vector (above boat) - apply visualization scale
+        marker.pose.position.x = 0.3 * self.visualization_scale  # Offset forward
+        marker.pose.position.y = 0.0
+        marker.pose.position.z = 1.2 * self.visualization_scale  # Above wind arrow
+        
+        # Text content with values
+        marker.text = f"Wind: {self.wind_speed:.1f} m/s @ {self.wind_angle:.1f}°"
+        
+        # Scale - apply visualization scale
+        marker.scale.z = 0.15 * self.visualization_scale
+        
+        # Color matching wind vector (green)
+        marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+        
+        # Lifetime
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+        
+        return marker
+    
+    def create_heading_label_marker(self):
+        """Create optional text label for heading indicator"""
+        marker = Marker()
+        marker.header = Header()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        
+        marker.id = 13
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.ns = "argo_boat_labels"
+        
+        # Position near heading arrow (at bow) - apply visualization scale
+        marker.pose.position.x = 0.5 * self.visualization_scale  # Forward of bow
+        marker.pose.position.y = 0.0
+        marker.pose.position.z = 0.2 * self.visualization_scale  # Above heading arrow
+        
+        # Text content with value
+        marker.text = f"Heading: {self.boat_heading:.1f}°"
+        
+        # Scale - apply visualization scale
+        marker.scale.z = 0.15 * self.visualization_scale
+        
+        # Color matching heading arrow (cyan)
+        marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
+        
+        # Lifetime
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         return marker
     
@@ -439,6 +627,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_wind_vector_marker())
             marker_array.markers.append(self.create_velocity_vector_marker())
             marker_array.markers.append(self.create_heading_arrow_marker())
+            
+            # Add optional text labels (in separate namespace for independent toggling)
+            marker_array.markers.append(self.create_rudder_label_marker())
+            marker_array.markers.append(self.create_sail_label_marker())
+            marker_array.markers.append(self.create_wind_label_marker())
+            marker_array.markers.append(self.create_heading_label_marker())
             
             # Add sailing area markers (boundaries, waypoints, hazards) for 3D visualization
             # Note: These come from sailing_area_publisher and may be empty initially
@@ -532,7 +726,9 @@ TOPICS:
   Subscribes:
     /pose (geometry_msgs/Vector3): Boat heading (z-component)
     /accel (geometry_msgs/Vector3): IMU accelerometer for roll/pitch
-    /rudder_sail_cmd (geometry_msgs/Vector3): Rudder and sail commands
+    /rudder_sail_servo (geometry_msgs/Vector3): Final executed rudder and sail commands (preferred)
+    /rudder_sail_radio (geometry_msgs/Vector3): Raw keyboard/radio input (fallback for simulation)
+    /rudder_sail_cmd (geometry_msgs/Vector3): Autonomous rudder and sail commands (fallback)
     /anem_speed_angle_temp (geometry_msgs/Vector3): Wind data
     /gps_velocity (geometry_msgs/Vector3): GPS velocity vector
     /fix (sensor_msgs/NavSatFix): GPS position

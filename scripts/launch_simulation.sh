@@ -57,19 +57,48 @@ echo "💡 To view log: tail -f $LOG_FILE"
 echo "💡 To grep log: grep 'pattern' $LOG_FILE"
 echo ""
 
-# Trap Ctrl+C to show log location
-# trap 'echo ""; echo "📝 Full log saved to: $LOG_FILE"; echo "💡 Grep with: grep \"pattern\" $LOG_FILE"' INT TERM
+# Function to handle cleanup and signal forwarding
+cleanup() {
+    echo ""
+    echo "🛑 Interrupt received, shutting down..."
+    # Kill the process group to ensure all children are terminated
+    if [ -n "$SIM_PID" ]; then
+        # Send SIGTERM to the entire process group (negative PID = process group)
+        kill -TERM -"$SIM_PID" 2>/dev/null || true
+        # Wait briefly for graceful shutdown
+        sleep 2
+        # Force kill if still running
+        kill -KILL -"$SIM_PID" 2>/dev/null || true
+    fi
+    echo ""
+    echo "📝 Full log saved to: $LOG_FILE"
+    echo "💡 Grep with: grep \"pattern\" $LOG_FILE"
+    exit 130  # Exit code 130 = terminated by SIGINT
+}
+
+# Set up signal handlers BEFORE launching
+trap cleanup INT TERM
 
 # Launch simulation and log everything
+# Use setsid to create a new process group, which makes signal handling more reliable
 if [ "$MODE" = "local" ]; then
-    ros2 launch launch/argo_launch.py mode:=simulation 2>&1 | tee "$LOG_FILE"
+    # Start a new process group (setsid) and run the command in background
+    # The command runs: ros2 launch ... | tee ... which creates a pipeline
+    # We need to kill the entire process group, so we use setsid to ensure proper grouping
+    setsid sh -c 'ros2 launch launch/argo_launch.py mode:=simulation 2>&1 | tee "$1"' _ "$LOG_FILE" &
+    SIM_PID=$!
 else
-    python3 launch/argo_lifecycle_manager.py simulate_remote 2>&1 | tee "$LOG_FILE"
+    setsid sh -c 'python3 launch/argo_lifecycle_manager.py simulate_remote 2>&1 | tee "$1"' _ "$LOG_FILE" &
+    SIM_PID=$!
 fi
 
-# Capture the exit code of the simulation command (before the pipe to tee)
-# PIPESTATUS is an array variable where PIPESTATUS[0] = exit status of the first command in a pipeline
-EXIT_CODE=${PIPESTATUS[0]}
+# Wait for the background process
+# This allows the trap handler to catch signals and forward them to the process group
+wait $SIM_PID 2>/dev/null
+EXIT_CODE=$?
+
+# Clear trap after process completes
+trap - INT TERM
 
 # Show log location on exit
 echo ""
