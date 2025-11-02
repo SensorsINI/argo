@@ -26,7 +26,7 @@ echo "💡 To grep log: grep 'pattern' $LOG_FILE"
 echo ""
 
 # Trap Ctrl+C to show log location
-trap 'echo ""; echo "📝 Full log saved to: $LOG_FILE"; echo "💡 Grep with: grep \"pattern\" $LOG_FILE"' INT TERM
+# trap 'echo ""; echo "📝 Full log saved to: $LOG_FILE"; echo "💡 Grep with: grep \"pattern\" $LOG_FILE"' INT TERM
 
 # Launch simulation and log everything
 if [ "$MODE" = "local" ]; then
@@ -35,6 +35,8 @@ else
     python3 launch/argo_lifecycle_manager.py simulate_remote 2>&1 | tee "$LOG_FILE"
 fi
 
+# Capture the exit code of the simulation command (before the pipe to tee)
+# PIPESTATUS is an array variable where PIPESTATUS[0] = exit status of the first command in a pipeline
 EXIT_CODE=${PIPESTATUS[0]}
 
 # Show log location on exit
