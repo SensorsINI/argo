@@ -226,10 +226,17 @@ class GpsNode(ArgoBaseNode):
         # Track NMEA sentence types received
         self.sentence_types_seen = set()
         self.last_sentence_type_log_time = time.time()
+        # Track first reception of expected NMEA sentences for debugging
+        self.first_gga_received = False
+        self.first_rmc_received = False
+        self.first_vtg_received = False
 
         # GPS communication timeout tracking
         self.last_data_received_time = time.time()
-        self.gps_timeout_seconds = 30.0  # Fail if no data received for 30 seconds
+        # Increased timeout: GPS may take time to output NMEA, especially indoors without fix
+        # But we need to detect actual communication failures
+        self.gps_timeout_seconds = 60.0  # Fail if no valid NMEA received for 60 seconds (when no satellites)
+        self.last_satellites_seen_time = None  # Track when we last saw satellites (satellites_used > 0)
 
         # GPS reset tracking for extended no-fix periods
         self.last_fix_time = time.time()  # Initialize to startup time (will be cleared when fix acquired)
@@ -367,9 +374,46 @@ class GpsNode(ArgoBaseNode):
         return ok
 
     def gps_cold_start(self) -> bool:
-        """Perform a cold start reset - clears all data (ephemeris, almanac, position, time)."""
+        """Perform a cold start reset - clears all data (ephemeris, almanac, position, time).
+        
+        NOTE: This performs a controlled software reset which may temporarily stop NMEA output.
+        After calling this, ensure enable_nmea_sentences() is called to restore NMEA output.
+        """
         self.get_logger().info("Performing GPS cold start reset (clearing all data)...")
         return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0004, reset_mode=0x08)
+
+    def clear_navigation_data(self) -> bool:
+        """Clear navigation BBR data (ephemeris, almanac) without doing a full reset.
+        
+        This uses UBX-CFG-CFG to clear only the navigation BBR, preserving port configuration
+        and other settings. This is safer than cold_start() as it doesn't stop NMEA output.
+        
+        Returns:
+            True if command was sent successfully
+        """
+        if not (self.serial_port and self.serial_port.is_open):
+            return False
+        
+        self.get_logger().info("Clearing navigation data (ephemeris, almanac) without reset...")
+        
+        # UBX-CFG-CFG: Clear navigation BBR (battery-backed RAM)
+        # This clears ephemeris and almanac data without doing a full reset
+        # Device mask: clear all (0xFFFFFFFF)
+        # Clear mask: navigation BBR only (0x00000001 = navBbr)
+        device_mask = bytes([0xFF, 0xFF, 0xFF, 0xFF])  # All devices
+        clear_mask = bytes([0x01, 0x00, 0x00, 0x00])   # Clear navBBR only
+        save_mask = bytes([0x00, 0x00, 0x00, 0x00])    # Don't save to flash
+        load_mask = bytes([0x00, 0x00, 0x00, 0x00])    # Don't load from flash
+        
+        payload = device_mask + clear_mask + save_mask + load_mask
+        
+        ok = self._send_ubx(0x06, 0x09, payload, expect_ack=True, timeout=2.0)
+        if ok:
+            self.get_logger().info("Navigation data cleared. GPS will reacquire fresh satellite data...")
+        else:
+            self.get_logger().warn("Navigation data clear command may have failed (no ACK received)")
+        
+        return ok
 
     def gps_warm_start(self) -> bool:
         """Perform a warm start reset - clears ephemeris and almanac, keeps position and time."""
@@ -386,12 +430,64 @@ class GpsNode(ArgoBaseNode):
         self.get_logger().info("Performing GPS GNSS-only restart...")
         return self.gps_reset(reset_type=0x02, nav_bbr_mask=0x0000, reset_mode=0x08)
 
+    def gps_factory_reset(self) -> bool:
+        """Perform a hardware factory reset - completely restores factory defaults.
+        
+        WARNING: This will clear ALL configuration including:
+        - Port settings (baud rate, protocol masks)
+        - Message rates
+        - Navigation settings
+        - Power management settings
+        
+        After this reset, the GPS must be fully re-configured.
+        """
+        self.get_logger().warn("Performing GPS hardware factory reset (restoring factory defaults)...")
+        self.get_logger().warn("WARNING: All configuration will be lost! GPS must be re-configured after reset.")
+        # Hardware reset immediately (reset_mode=0x09) with cold start mask
+        # This performs a full hardware reset, not just a controlled software reset
+        return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0004, reset_mode=0x09)
+
     def check_and_reset_if_needed(self):
-        """Check if GPS has been without a fix for too long and trigger reset if needed."""
+        """Check if GPS has been without a fix for too long and trigger reset if needed.
+        
+        Also detects the condition where many satellites are visible but no fix is acquired,
+        which often indicates stale almanac/ephemeris data requiring a cold start.
+        """
         current_time = time.time()
         
         # Only check if we don't have a fix
         if not self.gps_fix_valid:
+            # Check for "many satellites but no fix" condition (stale satellite data)
+            # This is a strong indicator that the GPS has stale almanac/ephemeris
+            # that prevents it from computing a position despite seeing satellites
+            if (self.satellites_used >= 8 and 
+                self.last_satellites_seen_time is not None and
+                (self.last_reset_time is None or 
+                 (current_time - self.last_reset_time) >= self.min_reset_interval_seconds)):
+                # Give GPS a reasonable time to acquire fix with satellites (2 minutes)
+                # If it still hasn't fixed after 2 minutes with 8+ satellites, something is wrong
+                time_with_satellites = current_time - self.last_satellites_seen_time
+                if time_with_satellites >= 120.0:  # 2 minutes with satellites but no fix
+                    self.get_logger().warn(
+                        f"GPS has {self.satellites_used} satellites in view but no fix after "
+                        f"{time_with_satellites/60:.1f} minutes. "
+                        f"This likely indicates stale satellite data. Clearing navigation data...")
+                    # Use clear_navigation_data() instead of cold_start() to avoid stopping NMEA output
+                    if self.clear_navigation_data():
+                        self.last_reset_time = current_time
+                        self.last_fix_time = current_time
+                        self.get_logger().info("Navigation data cleared. GPS will reacquire fresh satellite data...")
+                    else:
+                        self.get_logger().error("Failed to clear navigation data, trying warm start instead...")
+                        # Fallback to warm start if CFG-CFG fails
+                        if self.gps_warm_start():
+                            self.last_reset_time = current_time
+                            self.last_fix_time = current_time
+                            time.sleep(3.0)  # Give GPS more time after warm start
+                            self.enable_nmea_sentences()
+                            self.get_logger().info("Warm start completed. GPS will reacquire fresh satellite data...")
+                    return
+            
             # Calculate time without fix (from last fix time or startup)
             time_without_fix = current_time - self.last_fix_time
             
@@ -401,17 +497,23 @@ class GpsNode(ArgoBaseNode):
                     (current_time - self.last_reset_time) >= self.min_reset_interval_seconds):
                     self.get_logger().warn(
                         f"GPS has been without fix for {time_without_fix/60:.1f} minutes. "
-                        f"Performing cold start reset to clear stale data...")
-                    if self.gps_cold_start():
+                        f"Clearing stale navigation data...")
+                    # Try clear_navigation_data first (safer, doesn't stop NMEA)
+                    if self.clear_navigation_data():
                         self.last_reset_time = current_time
-                        # Reset last_fix_time to current time to track from reset
                         self.last_fix_time = current_time
-                        # Re-enable NMEA sentences after reset (GPS will need ~30 seconds to reinitialize)
-                        time.sleep(2.0)  # Give GPS time to process reset
-                        self.enable_nmea_sentences()
-                        self.get_logger().info("GPS reset completed. Waiting for satellite acquisition...")
+                        self.get_logger().info("Navigation data cleared. Waiting for satellite acquisition...")
                     else:
-                        self.get_logger().error("Failed to send GPS reset command")
+                        # Fallback to warm start if clear fails
+                        self.get_logger().warn("Navigation clear failed, trying warm start reset...")
+                        if self.gps_warm_start():
+                            self.last_reset_time = current_time
+                            self.last_fix_time = current_time
+                            time.sleep(3.0)  # Give GPS more time after warm start
+                            self.enable_nmea_sentences()
+                            self.get_logger().info("GPS warm start completed. Waiting for satellite acquisition...")
+                        else:
+                            self.get_logger().error("Failed to send GPS reset command")
         else:
             # We have a fix - we already updated last_fix_time when fix was acquired
             pass
@@ -551,6 +653,39 @@ class GpsNode(ArgoBaseNode):
         """Enable RMC, VTG, and GGA NMEA sentences on u-blox NEO-N9M for navigation and satellite data."""
         self.get_logger().info("Configuring u-blox NEO-N9M to enable navigation sentences...")
 
+        # CRITICAL: First configure UART port (CFG-PRT) to ensure NMEA protocol is enabled
+        # The port must have NMEA output protocol enabled, or no NMEA sentences will be sent
+        # Even if CFG-MSG enables specific NMEA messages, they won't output if protocol is disabled
+        # Format: portID=1 (UART1), txReady=0, mode=4 bytes (8N1, 38400 baud),
+        #         inProtoMask=0x07 (UBX + NMEA + RTCM3 input), outProtoMask=0x07 (UBX + NMEA + RTCM3 output)
+        # Mode format: [charLen(4 bits)|reserved(4 bits), parity(2 bits)|nStopBits(2 bits)|reserved(4 bits), 
+        #               baudRate(16 bits, little-endian)]
+        # For 38400 baud 8N1: charLen=8 (0x08), parity=none (0x0), nStopBits=1 (0x0), baudRate=38400 (0x9600)
+        # Note: Baud rate is already verified correct (version query works), preserving existing 38400 baud 8N1
+        # Protocol masks: 0x07 = UBX(bit0=1) + NMEA(bit1=1) + RTCM3(bit2=1) = all protocols enabled
+        uart1_cfg_prt = bytes([0xB5, 0x62,  # Sync chars
+                              0x06, 0x00,  # Class: CFG, ID: PRT
+                              0x14, 0x00,  # Length: 20 bytes
+                              0x01,        # Port ID: 1 (UART1)
+                              0x00,        # Reserved
+                              0x00, 0x00,  # TX Ready: disabled (little-endian)
+                              0x08,        # Mode[0]: charLen=8 (bits 0-3), reserved (bits 4-7)
+                              0x00,        # Mode[1]: parity=none (bits 0-1), nStopBits=1 (bits 2-3), reserved (bits 4-7)
+                              0x00, 0x96,  # Mode[2:3]: baudRate=38400 (0x9600, little-endian 16-bit)
+                              0x00, 0x00,  # Reserved
+                              0x07, 0x00,  # In Protocol Mask: 0x07 = UBX(1) + NMEA(2) + RTCM3(4) input enabled
+                              0x07, 0x00,  # Out Protocol Mask: 0x07 = UBX(1) + NMEA(2) + RTCM3(4) output enabled
+                              0x00, 0x00,  # Flags
+                              0x00, 0x00, 0x00, 0x00])  # Reserved
+        
+        # Calculate checksum for CFG-PRT
+        prt_ck_a = 0
+        prt_ck_b = 0
+        for byte in uart1_cfg_prt[2:]:  # Skip sync chars
+            prt_ck_a = (prt_ck_a + byte) & 0xFF
+            prt_ck_b = (prt_ck_b + prt_ck_a) & 0xFF
+        uart1_cfg_prt += bytes([prt_ck_a, prt_ck_b])
+
         # UBX-CFG-MSG commands to enable NMEA sentences
         # Format: Class ID, Message ID, Rate for each port (DDC, UART1, UART2, USB, SPI, Reserved)
 
@@ -619,6 +754,12 @@ class GpsNode(ArgoBaseNode):
         # Send configuration commands
         if self.serial_port and self.serial_port.is_open:
             try:
+                # CRITICAL: Configure UART port to enable NMEA protocol output first
+                # Without this, even if sentences are enabled, they won't be output
+                self.get_logger().debug("Configuring UART1 port to enable NMEA protocol...")
+                self.serial_port.write(uart1_cfg_prt)
+                time.sleep(0.2)  # Give GPS time to process port configuration
+                
                 self.get_logger().debug("Enabling NMEA GGA sentences...")
                 self.serial_port.write(gga_enable)
                 time.sleep(0.1)
@@ -633,8 +774,28 @@ class GpsNode(ArgoBaseNode):
 
                 self.get_logger().info("✓ Navigation sentences (GGA, RMC, VTG) enabled on GPS module")
                 
+                # Flush any pending UBX ACK/NAK messages from the configuration commands
+                # These are binary messages that would otherwise be read as invalid data
+                time.sleep(0.5)  # Give GPS time to send ACKs
+                try:
+                    if self.serial_port.in_waiting > 0:
+                        # Read and discard pending UBX ACK messages
+                        self.serial_port.read(self.serial_port.in_waiting)
+                        self.get_logger().debug("Flushed pending UBX ACK messages")
+                except Exception:
+                    pass
+                
                 # Configure GPS for hot start capability
                 self.configure_hot_start()
+                
+                # Final flush after all configuration
+                time.sleep(0.5)
+                try:
+                    if self.serial_port.in_waiting > 0:
+                        self.serial_port.read(self.serial_port.in_waiting)
+                        self.get_logger().debug("Flushed final UBX ACK messages")
+                except Exception:
+                    pass
                 
                 return True
 
@@ -915,6 +1076,10 @@ class GpsNode(ArgoBaseNode):
                         self.satellites_used = new_sat_count
                         # Handle immediate logging and publishing for satellite count changes
                         self.handle_satellite_count_change(new_sat_count)
+                        # Update timeout behavior: if satellites now in view, GPS is working
+                        if new_sat_count > 0 and self.last_satellites_seen_time is None:
+                            self.get_logger().info(
+                                f"Satellites detected ({new_sat_count}) - GPS is working, timeout disabled until satellites lost")
                     else:
                         self.satellites_used = new_sat_count
 
@@ -1206,12 +1371,30 @@ class GpsNode(ArgoBaseNode):
         # GPS node runs continuously without pause functionality
 
         # Check for GPS communication timeout
+        # Only timeout if no satellites are in view - if satellites are visible, GPS is working
+        # and just needs time to acquire a fix (which is normal behavior)
         current_time = time.time()
-        if current_time - self.last_data_received_time > self.gps_timeout_seconds:
+        has_satellites = self.satellites_used > 0
+        
+        # Update last_satellites_seen_time when we have satellites
+        if has_satellites:
+            if self.last_satellites_seen_time is None:
+                self.get_logger().info(f"Satellites in view ({self.satellites_used}) - GPS is working, timeout disabled")
+            self.last_satellites_seen_time = current_time
+        elif self.last_satellites_seen_time is not None:
+            # We previously had satellites but lost them - this is OK, they may come back
+            self.get_logger().debug(f"Lost satellite view (previously saw {self.last_satellite_count}), waiting for re-acquisition")
+        
+        # Only timeout if:
+        # 1. No valid NMEA data received for timeout period
+        # 2. AND no satellites are currently in view (satellites_used == 0)
+        # This allows GPS to work normally when satellites are visible but fix acquisition takes time
+        if (current_time - self.last_data_received_time > self.gps_timeout_seconds and 
+            not has_satellites):
             self.get_logger().error(
                 f"CRITICAL: GPS communication timeout - no data received for {self.gps_timeout_seconds} seconds")
             self.get_logger().error(
-                "CRITICAL: GPS device appears to have stopped communicating. Exiting.")
+                "CRITICAL: GPS device appears to have stopped communicating (no satellites in view). Exiting.")
             self.set_unhealthy("GPS device not accessible")
             import sys
             sys.exit(1)
@@ -1226,21 +1409,35 @@ class GpsNode(ArgoBaseNode):
                 data_str = data_bytes.decode('ascii', errors='ignore').strip()
 
                 if data_str:
+                    # Only process valid NMEA sentences (must start with $)
+                    # Invalid/corrupted data might be UBX binary, partial reads, or noise
+                    # UBX messages are binary and when decoded as ASCII appear as control characters or garbage
+                    if not data_str.startswith('$'):
+                        # Check if this looks like UBX binary data (control characters, non-printable)
+                        if any(ord(c) < 32 and c not in '\r\n\t' for c in data_str):
+                            # This is likely UBX binary data - silently discard it
+                            self.get_logger().debug(f"GPS UBX binary data (discarded): {repr(data_str[:50])}")
+                        else:
+                            # Not NMEA and not clearly binary - log for investigation
+                            self.get_logger().debug(f"GPS invalid data (ignored): {repr(data_str[:100])}")
+                        # Don't reset timeout for invalid data - only valid NMEA resets it
+                        return  # Skip processing invalid data
+                    
+                    # Process valid NMEA sentence
                     self.data_count += 1
-                    self.last_data_received_time = current_time  # Reset timeout
+                    self.last_data_received_time = current_time  # Reset timeout only on valid NMEA
                     self.get_logger().debug(f"GPS Raw: {data_str}")
                     
                     # Track sentence types seen
-                    if data_str.startswith('$'):
-                        sentence_type = data_str.split(',')[0]
-                        self.sentence_types_seen.add(sentence_type)
+                    sentence_type = data_str.split(',')[0]
+                    self.sentence_types_seen.add(sentence_type)
 
                     # Publish raw NMEA data
                     msg = String()
                     msg.data = data_str
                     self.pub_data.publish(msg)
 
-                    # Parse navigation data from specific NMEA sentences
+                    # Parse navigation data from specific NMEA sentences (only valid NMEA reaches here)
                     # NMEA sentence prefixes:
                     # - $GNRMC/$GPRMC: Recommended Minimum (RMC) - speed, course, position, fix status
                     # - $GNVTG/$GPVTG: Track Made Good and Ground Speed (VTG) - course, speed, heading
@@ -1254,17 +1451,26 @@ class GpsNode(ArgoBaseNode):
                     if data_str.startswith('$GNRMC') or data_str.startswith('$GPRMC'):
                         # RMC: Most comprehensive navigation sentence - contains position, speed, course, and fix status
                         # Distinguishing feature: Contains 'A' (valid) or 'V' (invalid) fix status
+                        if not self.first_rmc_received:
+                            self.first_rmc_received = True
+                            self.get_logger().info(f"✓ First RMC sentence received: {data_str[:80]}")
                         if self.parse_rmc_sentence(data_str):
                             self.publish_navigation_data()
                     elif data_str.startswith('$GNVTG') or data_str.startswith('$GPVTG'):
                         # VTG: Course and speed information - alternative to RMC for navigation data
                         # Distinguishing feature: Contains course over ground (COG) and speed over ground (SOG)
+                        if not self.first_vtg_received:
+                            self.first_vtg_received = True
+                            self.get_logger().info(f"✓ First VTG sentence received: {data_str[:80]}")
                         if self.parse_vtg_sentence(data_str):
                             self.publish_navigation_data()
                     elif data_str.startswith('$GNGGA') or data_str.startswith('$GPGGA'):
                         # GGA: Position and satellite information - most detailed position data
                         # Distinguishing feature: Contains satellite count, HDOP, and altitude
                           # HDOP = Horizontal Dilution of Precision (lower values = better accuracy)
+                        if not self.first_gga_received:
+                            self.first_gga_received = True
+                            self.get_logger().info(f"✓ First GGA sentence received: {data_str[:80]}")
                         # Always parse to extract satellite count and position data
                         self.parse_gga_sentence(data_str)
                         # Note: NavSatFix published by periodic timer (1 Hz) for consistent rate
@@ -1281,6 +1487,19 @@ class GpsNode(ArgoBaseNode):
                             has_gga = any('GGA' in s for s in self.sentence_types_seen)
                             if not has_gga:
                                 self.get_logger().warn("No GGA sentences received - satellite count unavailable")
+                        else:
+                            self.get_logger().warn("No NMEA sentences received - GPS may not be outputting NMEA data")
+                            # Debug: Check if expected sentences have been received
+                            expected_status = []
+                            if not self.first_gga_received:
+                                expected_status.append("GGA")
+                            if not self.first_rmc_received:
+                                expected_status.append("RMC")
+                            if not self.first_vtg_received:
+                                expected_status.append("VTG")
+                            if expected_status:
+                                self.get_logger().warn(
+                                    f"No expected NMEA sentences received yet (waiting for: {', '.join(expected_status)})")
                         self.last_sentence_type_log_time = current_time
                     
                     # Log data reception every 10 seconds for debugging (debug mode only)
