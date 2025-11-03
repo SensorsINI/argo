@@ -15,6 +15,7 @@ Features:
 """
 
 import os
+import sys
 import subprocess
 import signal
 import psutil

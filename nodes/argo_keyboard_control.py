@@ -23,12 +23,14 @@ Keyboard Controls:
     ↑  : Sail out (increase)
     ↓  : Sail in (decrease)
     c  : Center both controls
+    r  : Reset simulation
     q  : Quit
 """
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
+from std_srvs.srv import Trigger
 import curses
 import time
 import queue
@@ -43,6 +45,9 @@ class KeyboardControlNode(Node):
         
         # Publisher for control commands
         self.pub_rudder_sail_radio = self.create_publisher(Vector3, '/rudder_sail_radio', 10)
+        
+        # Service client for simulation reset
+        self.reset_service_client = self.create_client(Trigger, '/simulator/reset')
         
         # Control state
         self.rudder_position = 0.0  # -1.0 to +1.0
@@ -80,7 +85,7 @@ class KeyboardControlNode(Node):
         self.keyboard_timer = self.create_timer(0.05, self.handle_keyboard_input)
         
         self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | Q=Quit')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | R=Reset | Q=Quit')
     
     def _setup_curses(self):
         """Setup curses for terminal control."""
@@ -162,6 +167,8 @@ class KeyboardControlNode(Node):
                 self.adjust_sail(-1)     # Sail in
             elif key == ord('c') or key == ord('C'):
                 self.center_controls()
+            elif key == ord('r') or key == ord('R'):
+                self.reset_simulation()
             elif key == ord('q') or key == ord('Q'):
                 self.running = False
                 self.cleanup()
@@ -189,6 +196,30 @@ class KeyboardControlNode(Node):
         """Center both rudder and sail."""
         self.rudder_position = 0.0
         self.sail_position = 0.0
+    
+    def reset_simulation(self):
+        """Reset simulation to initial state."""
+        if not self.reset_service_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn("Reset service not available (simulator bridge may not be running)")
+            return
+        
+        request = Trigger.Request()
+        future = self.reset_service_client.call_async(request)
+        
+        # Wait for the response with timeout
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        if future.done():
+            try:
+                response = future.result()
+                if response.success:
+                    self.get_logger().info(f"✅ {response.message}")
+                else:
+                    self.get_logger().warn(f"⚠️  Reset service returned: {response.message}")
+            except Exception as e:
+                self.get_logger().error(f"❌ Error calling reset service: {e}")
+        else:
+            self.get_logger().warn("⚠️  Reset service call timed out")
     
     def publish_control(self):
         """Publish current control commands to /rudder_sail_radio."""
@@ -253,7 +284,7 @@ class KeyboardControlNode(Node):
             self.stdscr.addstr(6, 2, status_line)
             
             # Controls
-            controls_line = "Controls: ←→ Rudder | ↑↓ Sail | C=Center | Q=Quit"
+            controls_line = "Controls: ←→ Rudder | ↑↓ Sail | C=Center | R=Reset | Q=Quit"
             if len(controls_line) > width - 4:
                 controls_line = controls_line[:width - 7] + "..."
             self.stdscr.addstr(7, 2, controls_line)

@@ -176,7 +176,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         rudder_transform.transform.rotation.w = 1.0
         self.static_tf_broadcaster.sendTransform(rudder_transform)
         
-        self.get_logger().info("Static transforms published")
+        self.get_logger().debug("Static transforms published")
     
     def publish_dynamic_transforms(self):
         """Publish dynamic transforms for boat position and orientation"""

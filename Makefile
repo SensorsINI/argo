@@ -179,7 +179,7 @@ check-deps:
 	@echo "🔍 Quick Test:"
 	@echo "   Test foxglove-bridge: ros2 run foxglove_bridge foxglove_bridge --help"
 
-install-simulation-deps:
+install-simulation-deps: install-foxglove-bridge
 	@echo "Installing system and Python dependencies for sailboat-playground simulator..."
 	@echo "--- Installing system libraries (requires sudo) ---"
 	sudo apt-get update

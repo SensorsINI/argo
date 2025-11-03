@@ -45,6 +45,7 @@ import threading
 import argparse
 import argcomplete
 import json
+import shlex
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import select
@@ -642,7 +643,10 @@ class ArgoLifecycleManager:
                 if hasattr(self, 'simulation_node_args') and script in self.simulation_node_args:
                     args = self.simulation_node_args[script]
                     if args:
-                        cmd_str += ' ' + ' '.join(args)
+                        # Properly quote arguments to handle spaces in values (e.g., map names)
+                        # Use shlex.quote to safely escape arguments for shell use
+                        quoted_args = [shlex.quote(arg) for arg in args]
+                        cmd_str += ' ' + ' '.join(quoted_args)
                 
                 cmd = ['bash', '-c', cmd_str]
                 proc = subprocess.Popen(
@@ -755,9 +759,13 @@ class ArgoLifecycleManager:
                             continue
                     
                     if not foxglove_running:
-                        print(f"❌ WARNING: {special_node} process not found after launch!")
+                        print(f"❌ CRITICAL ERROR: {special_node} process not found after launch!")
                         print("   The launch may have failed silently.")
-                        # Don't fail immediately - let monitoring catch it
+                        print("   Simulation requires foxglove_bridge for visualization.")
+                        print("")
+                        print("   Check for errors above or run manually to diagnose:")
+                        print("     ros2 run foxglove_bridge foxglove_bridge")
+                        raise RuntimeError(f"foxglove_bridge failed to start - process not found after launch")
                     
                 except subprocess.SubprocessError as e:
                     print(f"❌ ERROR launching {special_node}: {e}")
@@ -1255,7 +1263,8 @@ class ArgoLifecycleManager:
             self._cleanup_ros2()
             return True
         except Exception as e:
-            print(f"⚠️  Error killing process group: {e}")
+            error_msg = str(e) if e else "Unknown error"
+            print(f"⚠️  Error killing process group: {error_msg}")
             # Fallback to old method if killpg fails
             return self._stop_fallback()
 
@@ -1510,7 +1519,7 @@ class ArgoLifecycleManager:
         print("  - anem.py (wind data provided by simulator)")
         print("  - rudder_sail_radio.py (control handled by simulator)")
         print("Simulation mode includes visualization:")
-        print("  - foxglove_bridge (Foxglove Studio at ws://localhost:9090)")
+        print("  - foxglove_bridge (Foxglove Studio at ws://localhost:8765)")
 
         # Use simulation nodes from YAML configuration
         if not self.simulation_expected_nodes and not self.simulation_special_nodes:
@@ -1549,24 +1558,22 @@ class ArgoLifecycleManager:
             # Ensure --no-curses is present (required for non-interactive launch)
             if '--no-curses' not in args:
                 args.append('--no-curses')
-            # Add map name if configured
-            if self.simulation_map_name:
-                if '--map' not in args:
-                    args.extend(['--map', self.simulation_map_name])
+            # Note: Map name is now automatically loaded from argo_nodes.yaml by the simulator bridge
+            # --map can still be passed to override if needed
             self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
         else:
             # If simulator bridge doesn't have args configured, add --mode and --no-curses
             args = ['--mode', mode, '--no-curses']
-            if self.simulation_map_name:
-                args.extend(['--map', self.simulation_map_name])
+            # Note: Map name is now automatically loaded from argo_nodes.yaml by the simulator bridge
             self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
         
         # Also pass map name to sailing_area_publisher so it uses the same coordinate origin
+        # Note: sailing_area_publisher now auto-loads from YAML, but we pass it explicitly to ensure consistency
         if self.simulation_map_name:
             if 'sailing_area_publisher.py' not in self.simulation_node_args:
                 self.simulation_node_args['sailing_area_publisher.py'] = []
             args = self.simulation_node_args['sailing_area_publisher.py'].copy()
-            # Add --map if not already present
+            # Add --map if not already present (explicit passing overrides auto-load if needed)
             if '--map' not in args:
                 args.extend(['--map', self.simulation_map_name])
                 self.simulation_node_args['sailing_area_publisher.py'] = args
@@ -1640,9 +1647,22 @@ class ArgoLifecycleManager:
         final_running_nodes = [
             node for node, status in final_node_status.items() if "RUNNING" in status]
 
-        # Determine success based on critical nodes and minimum thresholds
+        # Check for critical nodes - foxglove_bridge is required for simulation
         critical_running = [
             node for node in self.critical_nodes if node in final_running_nodes]
+        
+        # Also check special nodes (like foxglove_bridge) - these are required for simulation
+        special_running = [
+            node for node in self.special_nodes if node in final_running_nodes]
+        
+        # Simulation requires foxglove_bridge to be running
+        if 'foxglove_bridge' in self.special_nodes and 'foxglove_bridge' not in final_running_nodes:
+            print("❌ CRITICAL: foxglove_bridge is not running!")
+            print("   Simulation requires foxglove_bridge for visualization.")
+            print("   Please check the error messages above.")
+            print("   Try running manually: ros2 run foxglove_bridge foxglove_bridge")
+            return False
+        
         if len(critical_running) == len(self.critical_nodes):
             print("✅ All critical simulation nodes running")
             success = True
@@ -1665,7 +1685,7 @@ class ArgoLifecycleManager:
             print("Control commands sent to simulator via /rudder_sail_servo")
             print(
                 "Keyboard control: Use arrow keys in curses display to control rudder and sail")
-            print("Visualization available via Foxglove Studio at ws://localhost:9090")
+            print("Visualization available via Foxglove Studio at ws://localhost:8765")
             print("\n🔄 Simulation running... Press Ctrl+C to stop and clean up all nodes")
 
             # Start continuous monitoring with proper cleanup
@@ -1728,7 +1748,11 @@ class ArgoLifecycleManager:
                 print("✅ All simulation nodes terminated")
                 return True
             except Exception as e:
-                print(f"❌ Error in simulation mode: {e}")
+                import traceback
+                error_msg = str(e) if e else "Unknown error"
+                print(f"❌ Error in simulation mode: {error_msg}")
+                # Print full traceback to help with debugging
+                traceback.print_exc()
                 self.shutdown_requested = True
                 self.stop()
                 return False

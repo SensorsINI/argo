@@ -8,5 +8,7 @@
     "python.formatting.provider": "none",
     "isort.sortImportsOnSave": false,
     "ruff.fixOnSave": false,
-    "makefile.configureOnOpen": false
+    "makefile.configureOnOpen": false,
+    "git.autofetch": true,
+    "git.autofetchPeriod": 180
   }
