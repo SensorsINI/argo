@@ -237,6 +237,8 @@ class ArgoHealthMonitor(Node):
                 # (nodes without ArgoBaseNode are considered healthy if they're running)
                 self.node_health[health_key]['healthy'] = True
                 self.node_health[health_key]['last_seen'] = current_time
+                # Always update ros2_node_name field (may be None from old entries)
+                self.node_health[health_key]['ros2_node_name'] = ros2_node_name
                 
                 # Migration: Remove old entries that used executable string as key for special nodes
                 # This handles the case where the health monitor was initialized before the fix
