@@ -379,14 +379,40 @@ class ArgoLifecycleManager:
                         try:
                             monitor_data = json.loads(response.message)
                             # Convert health monitor format to lifecycle manager format
-                            # Health monitor uses YAML node names (which are .py filenames) as keys
+                            # Health monitor uses YAML node names (which are .py filenames for regular nodes)
+                            # or node names for special nodes (e.g., 'foxglove_bridge')
                             if 'nodes' in monitor_data:
                                 for node_name, node_info in monitor_data['nodes'].items():
-                                    # node_name is like 'gps.py', 'record.py', etc.
-                                    health_data[node_name] = {
+                                    # Handle both old format (executable string for special nodes) and new format (node name)
+                                    # Old format: 'ros2 run foxglove_bridge foxglove_bridge'
+                                    # New format: 'foxglove_bridge'
+                                    lookup_key = node_name
+                                    
+                                    # If this looks like an old format special node key (contains 'ros2 run'), try to extract node name
+                                    if 'ros2 run' in node_name:
+                                        # Load YAML config to find the matching node
+                                        try:
+                                            config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
+                                            with open(config_path, 'r') as f:
+                                                config = yaml.safe_load(f)
+                                            
+                                            # Check both regular and simulation nodes
+                                            for cfg in (config.get('nodes', []) + config.get('simulation_nodes', [])):
+                                                if cfg.get('executable', '') == node_name and cfg.get('special', False):
+                                                    lookup_key = cfg.get('name', node_name)
+                                                    break
+                                        except Exception:
+                                            # If we can't load config, keep original key
+                                            pass
+                                    
+                                    health_data[lookup_key] = {
                                         'healthy': node_info.get('healthy'),
                                         'last_seen': node_info.get('last_seen', 0.0)
                                     }
+                                    
+                                    # Also keep the original key for backward compatibility during transition
+                                    if lookup_key != node_name:
+                                        health_data[node_name] = health_data[lookup_key]
                             # If we got data from health monitor, return it (fast path succeeded)
                             if health_data:
                                 return health_data
