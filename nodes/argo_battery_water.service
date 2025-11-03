@@ -1,10 +1,9 @@
 [Unit]
 Description=Argo Battery and Water Monitoring Service
 Documentation=file://%h/argo/nodes/argo_battery_water.py
-After=network.target argo_power_control.service
-Wants=argo_power_control.service
+After=network.target
 DefaultDependencies=no
-Before=argo_launch_standard.service shutdown.target
+Before=shutdown.target
 
 [Service]
 Type=simple
@@ -27,9 +26,4 @@ NoNewPrivileges=false
 PrivateTmp=false
 
 [Install]
-WantedBy=basic.target
-
-
-
-
-
+WantedBy=multi-user.target

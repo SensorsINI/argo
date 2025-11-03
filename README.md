@@ -77,6 +77,7 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 - **`simulator/`** - Sailboat simulation submodule (sailboat-playground)
 
 ## Other READMEs
+- [**Systemd Services Architecture**](docs/README-services.md) - Service dependencies, boot sequence, and troubleshooting
 - [Simulation System Overview](simulator/README.md)  
 - [Power Control System](power_control/README.md)  
 - [Foxglove Visualization](foxglove/README.md)  
