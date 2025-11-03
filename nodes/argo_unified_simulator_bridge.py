@@ -96,7 +96,8 @@ except ImportError as e:
         tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
         print(f'Stack trace for import failure:\n{tb_str}')
 
-    print(f"         Falling back to mock simulator.")
+    print(f"         Falling back to mock simulator, ^c to exit.")
+    time.sleep(7)
     SIMULATOR_AVAILABLE = False
 except Exception as e:
     print(f"WARNING: sailboat-playground failed to initialize: {e}")
@@ -301,7 +302,7 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.heartbeat_timer = self.create_timer(1.0, self.send_heartbeat)
         
         # Status timer
-        self.status_timer = self.create_timer(1.0, self.print_status)
+        self.status_timer = self.create_timer(10.0, self.print_status)
         
         # Control arbitration publishers (simulate rudder_sail_radio.py functionality)
         self.pub_human_controlled = self.create_publisher(Bool, '/human_controlled', 10)
@@ -402,6 +403,7 @@ class ArgoUnifiedSimulatorBridge(Node):
                 tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
                 self.get_logger().warn(f'Stack trace for simulator initialization failure:\n{tb_str}')
                 self.get_logger().info('Falling back to mock simulator (reliable for headless operation)')
+                time.sleep(5)
                 self.simulator = MockSailboatSimulator()
                 self.use_mock = True
         else:
