@@ -210,10 +210,17 @@ class ArgoHealthMonitor(Node):
             
             # Only update if we don't have a health topic subscription for this node
             # (health topic subscriptions take precedence)
-            # Note: health_subscribers uses filename, but for special nodes we use node name
-            filename_for_sub = os.path.basename(executable)
-            if filename_for_sub in self.health_subscribers:
-                continue
+            # Note: health_subscribers uses filename for regular nodes
+            # For special nodes, executable is a command string (e.g., "ros2 run package node")
+            # so we need to handle them differently
+            if is_special:
+                # Special nodes don't have health topics, never skip
+                pass
+            else:
+                # Regular nodes: check if we have a health topic subscription
+                filename_for_sub = os.path.basename(executable)
+                if filename_for_sub in self.health_subscribers:
+                    continue
             
             if health_key not in self.node_health:
                 self.node_health[health_key] = {
