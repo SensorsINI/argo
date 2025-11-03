@@ -38,7 +38,7 @@ rudder_sail_radio_node:
 # Boat visualization (argo_boat_visualization.py)
 argo_boat_visualization:
   ros__parameters:
-    visualization_scale: 3.0        # Scale factor for boat visualization (1.0 = realistic size, 3.0 = 3x larger for better visibility)
+    visualization_scale: 6.0        # Scale factor for boat visualization (1.0 = realistic size, 3.0 = 3x larger for better visibility)
 
 # Example configurations:
 # Wind-aware controller:

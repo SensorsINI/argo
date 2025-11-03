@@ -238,7 +238,11 @@ class SailingAreaPublisher(Node):
                 self.timer = self.create_timer(60.0, self.periodic_republish)
     
     def create_waypoint_marker(self, feature, marker_id):
-        """Create a marker for a waypoint"""
+        """Create a marker for a waypoint
+        
+        Special handling for 'home' waypoint: creates a tall pillar (4m high, 0.5m across and transparent)
+        for better visibility. Other waypoints are shown as small spheres.
+        """
         coords = feature['geometry']['coordinates']
         name = feature['properties']['name']
         
@@ -248,7 +252,6 @@ class SailingAreaPublisher(Node):
         marker.header.stamp = self.get_clock().now().to_msg()
         
         marker.id = marker_id
-        marker.type = Marker.SPHERE
         marker.action = Marker.ADD
         
         # Position (convert from lon/lat to x/y/z)
@@ -257,16 +260,34 @@ class SailingAreaPublisher(Node):
         marker.pose.position.y = y
         marker.pose.position.z = coords[2] if len(coords) > 2 else 0.0  # altitude
         
-        # Scale
-        marker.scale.x = .5  # 1-meter sphere
-        marker.scale.y = .5
-        marker.scale.z = .2
-        
-        # Color (green for waypoints)
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+        # Special handling for 'home' waypoint: create a tall pillar
+        # This is the HOME LOCATION - the boat starts here and points toward geofence center
+        if name == 'home':
+            marker.type = Marker.CYLINDER
+            # Scale: 0.5m diameter (x, y), 4m height (z)
+            marker.scale.x = 0.5  # diameter in X direction (reduced from 1.0m for better visibility)
+            marker.scale.y = 0.5  # diameter in Y direction (reduced from 1.0m for better visibility)
+            marker.scale.z = 4.0  # height in Z direction
+            # Position cylinder base at ground level (z position is center of cylinder)
+            # So we need to offset by half the height to place base at ground
+            marker.pose.position.z = (coords[2] if len(coords) > 2 else 0.0) + 2.0  # Center at 2m above ground
+            # Color: green, semi-transparent (0.5 alpha) for better visibility
+            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.5)
+        else:
+            marker.type = Marker.SPHERE
+            # Scale: small sphere for other waypoints
+            marker.scale.x = 0.5  # 0.5m sphere
+            marker.scale.y = 0.5
+            marker.scale.z = 0.2
+            # Color (green for waypoints, fully opaque)
+            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
         
         # Text label
         marker.text = name
+        
+        # Lifetime - infinite so markers persist
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
         
         return marker
     
