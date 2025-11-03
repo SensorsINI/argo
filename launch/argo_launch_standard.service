@@ -12,8 +12,9 @@ WorkingDirectory=/home/orangepi/argo
 ExecStart=/bin/bash -c 'set -m && source /opt/ros/humble/setup.bash && source launch/argo.env && ros2 launch launch/argo_launch.py'
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+TimeoutStopSec=15
 KillMode=control-group
+KillSignal=SIGINT
 # Note: Signals don't propagate well through ros2 launch process tree
 # Nodes have signal handlers but systemd typically needs to force-kill
 StandardOutput=journal
