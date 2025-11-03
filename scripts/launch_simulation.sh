@@ -61,8 +61,9 @@ echo ""
 # trap 'echo ""; echo "📝 Full log saved to: $LOG_FILE"; echo "💡 Grep with: grep \"pattern\" $LOG_FILE"' INT TERM
 
 # Launch simulation and log everything
+# Use lifecycle manager which includes proper validation and error handling
 if [ "$MODE" = "local" ]; then
-    ros2 launch launch/argo_launch.py mode:=simulation 2>&1 | tee "$LOG_FILE"
+    python3 launch/argo_lifecycle_manager.py simulate_local 2>&1 | tee "$LOG_FILE"
 else
     python3 launch/argo_lifecycle_manager.py simulate_remote 2>&1 | tee "$LOG_FILE"
 fi
