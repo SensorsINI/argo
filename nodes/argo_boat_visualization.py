@@ -114,7 +114,7 @@ import copy
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
 
-UPDATE_RATE = 10  # Hz (match transform publisher rate for smooth visualization)
+UPDATE_RATE = 1  # Hz (match transform publisher rate for smooth visualization)
 
 class ArgoBoatVisualization(ArgoBaseNode):
     def __init__(self, debug_mode=False):
@@ -934,7 +934,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
                 self._debug_counter = 0
             
             # Log marker counts periodically for better debugging
-            if self._debug_counter % 10 == 0:  # Every 1 second at 10Hz
+            if self._debug_counter % 300 == 0:  # Every 1 second at 10Hz
                 boundary_count = len(self.sailing_boundaries)
                 waypoint_count = len(self.sailing_waypoints)
                 hazard_count = len(self.sailing_hazards)
