@@ -13,6 +13,9 @@ ExecStart=/bin/bash -c 'set -m && source /opt/ros/humble/setup.bash && source la
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+KillMode=control-group
+# Note: Signals don't propagate well through ros2 launch process tree
+# Nodes have signal handlers but systemd typically needs to force-kill
 StandardOutput=journal
 StandardError=journal
 
