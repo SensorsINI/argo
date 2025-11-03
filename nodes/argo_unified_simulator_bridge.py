@@ -176,9 +176,11 @@ class MockSailboatSimulator:
 class ArgoUnifiedSimulatorBridge(Node):
     """Unified bridge for local and remote sailboat simulation."""
     
-    def __init__(self, mode='local', map_name=None):
+    def __init__(self, mode='local', map_name=None, test_heading=None):
         super().__init__('argo_unified_simulator_bridge')
         self.mode = mode
+        self.map_name = map_name  # Store map_name for initial state calculation
+        self.test_heading = test_heading  # Test mode: override heading calculation
         
         self.get_logger().info(f'Argo Unified Simulator Bridge starting in {mode.upper()} mode...')
         
@@ -291,6 +293,7 @@ class ArgoUnifiedSimulatorBridge(Node):
         
         # Store initial boat state for reset capability
         self.initial_boat_state = None
+        self.initial_boat_heading = 0.0  # Will be set when initial state is calculated
         
         # --- Simulation Parameters ---
         self.simulation_rate = 10.0  # Hz
@@ -363,12 +366,22 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.auto_rudder = msg.x
         self.auto_sail = msg.y
     
-    def _init_local_simulator(self):
-        """Initialize local simulator (sailboat-playground or mock)."""
-        if SIMULATOR_AVAILABLE:
+    def _create_simulator(self, boat_heading, force_mock=False):
+        """Create a simulator instance (real or mock).
+        
+        Args:
+            boat_heading: Initial heading in degrees (0-360)
+            force_mock: If True, force use of mock simulator even if real simulator is available
+        
+        Returns:
+            tuple: (simulator_instance, use_mock_bool)
+        """
+        import numpy as np
+        
+        # Try real simulator if available and not forcing mock
+        if SIMULATOR_AVAILABLE and not force_mock:
             try:
-                self.get_logger().info('Initializing sailboat-playground simulator...')
-                import numpy as np
+                self.get_logger().info('Creating sailboat-playground simulator...')
                 
                 # Configuration file paths
                 boat_config = "simulator/customizations/sailboat-playground/boats/sample_boat.json"
@@ -385,32 +398,77 @@ class ArgoUnifiedSimulatorBridge(Node):
                 # directory to prevent FileNotFoundError when launched via ROS2.
                 parent_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'simulator', 'sailboat-playground')
                 foils_path = os.path.join(parent_path, 'foils')
-
+                
+                # Initial boat state: home location (0, 0) with specified heading
+                boat_position = np.array([0.0, 0.0])
+                
                 # Initialize the sailboat-playground simulation manager with configs
-                self.sim_manager = engine.Manager(
+                sim_manager = engine.Manager(
                     boat_config,
                     env_config,
-                    foils_dir=foils_path  # Provide the absolute path here
+                    foils_dir=foils_path,
+                    boat_heading=boat_heading,
+                    boat_position=boat_position
                 )
                 
-                self.simulator = self.sim_manager  # Use the manager as our simulator interface
-                self.use_mock = False
-                self.get_logger().info('Real sailboat-playground simulator initialized successfully')
+                # Explicitly set position and velocity to zero after creation to ensure clean state
+                try:
+                    sim_manager.boat.set_position(boat_position)  # Ensure position is (0, 0)
+                    sim_manager.boat._speed = np.array([0.0, 0.0])  # Zero velocity
+                    sim_manager.boat._angular_speed = 0.0  # Zero angular velocity
+                except Exception as e:
+                    self.get_logger().warn(f"Could not explicitly set simulator position/velocity: {e}")
+                
+                self.get_logger().info(f'Real simulator created: position=(0.0, 0.0), heading={boat_heading:.1f}°')
                 self.get_logger().info(f'Using boat config: {boat_config}')
                 self.get_logger().info(f'Using environment config: {env_config}')
+                
+                return sim_manager, False
+                
             except Exception as e:
                 import traceback
-                self.get_logger().warn(f'Failed to initialize real simulator: {e}')
+                self.get_logger().warn(f'Failed to create real simulator: {e}')
                 tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-                self.get_logger().warn(f'Stack trace for simulator initialization failure:\n{tb_str}')
-                self.get_logger().info('Falling back to mock simulator (reliable for headless operation)')
-                time.sleep(5)
-                self.simulator = MockSailboatSimulator()
-                self.use_mock = True
+                self.get_logger().warn(f'Stack trace:\n{tb_str}')
+                self.get_logger().info('Falling back to mock simulator')
+                # Fall through to mock simulator creation
+        
+        # Create mock simulator
+        self.get_logger().info('Creating mock simulator...')
+        simulator = MockSailboatSimulator()
+        # Mock simulator initializes at (0, 0) with heading 0, so we need to set it
+        if hasattr(simulator, 'boat_x'):
+            simulator.boat_x = 0.0
+            simulator.boat_y = 0.0
+            simulator.boat_heading = boat_heading
+            simulator.boat_speed = 0.0
+        self.get_logger().info(f'Mock simulator created: position=(0.0, 0.0), heading={boat_heading:.1f}°')
+        
+        return simulator, True
+    
+    def _init_local_simulator(self):
+        """Initialize local simulator (sailboat-playground or mock)."""
+        # Calculate initial boat position and heading
+        # Start at home location, pointing toward center of geofence
+        if self.test_heading is not None:
+            # Test mode: use specified heading
+            boat_position = np.array([0.0, 0.0])
+            boat_heading = float(self.test_heading)
+            self.get_logger().info(f'TEST MODE: Using test heading {boat_heading:.1f}° instead of calculated heading')
         else:
-            self.get_logger().info('Using mock simulator (reliable for headless operation)')
-            self.simulator = MockSailboatSimulator()
-            self.use_mock = True
+            boat_position, boat_heading = self._calculate_initial_boat_state()
+        
+        # Store initial heading for reset functionality
+        self.initial_boat_heading = boat_heading
+        self.get_logger().info(f'Stored initial_boat_heading = {self.initial_boat_heading:.1f}° for reset functionality')
+        self.get_logger().info(f'Initial boat state: position={boat_position}, heading={boat_heading:.1f}°')
+        
+        # Create simulator using shared method
+        self.simulator, self.use_mock = self._create_simulator(boat_heading)
+        
+        # For real simulator, also store as sim_manager
+        if not self.use_mock:
+            self.sim_manager = self.simulator
     
     def _init_remote_simulator(self):
         """Initialize remote simulator connection."""
@@ -437,6 +495,7 @@ class ArgoUnifiedSimulatorBridge(Node):
             
             # Update simulator physics
             if self.use_mock:
+                # Mock simulator is recreated on reset, so it starts fresh at (0,0)
                 self.boat_state = self.simulator.step()
             else:
                 # Handle real sailboat-playground API
@@ -450,17 +509,24 @@ class ArgoUnifiedSimulatorBridge(Node):
                     self.last_sail_angle = sail_angle
                     
                     # Step the simulation with control inputs
+                    # Simulator is recreated on reset, so it starts fresh at (0,0) with correct heading
                     self.sim_manager.step([sail_angle, rudder_angle])
                     
                     # Get the current state from sailboat-playground
                     state = self.sim_manager.agent_state
                     
+                    # Use simulator's reported position (simulator was recreated, so it should be correct)
+                    position_x = state['position'][0]
+                    position_y = state['position'][1]
+                    heading_to_use = state['heading']
+                    speed_to_use = np.linalg.norm(state['velocity']) if 'velocity' in state else 2.0
+                    
                     # Convert to our internal boat_state format
                     self.boat_state = {
-                        'x': state['position'][0],
-                        'y': state['position'][1], 
-                        'heading': state['heading'],
-                        'speed': np.linalg.norm(state['velocity']) if 'velocity' in state else 2.0,
+                        'x': position_x,
+                        'y': position_y, 
+                        'heading': heading_to_use,
+                        'speed': speed_to_use,
                         'wind_speed': state.get('wind_speed', 8.0),
                         'wind_direction': state.get('wind_direction', 45.0),
                         'rudder': current_rudder,  # Store normalized values
@@ -591,6 +657,191 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.base_latitude = sum(all_lats) / len(all_lats)
             self.get_logger().info(f"Calculated map center: lat={self.base_latitude:.6f}, lon={self.base_longitude:.6f}")
     
+    def _calculate_initial_boat_state(self):
+        """Calculate initial boat position and heading from map data.
+        
+        Returns:
+            tuple: (boat_position, boat_heading)
+            - boat_position: numpy array [x, y] in meters (home location at origin = [0, 0])
+            - boat_heading: float, heading in degrees (0-360) pointing toward geofence center
+        """
+        import numpy as np
+        
+        # Home location is at origin (0, 0) in local coordinates
+        # This is the base_latitude/base_longitude already loaded
+        home_x = 0.0
+        home_y = 0.0
+        
+        # Calculate center of geofence area (sailing area boundaries)
+        geofence_center_x, geofence_center_y = self._calculate_geofence_center()
+        
+        self.get_logger().info(f"Geofence center calculation result: x={geofence_center_x}, y={geofence_center_y}")
+        
+        # Calculate heading from home toward geofence center
+        if geofence_center_x is not None and geofence_center_y is not None and not (abs(geofence_center_x) < 0.1 and abs(geofence_center_y) < 0.1):
+            # Calculate heading in degrees (0-360, where 0° = North, 90° = East)
+            # In local XY coordinates: +X = East, +Y = North
+            dx = geofence_center_x - home_x
+            dy = geofence_center_y - home_y
+            
+            if abs(dx) < 0.1 and abs(dy) < 0.1:
+                # If center is very close to home, default to North (0°)
+                boat_heading = 0.0
+                self.get_logger().warn("Geofence center is very close to home, using default heading 0° (North)")
+            else:
+                # atan2(y, x) gives angle from +X axis, but we need compass heading
+                # Compass heading: 0° = North (+Y), 90° = East (+X), 180° = South (-Y), 270° = West (-X)
+                # In local XY: +X = East, +Y = North
+                # atan2(dy, dx) gives angle from +X axis (East), measured counterclockwise
+                # To convert to compass heading (0° = North), we need to rotate by 90° clockwise
+                # So: compass_heading = 90° - atan2(dy, dx)
+                # But we want the angle from North, so: heading = 90° - atan2(dy, dx)
+                # However, atan2 gives positive angles counterclockwise from +X, so:
+                # - If dx>0, dy>0 (NE quadrant): atan2 positive, heading should be 0-90°
+                # - If dx<0, dy>0 (NW quadrant): atan2 positive >90°, heading should be 90-180°
+                # - If dx<0, dy<0 (SW quadrant): atan2 negative, heading should be 180-270°
+                # - If dx>0, dy<0 (SE quadrant): atan2 negative, heading should be 270-360°
+                # Formula: heading = 90° - atan2(dy, dx), then normalize to 0-360°
+                angle_rad = math.atan2(dy, dx)
+                # atan2 gives angle from +X (East), we want angle from +Y (North)
+                # North is 90° clockwise from East, so: heading = 90° - atan2_angle
+                boat_heading = 90.0 - math.degrees(angle_rad)
+                boat_heading = boat_heading % 360.0  # Normalize to 0-360
+                
+                self.get_logger().info(f"Geofence center: ({geofence_center_x:.1f}, {geofence_center_y:.1f}) m from home")
+                self.get_logger().info(f"Delta from home: dx={dx:.1f}m (East), dy={dy:.1f}m (North)")
+                self.get_logger().info(f"Calculated heading: {boat_heading:.1f}° (toward geofence center)")
+        else:
+            # No geofence found, default to North (0°)
+            boat_heading = 0.0
+            self.get_logger().warn("No geofence found, using default heading 0° (North)")
+        
+        # Boat starts at home location (origin)
+        boat_position = np.array([home_x, home_y])
+        
+        return boat_position, boat_heading
+    
+    def _calculate_geofence_center(self):
+        """Calculate the center of the sailing area geofence from GeoJSON map data.
+        
+        Returns:
+            tuple: (center_x, center_y) in meters from home location, or (None, None) if not found
+        """
+        try:
+            # Get map name from stored attribute or use default
+            map_name = getattr(self, 'map_name', None)
+            if not map_name:
+                self.get_logger().warn("No map_name available, cannot calculate geofence center")
+                self.get_logger().warn(f"Available attributes: map_name={getattr(self, 'map_name', 'NOT SET')}")
+                return None, None
+            
+            # Load GeoJSON file
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[1]  # nodes -> argo
+            maps_dir = argo_dir / "foxglove" / "maps"
+            geojson_path = maps_dir / f"{map_name}.geojson"
+            
+            if not geojson_path.exists():
+                self.get_logger().warn(f"Map file not found: {geojson_path}")
+                return None, None
+            
+            with open(geojson_path, 'r') as f:
+                geojson_data = json.load(f)
+            
+            # Find all sailing area boundaries (Polygon features with type "sailing_area")
+            all_coords = []
+            feature_types_found = {}
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                geom = feature.get('geometry', {})
+                geom_type = geom.get('type', 'unknown')
+                prop_type = props.get('type', 'unknown')
+                
+                # Track what we find
+                key = f"{geom_type} ({prop_type})"
+                feature_types_found[key] = feature_types_found.get(key, 0) + 1
+                
+                # Look for sailing area boundaries (Polygon type)
+                if geom_type == 'Polygon' and prop_type == 'sailing_area':
+                    coords = geom.get('coordinates', [])
+                    if coords:
+                        # Get outer ring (first ring in coordinates)
+                        outer_ring = coords[0]
+                        for coord in outer_ring:
+                            all_coords.append(coord)
+                        self.get_logger().info(f"Found sailing_area Polygon with {len(outer_ring)} coordinates")
+            
+            # If no sailing_area polygons found, try LineString boundaries
+            if not all_coords:
+                self.get_logger().info(f"No sailing_area Polygons found, trying LineString boundaries...")
+                for feature in geojson_data.get('features', []):
+                    props = feature.get('properties', {})
+                    geom = feature.get('geometry', {})
+                    
+                    if geom.get('type') == 'LineString' and props.get('type') == 'sailing_boundary':
+                        coords = geom.get('coordinates', [])
+                        for coord in coords:
+                            all_coords.append(coord)
+                        self.get_logger().info(f"Found sailing_boundary LineString with {len(coords)} coordinates")
+            
+            # Log what we found
+            if feature_types_found:
+                self.get_logger().info(f"Feature types in map: {feature_types_found}")
+            
+            if not all_coords:
+                self.get_logger().warn("No sailing area boundaries found in map")
+                self.get_logger().warn(f"Checked for: Polygon (sailing_area) and LineString (sailing_boundary)")
+                return None, None
+            
+            # Calculate center of all boundary coordinates
+            all_lons = [coord[0] for coord in all_coords]
+            all_lats = [coord[1] for coord in all_coords]
+            
+            center_lon = sum(all_lons) / len(all_lons)
+            center_lat = sum(all_lats) / len(all_lats)
+            
+            self.get_logger().info(f"Geofence boundary coordinates: {len(all_coords)} points")
+            self.get_logger().info(f"Geofence center (lat/lon): {center_lat:.6f}°, {center_lon:.6f}°")
+            self.get_logger().info(f"Home location (lat/lon): {self.base_latitude:.6f}°, {self.base_longitude:.6f}°")
+            
+            # Convert center lat/lon to local XY coordinates (meters from home)
+            center_x, center_y = self.lonlat_to_xy(center_lon, center_lat)
+            
+            # Calculate the actual heading from home to center for verification
+            if abs(center_x) > 0.1 or abs(center_y) > 0.1:
+                dx = center_x
+                dy = center_y
+                angle_rad = math.atan2(dy, dx)
+                calculated_heading = 90.0 - math.degrees(angle_rad)
+                calculated_heading = calculated_heading % 360.0
+                self.get_logger().info(f"Geofence center relative to home: dx={dx:.1f}m (East), dy={dy:.1f}m (North)")
+                self.get_logger().info(f"Verification: heading from home to center = {calculated_heading:.1f}°")
+            
+            return center_x, center_y
+            
+        except Exception as e:
+            self.get_logger().error(f"Error calculating geofence center: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+            return None, None
+    
+    def lonlat_to_xy(self, lon, lat):
+        """Convert longitude/latitude to local x/y meters from base location.
+        
+        Args:
+            lon: Longitude in degrees
+            lat: Latitude in degrees
+            
+        Returns:
+            tuple: (x, y) in meters from base location
+            - x: East-West component (positive = East)
+            - y: North-South component (positive = North)
+        """
+        R = 6378137.0  # Earth radius in meters
+        x = (math.radians(lon) - math.radians(self.base_longitude)) * R * math.cos(math.radians(self.base_latitude))
+        y = (math.radians(lat) - math.radians(self.base_latitude)) * R
+        return x, y
+    
     def xy_to_latlon(self, x, y):
         """Convert XY meters from base lat/lon to new lat/lon."""
         R = 6378137.0  # Earth radius in meters
@@ -601,49 +852,118 @@ class ArgoUnifiedSimulatorBridge(Node):
         return lat, lon
 
     def reset_simulation_callback(self, request, response):
-        """Reset simulation to initial state (home waypoint, zero speed/heading)."""
+        """Reset simulation to initial state by recreating the simulator."""
         try:
-            self.get_logger().info("Resetting simulation to initial state...")
+            self.get_logger().info("Resetting simulation to initial state (recreating simulator)...")
             
-            # Reset real sailboat-playground simulator state
-            if not self.use_mock and hasattr(self, 'sim_manager') and self.sim_manager:
+            # Get initial heading (calculated at startup, pointing toward geofence center)
+            initial_heading = getattr(self, 'initial_boat_heading', 0.0)
+            
+            # If heading is 0.0, try to recalculate it (may have failed during initialization)
+            if initial_heading == 0.0 or abs(initial_heading) < 0.1:
+                self.get_logger().warn(f"⚠️ Initial heading is {initial_heading:.1f}° - attempting to recalculate from geofence...")
                 try:
-                    import numpy as np
-                    # Reset boat position to origin (home waypoint)
-                    self.sim_manager.boat.set_position(np.array([0.0, 0.0]))
-                    self.sim_manager.boat.set_heading(0.0)
-                    # Reset boat velocity
-                    self.sim_manager.boat._speed = np.array([0.0, 0.0])
-                    self.sim_manager.boat._angular_speed = 0.0
-                    self.get_logger().info("Real simulator reset to origin")
+                    _, recalculated_heading = self._calculate_initial_boat_state()
+                    if recalculated_heading != 0.0 and abs(recalculated_heading) > 0.1:
+                        initial_heading = recalculated_heading
+                        self.initial_boat_heading = recalculated_heading
+                        self.get_logger().info(f"✅ Recalculated initial heading: {initial_heading:.1f}°")
+                    else:
+                        self.get_logger().error(f"⚠️ Recalculation also returned 0.0° - geofence calculation may have failed")
                 except Exception as e:
-                    self.get_logger().warn(f"Failed to reset real simulator: {e}")
+                    self.get_logger().error(f"⚠️ Failed to recalculate initial heading: {e}")
             
-            # Reset mock simulator state
-            if self.use_mock and hasattr(self.simulator, 'boat_x'):
-                self.simulator.boat_x = 0.0
-                self.simulator.boat_y = 0.0
-                self.simulator.boat_heading = 0.0
-                self.simulator.boat_speed = 0.0
-                self.simulator.rudder_angle = 0.0
-                self.simulator.sail_angle = 0.0
-                self.get_logger().info("Mock simulator reset to origin")
+            self.get_logger().info(f"Recreating simulator with initial heading: {initial_heading:.1f}°")
             
-            # Reset boat_state to origin (home waypoint at base_latitude/base_longitude)
-            # Always reset to (0,0) in local coordinates, which maps to home waypoint
-            wind_speed = self.simulator.wind_speed if hasattr(self.simulator, 'wind_speed') else 8.0
-            wind_direction = self.simulator.wind_direction if hasattr(self.simulator, 'wind_direction') else 45.0
-            self.boat_state = {
-                'x': 0.0,  # Always reset to origin (home waypoint)
-                'y': 0.0,
-                'heading': 0.0,
-                'speed': 0.0,
-                'wind_speed': wind_speed,
-                'wind_direction': wind_direction,
-                'rudder': 0.0,
-                'sail': 0.0
-            }
-            # Update initial_boat_state so future resets use this as reference
+            # Preserve wind settings from current simulator before recreation
+            wind_speed = 8.0
+            wind_direction = 45.0
+            if hasattr(self, 'simulator'):
+                if hasattr(self.simulator, 'wind_speed'):
+                    wind_speed = self.simulator.wind_speed
+                if hasattr(self.simulator, 'wind_direction'):
+                    wind_direction = self.simulator.wind_direction
+                elif hasattr(self, 'boat_state') and self.boat_state:
+                    # Try to get from boat_state if simulator doesn't have it
+                    wind_speed = self.boat_state.get('wind_speed', 8.0)
+                    wind_direction = self.boat_state.get('wind_direction', 45.0)
+            
+            # Recreate the simulator (cleaner than trying to reset state)
+            # Only recreate if we're in local mode
+            if self.mode == 'local':
+                # Use shared method to create simulator
+                self.simulator, self.use_mock = self._create_simulator(initial_heading)
+                
+                # For real simulator, also store as sim_manager
+                if not self.use_mock:
+                    self.sim_manager = self.simulator
+                    # Verify the simulator's actual position after creation
+                    try:
+                        state = self.sim_manager.agent_state
+                        actual_pos = state.get('position', [0.0, 0.0])
+                        actual_heading = state.get('heading', initial_heading)
+                        self.get_logger().info(f"Simulator agent_state after creation: position=({actual_pos[0]:.2f}, {actual_pos[1]:.2f}), heading={actual_heading:.1f}°")
+                    except Exception as e:
+                        self.get_logger().warn(f"Could not verify simulator position: {e}")
+                
+                self.get_logger().info(f"✅ Simulator recreated: position=(0.0, 0.0), heading={initial_heading:.1f}° ({'real' if not self.use_mock else 'mock'})")
+            
+            # Get actual boat_state from simulator after recreation (simulator starts at (0,0) with correct heading)
+            if self.mode == 'local' and hasattr(self, 'simulator'):
+                if self.use_mock:
+                    # Mock simulator state
+                    self.boat_state = {
+                        'x': self.simulator.boat_x,
+                        'y': self.simulator.boat_y,
+                        'heading': self.simulator.boat_heading,
+                        'speed': self.simulator.boat_speed,
+                        'wind_speed': wind_speed,
+                        'wind_direction': wind_direction,
+                        'rudder': 0.0,
+                        'sail': 0.0
+                    }
+                else:
+                    # Real simulator state
+                    try:
+                        state = self.sim_manager.agent_state
+                        self.boat_state = {
+                            'x': state['position'][0],
+                            'y': state['position'][1],
+                            'heading': state['heading'],
+                            'speed': np.linalg.norm(state['velocity']) if 'velocity' in state else 0.0,
+                            'wind_speed': state.get('wind_speed', wind_speed),
+                            'wind_direction': state.get('wind_direction', wind_direction),
+                            'rudder': 0.0,
+                            'sail': 0.0
+                        }
+                    except Exception as e:
+                        self.get_logger().warn(f"Could not read simulator state after recreation: {e}, using defaults")
+                        self.boat_state = {
+                            'x': 0.0,
+                            'y': 0.0,
+                            'heading': initial_heading,
+                            'speed': 0.0,
+                            'wind_speed': wind_speed,
+                            'wind_direction': wind_direction,
+                            'rudder': 0.0,
+                            'sail': 0.0
+                        }
+            else:
+                # Fallback if simulator not available
+                self.boat_state = {
+                    'x': 0.0,
+                    'y': 0.0,
+                    'heading': initial_heading,
+                    'speed': 0.0,
+                    'wind_speed': wind_speed,
+                    'wind_direction': wind_direction,
+                    'rudder': 0.0,
+                    'sail': 0.0
+                }
+            
+            self.get_logger().info(f"boat_state after reset: position=({self.boat_state['x']:.2f}, {self.boat_state['y']:.2f}), heading={self.boat_state['heading']:.1f}°")
+            
+            # Update initial_boat_state for reference
             self.initial_boat_state = self.boat_state.copy()
             
             # Reset control state
@@ -652,7 +972,7 @@ class ArgoUnifiedSimulatorBridge(Node):
             
             response.success = True
             response.message = "Simulation reset to initial state (home waypoint)"
-            self.get_logger().info("✅ Simulation reset successful")
+            self.get_logger().info("✅ Simulation reset successful (simulator recreated)")
             return response
             
         except Exception as e:
@@ -985,6 +1305,8 @@ def main(args=None):
                        help='Simulation mode: local (run simulator here) or remote (connect to remote simulator)')
     parser.add_argument('--map', type=str,
                        help='Map name (without .geojson extension) - overrides map from argo_nodes.yaml')
+    parser.add_argument('--test-heading', type=float,
+                       help='Test mode: override initial heading calculation with specified heading in degrees (0-360)')
     
     # Parse known args to avoid conflicts with ROS2 args
     parsed_args, unknown_args = parser.parse_known_args(args)
@@ -1040,7 +1362,7 @@ def main(args=None):
     rclpy.init(args=unknown_args)
     bridge = None
     try:
-        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, map_name=map_name)
+        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, map_name=map_name, test_heading=parsed_args.test_heading)
         rclpy.spin(bridge)
     except KeyboardInterrupt:
         print(f"\nUnified simulator bridge ({parsed_args.mode} mode) stopped by user.")
