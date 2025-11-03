@@ -1521,11 +1521,12 @@ class BatteryWaterNode(ArgoBaseNode):
         # Publish GPIO status on change
         if rclpy.ok():
             try:
-                if charging_status is not None and charging_status != self._prev_charging_status:
+                # change to True to publish always since web dashboard is watching this topic
+                if True: # charging_status is not None and charging_status != self._prev_charging_status:
                     self.pub_charging_status.publish(Bool(data=charging_status))
                     if self._prev_charging_status is not None:
                         self.get_logger().info(f"Charging status changed: {charging_status}")
-                if ac_power_present is not None and ac_power_present != self._prev_ac_power_present:
+                if True: # ac_power_present is not None and ac_power_present != self._prev_ac_power_present:
                     self.pub_ac_power_present.publish(Bool(data=ac_power_present))
                     if self._prev_ac_power_present is not None:
                         self.get_logger().info(f"AC power status changed: {ac_power_present}")
