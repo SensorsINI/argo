@@ -11,10 +11,21 @@
 set -e
 
 # Configuration
-SD_DEVICE="/dev/mmcblk0"
 BACKUP_DIR="$HOME/sd_backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 HOSTNAME=$(hostname)
+
+# Auto-detect SD card device (device mounted at root)
+# Get the root filesystem device, then find its parent device (the whole SD card)
+ROOT_DEVICE=$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//' | head -1)
+if [ -z "$ROOT_DEVICE" ] || [ ! -b "$ROOT_DEVICE" ]; then
+    echo "❌ Error: Could not auto-detect SD card device"
+    echo "   Root filesystem device: $ROOT_DEVICE"
+    echo "   Please check your system configuration."
+    exit 1
+fi
+SD_DEVICE="$ROOT_DEVICE"
+
 # Get device size for filename tag
 SIZE_BYTES=$(lsblk -b -d -n -o SIZE "$SD_DEVICE")
 # Round up to nearest GB for a user-friendly tag
@@ -30,9 +41,15 @@ NC='\033[0m' # No Color
 
 # Cleanup function to run on exit/interrupt
 cleanup() {
-    echo -e "\n${YELLOW}⚠️  Backup interrupted. Cleaning up partial files...${NC}"
-    rm -f "$LOCAL_DIR/$BACKUP_NAME"
-    echo "   Removed partial backup: $LOCAL_DIR/$BACKUP_NAME"
+    echo -e "\n${YELLOW}⚠️  Backup interrupted. Cleaning up...${NC}"
+    # For local backups, a partial file might exist.
+    if [ "$LOCAL_ONLY" = true ]; then
+        echo "   Removing partial local backup: $LOCAL_DIR/$BACKUP_NAME"
+        rm -f "$LOCAL_DIR/$BACKUP_NAME"
+    else
+        echo "   For remote backups, you may need to manually remove the partial file on the remote host:"
+        echo "   $DESTINATION:~/$BACKUP_NAME"
+    fi
     exit 1
 }
 
@@ -86,20 +103,19 @@ Options:
     -l, --local     Save backup locally only (no remote transfer)
     -d, --destination PATH    Local backup directory (default: ~/sd_backups)
     -y, --yes       Non-interactive mode (no prompts, requires destination)
-    --rm-local      Remove local backup after successful remote transfer (for non-interactive mode)
     --no-space-check Skip the local disk space check
 
 Examples:
     # Interactive mode (prompts for remote destination)
     ./argo_sd_backup.sh
 
-    # Explicit remote destination
+    # Explicit remote destination (streams directly, no local copy)
     ./argo_sd_backup.sh tobi@sensors-tobidh87.lan.ini.uzh.ch
 
     # Local backup only
     ./argo_sd_backup.sh --local
 
-    # Unattended remote backup (immune to SSH hangups)
+    # Unattended remote backup (streams directly via SSH)
     nohup ./argo_sd_backup.sh tobi@sensors-tobidh87.lan.ini.uzh.ch -y &
 
 The backup file will be named: argo_${HOSTNAME}_${SIZE_TAG}_YYYYMMDD_HHMMSS.img.7z
@@ -117,7 +133,7 @@ check_not_root() {
     fi
 }
 
-# Check for sufficient disk space
+# Check for sufficient disk space (only for local backups)
 check_disk_space() {
     # 7z has better compression, so we can lower the required space estimate
     REQUIRED_SPACE_GB=12
@@ -129,7 +145,7 @@ check_disk_space() {
 
     if (( $(echo "$AVAILABLE_SPACE_GB < $REQUIRED_SPACE_GB" | bc -l) )); then
         echo -e "${RED}❌ Error: Not enough disk space in $LOCAL_DIR${NC}"
-        echo "   You need at least ${REQUIRED_SPACE_GB}GB of free space to create the local backup file before transfer."
+        echo "   You need at least ${REQUIRED_SPACE_GB}GB of free space to create the local backup file."
         echo "   Clean up files or use a different backup directory with the -d flag."
         exit 1
     else
@@ -142,7 +158,6 @@ DESTINATION=""
 LOCAL_ONLY=false
 LOCAL_DIR="$BACKUP_DIR"
 NON_INTERACTIVE=false
-REMOVE_LOCAL_AFTER_TRANSFER=false
 SKIP_SPACE_CHECK=false
 
 while [[ $# -gt 0 ]]; do
@@ -161,10 +176,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         -y|--yes)
             NON_INTERACTIVE=true
-            shift
-            ;;
-        --rm-local)
-            REMOVE_LOCAL_AFTER_TRANSFER=true
             shift
             ;;
         --no-space-check)
@@ -198,8 +209,8 @@ check_not_root
 # Create local backup directory
 mkdir -p "$LOCAL_DIR"
 
-# Check disk space before starting
-if [ "$SKIP_SPACE_CHECK" = false ]; then
+# Check disk space before starting (local only)
+if [ "$LOCAL_ONLY" = true ] && [ "$SKIP_SPACE_CHECK" = false ]; then
     check_disk_space
 fi
 
@@ -263,49 +274,23 @@ if [ "$LOCAL_ONLY" = true ]; then
     echo "Location: $LOCAL_DIR/$BACKUP_NAME"
     ls -lh "$LOCAL_DIR/$BACKUP_NAME"
 else
-    # Remote backup with network transfer
-    echo "Saving to: $LOCAL_DIR/$BACKUP_NAME"
-    echo "Then transferring to: $DESTINATION"
-    echo "Compression with 7z (ultra) will be slow but space-efficient."
+    # Remote backup streamed over SSH
+    # Note: Using gzip instead of 7z because p7zip doesn't support -so (stdout) on this system
+    BACKUP_NAME_GZ="${BACKUP_NAME%.7z}.img.gz"
+    echo "Streaming backup directly to: $DESTINATION:~/$BACKUP_NAME_GZ"
+    echo "This process will not use significant local disk space."
+    echo "Compression with gzip will be fast and space-efficient."
     echo ""
     
-    # Create backup locally first
-    echo "Step 1/2: Creating local backup..."
-    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | 7z a -t7z -mx=9 -si "$LOCAL_DIR/$BACKUP_NAME"
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}❌ Local backup failed${NC}"
-        exit 1
-    fi
-    
-    echo ""
-    echo "Step 2/2: Transferring to remote destination..."
-    scp "$LOCAL_DIR/$BACKUP_NAME" "$DESTINATION:~/"
-    
+    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | gzip -9 | ssh "$DESTINATION" "cat > ~/$BACKUP_NAME_GZ"
+
     if [ $? -eq 0 ]; then
         echo ""
-        echo -e "${GREEN}✅ Backup transferred successfully!${NC}"
-        echo "Remote location: $DESTINATION:~/"
-        echo "Local copy kept at: $LOCAL_DIR/$BACKUP_NAME"
-
-        # Optionally remove local copy to save space
-        REMOVE_LOCAL="no"
-        if [ "$NON_INTERACTIVE" = true ]; then
-            if [ "$REMOVE_LOCAL_AFTER_TRANSFER" = true ]; then
-                REMOVE_LOCAL="yes"
-            fi
-        else
-            echo ""
-            read -p "Remove local backup to save space? (yes/no): " REMOVE_LOCAL_INPUT
-            REMOVE_LOCAL=$REMOVE_LOCAL_INPUT
-        fi
-
-        if [ "$REMOVE_LOCAL" = "yes" ]; then
-            rm "$LOCAL_DIR/$BACKUP_NAME"
-            echo "Local backup removed."
-        fi
+        echo -e "${GREEN}✅ Remote backup streamed successfully!${NC}"
+        echo "Remote location: $DESTINATION:~/$BACKUP_NAME_GZ"
     else
-        echo -e "${YELLOW}⚠️  Transfer failed, but local backup is available at: $LOCAL_DIR/$BACKUP_NAME${NC}"
+        echo -e "${RED}❌ Remote backup failed.${NC}"
+        echo "   You may need to manually remove the partial file on the remote host."
         exit 1
     fi
 fi
