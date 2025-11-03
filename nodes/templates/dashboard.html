@@ -27,6 +27,10 @@
                     <span class="value" id="nodes-status">-/-</span>
                 </div>
                 <div class="status-item">
+                    <span class="label">Health:</span>
+                    <span class="value" id="nodes-health">-/-</span>
+                </div>
+                <div class="status-item">
                     <span class="label">Battery:</span>
                     <span class="value" id="battery-status">-.- V (--%)</span>
                 </div>
@@ -37,6 +41,14 @@
                 <div class="status-item">
                     <span class="label">CPU Temp:</span>
                     <span class="value" id="cpu-temp">-- °C</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">PCB Temp:</span>
+                    <span class="value" id="pcb-temp">-- °C</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Air Temp:</span>
+                    <span class="value" id="air-temp">-- °C</span>
                 </div>
                 <div class="status-item">
                     <span class="label">USB Power:</span>
@@ -195,8 +207,22 @@
             // System status
             document.getElementById('system-status').textContent = 
                 data.system_running ? '🟢 RUNNING' : '🔴 STOPPED';
+            
+            // Node counts (running/total from node manager)
             document.getElementById('nodes-status').textContent = 
                 `${data.nodes_running}/${data.nodes_total}`;
+            
+            // Node health counts (healthy/total from health service, includes excluded services)
+            if (data.nodes_expected_total && data.nodes_expected_total > 0) {
+                const healthy = data.nodes_healthy || 0;
+                const total = data.nodes_expected_total;
+                document.getElementById('nodes-health').textContent = 
+                    `${healthy}/${total}`;
+            } else {
+                // Fallback to running count if health service not available
+                document.getElementById('nodes-health').textContent = 
+                    `${data.nodes_running}/${data.nodes_total}`;
+            }
             
             // Battery
             if (data.battery_voltage && data.battery_pct) {
@@ -233,9 +259,13 @@
             }
             document.getElementById('battery-time').textContent = batteryTimeText;
             
-            // CPU temp
+            // Temperatures
             document.getElementById('cpu-temp').textContent = 
                 data.cpu_temp ? `${data.cpu_temp} °C` : '-- °C';
+            document.getElementById('pcb-temp').textContent = 
+                data.pcb_temp !== null && data.pcb_temp !== undefined ? `${data.pcb_temp.toFixed(1)} °C` : '-- °C';
+            document.getElementById('air-temp').textContent = 
+                data.air_temp !== null && data.air_temp !== undefined ? `${data.air_temp.toFixed(1)} °C` : '-- °C';
             
             // GPS
             document.getElementById('gps-lock').textContent = 
@@ -408,6 +438,3 @@
     </script>
 </body>
 </html>
-
-
-

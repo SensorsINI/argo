@@ -82,6 +82,14 @@ nodes:
     description: "Data recording management"
     health_topic: "/record_health"
     
+  # Remote Monitoring and Access
+  - name: argo_web_dashboard
+    executable: nodes/argo_web_dashboard.py
+    required: true
+    critical: false
+    description: "Web-based monitoring and control interface (mobile-friendly)"
+    health_topic: "/argo_web_dashboard_health"
+    
   # Visualization and Transform Nodes
   - name: argo_transform_publisher
     executable: nodes/argo_transform_publisher.py
