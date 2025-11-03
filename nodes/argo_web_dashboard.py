@@ -472,6 +472,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Update health status - battery voltage is boat data
         self._update_boat_data_received(f"battery_voltage_{source}")
+        self.get_logger().debug(f"Battery voltage: {msg.data}")
     
     def battery_pct_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -500,6 +501,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         with self.state_lock:
             self.state['battery_charging'] = msg.data
+            self.get_logger().debug(f"Battery charging status: {msg.data}")
     
     def ac_power_cb(self, msg):
         """Callback for AC/USB power present."""
