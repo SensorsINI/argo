@@ -4,6 +4,7 @@ Publish sailing area data from GeoJSON files as ROS2 markers for Foxglove visual
 """
 
 import json
+import yaml
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Point
@@ -46,6 +47,16 @@ class SailingAreaPublisher(Node):
         # Load sailing area data first
         self.sailing_areas = self.load_sailing_areas()
         
+        # Debug: Log loaded maps and requested map
+        self.get_logger().info(f"Requested map_name: '{self.map_name}'")
+        self.get_logger().info(f"Loaded sailing areas keys: {list(self.sailing_areas.keys())}")
+        if self.map_name:
+            self.get_logger().info(f"Map name in sailing_areas: {self.map_name in self.sailing_areas}")
+            if self.map_name not in self.sailing_areas:
+                self.get_logger().warn(f"⚠️ WARNING: Requested map '{self.map_name}' not found in loaded maps!")
+                self.get_logger().warn(f"   Available maps: {', '.join(self.sailing_areas.keys())}")
+                self.get_logger().warn(f"   Falling back to publishing all maps (may show wrong geofence)")
+        
         # Find origin from 'home' waypoint in loaded maps (same as simulator bridge)
         self.origin_lon = 8.5448386  # Default fallback
         self.origin_lat = 47.3981555
@@ -74,8 +85,9 @@ class SailingAreaPublisher(Node):
             try:
                 with open(geojson_file, 'r') as f:
                     data = json.load(f)
-                    sailing_areas[geojson_file.stem] = data
-                    self.get_logger().info(f"Loaded sailing area: {geojson_file.stem}")
+                    map_key = geojson_file.stem
+                    sailing_areas[map_key] = data
+                    self.get_logger().info(f"Loaded sailing area: '{map_key}' (from file: {geojson_file.name})")
             except Exception as e:
                 self.get_logger().error(f"Failed to load {geojson_file}: {e}")
         
@@ -364,12 +376,33 @@ class SailingAreaPublisher(Node):
         # If a specific map is requested, only publish markers from that map
         # This ensures coordinates use the correct origin
         maps_to_publish = []
-        if self.map_name and self.map_name in self.sailing_areas:
-            maps_to_publish = [self.map_name]
-            self.get_logger().info(f"Publishing markers only from '{self.map_name}' map (to ensure correct coordinate origin)")
+        if self.map_name:
+            # Try exact match first
+            if self.map_name in self.sailing_areas:
+                maps_to_publish = [self.map_name]
+                self.get_logger().info(f"✅ Publishing markers ONLY from '{self.map_name}' map (to ensure correct coordinate origin)")
+            else:
+                # Try case-insensitive match
+                map_name_lower = self.map_name.lower()
+                matched_map = None
+                for loaded_map in self.sailing_areas.keys():
+                    if loaded_map.lower() == map_name_lower:
+                        matched_map = loaded_map
+                        break
+                
+                if matched_map:
+                    maps_to_publish = [matched_map]
+                    self.get_logger().warn(f"⚠️ Map name case mismatch: requested '{self.map_name}', using '{matched_map}'")
+                    self.get_logger().info(f"✅ Publishing markers ONLY from '{matched_map}' map")
+                else:
+                    # No match found - fallback to all maps with warning
+                    maps_to_publish = list(self.sailing_areas.keys())
+                    self.get_logger().error(f"❌ ERROR: Requested map '{self.map_name}' not found in loaded maps!")
+                    self.get_logger().error(f"   Available maps: {', '.join(self.sailing_areas.keys())}")
+                    self.get_logger().error(f"   ⚠️ FALLING BACK: Publishing markers from ALL {len(maps_to_publish)} maps (WRONG GEOFENCE!)")
         else:
             maps_to_publish = list(self.sailing_areas.keys())
-            self.get_logger().info(f"Publishing markers from all {len(maps_to_publish)} maps")
+            self.get_logger().warn(f"⚠️ No map_name specified - publishing markers from all {len(maps_to_publish)} maps")
         
         for area_name in maps_to_publish:
             geojson_data = self.sailing_areas[area_name]
@@ -408,26 +441,54 @@ class SailingAreaPublisher(Node):
                               f"{len(hazard_markers.markers)} hazards "
                               f"(total: {total_markers} markers)")
 
+def load_map_from_yaml():
+    """Load map name from argo_nodes.yaml configuration file."""
+    try:
+        # Determine path to argo_nodes.yaml (launch/ directory)
+        script_path = Path(__file__).resolve()
+        argo_dir = script_path.parents[1]  # nodes -> argo
+        yaml_path = argo_dir / "launch" / "argo_nodes.yaml"
+        
+        if not yaml_path.exists():
+            return None
+        
+        with open(yaml_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Extract map_name from simulation_config
+        simulation_config = config.get('simulation_config', {})
+        map_name = simulation_config.get('map_name')
+        return map_name
+    except Exception as e:
+        # Silently fail - map_name will be None and defaults will be used
+        return None
+
 def main(args=None):
     parser = argparse.ArgumentParser(
         description='Publish sailing area data from GeoJSON files as ROS2 markers for Foxglove visualization',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 sailing_area_publisher.py
-  python3 sailing_area_publisher.py --map "Argo Irchel pond sailing area"
+  python3 sailing_area_publisher.py                              # Uses map from argo_nodes.yaml
+  python3 sailing_area_publisher.py --map "Argo Irchel pond sailing area"  # Override map
         """
     )
     parser.add_argument('--map', type=str, default=None,
-                       help='Map name (without .geojson extension) to use for coordinate origin. '
-                            'If not specified, uses the first map with a "home" waypoint found.')
+                       help='Map name (without .geojson extension) - overrides map from argo_nodes.yaml')
     
     # Parse known args (ROS2 will handle the rest)
     parsed_args, remaining_args = parser.parse_known_args(args)
     
+    # Load map name from YAML if not provided via command line
+    map_name = parsed_args.map
+    if not map_name:
+        map_name = load_map_from_yaml()
+        if map_name:
+            print(f"📍 Using map from argo_nodes.yaml: '{map_name}'")
+    
     rclpy.init(args=remaining_args)
     
-    publisher = SailingAreaPublisher(map_name=parsed_args.map)
+    publisher = SailingAreaPublisher(map_name=map_name)
     
     try:
         rclpy.spin(publisher)

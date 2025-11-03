@@ -80,22 +80,18 @@ cleanup() {
 trap cleanup INT TERM
 
 # Launch simulation and log everything
-# Use setsid to create a new process group, which makes signal handling more reliable
+# Use lifecycle manager which includes proper validation and error handling
 if [ "$MODE" = "local" ]; then
-    # Start a new process group (setsid) and run the command in background
-    # The command runs: ros2 launch ... | tee ... which creates a pipeline
-    # We need to kill the entire process group, so we use setsid to ensure proper grouping
-    setsid sh -c 'ros2 launch launch/argo_launch.py mode:=simulation 2>&1 | tee "$1"' _ "$LOG_FILE" &
-    SIM_PID=$!
+    python3 launch/argo_lifecycle_manager.py simulate_local 2>&1 | tee "$LOG_FILE"
+    EXIT_CODE=$?
 else
     setsid sh -c 'python3 launch/argo_lifecycle_manager.py simulate_remote 2>&1 | tee "$1"' _ "$LOG_FILE" &
     SIM_PID=$!
+    # Wait for the background process
+    # This allows the trap handler to catch signals and forward them to the process group
+    wait $SIM_PID 2>/dev/null
+    EXIT_CODE=$?
 fi
-
-# Wait for the background process
-# This allows the trap handler to catch signals and forward them to the process group
-wait $SIM_PID 2>/dev/null
-EXIT_CODE=$?
 
 # Clear trap after process completes
 trap - INT TERM

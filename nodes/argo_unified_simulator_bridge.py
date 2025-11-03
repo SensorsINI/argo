@@ -29,6 +29,7 @@ import os
 import signal
 import traceback
 import json
+import yaml
 from pathlib import Path
 
 # Try to import sailboat-playground for local simulation
@@ -96,7 +97,8 @@ except ImportError as e:
         tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
         print(f'Stack trace for import failure:\n{tb_str}')
 
-    print(f"         Falling back to mock simulator.")
+    print(f"         Falling back to mock simulator, ^c to exit.")
+    time.sleep(7)
     SIMULATOR_AVAILABLE = False
 except Exception as e:
     print(f"WARNING: sailboat-playground failed to initialize: {e}")
@@ -301,7 +303,7 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.heartbeat_timer = self.create_timer(1.0, self.send_heartbeat)
         
         # Status timer
-        self.status_timer = self.create_timer(1.0, self.print_status)
+        self.status_timer = self.create_timer(10.0, self.print_status)
         
         # Control arbitration publishers (simulate rudder_sail_radio.py functionality)
         self.pub_human_controlled = self.create_publisher(Bool, '/human_controlled', 10)
@@ -402,6 +404,7 @@ class ArgoUnifiedSimulatorBridge(Node):
                 tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
                 self.get_logger().warn(f'Stack trace for simulator initialization failure:\n{tb_str}')
                 self.get_logger().info('Falling back to mock simulator (reliable for headless operation)')
+                time.sleep(5)
                 self.simulator = MockSailboatSimulator()
                 self.use_mock = True
         else:
@@ -550,7 +553,7 @@ class ArgoUnifiedSimulatorBridge(Node):
                     # GeoJSON format: [longitude, latitude, altitude]
                     self.base_longitude = coords[0]
                     self.base_latitude = coords[1]
-                    self.get_logger().info(f"Loaded start location from map '{map_name}': "
+                    self.get_logger().info(f"Loaded start home waypoint location from map '{map_name}': "
                                          f"lat={self.base_latitude:.6f}, lon={self.base_longitude:.6f}")
                     return
             
@@ -918,6 +921,28 @@ class ArgoUnifiedSimulatorBridge(Node):
         """Clean up when node is destroyed."""
         super().destroy_node()
 
+def load_map_from_yaml():
+    """Load map name from argo_nodes.yaml configuration file."""
+    try:
+        # Determine path to argo_nodes.yaml (launch/ directory)
+        script_path = Path(__file__).resolve()
+        argo_dir = script_path.parents[1]  # nodes -> argo
+        yaml_path = argo_dir / "launch" / "argo_nodes.yaml"
+        
+        if not yaml_path.exists():
+            return None
+        
+        with open(yaml_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Extract map_name from simulation_config
+        simulation_config = config.get('simulation_config', {})
+        map_name = simulation_config.get('map_name')
+        return map_name
+    except Exception as e:
+        # Silently fail - map_name will be None and defaults will be used
+        return None
+
 def print_help():
     """Print detailed help information."""
     help_text = """
@@ -938,9 +963,14 @@ MODES:
    - Sends control commands to remote simulator
    - Monitors connection status
 
+MAP CONFIGURATION:
+  Map name is automatically loaded from launch/argo_nodes.yaml.
+  Use --map to override the default map for this run.
+
 USAGE:
-  python3 argo_unified_simulator_bridge.py --mode local    # Local simulation
-  python3 argo_unified_simulator_bridge.py --mode remote   # Remote simulation
+  python3 argo_unified_simulator_bridge.py --mode local              # Local simulation (uses map from YAML)
+  python3 argo_unified_simulator_bridge.py --mode remote             # Remote simulation (uses map from YAML)
+  python3 argo_unified_simulator_bridge.py --mode local --map "Map Name"  # Override map from YAML
 """
     print(help_text)
 
@@ -954,7 +984,7 @@ def main(args=None):
     parser.add_argument('--mode', choices=['local', 'remote'],
                        help='Simulation mode: local (run simulator here) or remote (connect to remote simulator)')
     parser.add_argument('--map', type=str,
-                       help='Map name (without .geojson extension) - start location will be at the "home" waypoint')
+                       help='Map name (without .geojson extension) - overrides map from argo_nodes.yaml')
     
     # Parse known args to avoid conflicts with ROS2 args
     parsed_args, unknown_args = parser.parse_known_args(args)
@@ -970,6 +1000,13 @@ def main(args=None):
         print("       For more information, run with --help")
         sys.exit(1)
     
+    # Load map name from YAML if not provided via command line
+    map_name = parsed_args.map
+    if not map_name:
+        map_name = load_map_from_yaml()
+        if map_name:
+            print(f"📍 Using map from argo_nodes.yaml: '{map_name}'")
+    
     print(f"Starting Argo Unified Simulator Bridge in {parsed_args.mode.upper()} mode...")
     print("This node bridges between Argo control system and sailboat simulator")
     print(f"\nMode: {parsed_args.mode.upper()}")
@@ -979,6 +1016,9 @@ def main(args=None):
     else:
         print("  - Connecting to remote simulator")
         print("  - Forwarding sensor data and control commands")
+    if map_name:
+        print(f"  - Map: {map_name} (config file: nodes/argo_nodes.yaml)")
+        time.sleep(1)
     
     print("\nPublished topics (Simulator → Argo):")
     print("  /pose - IMU compass heading")
@@ -1000,7 +1040,7 @@ def main(args=None):
     rclpy.init(args=unknown_args)
     bridge = None
     try:
-        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, map_name=parsed_args.map)
+        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, map_name=map_name)
         rclpy.spin(bridge)
     except KeyboardInterrupt:
         print(f"\nUnified simulator bridge ({parsed_args.mode} mode) stopped by user.")
