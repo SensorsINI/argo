@@ -25,6 +25,7 @@ import threading
 import argparse
 import logging
 import signal
+import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -96,6 +97,13 @@ class ArgoWebDashboard(ArgoBaseNode):
             
             # Temperature
             'cpu_temp': None,
+            'pcb_temp': None,
+            'air_temp': None,
+            
+            # Node health (from health service)
+            'nodes_healthy': 0,
+            'nodes_unhealthy': 0,
+            'nodes_expected_total': 0,  # Total from argo_nodes.yaml (includes excluded services)
             
             # GPS
             'gps_locked': False,
@@ -146,6 +154,12 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.health_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
         self.health_timer_period_idle = 60.0  # 60 seconds when idle (low-power)
         
+        # Battery service query rate: 1/10 Hz (10 seconds) - only for local fallback when topics don't have data
+        self.battery_service_query_period = 10.0  # 10 seconds (1/10 Hz)
+        
+        # Health service query rate: 1/5 Hz (5 seconds) - for node health counts (includes excluded services)
+        self.health_service_query_period = 5.0  # 5 seconds (1/5 Hz)
+        
         # Timestamps for each data type
         self.last_wifi_update = {}
         self.last_lora_update = {}
@@ -159,6 +173,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.recording_start_client = self.create_client(Trigger, '/argo/recording/start')
         self.recording_stop_client = self.create_client(Trigger, '/argo/recording/stop')
         self.controller_switch_client = self.create_client(Trigger, '/controller_node/switch_controller')
+        self.battery_status_client = self.create_client(Trigger, '/battery_status')
+        self.health_status_client = self.create_client(Trigger, '/argo/health/status')
+        
+        # Load node configuration from argo_nodes.yaml to know expected total count
+        self.expected_nodes_total = self._load_expected_nodes_count()
         
         # Store subscription references for mass unsubscribe/resubscribe
         # Use _topic_subscriptions to avoid conflict with ROS2 Node's subscriptions property
@@ -173,6 +192,14 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Timer for periodic health status checks (start with idle frequency since we're in low-power mode)
         self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
+        
+        # Timer for battery service queries (low rate: 1/10 Hz) - only for local fallback when topics don't have data
+        # This runs independently of HTTP requests and at a low rate to minimize network traffic
+        self.battery_service_timer = self.create_timer(self.battery_service_query_period, self._update_battery_status_from_service)
+        
+        # Timer for health service queries (low rate: 1/5 Hz) - for node health counts
+        # This runs independently of HTTP requests and at a low rate to minimize network traffic
+        self.health_service_timer = self.create_timer(self.health_service_query_period, self._update_node_health_from_service)
         
         # Timer to check viewer activity and adjust power mode
         self.viewer_activity_timer = self.create_timer(5.0, self._check_viewer_activity)
@@ -230,6 +257,10 @@ class ArgoWebDashboard(ArgoBaseNode):
                 self.status_timer.cancel()
             if hasattr(self, 'health_timer'):
                 self.health_timer.cancel()
+            if hasattr(self, 'battery_service_timer'):
+                self.battery_service_timer.cancel()
+            if hasattr(self, 'health_service_timer'):
+                self.health_service_timer.cancel()
             if hasattr(self, 'viewer_activity_timer'):
                 self.viewer_activity_timer.cancel()
         except Exception:
@@ -336,6 +367,12 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
         self._topic_subscriptions.append(
             self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/temperature_pcb', self.pcb_temp_cb, 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/temperature_air', self.air_temp_cb, 10)
         )
         self._topic_subscriptions.append(
             self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
@@ -468,6 +505,22 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         with self.state_lock:
             self.state['battery_usb_power'] = msg.data
+    
+    def pcb_temp_cb(self, msg):
+        """Callback for PCB temperature."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['pcb_temp'] = msg.data
+    
+    def air_temp_cb(self, msg):
+        """Callback for air temperature."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['air_temp'] = msg.data
     
     def compass_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -787,9 +840,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.health_timer.cancel()
         self.health_timer = self.create_timer(self.health_timer_period_active, self._check_health_status)
         
-        # Immediately update status when exiting low-power mode
+        # Immediately update status and health when exiting low-power mode
         self.update_system_status()
-        self._check_health_status()
+        self._update_node_health_from_service()  # Trigger immediate health check
     
     def _record_viewer_activity(self, source_ip=None):
         """Record that a viewer made an HTTP request."""
@@ -931,7 +984,14 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Get CPU temperature (file I/O - skip in low-power mode)
             self._update_cpu_temp()
             
+            # Note: Node health counts are updated by separate low-rate timer
+            # (health_service_timer at 1/5 Hz) to minimize network traffic
+            # Battery charging/USB status is updated by separate low-rate timer
+            # (battery_service_timer at 1/10 Hz) to minimize network traffic
+            # Topics are primary source, services are fallback only
+            
             with self.state_lock:
+                self.state['nodes_expected_total'] = self.expected_nodes_total
                 self.state['last_update'] = time.time()
                 
         except Exception as e:
@@ -945,6 +1005,140 @@ class ArgoWebDashboard(ArgoBaseNode):
                 with self.state_lock:
                     self.state['cpu_temp'] = temp_millicelsius // 1000
         except Exception:
+            pass
+    
+    def _load_expected_nodes_count(self) -> int:
+        """Load expected total node count from argo_nodes.yaml (includes excluded services).
+        
+        This counts all nodes defined in the YAML, including excluded services like
+        argo_power_control, argo_battery_water, and bno085 that run as independent systemd services.
+        """
+        try:
+            config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            # Count all nodes in the nodes section (includes excluded ones)
+            nodes = config.get('nodes', [])
+            return len(nodes)
+        except Exception as e:
+            self.get_logger().debug(f"Could not load node count from YAML: {e}")
+            return 0
+    
+    def _update_node_health_from_service(self):
+        """Query health service to get healthy/unhealthy node counts.
+        
+        Uses /argo/health/status service which includes all nodes from argo_nodes.yaml,
+        including excluded services (argo_power_control, argo_battery_water, bno085).
+        Runs at low rate (1/5 Hz) independently of HTTP requests to minimize network traffic.
+        """
+        try:
+            # In low-power mode, still query health but at lower priority
+            # This ensures health data is available when viewers connect
+            
+            if not self.health_status_client.wait_for_service(timeout_sec=0.5):
+                self.get_logger().debug("Health status service not available")
+                return  # Service not available, skip
+            
+            request = Trigger.Request()
+            future = self.health_status_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    try:
+                        health_data = json.loads(response.message)
+                        nodes_data = health_data.get('nodes', {})
+                        
+                        # Count healthy and unhealthy nodes
+                        healthy_count = 0
+                        unhealthy_count = 0
+                        
+                        for node_name, node_info in nodes_data.items():
+                            health_status = node_info.get('healthy')
+                            if health_status is True:
+                                healthy_count += 1
+                            elif health_status is False:
+                                unhealthy_count += 1
+                        
+                        with self.state_lock:
+                            self.state['nodes_healthy'] = healthy_count
+                            self.state['nodes_unhealthy'] = unhealthy_count
+                            self.get_logger().debug(f"Updated health counts: {healthy_count} healthy, {unhealthy_count} unhealthy")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        self.get_logger().warn(f"Error parsing health service response: {e}")
+                else:
+                    self.get_logger().debug(f"Health service returned success=False: {response.message}")
+            else:
+                self.get_logger().debug("Health service call timed out")
+        except Exception as e:
+            self.get_logger().warn(f"Error querying health service: {e}")
+    
+    def _update_battery_status_from_service(self):
+        """Query battery status service at low rate (1/10 Hz) to get charging/USB power status.
+        
+        This runs as a fallback when topics don't have data. Only updates state if topic data is None.
+        Runs independently of HTTP requests to minimize remote network traffic.
+        """
+        try:
+            # Skip if in low-power mode (no viewers) - battery status not needed when dashboard not in use
+            if self.low_power_mode:
+                return
+            
+            # Check if topic data is missing - only query service if needed
+            with self.state_lock:
+                charging_from_topic = self.state.get('battery_charging')
+                usb_from_topic = self.state.get('battery_usb_power')
+                voltage_from_topic = self.state.get('battery_voltage')
+                pct_from_topic = self.state.get('battery_pct')
+                pcb_temp_from_topic = self.state.get('pcb_temp')
+            
+            # Only query service if any topic data is missing (None)
+            # Query if charging, USB power, voltage, pct, or PCB temp is missing
+            if (charging_from_topic is not None and usb_from_topic is not None and 
+                voltage_from_topic is not None and pct_from_topic is not None and 
+                pcb_temp_from_topic is not None):
+                return  # Topics have all data, no need to query service
+            
+            if not self.battery_status_client.wait_for_service(timeout_sec=1.0):
+                return  # Service not available, skip
+            
+            request = Trigger.Request()
+            future = self.battery_status_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    try:
+                        battery_data = json.loads(response.message)
+                        raw_data = battery_data.get('raw_data', {})
+                        charging_status = raw_data.get('charging_status')
+                        usb_power_status = raw_data.get('ac_power_present')
+                        battery_voltage = raw_data.get('battery_voltage')
+                        battery_pct = raw_data.get('battery_remaining_pct')
+                        pcb_temperature = raw_data.get('pcb_temperature')
+                        
+                        # Only update if we got valid data and topic data is still missing
+                        # This prevents overriding topic data if it arrived between check and response
+                        with self.state_lock:
+                            if self.state.get('battery_charging') is None and charging_status is not None:
+                                self.state['battery_charging'] = charging_status
+                            if self.state.get('battery_usb_power') is None and usb_power_status is not None:
+                                self.state['battery_usb_power'] = usb_power_status
+                            # Also update voltage and percentage if missing from topics
+                            if self.state.get('battery_voltage') is None and battery_voltage is not None:
+                                self.state['battery_voltage'] = battery_voltage
+                            if self.state.get('battery_pct') is None and battery_pct is not None:
+                                self.state['battery_pct'] = battery_pct
+                            # Update PCB temperature if missing from topic
+                            if self.state.get('pcb_temp') is None and pcb_temperature is not None:
+                                self.state['pcb_temp'] = pcb_temperature
+                    except (json.JSONDecodeError, KeyError) as e:
+                        self.get_logger().debug(f"Error parsing battery status response: {e}")
+        except Exception as e:
+            # Silently fail - this is just a fallback, topics are primary source
             pass
     
     # ==================== Flask Routes ====================
@@ -1205,4 +1399,3 @@ Troubleshooting:
 
 if __name__ == '__main__':
     main()
-
