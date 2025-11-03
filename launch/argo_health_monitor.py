@@ -49,6 +49,13 @@ class ArgoHealthMonitor(Node):
         # Health topic subscribers - track actual health from ArgoBaseNode topics
         self.health_subscribers = {}
         
+        # Fast polling during startup (first 60 seconds)
+        self.startup_time = time.time()
+        self.startup_duration = 60.0  # Fast polling for first 60 seconds
+        self.fast_poll_period = 5.0   # 5 seconds during startup
+        self.normal_poll_period = 30.0  # 30 seconds after startup
+        self.using_fast_poll = True
+        
         # Load all node configs (normal + simulation) and build mappings
         for node_cfg in self.config.get('nodes', []):
             self.node_configs[node_cfg['name']] = node_cfg
@@ -94,10 +101,14 @@ class ArgoHealthMonitor(Node):
             Trigger, '/argo/health/status', self.status_callback)
         
         # Timer for periodic health checks (fallback for nodes without health topics)
-        self.timer = self.create_timer(30.0, self.check_node_health)
+        # Start with fast polling (5s) during startup
+        self.timer = self.create_timer(self.fast_poll_period, self.check_node_health)
         
         # Timer for status publishing
-        self.status_timer = self.create_timer(30.0, self.publish_status)
+        self.status_timer = self.create_timer(self.fast_poll_period, self.publish_status)
+        
+        # Timer to check if we should transition from fast to normal polling
+        self.poll_transition_timer = self.create_timer(10.0, self._check_poll_transition)
         
         # Run initial health check immediately to populate entries for all nodes
         self.check_node_health()
@@ -105,6 +116,7 @@ class ArgoHealthMonitor(Node):
         self.get_logger().info("Argo Health Monitor started")
         self.get_logger().info(f"Monitoring {len(self.node_configs)} nodes")
         self.get_logger().info(f"Subscribed to {len(self.health_subscribers)} health topics")
+        self.get_logger().info(f"⚡ Fast polling enabled (every {self.fast_poll_period}s) for first {self.startup_duration}s")
     
     def _subscribe_to_health_topics(self):
         """Subscribe to health topics published by ArgoBaseNode nodes"""
@@ -245,6 +257,28 @@ class ArgoHealthMonitor(Node):
         status_msg.data = f"Nodes: {healthy_count}/{total_count} healthy, {unhealthy_count} unhealthy"
         
         self.health_pub.publish(status_msg)
+    
+    def _check_poll_transition(self):
+        """Check if we should transition from fast to normal polling rate."""
+        if not self.using_fast_poll:
+            return  # Already transitioned
+        
+        elapsed = time.time() - self.startup_time
+        if elapsed >= self.startup_duration:
+            # Transition to normal polling
+            self.get_logger().info(f"🐢 Transitioning to normal polling (every {self.normal_poll_period}s)")
+            
+            # Cancel and recreate timers with normal period
+            self.timer.cancel()
+            self.timer = self.create_timer(self.normal_poll_period, self.check_node_health)
+            
+            self.status_timer.cancel()
+            self.status_timer = self.create_timer(self.normal_poll_period, self.publish_status)
+            
+            # Cancel the transition check timer (no longer needed)
+            self.poll_transition_timer.cancel()
+            
+            self.using_fast_poll = False
     
     def status_callback(self, request, response):
         """Service callback for health status query
