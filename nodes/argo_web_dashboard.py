@@ -59,11 +59,15 @@ class ArgoWebDashboard(ArgoBaseNode):
         super().__init__('argo_web_dashboard', enable_health_service=True, enable_health_publisher=True)
         self.debug_mode = debug_mode
         
+        # Enable DEBUG logging if requested
+        if self.debug_mode:
+            self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
+        
         # Check for running web dashboard processes before starting
         self._check_for_running_dashboard()
         
         self.get_logger().info('Starting Argo Web Dashboard...')
-        self.get_logger().debug('debug test')
+        self.get_logger().debug('🔍 DEBUG mode enabled - verbose logging active')
  
         
         # Health monitoring - track data reception
@@ -1084,6 +1088,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         try:
             # Skip if in low-power mode (no viewers) - battery status not needed when dashboard not in use
             if self.low_power_mode:
+                self.get_logger().debug("Skipping battery status update in low-power mode")
                 return
             
             # Check if topic data is missing - only query service if needed
@@ -1099,9 +1104,11 @@ class ArgoWebDashboard(ArgoBaseNode):
             if (charging_from_topic is not None and usb_from_topic is not None and 
                 voltage_from_topic is not None and pct_from_topic is not None and 
                 pcb_temp_from_topic is not None):
+                self.get_logger().debug("Topics have all data, no need to query service")
                 return  # Topics have all data, no need to query service
             
-            if not self.battery_status_client.wait_for_service(timeout_sec=1.0):
+            if not self.battery_status_client.wait_for_service(timeout_sec=5.0):
+                self.get_logger().debug("Battery status service not available after 5 seconds")
                 return  # Service not available, skip
             
             request = Trigger.Request()
@@ -1123,7 +1130,9 @@ class ArgoWebDashboard(ArgoBaseNode):
                         # Only update if we got valid data and topic data is still missing
                         # This prevents overriding topic data if it arrived between check and response
                         with self.state_lock:
+                            self.get_logger().debug(f"Battery status response: {battery_data}")
                             if self.state.get('battery_charging') is None and charging_status is not None:
+                                self.get_logger().debug(f"Updating battery charging status: {charging_status}")
                                 self.state['battery_charging'] = charging_status
                             if self.state.get('battery_usb_power') is None and usb_power_status is not None:
                                 self.state['battery_usb_power'] = usb_power_status
