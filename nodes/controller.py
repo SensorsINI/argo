@@ -622,9 +622,17 @@ class ControllerNode(ArgoBaseNode):
         self.last_logged_human_control = None
 
         # CPU monitoring
-        self.cpu_monitor_enabled = True
+        self.cpu_monitor_enabled = False
         self.last_cpu_check = time.time()
         self.cpu_check_interval = 30.0  # Check CPU usage every 30 seconds
+        if self.cpu_monitor_enabled:
+            self.get_logger().info(
+                f"CPU monitoring enabled: True (check interval: {self.cpu_check_interval}s)"
+            )
+        else:
+            self.get_logger().info(
+                "CPU monitoring disabled. To enable, set the parameter 'self.cpu_monitor_enabled' to True."
+            )
 
         # Initialize controller
         self._initialize_controller()

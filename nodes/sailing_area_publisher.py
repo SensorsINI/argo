@@ -380,7 +380,7 @@ class SailingAreaPublisher(Node):
             # Try exact match first
             if self.map_name in self.sailing_areas:
                 maps_to_publish = [self.map_name]
-                self.get_logger().info(f"✅ Publishing markers ONLY from '{self.map_name}' map (to ensure correct coordinate origin)")
+                self.get_logger().debug(f"✅ Publishing markers ONLY from '{self.map_name}' map (to ensure correct coordinate origin)")
             else:
                 # Try case-insensitive match
                 map_name_lower = self.map_name.lower()
@@ -393,7 +393,7 @@ class SailingAreaPublisher(Node):
                 if matched_map:
                     maps_to_publish = [matched_map]
                     self.get_logger().warn(f"⚠️ Map name case mismatch: requested '{self.map_name}', using '{matched_map}'")
-                    self.get_logger().info(f"✅ Publishing markers ONLY from '{matched_map}' map")
+                    self.get_logger().debug(f"✅ Publishing markers ONLY from '{matched_map}' map")
                 else:
                     # No match found - fallback to all maps with warning
                     maps_to_publish = list(self.sailing_areas.keys())

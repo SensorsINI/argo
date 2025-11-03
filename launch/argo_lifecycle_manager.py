@@ -1263,7 +1263,8 @@ class ArgoLifecycleManager:
             self._cleanup_ros2()
             return True
         except Exception as e:
-            print(f"⚠️  Error killing process group: {e}")
+            error_msg = str(e) if e else "Unknown error"
+            print(f"⚠️  Error killing process group: {error_msg}")
             # Fallback to old method if killpg fails
             return self._stop_fallback()
 
@@ -1747,7 +1748,11 @@ class ArgoLifecycleManager:
                 print("✅ All simulation nodes terminated")
                 return True
             except Exception as e:
-                print(f"❌ Error in simulation mode: {e}")
+                import traceback
+                error_msg = str(e) if e else "Unknown error"
+                print(f"❌ Error in simulation mode: {error_msg}")
+                # Print full traceback to help with debugging
+                traceback.print_exc()
                 self.shutdown_requested = True
                 self.stop()
                 return False
