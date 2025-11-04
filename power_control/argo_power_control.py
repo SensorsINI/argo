@@ -442,10 +442,13 @@ class PowerController(ArgoBaseNode):
         self.green_led_state = False
         self.blue_led_state = False
 
-        # Sysfs LED control paths
+        # Sysfs LED control paths (for kernel overlay)
         self.green_led_sysfs_path = Path("/sys/class/leds/argo:green:heartbeat")
         self.green_led_brightness_path = self.green_led_sysfs_path / "brightness"
         self.green_led_trigger_path = self.green_led_sysfs_path / "trigger"
+        self.green_led_driver_unbind_path = Path("/sys/bus/platform/drivers/leds-gpio/unbind")
+        self.green_led_driver_bind_path = Path("/sys/bus/platform/drivers/leds-gpio/bind")
+        self.green_led_driver_unbound = False
         self.green_led_available = False
 
         # Heartbeat control
@@ -496,10 +499,10 @@ class PowerController(ArgoBaseNode):
         # Correct GPIO Line offsets from gpio readall
         self.POWER_RELAY_LINE = 259    # PI3 (Pin 40) - !POW
         self.POWER_BUTTON_LINE = 265   # PI9 (Pin 28) - !POW_BUT
-        # GREEN_LED_LINE is now managed by the kernel overlay
-        # self.GREEN_LED_LINE = 228      # PH4 (Pin 18) - Green LED
-        # HACK: Rerouting Green LED heartbeat to BLUE LED pin (257) due to PH4/PH0 pin issues.
-        self.GREEN_LED_LINE = 257      # Was 224 (PH0), now 257 (PI1/Blue LED)
+        # GREEN_LED_LINE: GPIO 228 (PH4) - Green LED
+        # We unbind the kernel LED driver to control it directly, then rebind on shutdown
+        self.GREEN_LED_LINE = 228      # PH4 (Pin 18) - Green LED (kernel overlay)
+        # Note: GPIO 257 was a temporary hack, but GPIO 228 works when LED driver is unbound
         self.BLUE_LED_LINE = 257       # PI1 (Pin 12) - Blue LED
         self.RED_LED_LINE = 272        # PI16 (Pin 37) - Red LED
 
@@ -574,11 +577,12 @@ class PowerController(ArgoBaseNode):
         # Initialize desktop user detection and caching
         self._detect_and_cache_desktop_user()
 
-        # Initialize GPIO for button and other LEDs
-        self.init_gpio()
+        # Initialize and take control of sysfs-managed Green LED (GPIO 228) FIRST
+        # This unbinds the kernel LED driver BEFORE we request GPIO 228
+        self.init_sysfs_led()
 
-        # Initialize and take control of sysfs-managed Green LED
-        # self.init_sysfs_led() # Temporarily disabled to use direct GPIO control for PH0
+        # Initialize GPIO for button and other LEDs (after unbinding LED driver)
+        self.init_gpio()
 
         # Configure button line for interrupt-based monitoring
         if self.gpio_available:
@@ -735,18 +739,73 @@ class PowerController(ArgoBaseNode):
             self.get_logger().error(f"Error handling GPIO conflicts: {e}")
 
     def init_sysfs_led(self):
-        """Initialize and take control of the sysfs-managed green LED."""
-        # This function is temporarily disabled.
-        # We are using direct GPIO control for PH0 as a workaround for a damaged PH4 pin.
-        # The original implementation used this to control the kernel-managed LED on PH4.
-        self.green_led_available = False
-        return
+        """Initialize and take control of the green LED by unbinding kernel driver."""
+        # GPIO 228 (PH4) is managed by kernel LED driver via overlay
+        # To control it directly, we need to unbind the LED driver
+        # This allows direct GPIO control, then we rebind on shutdown for kernel heartbeat
+        # If unbind fails (permission denied or not possible), fall back to GPIO 257 hack
+        try:
+            if not self.green_led_sysfs_path.exists():
+                self.get_logger().warning("Green LED sysfs path not found - kernel overlay may not be loaded, using GPIO 257 fallback")
+                self.green_led_available = False
+                self.green_led_driver_unbound = False
+                return
+            
+            # Try to unbind the LED driver to release GPIO 228 for direct control
+            # Note: This requires root permissions, may fail if running as non-root
+            if self.green_led_driver_unbind_path.exists():
+                try:
+                    with open(self.green_led_driver_unbind_path, 'w') as f:
+                        f.write('leds')
+                    self.green_led_driver_unbound = True
+                    self.get_logger().info("Unbound kernel LED driver to enable direct GPIO 228 control")
+                    self.green_led_available = True
+                except PermissionError:
+                    self.get_logger().warning("Permission denied unbinding LED driver (need root) - will use GPIO 257 fallback")
+                    self.green_led_available = False
+                    self.green_led_driver_unbound = False
+                    return
+                except Exception as e:
+                    self.get_logger().warning(f"Failed to unbind LED driver: {e} - will use GPIO 257 fallback")
+                    self.green_led_available = False
+                    self.green_led_driver_unbound = False
+                    return
+            else:
+                self.get_logger().warning("LED driver unbind path not found - will use GPIO 257 fallback")
+                self.green_led_available = False
+                self.green_led_driver_unbound = False
+                return
+            
+            if self.green_led_available:
+                self.get_logger().info("Successfully unbound LED driver - GPIO 228 available for direct control")
+        except Exception as e:
+            self.get_logger().warning(f"Failed to initialize LED driver unbind: {e} - will use GPIO 257 fallback")
+            self.green_led_available = False
+            self.green_led_driver_unbound = False
 
     def release_sysfs_led(self):
-        """Release control of the sysfs green LED back to the kernel."""
-        # This function is temporarily disabled.
-        # We are using direct GPIO control for PH0 as a workaround for a damaged PH4 pin.
-        return
+        """Release control of the green LED by rebinding kernel driver."""
+        if not self.green_led_driver_unbound:
+            return
+        try:
+            # Rebind the LED driver so kernel heartbeat works during shutdown
+            if self.green_led_driver_bind_path.exists():
+                with open(self.green_led_driver_bind_path, 'w') as f:
+                    f.write('leds')
+                self.get_logger().info("Rebound kernel LED driver - green LED heartbeat restored")
+            else:
+                self.get_logger().warning("LED driver bind path not found")
+            
+            # Restore kernel heartbeat trigger
+            if self.green_led_trigger_path.exists():
+                with open(self.green_led_trigger_path, 'w') as f:
+                    f.write('heartbeat')
+                self.get_logger().info("Restored kernel heartbeat trigger for green LED")
+            
+            self.green_led_driver_unbound = False
+            self.green_led_available = False
+        except Exception as e:
+            self.get_logger().error(f"Failed to rebind LED driver: {e}")
 
     def init_gpio(self):
         """Initialize GPIO pins with conflict resolution"""
@@ -793,7 +852,15 @@ class PowerController(ArgoBaseNode):
             # NOTE: power_relay_line (GPIO 259) is NOT controlled by this service
             # Power relay control is handled exclusively by the shutdown hook
             self.power_button_line = self.chip.get_line(self.POWER_BUTTON_LINE)
-            self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE) # Re-enabled for temporary PH0 fix
+            # Only request GPIO 228 if LED driver was successfully unbound
+            # Otherwise, GPIO 228 is still claimed by kernel overlay and we'll skip it
+            if self.green_led_available and self.green_led_driver_unbound:
+                self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE)  # GPIO 228 (PH4)
+            else:
+                # Fall back to GPIO 257 hack if we can't use GPIO 228
+                self.get_logger().info("Using GPIO 257 fallback for green LED (GPIO 228 unavailable)")
+                self.GREEN_LED_LINE = 257  # Temporarily use GPIO 257 (blue LED pin)
+                self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE)
             self.blue_led_line = self.chip.get_line(self.BLUE_LED_LINE)
             self.red_led_line = self.chip.get_line(self.RED_LED_LINE)
 
@@ -822,6 +889,9 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("GPIO pins configured successfully")
             self.gpio_available = True
         except Exception as e:
+            # Release any GPIO lines that were successfully requested before the error
+            self._release_gpio_lines_safe()
+            
             if self.test_mode:
                 self.get_logger().warning(f"GPIO not available in test mode: {e}")
                 self.get_logger().warning(
@@ -1454,8 +1524,7 @@ class PowerController(ArgoBaseNode):
 
     def set_green_led(self, state):
         """Control green LED (system running indicator) via direct GPIO."""
-        # Temporary fix: Using direct GPIO for PH0 due to damaged PH4.
-        # Original implementation used sysfs for kernel-managed PH4.
+        # GPIO 228 is controlled directly after unbinding kernel LED driver
         if not self.gpio_available:
             self.green_led_state = state
             return
@@ -1465,7 +1534,7 @@ class PowerController(ArgoBaseNode):
             self.green_led_line.set_value(value)
             self.green_led_state = state
         except Exception as e:
-            self.get_logger().error(f"Error controlling green LED (GPIO): {e}")
+            self.get_logger().error(f"Error controlling green LED (GPIO 228): {e}")
 
     # def set_blue_led(self, state):
     #     """Control blue LED (charging indicator)"""
@@ -3532,9 +3601,18 @@ If you take no action within 30 seconds, the system will automatically
             self.set_blue_led(False)
             self.set_red_led(False)
 
+            # Release GPIO lines before closing chip
+            self._release_gpio_lines_safe()
+
+            # Release sysfs LED control back to kernel
+            self.release_sysfs_led()
+
             # Close GPIO chip if available
             if hasattr(self, 'chip') and self.chip is not None:
-                self.chip.close()
+                try:
+                    self.chip.close()
+                except Exception as e:
+                    self.get_logger().warning(f"Error closing GPIO chip: {e}")
 
             # ROS2 cleanup
             self._cleanup_ros2()
@@ -3544,6 +3622,39 @@ If you take no action within 30 seconds, the system will automatically
 
         self.get_logger().info("Power controller cleanup complete")
 
+    def _release_gpio_lines_safe(self):
+        """Safely release all GPIO lines without raising exceptions"""
+        try:
+            if hasattr(self, 'power_button_line') and self.power_button_line is not None:
+                self.power_button_line.release()
+                self.power_button_line = None
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().warning(f"Error releasing power_button_line: {e}")
+        
+        try:
+            if hasattr(self, 'green_led_line') and self.green_led_line is not None:
+                self.green_led_line.release()
+                self.green_led_line = None
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().warning(f"Error releasing green_led_line: {e}")
+        
+        try:
+            if hasattr(self, 'red_led_line') and self.red_led_line is not None:
+                self.red_led_line.release()
+                self.red_led_line = None
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().warning(f"Error releasing red_led_line: {e}")
+        
+        try:
+            if hasattr(self, 'blue_led_line') and self.blue_led_line is not None:
+                self.blue_led_line.release()
+                self.blue_led_line = None
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().warning(f"Error releasing blue_led_line: {e}")
 
     def set_heartbeat_frequency(self, frequency_hz):
         """Set the heartbeat frequency"""
