@@ -33,6 +33,7 @@ from typing import Dict, Any, Optional
 # ROS2 imports
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Bool, Float64, Float32, String, Int32, UInt8
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
@@ -41,6 +42,7 @@ from std_srvs.srv import Trigger, SetBool
 # Flask web server
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
+from werkzeug.serving import ThreadedWSGIServer
 
 # Add launch directory to path for ArgoNodeManager
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'launch'))
@@ -80,6 +82,10 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Service callback threading fix - use flag-based approach
         self.health_service_requested = False
         self.health_service_response = None
+        
+        # Add flags to trigger service calls from the main spin loop
+        self._trigger_health_query = False
+        self._trigger_battery_query = False
         
         # Initialize state storage (thread-safe with lock)
         self.state_lock = threading.Lock()
@@ -152,7 +158,15 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Viewer activity tracking for CPU optimization
         self.last_viewer_request_time = time.time()  # Track last HTTP request
         self.viewer_timeout = 30.0  # Enter low-power mode after 30s of no requests
-        self.low_power_mode = True  # Start in low-power mode (lazy subscriptions)
+        self.low_power_mode = False  # Start in high power mode, but if no queries for some time, we unsubscribe aagin
+        
+        # QoS profile for subscriptions that should not receive stale data from transient_local publishers
+        self.volatile_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=10
+        )
+        
         self.status_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
         self.status_timer_period_idle = 30.0  # 30 seconds when idle (low-power)
         self.health_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
@@ -181,12 +195,19 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.health_status_client = self.create_client(Trigger, '/argo/health/status')
         
         # Load node configuration from argo_nodes.yaml to know expected total count
-        self.expected_nodes_total = self._load_expected_nodes_count()
+        (self.physical_robot_nodes, 
+         self.physical_robot_special_nodes, 
+         self.all_nodes_including_excluded) = self._load_node_lists_from_yaml()
+        self.state['nodes_total'] = len(self.physical_robot_nodes) + len(self.physical_robot_special_nodes)
+        self.state['nodes_expected_total'] = len(self.all_nodes_including_excluded)
         
         # Store subscription references for mass unsubscribe/resubscribe
         # Use _topic_subscriptions to avoid conflict with ROS2 Node's subscriptions property
         # Start with empty list - subscriptions created lazily on first viewer access
         self._topic_subscriptions = []
+
+        if not self.low_power_mode: # only create initial subscriptions if not in low-power mode, now default
+            self._create_all_subscriptions()
         
         # Lazy subscriptions: Don't subscribe to topics until a viewer accesses the dashboard
         # This minimizes startup CPU usage when dashboard is not being used
@@ -199,11 +220,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Timer for battery service queries (low rate: 1/10 Hz) - only for local fallback when topics don't have data
         # This runs independently of HTTP requests and at a low rate to minimize network traffic
-        self.battery_service_timer = self.create_timer(self.battery_service_query_period, self._update_battery_status_from_service)
+        self.battery_service_timer = self.create_timer(self.battery_service_query_period, self._trigger_battery_query_flag)
         
         # Timer for health service queries (low rate: 1/5 Hz) - for node health counts
         # This runs independently of HTTP requests and at a low rate to minimize network traffic
-        self.health_service_timer = self.create_timer(self.health_service_query_period, self._update_node_health_from_service)
+        self.health_service_timer = self.create_timer(self.health_service_query_period, self._trigger_health_query_flag)
         
         # Timer to check viewer activity and adjust power mode
         self.viewer_activity_timer = self.create_timer(5.0, self._check_viewer_activity)
@@ -230,6 +251,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Flask shutdown control
         self.flask_shutdown_requested = False
         self.signal_received = False  # Prevent recursive signal handling
+        self.wsgi_server = ThreadedWSGIServer(host='0.0.0.0', port=8081, app=self.app)
         
         # Start Flask in separate thread (daemon so it exits when main thread exits)
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
@@ -242,36 +264,50 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.get_logger().info('🌐 Web dashboard started on http://0.0.0.0:8081')
         self.get_logger().info('   Access from phone: http://ORANGEPI_IP:8081')
     
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully (only once)"""
-        # Prevent recursive signal handling
+    def shutdown(self):
+        """Custom shutdown logic for graceful termination."""
         if self.signal_received:
+            self.get_logger().debug("Shutdown already requested - skipping")
             return
         self.signal_received = True
-        
-        self.get_logger().info(f"Received signal {signum}, initiating shutdown...")
+        self.get_logger().info("Initiating graceful shutdown of web dashboard...")
         self.set_unhealthy("Node shutting down")
+
+        # Stop Flask server directly
+        if hasattr(self, 'wsgi_server') and self.wsgi_server:
+            try:
+                self.get_logger().info("Shutting down Werkzeug WSGI server...")
+                self.wsgi_server.shutdown()
+            except Exception as e:
+                self.get_logger().error(f"Error shutting down Werkzeug server: {e}")
+        else:
+            self.get_logger().warn("Could not shut down Flask server: wsgi_server not found.")
+
+        # Cancel all timers
+        for timer_name in ['status_timer', 'health_timer', 'battery_service_timer', 'health_service_timer', 'viewer_activity_timer']:
+            if hasattr(self, timer_name):
+                try:
+                    getattr(self, timer_name).cancel()
+                except Exception:
+                    pass
         
-        # Mark Flask as needing shutdown
-        self.flask_shutdown_requested = True
-        
-        # Cancel timers to stop health check spam
-        try:
-            if hasattr(self, 'status_timer'):
-                self.status_timer.cancel()
-            if hasattr(self, 'health_timer'):
-                self.health_timer.cancel()
-            if hasattr(self, 'battery_service_timer'):
-                self.battery_service_timer.cancel()
-            if hasattr(self, 'health_service_timer'):
-                self.health_service_timer.cancel()
-            if hasattr(self, 'viewer_activity_timer'):
-                self.viewer_activity_timer.cancel()
-        except Exception:
-            pass
-        
-        # Trigger ROS2 shutdown to stop executor
-        raise KeyboardInterrupt()
+        # Give a moment for shutdown to propagate
+        time.sleep(0.5)
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully (only once)"""
+        if self.signal_received:
+            self.get_logger().debug("Signal handler called but shutdown already in progress.")
+            return
+
+        self.get_logger().info(f"Received signal {signum}, requesting shutdown...")
+        # Setting this flag prevents re-entry
+        self.signal_received = True
+
+        # To break the main loop in main(), we must call rclpy.shutdown().
+        # It's safest to do this from within the ROS context, so we create a short
+        # one-shot timer to schedule the shutdown. This avoids race conditions.
+        self.create_timer(1.0, lambda: rclpy.shutdown())
     
     def _check_for_running_dashboard(self):
         """Check for running web dashboard processes and refuse to start if found."""
@@ -340,10 +376,10 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Bool, '/human_controlled', lambda msg: self.human_control_cb(msg, 'wifi'), 10)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), 10)
+            self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), 10)
+            self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/charging_status', self.charging_status_cb, 10)
@@ -352,31 +388,31 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Bool, '/ac_power_present', self.ac_power_cb, 10)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), 10)
+            self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), 10)
+            self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), 10)
+            self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, '/gps_sog', lambda msg: self.gps_sog_cb(msg, 'wifi'), 10)
+            self.create_subscription(Float64, '/gps_sog', lambda msg: self.gps_sog_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), 10)
+            self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), 10)
+            self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), 10)
+            self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float32, '/temperature_pcb', self.pcb_temp_cb, 10)
+            self.create_subscription(Float32, '/temperature_pcb', self.pcb_temp_cb, self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float32, '/temperature_air', self.air_temp_cb, 10)
+            self.create_subscription(Float32, '/temperature_air', self.air_temp_cb, self.volatile_qos)
         )
         self._topic_subscriptions.append(
             self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
@@ -387,22 +423,22 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Bool, 'lora/human_controlled', lambda msg: self.human_control_cb(msg, 'lora'), 10)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), 10)
+            self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), 10)
+            self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), 10)
+            self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), 10)
+            self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), 10)
+            self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), 10)
+            self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), self.volatile_qos)
         )
         
         # LoRa-specific monitoring
@@ -558,7 +594,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Skip processing in low-power mode (no viewers)
         if self.low_power_mode:
             return
-        
+
         now = time.time()
         
         with self.state_lock:
@@ -637,6 +673,14 @@ class ArgoWebDashboard(ArgoBaseNode):
                 self.state['wind_angle'] = msg.y
                 self.state['wind_temp'] = msg.z
                 self.state['data_source'] = 'WiFi'
+            elif source == 'lora':
+                self.last_lora_update['wind'] = now
+                wifi_age = now - self.last_wifi_update.get('wind', 0)
+                if wifi_age > 2.0:
+                    self.state['wind_speed'] = msg.x
+                    self.state['wind_angle'] = msg.y
+                    self.state['wind_temp'] = msg.z
+                    self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()
         
@@ -781,7 +825,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             self._check_health_status()
         
         if self.debug_mode:
-            self.get_logger().debug(f"Boat data received: {data_type} at {now}")
+            self.get_logger().debug(f"Boat data received: {data_type} at {now} (age {now - self.last_boat_data_received:.2f}s)")
     
     def _check_viewer_activity(self):
         """Check viewer activity and adjust power mode accordingly."""
@@ -976,28 +1020,29 @@ class ArgoWebDashboard(ArgoBaseNode):
             
             # Update node status (expensive operation - skip in low-power mode)
             node_status = self.node_manager.get_node_status()
-            running_nodes = [node for node, info in node_status.items() if info.get('running', False)]
+            
+            # --- REFACTORED: Filter status to only include nodes from the physical_robot group ---
+            filtered_status = {
+                node: info for node, info in node_status.items()
+                if node in self.physical_robot_nodes or node in self.physical_robot_special_nodes
+            }
+
+            running_nodes = [node for node, info in filtered_status.items() if info.get('running', False)]
             
             with self.state_lock:
                 self.state['nodes_running'] = len(running_nodes)
-                self.state['nodes_total'] = len(node_status)
+                self.state['nodes_total'] = len(self.physical_robot_nodes) + len(self.physical_robot_special_nodes)
                 self.state['nodes_list'] = {
                     node: '🟢 RUNNING' if info.get('running', False) else '🔴 STOPPED'
-                    for node, info in node_status.items()
+                    for node, info in filtered_status.items()
                 }
                 self.state['system_running'] = len(running_nodes) > 0
             
             # Get CPU temperature (file I/O - skip in low-power mode)
             self._update_cpu_temp()
             
-            # Note: Node health counts are updated by separate low-rate timer
-            # (health_service_timer at 1/5 Hz) to minimize network traffic
-            # Battery charging/USB status is updated by separate low-rate timer
-            # (battery_service_timer at 1/10 Hz) to minimize network traffic
-            # Topics are primary source, services are fallback only
-            
             with self.state_lock:
-                self.state['nodes_expected_total'] = self.expected_nodes_total
+                self.state['nodes_expected_total'] = len(self.all_nodes_including_excluded)
                 self.state['last_update'] = time.time()
                 
         except Exception as e:
@@ -1013,23 +1058,55 @@ class ArgoWebDashboard(ArgoBaseNode):
         except Exception:
             pass
     
-    def _load_expected_nodes_count(self) -> int:
-        """Load expected total node count from argo_nodes.yaml (includes excluded services).
-        
-        This counts all nodes defined in the YAML, including excluded services like
-        argo_power_control, argo_battery_water, and bno085 that run as independent systemd services.
+    def _load_node_lists_from_yaml(self) -> (list, list, list):
+        """Load the list of nodes for the physical robot from argo_nodes.yaml.
+
+        Returns:
+            A tuple containing:
+            - A list of regular nodes that are launched by the lifecycle manager.
+            - A list of special nodes (e.g., foxglove_bridge) launched by the manager.
+            - A list of all nodes, including those that run as excluded services.
         """
         try:
             config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
+
+            all_node_configs = {node['name']: node for node in config.get('nodes', [])}
+            groups = config.get('groups', {})
+            physical_robot_group_names = groups.get('physical_robot', [])
+
+            launched_nodes = []
+            special_nodes = []
+
+            for name in physical_robot_group_names:
+                if name in all_node_configs:
+                    node_cfg = all_node_configs[name]
+                    if node_cfg.get('special'):
+                        special_nodes.append(name)
+                    else:
+                        script_name = os.path.basename(node_cfg.get('executable', ''))
+                        launched_nodes.append(script_name)
+
+            # Get the list of all nodes defined in the YAML, including excluded ones, for health checks
+            all_defined_nodes = list(all_node_configs.keys())
             
-            # Count all nodes in the nodes section (includes excluded ones)
-            nodes = config.get('nodes', [])
-            return len(nodes)
+            return launched_nodes, special_nodes, all_defined_nodes
         except Exception as e:
-            self.get_logger().debug(f"Could not load node count from YAML: {e}")
-            return 0
+            self.get_logger().error(f"Could not load node lists from YAML: {e}")
+            return [], [], []
+
+    def _trigger_health_query_flag(self):
+        """Timer callback to set the flag for a health query."""
+        self._trigger_health_query = True
+
+    def _trigger_battery_query_flag(self):
+        """Timer callback to set the flag for a battery query."""
+        self._trigger_battery_query = True
+
+    def _load_expected_nodes_count(self) -> int:
+        """DEPRECATED: This method is replaced by _load_node_lists_from_yaml."""
+        return len(self.all_nodes_including_excluded)
     
     def _update_node_health_from_service(self):
         """Query health service to get healthy/unhealthy node counts.
@@ -1039,9 +1116,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         Runs at low rate (1/5 Hz) independently of HTTP requests to minimize network traffic.
         """
         try:
-            # In low-power mode, still query health but at lower priority
-            # This ensures health data is available when viewers connect
-            
+            # This method is now triggered by a flag from the main spin loop
+            if not self._trigger_health_query:
+                return
+            self._trigger_health_query = False # Reset flag
+
             if not self.health_status_client.wait_for_service(timeout_sec=0.5):
                 self.get_logger().debug("Health status service not available")
                 return  # Service not available, skip
@@ -1088,6 +1167,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         Runs independently of HTTP requests to minimize remote network traffic.
         """
         try:
+            # This method is now triggered by a flag from the main spin loop
+            if not self._trigger_battery_query:
+                return
+            self._trigger_battery_query = False # Reset flag
+            
             # Skip if in low-power mode (no viewers) - battery status not needed when dashboard not in use
             if self.low_power_mode:
                 self.get_logger().debug("Skipping battery status update in low-power mode")
@@ -1295,6 +1379,19 @@ class ArgoWebDashboard(ArgoBaseNode):
                     
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e)}), 500
+                
+        @self.app.route('/api/shutdown', methods=['POST'])
+        def shutdown():
+            """Internal endpoint to shut down the Flask server."""
+            self.get_logger().info("Flask shutdown route called.")
+            if hasattr(self, 'wsgi_server'):
+                # Shutdown must be in a thread, as it blocks until the server is fully down
+                shutdown_thread = threading.Thread(target=self.wsgi_server.shutdown)
+                shutdown_thread.start()
+                return jsonify({'success': True, 'message': 'Server shutting down...'})
+            else:
+                self.get_logger().error('Not running with a managed Werkzeug Server, cannot shutdown!')
+                return jsonify({'success': False, 'message': 'Not running with managed Werkzeug server.'})
     
     def _call_service(self, client, service_name):
         """Generic service call wrapper."""
@@ -1317,7 +1414,9 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def run_flask(self):
         """Run Flask server in separate thread."""
-        self.app.run(host='0.0.0.0', port=8081, debug=self.debug_mode, threaded=True, use_reloader=False)
+        self.get_logger().info("Starting Werkzeug WSGI server...")
+        self.wsgi_server.serve_forever()
+        self.get_logger().info("Werkzeug WSGI server has shut down.")
 
 
 def main(args=None):
@@ -1389,23 +1488,29 @@ Troubleshooting:
     executor.add_node(node)
     
     try:
-        executor.spin()
+        # executor.spin()
+        # Custom spin loop to handle service calls on the main thread
+        while rclpy.ok():
+            executor.spin_once(timeout_sec=5.0)
+            # Check flags and execute service calls
+            if node._trigger_health_query:
+                node._update_node_health_from_service()
+            if node._trigger_battery_query:
+                node._update_battery_status_from_service()
+            time.sleep(0.01) # Small sleep to prevent busy-waiting
     except KeyboardInterrupt:
         print("\n🛑 Shutting down web dashboard...")
     except Exception as e:
         print(f"\n❌ Error: {e}")
     finally:
         # Ensure proper cleanup
-        try:
+        if node:
+            node.shutdown()
             node.destroy_node()
-        except Exception:
-            pass
             
-        try:
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            pass
+        if rclpy.ok():
+            rclpy.shutdown()
+        print("🛑 Web dashboard shutdown complete.")
 
 
 if __name__ == '__main__':
