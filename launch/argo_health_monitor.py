@@ -133,6 +133,16 @@ class ArgoHealthMonitor(ArgoBaseNode):
             executable = node_cfg.get('executable', '')
             filename = os.path.basename(executable)  # e.g., 'gps.py'
             
+            # Don't subscribe to our own health topic
+            if filename == os.path.basename(__file__):
+                continue
+
+            # Skip special nodes (like foxglove_bridge) which are launched via 'ros2 run'
+            # and may not have a standard health topic. Also skip nodes that explicitly
+            # have no health_topic defined in the YAML.
+            if node_cfg.get('special', False) or not node_cfg.get('health_topic'):
+                continue
+            
             # Find health topic mapping for this executable
             if executable in self.executable_to_health or filename in self.executable_to_health:
                 mapping_key = executable if executable in self.executable_to_health else filename
@@ -410,6 +420,20 @@ class ArgoHealthMonitor(ArgoBaseNode):
                     'description': node_cfg.get('description', ''),
                     'last_seen': health.get('last_seen', 0.0)
                 }
+            
+            # Directly inject our own health status into the final response dict.
+            # The health status is maintained by the ArgoBaseNode parent class.
+            # If this callback is running, the node is alive; its health reflects
+            # whether it can communicate with the ROS daemon to check other nodes.
+            own_health = self.get_health_status()
+            own_config = self.node_configs.get(self.get_name(), {})
+            status_dict['nodes']['argo_health_monitor.py'] = {
+                'healthy': own_health.get('healthy'),
+                'required': own_config.get('required', True),
+                'critical': own_config.get('critical', True),
+                'description': own_config.get('description', 'Health monitoring service'),
+                'last_seen': own_health.get('timestamp', time.time())
+            }
             
             import json
             response.success = True
