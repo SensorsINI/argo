@@ -663,6 +663,7 @@ class ArgoLifecycleManager:
                 print(f"✅ Launching {script}...")
                 # Launch each node with proper ROS2 environment
                 # Use None for stdout/stderr so output goes directly to systemd journal
+                argo_yaml_path = os.path.join(self.argo_dir, 'nodes', 'argo.yaml')
                 cmd_str = f'source /opt/ros/humble/setup.bash && python3 {script_path}'
                 
                 # Add args from YAML configuration if available (for simulation nodes)
@@ -673,6 +674,9 @@ class ArgoLifecycleManager:
                         # Use shlex.quote to safely escape arguments for shell use
                         quoted_args = [shlex.quote(arg) for arg in args]
                         cmd_str += ' ' + ' '.join(quoted_args)
+                
+                # Add parameter file so nodes can load argo.yaml parameters
+                cmd_str += f' --ros-args --params-file {shlex.quote(argo_yaml_path)}'
                 
                 cmd = ['bash', '-c', cmd_str]
                 proc = subprocess.Popen(
@@ -1494,9 +1498,13 @@ class ArgoLifecycleManager:
                 
         return True
 
-    def simulate_local(self) -> bool:
-        """Launch Argo in local simulation mode."""
-        return self._simulate(mode='local')
+    def simulate_local(self, force_mock: bool = False) -> bool:
+        """Launch Argo in local simulation mode.
+        
+        Args:
+            force_mock: If True, force use of mock simulator even if real simulator is available
+        """
+        return self._simulate(mode='local', force_mock=force_mock)
 
     def simulate_remote(self) -> bool:
         """Launch Argo in remote simulation mode."""
@@ -1510,7 +1518,7 @@ class ArgoLifecycleManager:
             return False
         return self._simulate(mode='remote')
 
-    def _simulate(self, mode: str) -> bool:
+    def _simulate(self, mode: str, force_mock: bool = False) -> bool:
         """
         Launch Argo in simulation mode.
 
@@ -1584,12 +1592,18 @@ class ArgoLifecycleManager:
             # Ensure --no-curses is present (required for non-interactive launch)
             if '--no-curses' not in args:
                 args.append('--no-curses')
+            # Add --force-mock if requested
+            if force_mock and '--force-mock' not in args:
+                args.append('--force-mock')
             # Note: Map name is now automatically loaded from argo_nodes.yaml by the simulator bridge
             # --map can still be passed to override if needed
             self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
         else:
             # If simulator bridge doesn't have args configured, add --mode and --no-curses
             args = ['--mode', mode, '--no-curses']
+            # Add --force-mock if requested
+            if force_mock:
+                args.append('--force-mock')
             # Note: Map name is now automatically loaded from argo_nodes.yaml by the simulator bridge
             self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
         
@@ -2791,6 +2805,8 @@ EXAMPLES:
                         help='Suppress initialization messages (useful for quick_status)')
     parser.add_argument('--toggle_pause', action='store_true',
                         help='Toggle controller pause state (pauses autonomous navigation)')
+    parser.add_argument('--force-mock', action='store_true',
+                        help='Force use of mock simulator even if real simulator (sailboat-playground) is available (only for simulate_local)')
     
     # Enable bash completion for command-line arguments
     argcomplete.autocomplete(parser)
@@ -2819,7 +2835,7 @@ EXAMPLES:
             manager.quick_status()
             manager._cleanup_ros2()
         elif args.command == 'simulate_local':
-            success = manager.simulate_local()
+            success = manager.simulate_local(force_mock=args.force_mock)
             # simulate handles its own cleanup
             sys.exit(0 if success else 1)
         elif args.command == 'simulate_remote':

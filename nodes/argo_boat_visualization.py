@@ -114,7 +114,8 @@ import copy
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
 
-UPDATE_RATE = 1  # Hz (match transform publisher rate for smooth visualization)
+# Default update rate (Hz) - can be overridden by parameter
+DEFAULT_UPDATE_RATE = 10.0
 
 class ArgoBoatVisualization(ArgoBaseNode):
     def __init__(self, debug_mode=False):
@@ -124,9 +125,19 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.declare_parameter('visualization_scale', 3.0)
         self.visualization_scale = self.get_parameter('visualization_scale').get_parameter_value().double_value
         
+        # Read update rate from shared simulation parameters (argo.yaml)
+        # Uses simulation.publish_rate to match transform publisher and simulator rate
+        self.declare_parameter('simulation.publish_rate', DEFAULT_UPDATE_RATE)
+        self.update_rate = self.get_parameter('simulation.publish_rate').get_parameter_value().double_value
+        if self.update_rate <= 0:
+            self.update_rate = DEFAULT_UPDATE_RATE
+        
         # Log scale setting for debugging
         if self.visualization_scale != 1.0:
             self.get_logger().info(f"Visualization scale set to {self.visualization_scale}x")
+        
+        # Log update rate
+        self.get_logger().info(f"Visualization update rate: {self.update_rate:.1f} Hz")
         
         # Add parameter callback to handle runtime parameter changes (e.g., from Foxglove)
         self.add_on_set_parameters_callback(self._on_parameter_change)
@@ -182,7 +193,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.gps_lon = 0.0
         
         # Timer for publishing markers
-        self.timer = self.create_timer(1/UPDATE_RATE, self.publish_markers)  #  Hz
+        self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
         
         # Initialize health status - healthy when publishing successfully
         self.set_healthy("Boat visualization initialized")
@@ -242,9 +253,24 @@ class ArgoBoatVisualization(ArgoBaseNode):
                     f"Visualization scale changed from {old_scale}x to {self.visualization_scale}x "
                     f"(change via ros2 param set or Foxglove)"
                 )
+            elif param.name == 'simulation.publish_rate':
+                old_rate = self.update_rate
+                new_rate = param.get_parameter_value().double_value
+                if new_rate > 0:
+                    self.update_rate = new_rate
+                    # Cancel and recreate timer with new rate
+                    self.timer.cancel()
+                    self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
+                    self.get_logger().info(
+                        f"Visualization update rate changed from {old_rate:.1f} Hz to {self.update_rate:.1f} Hz "
+                        f"(change via ros2 param set or Foxglove)"
+                    )
+                else:
+                    result.successful = False
+                    result.reason = f"Invalid publish_rate: {new_rate} (must be > 0)"
             else:
-                result.successful = False
-                result.reason = f"Unknown parameter: {param.name}"
+                # Allow other parameters (don't fail on unknown parameters)
+                pass
         
         return result
     
@@ -963,12 +989,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
                 if total_sailing == 0:
                     self.get_logger().warn("No sailing area markers received - check sailing_area_publisher is running")
             
-            # Publish marker array
+            # Publish marker array (this is the primary publication method)
             self.marker_array_pub.publish(marker_array)
             
-            # Also publish individual markers for debugging
-            for marker in marker_array.markers:
-                self.marker_pub.publish(marker)
+            # Note: Individual marker publishing removed to prevent duplicates in Foxglove
+            # Foxglove should subscribe to /visualization_marker_array, not /visualization_marker
+            # Individual markers were only for debugging and caused duplicate visualization
             
             # Update health status - successful publishing
             self.publish_success_count += 1

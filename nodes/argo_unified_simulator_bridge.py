@@ -112,14 +112,14 @@ class MockSailboatSimulator:
     def __init__(self):
         self.boat_x = 0.0
         self.boat_y = 0.0
-        self.boat_heading = 0.0  # degrees
-        self.boat_speed = 0.0    # m/s
+        self.boat_heading = 180.0  # degrees
+        self.boat_speed = 1.0    # m/s
         self.rudder_angle = 0.0  # -1 to +1
         self.sail_angle = 0.0    # -1 to +1
         
         # Wind conditions
-        self.wind_speed = 8.0    # m/s
-        self.wind_direction = 45.0  # degrees (where wind comes from)
+        self.wind_speed = 1.0    # m/s
+        self.wind_direction = 0.0  # degrees (where wind comes from)
         
         # Physics parameters
         self.dt = 0.1  # time step
@@ -176,13 +176,27 @@ class MockSailboatSimulator:
 class ArgoUnifiedSimulatorBridge(Node):
     """Unified bridge for local and remote sailboat simulation."""
     
-    def __init__(self, mode='local', map_name=None, test_heading=None):
+    def __init__(self, mode='local', map_name=None, test_heading=None, force_mock=False):
         super().__init__('argo_unified_simulator_bridge')
         self.mode = mode
         self.map_name = map_name  # Store map_name for initial state calculation
         self.test_heading = test_heading  # Test mode: override heading calculation
+        self.force_mock = force_mock  # Force mock simulator even if real simulator is available
         
         self.get_logger().info(f'Argo Unified Simulator Bridge starting in {mode.upper()} mode...')
+        
+        # --- Debug Tracing (declare early so it's available during initialization) ---
+        # Enable position tracing to debug oscillation issues
+        # Set to True to enable verbose position tracking logs
+        self.debug_position_trace = self.declare_parameter('debug_position_trace', False).get_parameter_value().bool_value
+        self.position_trace_counter = 0  # Counter for log sequence numbers
+        self.publish_counter = 0  # Counter for tracking publishes
+        
+        # Set logger level to DEBUG if position tracing is enabled
+        if self.debug_position_trace:
+            from rclpy.logging import LoggingSeverity
+            self.get_logger().set_level(LoggingSeverity.DEBUG)
+            self.get_logger().info('🔍 Position trace debugging ENABLED - verbose logging active')
         
         # --- GPS Base Location (for NavSatFix) ---
         # Load from map GeoJSON if specified, otherwise use default
@@ -296,7 +310,16 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.initial_boat_heading = 0.0  # Will be set when initial state is calculated
         
         # --- Simulation Parameters ---
-        self.simulation_rate = 10.0  # Hz
+        # Read simulation rate from shared simulation parameters (argo.yaml)
+        self.declare_parameter('simulation.simulation_rate', 10.0)
+        self.simulation_rate = self.get_parameter('simulation.simulation_rate').get_parameter_value().double_value
+        if self.simulation_rate <= 0:
+            self.simulation_rate = 10.0
+        
+        self.get_logger().info(f"Simulation rate: {self.simulation_rate:.1f} Hz")
+        
+        # Add parameter callback to handle runtime parameter changes (e.g., from Foxglove)
+        self.add_on_set_parameters_callback(self._on_parameter_change)
         
         # --- Timers ---
         if mode == 'local':
@@ -411,6 +434,13 @@ class ArgoUnifiedSimulatorBridge(Node):
                     boat_position=boat_position
                 )
                 
+                # Note: debug_position_trace may not be initialized yet, so check safely
+                try:
+                    if hasattr(self, 'debug_position_trace') and self.debug_position_trace:
+                        self.get_logger().debug(f"[POS_TRACE:CREATE] Real simulator created - sim_mgr_id={id(sim_manager)}, boat_id={id(sim_manager.boat)}")
+                except AttributeError:
+                    pass  # Not initialized yet, skip debug logging
+                
                 # Explicitly set position and velocity to zero after creation to ensure clean state
                 try:
                     sim_manager.boat.set_position(boat_position)  # Ensure position is (0, 0)
@@ -464,11 +494,16 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.get_logger().info(f'Initial boat state: position={boat_position}, heading={boat_heading:.1f}°')
         
         # Create simulator using shared method
-        self.simulator, self.use_mock = self._create_simulator(boat_heading)
+        self.simulator, self.use_mock = self._create_simulator(boat_heading, force_mock=self.force_mock)
+        
+        if self.debug_position_trace:
+            self.get_logger().debug(f"[POS_TRACE:INIT] Simulator created - use_mock={self.use_mock}, sim_id={id(self.simulator)}")
         
         # For real simulator, also store as sim_manager
         if not self.use_mock:
             self.sim_manager = self.simulator
+            if self.debug_position_trace:
+                self.get_logger().debug(f"[POS_TRACE:INIT] sim_manager set - sim_mgr_id={id(self.sim_manager)}")
     
     def _init_remote_simulator(self):
         """Initialize remote simulator connection."""
@@ -478,6 +513,12 @@ class ArgoUnifiedSimulatorBridge(Node):
     def local_simulation_step(self):
         """Main simulation step for local mode - updates physics and publishes sensor data."""
         try:
+            self.position_trace_counter += 1
+            trace_id = self.position_trace_counter
+            
+            if self.debug_position_trace:
+                self.get_logger().debug(f"[POS_TRACE:{trace_id}] === STEP START === sim_id={id(self.sim_manager) if hasattr(self, 'sim_manager') else 'N/A'}")
+            
             # Generate mock human input for testing (optional)
             if self.mock_human_input and self.human_controlled:
                 self.publish_mock_human_input()
@@ -496,7 +537,30 @@ class ArgoUnifiedSimulatorBridge(Node):
             # Update simulator physics
             if self.use_mock:
                 # Mock simulator is recreated on reset, so it starts fresh at (0,0)
-                self.boat_state = self.simulator.step()
+                if self.debug_position_trace:
+                    old_pos = (self.boat_state.get('x', 0), self.boat_state.get('y', 0)) if self.boat_state else (0, 0)
+                    # Convert numpy types to float for logging
+                    old_pos = (float(old_pos[0]), float(old_pos[1]))
+                    self.get_logger().debug(f"[POS_TRACE:{trace_id}] MOCK: Before step - pos={old_pos}")
+                
+                # Get new state from simulator (returns new dict each time)
+                new_state = self.simulator.step()
+                
+                # Convert numpy types to Python floats for consistency
+                self.boat_state = {
+                    'x': float(new_state['x']),
+                    'y': float(new_state['y']),
+                    'heading': float(new_state['heading']),
+                    'speed': float(new_state['speed']),
+                    'wind_speed': float(new_state['wind_speed']),
+                    'wind_direction': float(new_state['wind_direction']),
+                    'rudder': float(new_state['rudder']),
+                    'sail': float(new_state['sail'])
+                }
+                
+                if self.debug_position_trace:
+                    new_pos = (self.boat_state['x'], self.boat_state['y'])
+                    self.get_logger().debug(f"[POS_TRACE:{trace_id}] MOCK: After step - pos={new_pos}, boat_state_id={id(self.boat_state)}")
             else:
                 # Handle real sailboat-playground API
                 try:
@@ -508,6 +572,10 @@ class ArgoUnifiedSimulatorBridge(Node):
                     self.last_rudder_angle = rudder_angle
                     self.last_sail_angle = sail_angle
                     
+                    if self.debug_position_trace:
+                        old_pos = (self.boat_state.get('x', 0), self.boat_state.get('y', 0)) if self.boat_state else (0, 0)
+                        self.get_logger().debug(f"[POS_TRACE:{trace_id}] REAL: Before step - pos={old_pos}, sim_mgr_id={id(self.sim_manager)}")
+                    
                     # Step the simulation with control inputs
                     # Simulator is recreated on reset, so it starts fresh at (0,0) with correct heading
                     self.sim_manager.step([sail_angle, rudder_angle])
@@ -515,11 +583,32 @@ class ArgoUnifiedSimulatorBridge(Node):
                     # Get the current state from sailboat-playground
                     state = self.sim_manager.agent_state
                     
-                    # Use simulator's reported position (simulator was recreated, so it should be correct)
-                    position_x = state['position'][0]
-                    position_y = state['position'][1]
-                    heading_to_use = state['heading']
-                    speed_to_use = np.linalg.norm(state['velocity']) if 'velocity' in state else 2.0
+                    if self.debug_position_trace:
+                        raw_pos = state.get('position', [0.0, 0.0])
+                        raw_pos_type = type(raw_pos).__name__
+                        raw_pos_id = id(raw_pos) if hasattr(raw_pos, '__array__') else 'N/A'
+                        self.get_logger().debug(f"[POS_TRACE:{trace_id}] REAL: After step - raw_pos={raw_pos}, type={raw_pos_type}, id={raw_pos_id}")
+                    
+                    # Extract position - ensure we copy numpy array values to avoid reference issues
+                    position = state.get('position', [0.0, 0.0])
+                    # Convert numpy array to Python list/float to ensure we have copies, not references
+                    if isinstance(position, np.ndarray):
+                        position = position.copy().tolist()
+                    position_x = float(position[0])
+                    position_y = float(position[1])
+                    heading_to_use = float(state.get('heading', 0.0))
+                    
+                    if self.debug_position_trace:
+                        self.get_logger().debug(f"[POS_TRACE:{trace_id}] REAL: Extracted - pos_x={position_x:.6f}, pos_y={position_y:.6f}, pos_id={id(position)}")
+                    
+                    # Calculate speed from velocity if available, otherwise use magnitude
+                    velocity = state.get('velocity', None)
+                    if velocity is not None:
+                        if isinstance(velocity, np.ndarray):
+                            velocity = velocity.copy()
+                        speed_to_use = float(np.linalg.norm(velocity))
+                    else:
+                        speed_to_use = 0.0
                     
                     # Convert to our internal boat_state format
                     self.boat_state = {
@@ -527,41 +616,73 @@ class ArgoUnifiedSimulatorBridge(Node):
                         'y': position_y, 
                         'heading': heading_to_use,
                         'speed': speed_to_use,
-                        'wind_speed': state.get('wind_speed', 8.0),
-                        'wind_direction': state.get('wind_direction', 45.0),
+                        'wind_speed': float(state.get('wind_speed', 8.0)),
+                        'wind_direction': float(state.get('wind_direction', 45.0)),
                         'rudder': current_rudder,  # Store normalized values
                         'sail': current_sail
                     }
+                    
+                    if self.debug_position_trace:
+                        stored_pos = (self.boat_state['x'], self.boat_state['y'])
+                        self.get_logger().debug(f"[POS_TRACE:{trace_id}] REAL: Stored - pos={stored_pos}, boat_state_id={id(self.boat_state)}")
                 except Exception as e:
                     self.get_logger().warn(f'Simulator step failed: {e}')
+                    if self.debug_position_trace:
+                        self.get_logger().debug(f"[POS_TRACE:{trace_id}] ERROR: {e}")
                     return
             
             # Publish sensor data to Argo
-            self.publish_sensor_data()
+            if self.debug_position_trace:
+                pub_pos = (float(self.boat_state.get('x', 0)), float(self.boat_state.get('y', 0)))
+                self.get_logger().debug(f"[POS_TRACE:{trace_id}] About to publish sensor data - pos={pub_pos}")
+            
+            self.publish_sensor_data(trace_id=trace_id)
+            
+            if self.debug_position_trace:
+                self.get_logger().debug(f"[POS_TRACE:{trace_id}] === STEP END ===")
             
         except Exception as e:
             self.get_logger().error(f'Simulation step error: {e}')
     
-    def publish_sensor_data(self):
-        """Publish simulated sensor data to Argo topics."""
+    def publish_sensor_data(self, trace_id=None):
+        """Publish simulated sensor data to Argo topics.
+        
+        Args:
+            trace_id: Optional simulation step ID for debug tracing
+        """
         if not self.boat_state:
             return
+        
+        self.publish_counter += 1
+        pub_id = self.publish_counter
+        
+        if self.debug_position_trace and trace_id is not None:
+            pos = (float(self.boat_state['x']), float(self.boat_state['y']))
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] PUBLISH_START - Publishing from sim_step={trace_id}, pos={pos}")
         
         # IMU/Compass data (heading in degrees)
         pose_msg = Vector3(x=0.0, y=0.0, z=self.boat_state['heading'])
         self.pub_pose.publish(pose_msg)
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /pose - heading={self.boat_state['heading']:.1f}°")
         
         compass_msg = Vector3(x=0.0, y=0.0, z=self.boat_state['heading'])
         self.pub_compass.publish(compass_msg)
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /compass - heading={self.boat_state['heading']:.1f}°")
         
         # GPS data
         gps_cog_msg = Float64(data=self.boat_state['heading'])  # Course over ground
         self.pub_gps_cog.publish(gps_cog_msg)
-        
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /gps_cog - cog={self.boat_state['heading']:.1f}°")
+
         # Speed over ground (convert m/s to knots)
         speed_knots = self.boat_state['speed'] * 1.94384  # m/s to knots
         gps_sog_msg = Float64(data=speed_knots)
         self.pub_gps_sog.publish(gps_sog_msg)
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /gps_sog - sog={speed_knots:.3f} knots")
         
         # GPS velocity vector (north, east, speed)
         heading_rad = math.radians(self.boat_state['heading'])
@@ -569,6 +690,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         vel_east = self.boat_state['speed'] * math.sin(heading_rad) * 1.94384   # knots
         gps_vel_msg = Vector3(x=vel_north, y=vel_east, z=speed_knots)
         self.pub_gps_velocity.publish(gps_vel_msg)
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /gps_velocity - north={vel_north:.3f}, east={vel_east:.3f}, speed={speed_knots:.3f}")
         
         # Wind data (speed, angle relative to boat, temperature)
         wind_msg = Vector3(
@@ -577,17 +700,29 @@ class ArgoUnifiedSimulatorBridge(Node):
             z=22.5                               # temperature (mock)
         )
         self.pub_wind.publish(wind_msg)
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /anem_speed_angle_temp - speed={self.boat_state['wind_speed']:.2f}m/s, angle={self.boat_state['wind_direction']:.1f}°")
 
         # Publish satellite count
         sat_msg = UInt8()
         sat_msg.data = 12  # Mock satellite count
         self.pub_gps_satellites.publish(sat_msg)
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /gps_num_satellites - count=12")
 
         # Publish NavSatFix message for mapping
-        self.publish_navsat_fix()
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] About to publish NavSatFix")
+        self.publish_navsat_fix(trace_id=trace_id, pub_id=pub_id)
 
         # Publish mock NMEA RMC sentence
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] About to publish NMEA")
         self.publish_mock_nmea()
+        
+        if self.debug_position_trace and trace_id is not None:
+            pos = (float(self.boat_state['x']), float(self.boat_state['y']))
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] PUBLISH_END - All topics published from sim_step={trace_id}, pos={pos}")
 
     def publish_mock_human_input(self):
         """Generate mock human radio input for testing (deprecated - use external control instead)."""
@@ -892,7 +1027,7 @@ class ArgoUnifiedSimulatorBridge(Node):
             # Only recreate if we're in local mode
             if self.mode == 'local':
                 # Use shared method to create simulator
-                self.simulator, self.use_mock = self._create_simulator(initial_heading)
+                self.simulator, self.use_mock = self._create_simulator(initial_heading, force_mock=self.force_mock)
                 
                 # For real simulator, also store as sim_manager
                 if not self.use_mock:
@@ -901,6 +1036,9 @@ class ArgoUnifiedSimulatorBridge(Node):
                     try:
                         state = self.sim_manager.agent_state
                         actual_pos = state.get('position', [0.0, 0.0])
+                        # Convert numpy array to list if needed
+                        if isinstance(actual_pos, np.ndarray):
+                            actual_pos = actual_pos.copy().tolist()
                         actual_heading = state.get('heading', initial_heading)
                         self.get_logger().info(f"Simulator agent_state after creation: position=({actual_pos[0]:.2f}, {actual_pos[1]:.2f}), heading={actual_heading:.1f}°")
                     except Exception as e:
@@ -926,13 +1064,29 @@ class ArgoUnifiedSimulatorBridge(Node):
                     # Real simulator state
                     try:
                         state = self.sim_manager.agent_state
+                        # Extract position - ensure we copy numpy array values to avoid reference issues
+                        position = state.get('position', [0.0, 0.0])
+                        if isinstance(position, np.ndarray):
+                            position = position.copy().tolist()
+                        position_x = float(position[0])
+                        position_y = float(position[1])
+                        
+                        # Calculate speed from velocity if available
+                        velocity = state.get('velocity', None)
+                        if velocity is not None:
+                            if isinstance(velocity, np.ndarray):
+                                velocity = velocity.copy()
+                            speed = float(np.linalg.norm(velocity))
+                        else:
+                            speed = 0.0
+                        
                         self.boat_state = {
-                            'x': state['position'][0],
-                            'y': state['position'][1],
-                            'heading': state['heading'],
-                            'speed': np.linalg.norm(state['velocity']) if 'velocity' in state else 0.0,
-                            'wind_speed': state.get('wind_speed', wind_speed),
-                            'wind_direction': state.get('wind_direction', wind_direction),
+                            'x': position_x,
+                            'y': position_y,
+                            'heading': float(state.get('heading', initial_heading)),
+                            'speed': speed,
+                            'wind_speed': float(state.get('wind_speed', wind_speed)),
+                            'wind_direction': float(state.get('wind_direction', wind_direction)),
                             'rudder': 0.0,
                             'sail': 0.0
                         }
@@ -983,8 +1137,43 @@ class ArgoUnifiedSimulatorBridge(Node):
             response.message = f"Reset failed: {str(e)}"
             return response
     
-    def publish_navsat_fix(self):
-        """Publish a NavSatFix message."""
+    def _on_parameter_change(self, parameters):
+        """Handle runtime parameter changes (called when parameters are set via ros2 param set or Foxglove)"""
+        from rcl_interfaces.msg import SetParametersResult
+        
+        result = SetParametersResult()
+        result.successful = True
+        
+        for param in parameters:
+            if param.name == 'simulation.simulation_rate':
+                old_rate = self.simulation_rate
+                new_rate = param.get_parameter_value().double_value
+                if new_rate > 0:
+                    self.simulation_rate = new_rate
+                    # Cancel and recreate timer with new rate (only for local mode)
+                    if self.mode == 'local' and hasattr(self, 'sim_timer') and self.sim_timer is not None:
+                        self.sim_timer.cancel()
+                        self.sim_timer = self.create_timer(1.0/self.simulation_rate, self.local_simulation_step)
+                        self.get_logger().info(
+                            f"Simulation rate changed from {old_rate:.1f} Hz to {self.simulation_rate:.1f} Hz "
+                            f"(change via ros2 param set or Foxglove)"
+                        )
+                else:
+                    result.successful = False
+                    result.reason = f"Invalid simulation_rate: {new_rate} (must be > 0)"
+            else:
+                # Allow other parameters (don't fail on unknown parameters)
+                pass
+        
+        return result
+    
+    def publish_navsat_fix(self, trace_id=None, pub_id=None):
+        """Publish a NavSatFix message.
+        
+        Args:
+            trace_id: Optional simulation step ID for debug tracing
+            pub_id: Optional publish counter ID for debug tracing
+        """
         if not self.boat_state:
             return
         
@@ -993,6 +1182,9 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.initial_boat_state = self.boat_state.copy()
 
         lat, lon = self.xy_to_latlon(self.boat_state['x'], self.boat_state['y'])
+        
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] GPS: Publishing NavSatFix - x={self.boat_state['x']:.6f}, y={self.boat_state['y']:.6f}, lat={lat:.8f}, lon={lon:.8f}")
 
         fix_msg = NavSatFix()
         fix_msg.header.stamp = self.get_clock().now().to_msg()
@@ -1004,6 +1196,9 @@ class ArgoUnifiedSimulatorBridge(Node):
         fix_msg.altitude = 0.0  # Mock altitude
         fix_msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
         self.pub_gps_fix.publish(fix_msg)
+        
+        if self.debug_position_trace and trace_id is not None:
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] GPS: Published /fix - lat={lat:.8f}, lon={lon:.8f}")
 
     def publish_mock_nmea(self):
         """Publish a mock NMEA RMC sentence."""
@@ -1307,6 +1502,8 @@ def main(args=None):
                        help='Map name (without .geojson extension) - overrides map from argo_nodes.yaml')
     parser.add_argument('--test-heading', type=float,
                        help='Test mode: override initial heading calculation with specified heading in degrees (0-360)')
+    parser.add_argument('--force-mock', action='store_true',
+                       help='Force use of mock simulator even if real simulator (sailboat-playground) is available')
     
     # Parse known args to avoid conflicts with ROS2 args
     parsed_args, unknown_args = parser.parse_known_args(args)
@@ -1334,7 +1531,10 @@ def main(args=None):
     print(f"\nMode: {parsed_args.mode.upper()}")
     if parsed_args.mode == 'local':
         print("  - Running simulator locally")
-        print("  - Using sailboat-playground or mock simulator")
+        if parsed_args.force_mock:
+            print("  - Using mock simulator (--force-mock enabled)")
+        else:
+            print("  - Using sailboat-playground or mock simulator")
     else:
         print("  - Connecting to remote simulator")
         print("  - Forwarding sensor data and control commands")
@@ -1362,7 +1562,7 @@ def main(args=None):
     rclpy.init(args=unknown_args)
     bridge = None
     try:
-        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, map_name=map_name, test_heading=parsed_args.test_heading)
+        bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, map_name=map_name, test_heading=parsed_args.test_heading, force_mock=parsed_args.force_mock)
         rclpy.spin(bridge)
     except KeyboardInterrupt:
         print(f"\nUnified simulator bridge ({parsed_args.mode} mode) stopped by user.")

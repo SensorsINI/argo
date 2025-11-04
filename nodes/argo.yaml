@@ -7,6 +7,11 @@
     argo:
       mode: autonomous
       rudder_gain: 2
+    # Simulation parameters (shared across simulator bridge, transform publisher, and visualization)
+    # These are accessible to all nodes via the simulation.* namespace
+    simulation:
+      publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz) - 2Hz sufficient for visualization
+      simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics simulation
 
 # Single-node system (control_refactored.py)
 control_node:

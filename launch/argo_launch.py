@@ -49,6 +49,7 @@ def generate_launch_description():
     # Load configuration
     config = load_node_config()
     argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    argo_yaml_path = os.path.join(argo_dir, 'nodes', 'argo.yaml')
     
     # Determine which nodes to launch based on mode
     def launch_nodes(context):
@@ -131,8 +132,10 @@ def generate_launch_description():
             
             # Create ROS2 node action using ExecuteProcess for Python scripts
             # Note: For non-package nodes, we use ExecuteProcess instead of Node
+            # Add parameter file to command so nodes can load argo.yaml parameters
+            cmd = ['python3', executable_path] + node_args + ['--ros-args', '--params-file', argo_yaml_path]
             node_action = ExecuteProcess(
-                cmd=['python3', executable_path] + node_args,
+                cmd=cmd,
                 output='screen',
                 name=node_name,
                 respawn=not critical,  # Only respawn non-critical nodes
