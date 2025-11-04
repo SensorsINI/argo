@@ -9,8 +9,12 @@
 #   - package: Not used for Python nodes (leave empty)
 #   - parameters: Optional parameter files
 #   - required: true/false - if false, system continues if node fails
-#   - critical: true/false - if true, missing node is considered system failure
+#   - critical: true/false - if true, missing node is considered system failure and ros2 will attempt to restart it
 #   - description: Human-readable description
+#   - health_topic: ROS2 topic for health monitoring
+#   - excluded: true/false - if true, node is not launched by the lifecycle manager
+#   - special: true/false - if true, node is launched via ros2 run, not direct Python
+#   - args: Optional list of arguments to pass to the node
 
 nodes:
   # Core System Nodes (Critical for operation)
@@ -42,21 +46,21 @@ nodes:
   - name: controller_node
     executable: nodes/controller.py
     required: true
-    critical: false
+    critical: false  # we can still control argo with RC control
     description: "Autonomous navigation controller"
     health_topic: "/controller_node_health"
 
   - name: gps_node
     executable: nodes/gps.py
-    required: false
-    critical: false
+    required: true
+    critical: false # we can still control argo with RC control
     description: "GPS navigation via UART5"
     health_topic: "/gps_node_health"
     
   - name: anem_node
     executable: nodes/anem.py
-    required: false
-    critical: false
+    required: true
+    critical: false # we can still control argo with RC control
     description: "Wind speed and direction sensor (I2C)"
     health_topic: "/anem_node_health"
     
@@ -77,7 +81,7 @@ nodes:
   # Monitoring and Recording Nodes
   - name: record_node
     executable: nodes/record.py
-    required: false
+    required: false # we need to record data for analysis
     critical: false
     description: "Data recording management"
     health_topic: "/record_health"
@@ -86,7 +90,7 @@ nodes:
   - name: argo_web_dashboard
     executable: nodes/argo_web_dashboard.py
     required: true
-    critical: false
+    critical: true # essential for remote monitoring and control
     description: "Web-based monitoring and control interface (mobile-friendly)"
     health_topic: "/argo_web_dashboard_health"
     
@@ -104,6 +108,18 @@ nodes:
     critical: false
     description: "Boat state visualization node"
     health_topic: "/argo_boat_visualization_health"
+
+  - name: sailing_area_publisher
+    executable: nodes/sailing_area_publisher.py
+    required: false
+    critical: false
+    description: "Publishes GeoJSON sailing boundaries for visualization"
+    
+  - name: argo_health_monitor
+    executable: launch/argo_health_monitor.py
+    required: true
+    critical: true
+    description: "Monitors and aggregates health status from all nodes"
     
   # Special Nodes (not launched directly but monitored)
   - name: foxglove_bridge
@@ -186,4 +202,23 @@ groups:
   visualization:
     - argo_transform_publisher
     - argo_boat_visualization
+    - sailing_area_publisher
+    - foxglove_bridge
+
+  physical_robot:
+    # This group defines all nodes that should be launched by the lifecycle
+    # manager when running on the physical robot. Excluded nodes that run
+    # as independent systemd services are not listed here.
+    - rudder_sail_radio_node
+    - controller_node
+    - gps_node
+    - anem_node
+    - temp_monitor_node
+    - lora_node
+    - record_node
+    - argo_web_dashboard
+    - argo_transform_publisher
+    - argo_boat_visualization
+    - sailing_area_publisher
+    - argo_health_monitor
     - foxglove_bridge
