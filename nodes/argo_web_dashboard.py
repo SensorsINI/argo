@@ -213,21 +213,22 @@ class ArgoWebDashboard(ArgoBaseNode):
         # This minimizes startup CPU usage when dashboard is not being used
         
         # Timer for periodic status updates (start with idle frequency since we're in low-power mode)
-        self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
+        # self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
+        self.get_logger().debug("Created status timer")
         
         # Timer for periodic health status checks (start with idle frequency since we're in low-power mode)
-        self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
+        # self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
         
         # Timer for battery service queries (low rate: 1/10 Hz) - only for local fallback when topics don't have data
         # This runs independently of HTTP requests and at a low rate to minimize network traffic
-        self.battery_service_timer = self.create_timer(self.battery_service_query_period, self._trigger_battery_query_flag)
+        # self.battery_service_timer = self.create_timer(self.battery_service_query_period, self._trigger_battery_query_flag)
         
         # Timer for health service queries (low rate: 1/5 Hz) - for node health counts
         # This runs independently of HTTP requests and at a low rate to minimize network traffic
-        self.health_service_timer = self.create_timer(self.health_service_query_period, self._trigger_health_query_flag)
+        # self.health_service_timer = self.create_timer(self.health_service_query_period, self._trigger_health_query_flag)
         
-        # Timer to check viewer activity and adjust power mode
-        self.viewer_activity_timer = self.create_timer(5.0, self._check_viewer_activity)
+        # Timer to check viewer activity and adjust power mode - REMOVED, handled in main loop
+        # self.viewer_activity_timer = self.create_timer(5.0, self._check_viewer_activity)
         
         # Flask app setup
         self.app = Flask(__name__, 
@@ -855,13 +856,13 @@ class ArgoWebDashboard(ArgoBaseNode):
             self._destroy_all_subscriptions()
         # If no subscriptions exist yet, we're already in the optimal state (lazy initialization)
         
-        # Adjust status timer to run less frequently
-        self.status_timer.cancel()
-        self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
+        # Adjust status timer to run less frequently - REMOVED, handled in main loop
+        # self.status_timer.cancel()
+        # self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
         
-        # Adjust health timer to run less frequently
-        self.health_timer.cancel()
-        self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
+        # Adjust health timer to run less frequently - REMOVED, handled in main loop
+        # self.health_timer.cancel()
+        # self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
     
     def _exit_low_power_mode(self, source_ip=None):
         """Exit low-power mode: subscribe/resubscribe to all topics and restore normal timer frequencies."""
@@ -882,13 +883,13 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.get_logger().info("Resubscribing to all topics")
             self._create_all_subscriptions()
         
-        # Restore status timer to normal frequency
-        self.status_timer.cancel()
-        self.status_timer = self.create_timer(self.status_timer_period_active, self.update_system_status)
+        # Restore status timer to normal frequency - REMOVED, handled in main loop
+        # self.status_timer.cancel()
+        # self.status_timer = self.create_timer(self.status_timer_period_active, self.update_system_status)
         
-        # Restore health timer to normal frequency
-        self.health_timer.cancel()
-        self.health_timer = self.create_timer(self.health_timer_period_active, self._check_health_status)
+        # Restore health timer to normal frequency - REMOVED, handled in main loop
+        # self.health_timer.cancel()
+        # self.health_timer = self.create_timer(self.health_timer_period_active, self._check_health_status)
         
         # Immediately update status and health when exiting low-power mode
         self.update_system_status()
@@ -1010,14 +1011,19 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def update_system_status(self):
         """Periodically update system status (nodes, battery, CPU temp)."""
+        self.get_logger().debug("Updating system status")
         try:
             # In low-power mode, skip expensive operations
             if self.low_power_mode:
                 # Only update timestamp, skip node queries and CPU temp
                 with self.state_lock:
                     self.state['last_update'] = time.time()
+                self.get_logger().debug("Skipping system status update in low-power mode")
                 return
             
+            # Get CPU temperature (file I/O - skip in low-power mode)
+            self._update_cpu_temp()
+
             # Update node status (expensive operation - skip in low-power mode)
             node_status = self.node_manager.get_node_status()
             
@@ -1038,8 +1044,6 @@ class ArgoWebDashboard(ArgoBaseNode):
                 }
                 self.state['system_running'] = len(running_nodes) > 0
             
-            # Get CPU temperature (file I/O - skip in low-power mode)
-            self._update_cpu_temp()
             
             with self.state_lock:
                 self.state['nodes_expected_total'] = len(self.all_nodes_including_excluded)
@@ -1053,10 +1057,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         try:
             with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
                 temp_millicelsius = int(f.read().strip())
+                self.get_logger().debug(f"CPU temperature: {temp_millicelsius} millicelsius")   # DEBUG
                 with self.state_lock:
                     self.state['cpu_temp'] = temp_millicelsius // 1000
-        except Exception:
-            pass
+        except Exception as e:
+            self.get_logger().error(f"Error reading CPU temperature: {e}")
     
     def _load_node_lists_from_yaml(self) -> (list, list, list):
         """Load the list of nodes for the physical robot from argo_nodes.yaml.
@@ -1490,14 +1495,43 @@ Troubleshooting:
     try:
         # executor.spin()
         # Custom spin loop to handle service calls on the main thread
+        # and manually trigger periodic tasks, as ROS2 timers are not reliable
+        # with this custom executor model.
+        
+        last_status_update = time.time()
+        last_health_check = time.time()
+        last_viewer_check = time.time()
+        
         while rclpy.ok():
-            executor.spin_once(timeout_sec=5.0)
-            # Check flags and execute service calls
+            # Spin once with a short timeout to handle ROS callbacks
+            executor.spin_once(timeout_sec=0.1)
+            
+            now = time.time()
+            
+            # Determine current update intervals based on power mode
+            status_interval = node.status_timer_period_idle if node.low_power_mode else node.status_timer_period_active
+            health_interval = node.health_timer_period_idle if node.low_power_mode else node.health_timer_period_active
+            viewer_check_interval = 5.0 # Constant 5s check
+            
+            # --- Manually trigger periodic tasks ---
+            if now - last_status_update > status_interval:
+                node.update_system_status()
+                last_status_update = now
+                
+            if now - last_health_check > health_interval:
+                node._check_health_status()
+                last_health_check = now
+            
+            if now - last_viewer_check > viewer_check_interval:
+                node._check_viewer_activity()
+                last_viewer_check = now
+            
+            # --- Handle asynchronous service calls triggered by timers ---
             if node._trigger_health_query:
                 node._update_node_health_from_service()
             if node._trigger_battery_query:
                 node._update_battery_status_from_service()
-            time.sleep(0.01) # Small sleep to prevent busy-waiting
+            
     except KeyboardInterrupt:
         print("\n🛑 Shutting down web dashboard...")
     except Exception as e:
