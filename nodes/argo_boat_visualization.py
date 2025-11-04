@@ -57,31 +57,30 @@ The transform tree establishes the relationship between frames:
 **base_link Frame (Boat-Centric Coordinate System):**
 The base_link frame is a local coordinate frame attached to the boat's center. All boat visualization markers are defined in this frame, which automatically moves and rotates with the boat as transforms are updated.
 
-**base_link axes (as implemented in this visualization):**
-- **X axis (Starboard/Port):** Positive X points to **starboard** (right side), negative X points to **port** (left side).
-- **Y axis (Forward/Aft):** Positive Y points **forward** (toward bow), negative Y points **aft** (toward stern).
+**base_link axes (ROS standard convention):**
+- **X axis (Forward/Aft):** Positive X points **forward** (toward bow), negative X points **aft** (toward stern).
+- **Y axis (Port/Starboard):** Positive Y points to **port** (left side), negative Y points to **starboard** (right side).
 - **Z axis (Up/Down):** Positive Z points **upward**, negative Z points **downward**.
 
 **Relationship between base_link and ENU:**
 - The base_link frame rotates relative to ENU based on the boat's heading (yaw).
-- When the boat points north (heading = 0°), base_link +Y aligns with ENU +Y (north).
-- When the boat points east (heading = 90°), base_link +Y aligns with ENU +X (east).
-- base_link +X always points to starboard (right side of boat) regardless of heading.
+- When the boat points north (heading = 0°), base_link +X aligns with ENU +Y (north).
+- When the boat points east (heading = 90°), base_link +X aligns with ENU +X (east).
+- base_link +Y always points to port (left side of boat) regardless of heading.
 - base_link +Z always points up (same as ENU +Z).
 
 **Visualization Markers in base_link:**
 All boat markers are defined in base_link coordinates, which means they move and rotate with the boat automatically:
-- The **hull marker** (cube) is centered at (0, 0, 0) with:
-  - scale.x = hull width (starboard/port)
-  - scale.y = hull length (forward/aft)
-  - scale.z = hull height (up/down)
+- The **hull marker** (triangle) has:
+  - Tip at bow: (hull_half_length, 0, 0) - forward (+X direction)
+  - Base at stern: (-hull_half_length, ±hull_half_width, 0) - aft (-X direction)
 - The **mast marker** (cylinder) extends from (0, 0, 0) to (0, 0, mast_height).
-- The **rudder marker** (triangle) is located at stern: x=0 (centerline), y=-0.325 (stern), z below hull.
-- The **rudder arrow** is positioned at stern center: (0, -0.325, 0).
+- The **rudder marker** (triangle) is located at stern: x=-0.325 (stern), y=0 (centerline), z below hull.
+- The **rudder arrow** is positioned at stern center: (-0.325, 0, 0).
 - The **sail marker** (triangle) extends from mast top (0, 0, mast_top) to stern area, rotated based on sail position.
 - The **wind vector marker** is positioned above the mast (0, 0, above_mast), with arrow direction based on wind angle relative to boat.
 - The **velocity vector marker** starts at boat center (0, 0, 0), points in direction of movement.
-- The **heading arrow** points in the boat's forward direction (+Y axis in base_link).
+- The **heading arrow** points in the boat's forward direction (+X axis in base_link).
 
 **Practical Notes:**
 - In Foxglove, when viewing in "base_link" frame, all boat markers appear stationary (they're attached to the boat).
@@ -101,7 +100,7 @@ import rclpy
 from geometry_msgs.msg import Vector3, PoseStamped, Point
 from sensor_msgs.msg import NavSatFix
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA, Header
+from std_msgs.msg import ColorRGBA, Header, Float64
 import math
 import numpy as np
 import sys
@@ -145,6 +144,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # Publishers
         self.marker_pub = self.create_publisher(Marker, '/visualization_marker', 10)
         self.marker_array_pub = self.create_publisher(MarkerArray, '/visualization_marker_array', 10)
+        # Debug publisher for calculated wind direction (for debugging wind vector drift)
+        self.pub_debug_wind = self.create_publisher(Float64, '/visualization/debug/wind_direction_calculated', 10)
         
         # Subscribers
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
@@ -157,6 +158,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # /rudder_sail_cmd: Autonomous commands (lowest priority fallback)
         self.create_subscription(Vector3, '/rudder_sail_cmd', self.control_callback, 10)
         self.create_subscription(Vector3, '/anem_speed_angle_temp', self.wind_callback, 10)
+        # Subscribe to true wind direction for accurate relative wind calculation
+        self.create_subscription(Float64, '/simulator/true_wind_direction', self.true_wind_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(NavSatFix, '/fix', self.gps_callback, 10)
         
@@ -186,6 +189,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.wind_speed = 0.0    # m/s
         self.wind_angle = 0.0    # degrees relative to boat
         self.wind_temp = 0.0     # celsius
+        self.true_wind_direction = None  # degrees (compass convention) - for recalculating relative wind
         self.gps_velocity_north = 0.0  # knots
         self.gps_velocity_east = 0.0   # knots
         self.gps_velocity_speed = 0.0  # knots
@@ -285,6 +289,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.wind_angle = msg.y      # degrees relative to boat
         self.wind_temp = msg.z       # celsius
     
+    def true_wind_callback(self, msg):
+        """Update true wind direction (absolute, compass convention)"""
+        self.true_wind_direction = msg.data
+    
     def velocity_callback(self, msg):
         """Update GPS velocity data"""
         self.gps_velocity_north = msg.x  # knots north
@@ -310,7 +318,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.ns = "argo_boat"
         
         # Hull dimensions - apply visualization scale
-        # base_link coordinate system: +X = starboard, +Y = forward, +Z = up
+        # base_link coordinate system (ROS standard): +X = forward (bow), +Y = left (port), +Z = up
         hull_length = 0.65 * self.visualization_scale  # Dragonforce 65 hull length
         hull_half_length = hull_length / 2.0
         hull_half_width = 0.065 * self.visualization_scale  # Half hull width (0.13/2)
@@ -319,20 +327,20 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # Create triangle vertices: tip at bow, base at stern
         # Vertex 1: Tip at bow (forward, centerline)
         vertex1 = Point()
-        vertex1.x = 0.0  # Centerline
-        vertex1.y = hull_half_length  # Bow (forward)
+        vertex1.x = hull_half_length  # Bow (forward, +X direction)
+        vertex1.y = 0.0  # Centerline
         vertex1.z = hull_z  # Water surface
         
         # Vertex 2: Stern port side (aft, port)
         vertex2 = Point()
-        vertex2.x = -hull_half_width  # Port side
-        vertex2.y = -hull_half_length  # Stern (aft)
+        vertex2.x = -hull_half_length  # Stern (aft, -X direction)
+        vertex2.y = -hull_half_width  # Port side (left, -Y direction)
         vertex2.z = hull_z  # Water surface
         
         # Vertex 3: Stern starboard side (aft, starboard)
         vertex3 = Point()
-        vertex3.x = hull_half_width  # Starboard side
-        vertex3.y = -hull_half_length  # Stern (aft)
+        vertex3.x = -hull_half_length  # Stern (aft, -X direction)
+        vertex3.y = hull_half_width  # Starboard side (right, +Y direction)
         vertex3.z = hull_z  # Water surface
         
         # Create triangle using three vertices
@@ -402,12 +410,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.ns = "argo_boat"
         
         # Rudder position: at stern, below hull
-        # base_link coordinate system: +X = starboard, +Y = forward, +Z = up
-        stern_y = -0.325 * self.visualization_scale  # Half hull length back (0.65/2)
+        # base_link coordinate system (ROS standard): +X = forward (bow), +Y = left (port), +Z = up
+        stern_x = -0.325 * self.visualization_scale  # Half hull length back (0.65/2)
         hull_bottom_z = -0.075 * self.visualization_scale  # Bottom of hull (half of 0.15m height)
         
         # Rudder angle relative to boat centerline
-        # Positive rudder_cmd = right turn = rudder deflects to starboard (positive X)
+        # Positive rudder_cmd = right turn = rudder deflects to starboard (negative Y, right side)
         rudder_angle_deg = self.rudder_cmd * 30.0  # Max 30 degrees
         rudder_angle_rad = math.radians(rudder_angle_deg)
         
@@ -421,32 +429,34 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # Tip extends downward from stern end of base and rotates left/right based on rudder angle
         
         # Vertex 1: Forward end of rudder base (inside hull, at bottom)
-        base_start_y = stern_y + rudder_base_length  # Forward of stern by base_length
+        base_start_x = stern_x + rudder_base_length  # Forward of stern by base_length
         vertex1 = Point()
-        vertex1.x = 0.0  # At centerline
-        vertex1.y = base_start_y  # Forward end of base
+        vertex1.x = base_start_x  # Forward end of base
+        vertex1.y = 0.0  # At centerline
         vertex1.z = hull_bottom_z  # At hull bottom
         
         # Vertex 2: Stern end of rudder base (at stern, at bottom)
         vertex2 = Point()
-        vertex2.x = 0.0  # At centerline
-        vertex2.y = stern_y  # At stern y position
+        vertex2.x = stern_x  # At stern x position (aft, -X)
+        vertex2.y = 0.0  # At centerline
         vertex2.z = hull_bottom_z  # At hull bottom
         
         # Vertex 3: Tip of rudder (below stern end of base, rotated by rudder angle)
         # Rudder rotates around vertical Z axis (horizontal rotation in XY plane)
-        # Pivot point: (x=0, y=stern_y, z=hull_bottom_z) - the stern end of the base (vertex2)
-        # The rudder is a vertical fin. When angle=0, it extends straight back (in -Y direction)
+        # Pivot point: (x=stern_x, y=0, z=hull_bottom_z) - the stern end of the base (vertex2)
+        # The rudder is a vertical fin. When angle=0, it extends straight back (in -X direction)
         # When rotated, the tip rotates horizontally around the pivot point in XY plane
-        # When angle = 0: tip is at (x=0, y=stern_y-rudder_height, z=hull_bottom_z-rudder_height) - straight back and down
-        # Positive angle: tip rotates to starboard (positive X) and slightly forward (positive Y)
-        # Negative angle: tip rotates to port (negative X) and slightly forward (positive Y)
+        # When angle = 0: tip is at (x=stern_x-rudder_height, y=0, z=hull_bottom_z-rudder_height) - straight back and down
+        # Positive angle: tip rotates to starboard (negative Y, right side) and slightly forward
+        # Negative angle: tip rotates to port (positive Y, left side) and slightly forward
         vertex3 = Point()
         # Rotate tip position around pivot in XY plane
-        # Initial direction when angle=0: pointing in -Y direction (straight back)
+        # Initial direction when angle=0: pointing in -X direction (straight back/aft)
         # Rotate this direction by rudder_angle_rad
-        vertex3.x = 0.0 + rudder_height * math.sin(rudder_angle_rad)  # Rotates starboard/port
-        vertex3.y = stern_y - rudder_height * math.cos(rudder_angle_rad)  # Extends back when angle=0, rotates forward
+        # In ROS convention: +X = forward, so -X = aft
+        # When rotating: +angle rotates starboard (negative Y), -angle rotates port (positive Y)
+        vertex3.x = stern_x - rudder_height * math.cos(rudder_angle_rad)  # Extends back when angle=0
+        vertex3.y = 0.0 - rudder_height * math.sin(rudder_angle_rad)  # Rotates starboard/port (positive angle = negative Y = starboard)
         vertex3.z = hull_bottom_z - rudder_height  # Always extends straight down (vertical, Z axis)
         
         # Create triangle using three vertices
@@ -485,14 +495,14 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.action = Marker.ADD
         marker.ns = "argo_boat"
         
-        # Position at stern of boat (base_link frame):
-        #   +X = starboard/right
-        #   -X = port/left
-        #   +Y = bow/forward
-        #   -Y = stern/backward
-        stern_y = -0.325 * self.visualization_scale  # Half hull length back (0.65/2)
-        marker.pose.position.x = 0.0  # Centerline (center of stern)
-        marker.pose.position.y = stern_y  # At stern position
+        # Position at stern of boat (base_link frame, ROS standard):
+        #   +X = forward/bow
+        #   -X = aft/stern
+        #   +Y = left/port
+        #   -Y = right/starboard
+        stern_x = -0.325 * self.visualization_scale  # Half hull length back (0.65/2)
+        marker.pose.position.x = stern_x  # At stern position (aft, -X)
+        marker.pose.position.y = 0.0  # Centerline (center of stern)
         marker.pose.position.z = 0.0  # At waterline level
         
         # Rudder command: -1.0 (full left) to +1.0 (full right)
@@ -501,30 +511,33 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         # Arrow direction: fixed at 90° to stern (perpendicular to boat centerline)
         # ROS2 ARROW markers point in +X direction of their local frame by default
-        # To point perpendicular to hull (along ±X in base_link), we need:
-        # - For positive rudder_cmd: arrow points +X (starboard) → identity orientation (no rotation)
-        # - For negative rudder_cmd: arrow points -X (port) → 180° rotation around Z
+        # In base_link: +X = forward, +Y = left, so perpendicular to centerline is along ±Y
+        # - For positive rudder_cmd: arrow points starboard (-Y direction in base_link)
+        # - For negative rudder_cmd: arrow points port (+Y direction in base_link)
         if self.rudder_cmd > 0:
-            # Right turn: arrow points starboard (+X direction in base_link)
-            # Identity orientation: arrow's default +X aligns with base_link +X
-            marker.pose.orientation.w = 1.0
+            # Right turn: arrow points starboard (-Y direction in base_link)
+            # Rotate 90° around Z: arrow's default +X aligns with base_link -Y (starboard)
+            # 270° rotation: w=cos(135°)= -0.707, z=sin(135°)= 0.707 (but normalized)
+            # Actually: 270° = -90°, so w=cos(-45°)=0.707, z=sin(-45°)=-0.707
+            marker.pose.orientation.w = 0.7071067811865476  # cos(-90°/2) = cos(-45°)
             marker.pose.orientation.x = 0.0
             marker.pose.orientation.y = 0.0
-            marker.pose.orientation.z = 0.0
+            marker.pose.orientation.z = -0.7071067811865476  # sin(-90°/2) = sin(-45°)
         elif self.rudder_cmd < 0:
-            # Left turn: arrow points port (-X direction in base_link)
-            # 180° rotation around Z: arrow's default +X aligns with base_link -X
-            marker.pose.orientation.w = 0.0  # cos(180°/2) = cos(90°) = 0
+            # Left turn: arrow points port (+Y direction in base_link)
+            # Rotate 90° around Z: arrow's default +X aligns with base_link +Y (port)
+            # 90° rotation: w=cos(45°)=0.707, z=sin(45°)=0.707
+            marker.pose.orientation.w = 0.7071067811865476  # cos(90°/2) = cos(45°)
             marker.pose.orientation.x = 0.0
             marker.pose.orientation.y = 0.0
-            marker.pose.orientation.z = 1.0  # sin(180°/2) = sin(90°) = 1
+            marker.pose.orientation.z = 0.7071067811865476  # sin(90°/2) = sin(45°)
         else:
             # Neutral: arrow length will be zero, direction doesn't matter
-            # Default to starboard direction (identity)
-            marker.pose.orientation.w = 1.0
+            # Default to starboard direction
+            marker.pose.orientation.w = 0.7071067811865476
             marker.pose.orientation.x = 0.0
             marker.pose.orientation.y = 0.0
-            marker.pose.orientation.z = 0.0
+            marker.pose.orientation.z = -0.7071067811865476
         
         # Arrow length: proportional to |rudder_cmd|
         # Base length when rudder is at full deflection (|rudder_cmd| = 1.0)
@@ -563,46 +576,45 @@ class ArgoBoatVisualization(ArgoBaseNode):
         mast_mid_z = 0.1 * self.visualization_scale  # 10cm from bottom
         
         # Hull dimensions
-        # base_link coordinate system: +X = starboard, +Y = forward, +Z = up
+        # base_link coordinate system (ROS standard): +X = forward (bow), +Y = left (port), +Z = up
         hull_length = 0.65 * self.visualization_scale
         hull_half_length = hull_length / 2.0
         hull_top_z = 0.075 * self.visualization_scale  # Half hull height (0.15/2)
-        stern_y = -hull_half_length  # Back of hull (stern is at negative Y)
+        stern_x = -hull_half_length  # Back of hull (stern is at negative X)
         
         # Determine downwind side from wind direction
-        # wind_angle: 0° = from front, 90° = from starboard (right/+y), -90° = from port (left/-y)
+        # wind_angle: 0° = from front, 90° = from starboard, -90° = from port
+        # In base_link (ROS standard): +X = forward, +Y = left (port), -Y = right (starboard)
         # Sail goes to downwind side (opposite of where wind comes from)
         
         if abs(self.wind_angle) < 0.1:  # Wind from front/back
             sail_side = 0.0  # No side preference when wind is head-on/from-back
         else:
-            sail_side = 1.0 if self.wind_angle > 0 else -1.0  # Wind blows sail to side same as wind direction, since wind direction is anemometer angle relative to boat heading
+            # wind_angle > 0 means wind from starboard, sail goes to port (+Y)
+            # wind_angle < 0 means wind from port, sail goes to starboard (-Y)
+            sail_side = 1.0 if self.wind_angle > 0 else -1.0  # +1 = port (+Y), -1 = starboard (-Y)
         
         # Sail trim angle from sail command
         # sail_cmd: -1 = fully out, 0 = half in, +1 = fully in (along hull)
         # Note: Hardware convention from rudder_sail_radio.py is -1 = pulled in, +1 = let out
         # So we negate sail_cmd to match visualization expectation
-        # When sail_cmd = 0: sail should be halfway pulled in (not aligned with hull)
         sail_angle_deg = -self.sail_cmd * 45.0  # Negate to match visualization convention, max 45 degrees
         sail_angle_rad = math.radians(sail_angle_deg)
         
-        # Sail base angle: aligned with hull length (aft direction = 180° or π radians)
-        # When sail_cmd = 0 (halfway pulled in): sail angle is 0, so base angle determines position
-        # From this base, sail rotates to downwind side and with trim angle
-        base_aft_rad = math.pi  # 180° = aft direction (toward stern)
+        # Sail base angle: aligned with hull length (aft direction = -X = 180° or π radians)
+        # In base_link: +X = forward (0°), -X = aft (180°)
+        base_aft_rad = math.pi  # 180° = aft direction (toward stern, -X)
         
         # Rotation to downwind side: perpendicular component (90° from base)
-        # When wind comes from starboard (wind_angle > 0): sail goes to port (-y), so perpendicular = +90°
-        # When wind comes from port (wind_angle < 0): sail goes to starboard (+y), so perpendicular = -90°
-        # sail_side is -1.0 for port, +1.0 for starboard
-        # But we need: port side = +90° from aft = π + π/2 = 3π/2, starboard = π - π/2 = π/2
-        # So perpendicular should be: -π/2 * sail_side
-        perpendicular_component_rad = -(math.pi / 2.0) * sail_side  # -90° for port, +90° for starboard
+        # When wind comes from starboard (wind_angle > 0): sail goes to port (+Y), so perpendicular = +90°
+        # When wind comes from port (wind_angle < 0): sail goes to starboard (-Y), so perpendicular = -90°
+        # In base_link: 0° = +X, 90° = +Y (port), -90° = -Y (starboard)
+        perpendicular_component_rad = (math.pi / 2.0) * sail_side  # +90° for port, -90° for starboard
         
         # Total sail angle: aft direction + perpendicular rotation + trim angle
         # When sail_cmd = 0 (halfway pulled in): sail_angle_rad = 0, so total = base + perpendicular
-        # When sail_cmd = 0 and wind head-on (sail_side = 0): total = π (straight aft)
-        # When sail_cmd = 0 and wind from starboard (sail_side = -1): total = π + π/2 = 3π/2 (aft and port)
+        # When sail_cmd = 0 and wind head-on (sail_side = 0): total = π (straight aft, -X)
+        # When sail_cmd = 0 and wind from starboard (sail_side = +1): total = π + π/2 = 3π/2 (aft and port, -X and +Y)
         total_sail_angle_rad = base_aft_rad + perpendicular_component_rad + sail_angle_rad
         
         # Vertex 1: Top of mast (at boat center)
@@ -612,40 +624,31 @@ class ArgoBoatVisualization(ArgoBaseNode):
         vertex1.z = mast_top_z
         
         # Vertex 2: 10cm above back hull (at stern), position depends on sail angle
-        # When sail_cmd = 0: should be at stern (x=0 on centerline, stern_y), aligned with hull
-        # When sail rotates: x offset based on sail angle from mast center
+        # When sail_cmd = 0: should be at stern (x=stern_x, y=0 on centerline), aligned with hull
+        # When sail rotates: y offset based on sail angle from mast center
         
         # Calculate vertex2 position using parametric line equation:
         # Sail extends from mast (0,0) at angle total_sail_angle_rad
-        # Parametric: x = t * cos(θ), y = t * sin(θ)
-        # When y = stern_y: t = stern_y / sin(θ)
-        # Then: x = stern_y * cos(θ) / sin(θ) = stern_y * cot(θ)
-        # Handle edge case when sin(θ) ≈ 0 (sail perpendicular to hull)
-        
-        vertex2 = Point()
-        vertex2.y = stern_y  # Always at stern y position
-        
-        # Calculate x position using parametric intersection
-        # Sail extends from mast (0,0) at angle total_sail_angle_rad
-        # In base_link: 0° = +X (starboard), 90° = +Y (forward), 180° = -X (port), 270° = -Y (aft)
-        # total_sail_angle_rad uses math.pi (180°) as base (aft direction)
+        # In base_link (ROS standard): 0° = +X (forward), 90° = +Y (port), 180° = -X (aft), 270° = -Y (starboard)
         # Parametric: x = t * cos(θ), y = t * sin(θ) where θ is measured from +X axis
-        # We want vertex2 at stern (y = stern_y), so solve for x
+        # We want vertex2 at stern (x = stern_x), so solve for y
         cos_angle = math.cos(total_sail_angle_rad)
         sin_angle = math.sin(total_sail_angle_rad)
         
-        if abs(sin_angle) > 0.001:  # Normal case: not perpendicular to Y axis
-            # When y = stern_y: t = stern_y / sin(θ)
-            # Then: x = stern_y * cos(θ) / sin(θ) = stern_y * cot(θ)
-            vertex2.x = stern_y * cos_angle / sin_angle
+        vertex2 = Point()
+        vertex2.x = stern_x  # Always at stern x position (aft, -X)
+        
+        if abs(cos_angle) > 0.001:  # Normal case: not perpendicular to X axis
+            # When x = stern_x: t = stern_x / cos(θ)
+            # Then: y = stern_x * sin(θ) / cos(θ) = stern_x * tan(θ)
+            vertex2.y = stern_x * sin_angle / cos_angle
         else:
-            # Edge case: sail is perpendicular to Y axis (sin ≈ 0)
-            # When perpendicular, x is determined by sign of cos and distance to stern
-            # If cos > 0: sail extends to starboard, x should be large positive
-            # If cos < 0: sail extends to port, x should be large negative
-            # But we want vertex2 at stern y, so use a reasonable offset
-            max_x_offset = abs(stern_y) * 2.0  # Allow sail to extend 2x hull length sideways
-            vertex2.x = max_x_offset if cos_angle > 0 else -max_x_offset
+            # Edge case: sail is perpendicular to X axis (cos ≈ 0)
+            # When perpendicular, y is determined by sign of sin and distance to stern
+            # If sin > 0: sail extends to port (+Y), y should be large positive
+            # If sin < 0: sail extends to starboard (-Y), y should be large negative
+            max_y_offset = abs(stern_x) * 2.0  # Allow sail to extend 2x hull length sideways
+            vertex2.y = max_y_offset if sin_angle > 0 else -max_y_offset
         
         vertex2.z = hull_top_z + 0.10 * self.visualization_scale  # 10cm above hull top
         
@@ -673,7 +676,24 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_wind_vector_marker(self):
-        """Create wind vector arrow"""
+        """Create wind vector arrow showing absolute wind direction (where wind goes on the map)
+        
+        Wind direction convention:
+        - wind_angle from sensor: "where wind comes from" relative to boat (0° = from front, 90° = from starboard)
+        - boat_heading: boat's heading in compass convention (0° = North, 90° = East, 180° = South, 270° = West)
+        - We want to show: "where wind goes" in absolute terms (on the map)
+        
+        Calculation:
+        - Step 1: Calculate absolute wind direction (where wind comes from in compass frame)
+          absolute_wind_from_compass = (boat_heading + wind_angle) % 360
+        - Step 2: Convert "wind comes from" to "wind goes toward" (add 180°)
+          absolute_wind_to_compass = (absolute_wind_from_compass + 180) % 360
+        - Step 3: Convert back to relative direction for base_link frame visualization
+          relative_wind_to = (absolute_wind_to_compass - boat_heading) % 360
+          
+        Note: The wind_angle from sensor is already relative to boat and in the correct coordinate system
+        for this calculation (where 0° = from front of boat).
+        """
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
@@ -689,8 +709,46 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.position.y = 0.0
         marker.pose.position.z = 1.1 * self.visualization_scale  # Above mast
         
-        # Wind direction relative to boat (wind_angle is already relative to boat heading)
-        wind_angle_rad = math.radians(self.wind_angle)
+        # Convert wind direction from "relative to boat, where wind comes from" 
+        # to "relative to boat, where wind goes" (for visualization)
+        # wind_angle: where wind comes from relative to boat (0° = from front/bow, 90° = from starboard)
+        # boat_heading: compass heading (0° = North, 90° = East)
+        
+        # Step 1: Calculate absolute wind direction (where wind comes from in compass frame)
+        # The relative wind_angle from sensor is in simulator convention, but boat_heading is now in compass convention.
+        # We can either convert wind_angle OR recalculate from true wind direction (more accurate).
+        if self.true_wind_direction is not None:
+            # Recalculate relative wind from true wind and boat heading (both in compass convention)
+            # Relative wind = (true_wind - boat_heading), normalized to -180 to +180
+            relative_wind_compass = (self.true_wind_direction - self.boat_heading) % 360.0
+            if relative_wind_compass > 180.0:
+                relative_wind_compass -= 360.0
+            absolute_wind_from = self.true_wind_direction
+        else:
+            # Fallback: use relative wind angle from sensor (may have coordinate system mismatch)
+            # Note: This assumes wind_angle is in the same convention as boat_heading
+            absolute_wind_from = (self.boat_heading + self.wind_angle) % 360.0
+        
+        # Publish calculated absolute wind direction for debugging
+        debug_msg = Float64(data=absolute_wind_from)
+        self.pub_debug_wind.publish(debug_msg)
+        
+        # Step 2: Convert "wind comes from" to "wind goes toward" (add 180°)
+        # If wind comes from 0° (north), it goes toward 180° (south)
+        absolute_wind_to = (absolute_wind_from + 180.0) % 360.0
+        
+        # Step 3: Convert back to relative direction for base_link frame visualization
+        # This gives us the direction the wind arrow should point in base_link coordinates
+        relative_wind_to = (absolute_wind_to - self.boat_heading) % 360.0
+        # Normalize to -180 to +180 range for easier angle calculation
+        if relative_wind_to > 180.0:
+            relative_wind_to -= 360.0
+        
+        # Convert to radians for quaternion calculation
+        # Note: In base_link, +X = forward, so 0° relative means pointing forward (+X direction)
+        # The relative_wind_to angle is a compass bearing (clockwise from forward),
+        # but ROS quaternion rotation is counterclockwise, so we need to negate
+        wind_angle_rad = -math.radians(relative_wind_to)
         
         marker.pose.orientation.w = math.cos(wind_angle_rad * 0.5)
         marker.pose.orientation.x = 0.0
@@ -714,7 +772,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_velocity_vector_marker(self):
-        """Create GPS velocity vector arrow"""
+        """Create GPS velocity vector arrow
+        
+        GPS velocity is in ENU frame (map frame):
+        - velocity_north: component toward north (positive Y in ENU)
+        - velocity_east: component toward east (positive X in ENU)
+        
+        We need to convert from ENU absolute direction to base_link relative direction.
+        base_link: +Y = forward (bow), +X = starboard
+        """
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
@@ -730,13 +796,27 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.position.y = 0.0
         marker.pose.position.z = 0.1 * self.visualization_scale  # Slightly above hull
         
-        # Velocity direction
-        velocity_heading = math.atan2(self.gps_velocity_east, self.gps_velocity_north)
+        # Calculate absolute velocity heading in ENU frame (map frame)
+        # atan2(east, north) gives angle from north (0° = north, 90° = east)
+        absolute_velocity_heading = math.degrees(math.atan2(self.gps_velocity_east, self.gps_velocity_north))
+        # Normalize to 0-360 range
+        if absolute_velocity_heading < 0:
+            absolute_velocity_heading += 360.0
         
-        marker.pose.orientation.w = math.cos(velocity_heading * 0.5)
+        # Convert from absolute (map frame) to relative (base_link frame)
+        # base_link +X = forward = boat heading direction (ROS standard)
+        relative_velocity_heading = (absolute_velocity_heading - self.boat_heading) % 360.0
+        # Normalize to -180 to +180 range
+        if relative_velocity_heading > 180.0:
+            relative_velocity_heading -= 360.0
+        
+        # Convert to radians for quaternion calculation
+        velocity_heading_rad = math.radians(relative_velocity_heading)
+        
+        marker.pose.orientation.w = math.cos(velocity_heading_rad * 0.5)
         marker.pose.orientation.x = 0.0
         marker.pose.orientation.y = 0.0
-        marker.pose.orientation.z = math.sin(velocity_heading * 0.5)
+        marker.pose.orientation.z = math.sin(velocity_heading_rad * 0.5)
         
         # Scale based on speed (max 1m arrow length) - apply visualization scale
         velocity_scale = min(self.gps_velocity_speed * 0.1, 1.0)  # Scale factor
@@ -754,7 +834,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_heading_arrow_marker(self):
-        """Create boat heading direction arrow"""
+        """Create boat heading direction arrow
+        
+        base_link coordinate system (ROS standard):
+        - +X = forward (bow direction)
+        - +Y = left (port side)
+        - +Z = up
+        The arrow should point in +X direction (forward/bow)
+        ROS2 ARROW markers default to pointing in +X direction, so identity quaternion works
+        """
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
@@ -765,13 +853,14 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.action = Marker.ADD
         marker.ns = "argo_boat"
         
-        # Position at bow of boat (in base_link frame, +x is forward) - apply visualization scale
-        marker.pose.position.x = 0.35 * self.visualization_scale  # Front of boat
-        marker.pose.position.y = 0.0
+        # Position at bow of boat (in base_link frame, +X is forward) - apply visualization scale
+        marker.pose.position.x = 0.35 * self.visualization_scale  # Front of boat (bow, +X direction)
+        marker.pose.position.y = 0.0  # Centerline
         marker.pose.position.z = 0.1 * self.visualization_scale
         
-        # Heading direction arrow points forward (+x direction in base_link)
-        marker.pose.orientation.w = 1.0  # Identity quaternion (points in +x direction)
+        # Heading direction arrow points forward (+X direction in base_link)
+        # ROS2 ARROW markers default to pointing in +X direction, so identity quaternion works
+        marker.pose.orientation.w = 1.0  # Identity quaternion (points in +X direction)
         marker.pose.orientation.x = 0.0
         marker.pose.orientation.y = 0.0
         marker.pose.orientation.z = 0.0

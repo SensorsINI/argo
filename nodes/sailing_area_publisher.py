@@ -272,7 +272,7 @@ class SailingAreaPublisher(Node):
             # So we need to offset by half the height to place base at ground
             marker.pose.position.z = (coords[2] if len(coords) > 2 else 0.0) + 2.0  # Center at 2m above ground
             # Color: green, semi-transparent (0.5 alpha) for better visibility
-            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.5)
+            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.2)
         else:
             marker.type = Marker.SPHERE
             # Scale: small sphere for other waypoints

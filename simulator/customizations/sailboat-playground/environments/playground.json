@@ -9,7 +9,7 @@
     "wind_gust_min_speed": 4,
     "wind_gust_max_speed": 7,
     "wind_gust_max_delta_percent": 10,
-    "wind_direction": 90,
+    "wind_direction": 0,
     "current_speed": 0,
     "current_direction": 180
 }
