@@ -25,7 +25,7 @@ else
     source /opt/ros/humble/setup.bash
     ros2 launch launch/argo_launch.py &
     HEALTH_MONITOR_PID=$!
-    python3 launch/argo_health_monitor.py &
+    # python3 launch/argo_health_monitor.py &
     echo "✅ Launched via ros2 launch (PID: $HEALTH_MONITOR_PID)"
     exit 0
 fi
