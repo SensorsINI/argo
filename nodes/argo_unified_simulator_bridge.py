@@ -205,6 +205,17 @@ class ArgoUnifiedSimulatorBridge(Node):
         if map_name:
             self._load_map_home_location(map_name)
         
+        # --- Load initial wind_direction from playground.json before simulator creation ---
+        # This allows us to use it as the default parameter value
+        initial_wind_direction = self._load_initial_wind_direction()
+        
+        # --- Declare wind_direction parameter (can be changed dynamically via Foxglove) ---
+        # Declare it early so it's available throughout initialization
+        self.declare_parameter('simulation.wind_direction', float(initial_wind_direction))
+        self.wind_direction = self.get_parameter('simulation.wind_direction').get_parameter_value().double_value
+        # Normalize to 0-360 range
+        self.wind_direction = self.wind_direction % 360.0
+        
         # Initialize simulator based on mode
         if mode == 'local':
             self._init_local_simulator()
@@ -244,6 +255,8 @@ class ArgoUnifiedSimulatorBridge(Node):
 
         # Wind data
         self.pub_wind = self.create_publisher(Vector3, '/anem_speed_angle_temp', 10)
+        # True wind direction (absolute, in compass convention) for monitoring
+        self.pub_true_wind = self.create_publisher(Float64, '/simulator/true_wind_direction', 10)
         
         # --- Subscribers (Argo → Simulator) ---
         # Control commands from Argo (final servo commands)
@@ -317,6 +330,7 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.simulation_rate = 10.0
         
         self.get_logger().info(f"Simulation rate: {self.simulation_rate:.1f} Hz")
+        self.get_logger().info(f"Initial wind direction: {self.wind_direction:.1f}° (loaded from playground.json, can be changed via parameter)")
         
         # Add parameter callback to handle runtime parameter changes (e.g., from Foxglove)
         self.add_on_set_parameters_callback(self._on_parameter_change)
@@ -504,6 +518,11 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.sim_manager = self.simulator
             if self.debug_position_trace:
                 self.get_logger().debug(f"[POS_TRACE:INIT] sim_manager set - sim_mgr_id={id(self.sim_manager)}")
+        
+        # Apply initial wind_direction parameter to simulator (after creation)
+        # This ensures the parameter value (which may have been loaded from playground.json) is applied
+        if hasattr(self, 'wind_direction'):
+            self._apply_wind_direction_to_simulator(self.wind_direction)
     
     def _init_remote_simulator(self):
         """Initialize remote simulator connection."""
@@ -660,23 +679,30 @@ class ArgoUnifiedSimulatorBridge(Node):
             pos = (float(self.boat_state['x']), float(self.boat_state['y']))
             self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] PUBLISH_START - Publishing from sim_step={trace_id}, pos={pos}")
         
-        # IMU/Compass data (heading in degrees)
-        pose_msg = Vector3(x=0.0, y=0.0, z=self.boat_state['heading'])
+        # Convert boat heading from simulator convention (0° = East) to compass convention (0° = North)
+        # Simulator: 0° = East, 90° = North, 180° = West, 270° = South
+        # Compass: 0° = North, 90° = East, 180° = South, 270° = West
+        # Conversion: compass_heading = (90 - simulator_heading) % 360
+        heading_simulator = self.boat_state['heading']  # Heading in simulator convention
+        heading_compass = (90.0 - heading_simulator) % 360.0  # Convert to compass convention
+        
+        # IMU/Compass data (heading in degrees, compass convention)
+        pose_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
         self.pub_pose.publish(pose_msg)
         if self.debug_position_trace and trace_id is not None:
-            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /pose - heading={self.boat_state['heading']:.1f}°")
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /pose - heading={heading_compass:.1f}° (compass, {heading_simulator:.1f}° simulator)")
         
-        compass_msg = Vector3(x=0.0, y=0.0, z=self.boat_state['heading'])
+        compass_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
         self.pub_compass.publish(compass_msg)
         if self.debug_position_trace and trace_id is not None:
-            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /compass - heading={self.boat_state['heading']:.1f}°")
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /compass - heading={heading_compass:.1f}° (compass)")
         
-        # GPS data
-        gps_cog_msg = Float64(data=self.boat_state['heading'])  # Course over ground
+        # GPS data (compass convention)
+        gps_cog_msg = Float64(data=heading_compass)  # Course over ground
         self.pub_gps_cog.publish(gps_cog_msg)
         if self.debug_position_trace and trace_id is not None:
-            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /gps_cog - cog={self.boat_state['heading']:.1f}°")
-
+            self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /gps_cog - cog={heading_compass:.1f}° (compass)")
+        
         # Speed over ground (convert m/s to knots)
         speed_knots = self.boat_state['speed'] * 1.94384  # m/s to knots
         gps_sog_msg = Float64(data=speed_knots)
@@ -685,9 +711,10 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /gps_sog - sog={speed_knots:.3f} knots")
         
         # GPS velocity vector (north, east, speed)
-        heading_rad = math.radians(self.boat_state['heading'])
-        vel_north = self.boat_state['speed'] * math.cos(heading_rad) * 1.94384  # knots
-        vel_east = self.boat_state['speed'] * math.sin(heading_rad) * 1.94384   # knots
+        # Use compass heading for velocity calculation
+        heading_compass_rad = math.radians(heading_compass)
+        vel_north = self.boat_state['speed'] * math.cos(heading_compass_rad) * 1.94384  # knots
+        vel_east = self.boat_state['speed'] * math.sin(heading_compass_rad) * 1.94384   # knots
         gps_vel_msg = Vector3(x=vel_north, y=vel_east, z=speed_knots)
         self.pub_gps_velocity.publish(gps_vel_msg)
         if self.debug_position_trace and trace_id is not None:
@@ -702,6 +729,31 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.pub_wind.publish(wind_msg)
         if self.debug_position_trace and trace_id is not None:
             self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /anem_speed_angle_temp - speed={self.boat_state['wind_speed']:.2f}m/s, angle={self.boat_state['wind_direction']:.1f}°")
+        
+        # Publish true wind direction (absolute, in compass convention) for monitoring
+        # Get true wind direction from simulator's Environment
+        true_wind_direction_compass = None
+        if self.mode == 'local' and not self.use_mock:
+            # Real simulator: get from Environment config
+            if hasattr(self, 'sim_manager') and self.sim_manager is not None:
+                if hasattr(self.sim_manager, 'environment') and self.sim_manager.environment is not None:
+                    env = self.sim_manager.environment
+                    if hasattr(env, '_config'):
+                        true_wind_dir_simulator = env._config.get('wind_direction', 0.0)
+                        # Convert from simulator convention (0° = East) to compass convention (0° = North)
+                        true_wind_direction_compass = (90.0 - true_wind_dir_simulator) % 360.0
+        elif self.mode == 'local' and self.use_mock:
+            # Mock simulator: convert the wind_direction (which is in simulator convention)
+            if hasattr(self, 'simulator') and self.simulator is not None:
+                true_wind_dir_simulator = getattr(self.simulator, 'wind_direction', 0.0)
+                # Convert from simulator convention to compass convention
+                true_wind_direction_compass = (90.0 - true_wind_dir_simulator) % 360.0
+        
+        if true_wind_direction_compass is not None:
+            true_wind_msg = Float64(data=true_wind_direction_compass)
+            self.pub_true_wind.publish(true_wind_msg)
+            if self.debug_position_trace and trace_id is not None:
+                self.get_logger().debug(f"[PUB_TRACE:{pub_id}:{trace_id}] Published /simulator/true_wind_direction - {true_wind_direction_compass:.1f}° (compass)")
 
         # Publish satellite count
         sat_msg = UInt8()
@@ -1045,6 +1097,13 @@ class ArgoUnifiedSimulatorBridge(Node):
                         self.get_logger().warn(f"Could not verify simulator position: {e}")
                 
                 self.get_logger().info(f"✅ Simulator recreated: position=(0.0, 0.0), heading={initial_heading:.1f}° ({'real' if not self.use_mock else 'mock'})")
+                
+                # Apply current wind_direction parameter value to recreated simulator
+                # This ensures user-set wind direction is preserved after reset
+                if hasattr(self, 'wind_direction'):
+                    self._apply_wind_direction_to_simulator(self.wind_direction)
+                    # Update wind_direction variable used below to match parameter
+                    wind_direction = self.wind_direction
             
             # Get actual boat_state from simulator after recreation (simulator starts at (0,0) with correct heading)
             if self.mode == 'local' and hasattr(self, 'simulator'):
@@ -1137,6 +1196,92 @@ class ArgoUnifiedSimulatorBridge(Node):
             response.message = f"Reset failed: {str(e)}"
             return response
     
+    def _load_initial_wind_direction(self):
+        """Load initial wind_direction from playground.json configuration file.
+        
+        Returns:
+            float: Initial wind direction in degrees (0-360) in COMPASS convention (0° = North), or 0.0 if not found
+            
+        Note:
+            The playground.json file uses simulator convention (0° = East, 90° = North).
+            This function converts to compass convention (0° = North, 90° = East) for the parameter.
+            Conversion: compass_angle = (simulator_angle + 90) % 360
+        """
+        try:
+            env_config = "simulator/customizations/sailboat-playground/environments/playground.json"
+            if os.path.exists(env_config):
+                with open(env_config, 'r') as f:
+                    config = json.load(f)
+                    wind_dir_simulator = config.get('wind_direction', 0.0)
+                    # Convert from simulator convention (0° = East) to compass convention (0° = North)
+                    # Reverse conversion: compass = (90 - simulator) % 360
+                    wind_dir_compass = (90.0 - wind_dir_simulator) % 360.0
+                    self.get_logger().info(
+                        f"Loaded initial wind_direction from {env_config}: "
+                        f"{wind_dir_simulator:.1f}° (simulator) = {wind_dir_compass:.1f}° (compass)"
+                    )
+                    return float(wind_dir_compass)
+            else:
+                self.get_logger().warn(f"Environment config file not found: {env_config}, using default wind_direction=0.0°")
+                return 0.0
+        except Exception as e:
+            self.get_logger().warn(f"Failed to load wind_direction from playground.json: {e}, using default 0.0°")
+            return 0.0
+    
+    def _apply_wind_direction_to_simulator(self, wind_direction_deg):
+        """Apply wind direction change to the simulator's environment.
+        
+        Args:
+            wind_direction_deg: Wind direction in degrees (0-360) in COMPASS convention (0° = North)
+            
+        Note:
+            The simulator uses trigonometric convention (0° = East, 90° = North).
+            This function converts from compass convention (0° = North, 90° = East) to simulator convention.
+            Conversion: simulator_angle = (compass_angle - 90) % 360
+        """
+        # Normalize to 0-360 range (compass convention: 0° = North)
+        wind_direction_deg = wind_direction_deg % 360.0
+        
+        # Convert from compass convention (0° = North) to simulator convention (0° = East)
+        # Compass: 0° = North, 90° = East, 180° = South, 270° = West
+        # Simulator: 0° = East, 90° = North, 180° = West, 270° = South
+        # Conversion: simulator = (90 - compass) % 360
+        # Examples: Compass 0° (N) -> Sim 90° (N), Compass 90° (E) -> Sim 0° (E)
+        simulator_wind_direction = (90.0 - wind_direction_deg) % 360.0
+        
+        if self.mode == 'local' and not self.use_mock:
+            # Update real simulator's environment config
+            if hasattr(self, 'sim_manager') and self.sim_manager is not None:
+                try:
+                    # Access the environment's config dictionary directly
+                    if hasattr(self.sim_manager, 'environment') and self.sim_manager.environment is not None:
+                        env = self.sim_manager.environment
+                        if hasattr(env, '_config'):
+                            old_wind_dir_simulator = env._config.get('wind_direction', 0.0)
+                            # Convert old simulator angle back to compass for logging
+                            # Reverse conversion: compass = (90 - simulator) % 360
+                            old_wind_dir_compass = (90.0 - old_wind_dir_simulator) % 360.0
+                            env._config['wind_direction'] = float(simulator_wind_direction)
+                            self.get_logger().info(
+                                f"Wind direction changed from {old_wind_dir_compass:.1f}° to {wind_direction_deg:.1f}° "
+                                f"(compass, {simulator_wind_direction:.1f}° simulator) via parameter change"
+                            )
+                        else:
+                            self.get_logger().warn("Simulator environment does not have _config attribute")
+                    else:
+                        self.get_logger().warn("Simulator manager does not have environment attribute")
+                except Exception as e:
+                    self.get_logger().error(f"Failed to update wind direction in simulator: {e}")
+        elif self.mode == 'local' and self.use_mock:
+            # Update mock simulator's wind direction
+            # Note: Mock simulator also uses trigonometric convention, so apply same conversion
+            if hasattr(self, 'simulator') and self.simulator is not None:
+                self.simulator.wind_direction = float(simulator_wind_direction)
+                self.get_logger().info(
+                    f"Mock simulator wind direction changed to {wind_direction_deg:.1f}° "
+                    f"(compass, {simulator_wind_direction:.1f}° simulator)"
+                )
+    
     def _on_parameter_change(self, parameters):
         """Handle runtime parameter changes (called when parameters are set via ros2 param set or Foxglove)"""
         from rcl_interfaces.msg import SetParametersResult
@@ -1161,6 +1306,20 @@ class ArgoUnifiedSimulatorBridge(Node):
                 else:
                     result.successful = False
                     result.reason = f"Invalid simulation_rate: {new_rate} (must be > 0)"
+            elif param.name == 'simulation.wind_direction':
+                old_wind_dir = self.wind_direction
+                new_wind_dir = param.get_parameter_value().double_value
+                # Normalize to 0-360 range
+                new_wind_dir = new_wind_dir % 360.0
+                
+                self.wind_direction = new_wind_dir
+                # Apply the change to the simulator
+                self._apply_wind_direction_to_simulator(new_wind_dir)
+                
+                self.get_logger().info(
+                    f"Wind direction parameter changed from {old_wind_dir:.1f}° to {new_wind_dir:.1f}° "
+                    f"(change via ros2 param set or Foxglove)"
+                )
             else:
                 # Allow other parameters (don't fail on unknown parameters)
                 pass
