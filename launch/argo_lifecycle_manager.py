@@ -174,10 +174,6 @@ class ArgoLifecycleManager:
                 self._query_controller_pause_state()
             threading.Thread(target=query_initial_pause_state, daemon=True).start()
         
-        # Log excluded nodes for visibility (only if not in quiet mode)
-        if self.excluded_nodes and not self.quiet:
-            print(
-                f"ℹ️  Excluded nodes (critical services): {', '.join(self.excluded_nodes)}")
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -208,8 +204,37 @@ class ArgoLifecycleManager:
         self.simulation_node_args = {}  # Map of script_name -> args list
         self.simulation_map_name = None  # Map name for simulation start location
 
+        # --- NEW: Physical Robot node configuration ---
+        self.physical_robot_nodes = []
+        self.physical_robot_special_nodes = []
+        self.physical_robot_node_args = {}
+
         all_node_configs = config.get('nodes', [])
         
+        # Create a lookup map for node configs by name for easy reference
+        node_config_map = {node['name']: node for node in all_node_configs if 'name' in node}
+
+        # --- Process node groups ---
+        groups = config.get('groups', {})
+        physical_robot_group = groups.get('physical_robot', [])
+
+        for node_name in physical_robot_group:
+            if node_name not in node_config_map:
+                print(f"⚠️  Warning: Node '{node_name}' from 'physical_robot' group not found in main node list.")
+                continue
+
+            node_cfg = node_config_map[node_name]
+            script_name = os.path.basename(node_cfg.get('executable', ''))
+
+            if node_cfg.get('special', False):
+                # For special nodes, the "script_name" is just the node name
+                self.physical_robot_special_nodes.append(node_name)
+            else:
+                self.physical_robot_nodes.append(script_name)
+
+            if node_cfg.get('args'):
+                self.physical_robot_node_args[script_name] = node_cfg.get('args', [])
+
         for node_cfg in all_node_configs:
             name = node_cfg.get('name')
             if not name:
@@ -367,7 +392,7 @@ class ArgoLifecycleManager:
         # FAST PATH: Try to use health monitor aggregated service
         try:
             health_monitor_client = self.ros2_node.create_client(Trigger, '/argo/health/status')
-            if health_monitor_client.wait_for_service(timeout_sec=0.5):
+            if health_monitor_client.wait_for_service(timeout_sec=2.0):
                 request = Trigger.Request()
                 future = health_monitor_client.call_async(request)
                 rclpy.spin_until_future_complete(
@@ -419,12 +444,13 @@ class ArgoLifecycleManager:
                         except json.JSONDecodeError:
                             # JSON parse error, fall through to individual calls
                             pass
-        except Exception:
+        except Exception as e:
+            print(f"🔍 Error in health monitor service call: {e}")
             # Health monitor unavailable or error, fall through to individual calls
+            print(f"Falling through to individual calls: {e}")
             pass
         
-        # SLOW PATH: Query individual node health services (fallback)
-        
+        # SLOW PATH: Query individual node health services (fallback)        
         # Define health services for each node
         health_services = {
             'gps.py': '/gps_node/health',
@@ -644,12 +670,9 @@ class ArgoLifecycleManager:
             node_scripts = self.expected_nodes
             print(f"Launching specific nodes: {', '.join(node_scripts)}")
         else:
-            # Discover available nodes, excluding simulation-only nodes for normal launches
-            discovered_nodes = self.node_manager.discover_nodes(
-                exclude_simulation_only=True)
-            node_scripts = [
-                f"{node}.py" for node in discovered_nodes
-                if node != 'foxglove_bridge' and node not in self.excluded_nodes]
+            # --- REFACTORED: Use physical_robot group from YAML ---
+            node_scripts = self.physical_robot_nodes
+            print(f"✅ Launching physical robot nodes from YAML: {', '.join(node_scripts)}")
         
         # Launch each node in a separate process
         # Store as list of dicts: {'proc': process, 'name': script_name}
@@ -700,12 +723,9 @@ class ArgoLifecycleManager:
             # Simulation mode: use explicitly defined special nodes
             special_nodes_to_launch = self.special_nodes
         elif not (hasattr(self, 'expected_nodes') and self.expected_nodes):
-            # Normal mode: discover all special nodes (excluding hardware not ready)
-            discovered_nodes = self.node_manager.discover_nodes()
-            special_nodes_to_launch = [
-                node for node in discovered_nodes
-                if (node == 'foxglove_bridge' and node not in self.excluded_nodes) or 
-                   (node == 'bno085' and node in self.excluded_nodes)]  # BNO085: monitor but don't launch
+            # --- REFACTORED: Use physical_robot_special_nodes from YAML ---
+            special_nodes_to_launch = self.physical_robot_special_nodes
+            print(f"✅ Launching physical robot special nodes from YAML: {', '.join(special_nodes_to_launch)}")
 
         for special_node in special_nodes_to_launch:
             if special_node == 'foxglove_bridge':
@@ -1880,14 +1900,14 @@ class ArgoLifecycleManager:
         total_count = len(node_status)
         print(f"🤖 ROS NODES: [{running_count}/{total_count}]")
         
-        # Show controller pause state
-        if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
-            # Query current pause state to ensure we have the latest
-            self._query_controller_pause_state()
-            pause_status = "⏸️ PAUSED" if self.controller_pause_state else "▶️ RUNNING"
-            print(f"🎮 CONTROLLER: {pause_status}")
-        else:
-            print(f"🎮 CONTROLLER: 🔴 STOPPED")
+        # # Show controller pause state
+        # if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
+        #     # Query current pause state to ensure we have the latest
+        #     self._query_controller_pause_state()
+        #     pause_status = "⏸️ PAUSED" if self.controller_pause_state else "▶️ RUNNING"
+        #     print(f"🎮 CONTROLLER: {pause_status}")
+        # else:
+        #     print(f"🎮 CONTROLLER: 🔴 STOPPED")
         
         # Only query health status if nodes are running
         health_data = {}
@@ -2751,6 +2771,342 @@ class ArgoLifecycleManager:
             else:
                 print(
                     f"  {sensor}: 🔴 not present (expected {', '.join([f'0x{x:02x}' for x in addrs])})")
+
+    def start(self, debug=False) -> bool:
+        """Start the Argo launch process"""
+        if self._is_launch_running():
+            print("🚢 Argo is already running.")
+            # If nodes are running but service is not, start monitoring
+            if not self._is_service_active():
+                 print("   Monitoring existing nodes...")
+                 self.continuous(debug=debug, monitor_only=True)
+            return True
+            
+        # --- REFACTORED: Set node lists for physical robot mode ---
+        # This ensures that status checks and health monitoring use the correct
+        # node list defined in the 'physical_robot' group in argo_nodes.yaml
+        self.expected_nodes = self.physical_robot_nodes
+        self.special_nodes = self.physical_robot_special_nodes
+        self.all_expected_nodes = self.expected_nodes + self.special_nodes
+
+        # Check if the service is running - if so, delegate to service
+        if self._is_service_active():
+            print("🚀 Launch service is running - it will manage the nodes.")
+            return True
+        
+        print("🚀 Starting Argo ROS2 nodes...")
+        
+        if self.shutdown_requested:
+            print("⚠️  Shutdown requested before node launch - aborting")
+            return False
+        
+        try:
+            # Start the nodes directly
+            self._launch_nodes_directly()
+            
+            # Check again after launch
+            if self.shutdown_requested:
+                print("⚠️  Shutdown requested during launch - stopping nodes")
+                self.stop()
+                return False
+            
+            # Wait and check for actual node startup with continuous feedback
+            print("⏳ Waiting for nodes to start...")
+            
+            timeout = 30  # 30 second timeout
+            check_interval = .3  # Check every .3 second
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout:
+                # Check for shutdown request during launch
+                if self.shutdown_requested:
+                    print("⚠️  Shutdown requested during node startup - stopping nodes")
+                    self.stop()
+                    return False
+                
+                if not self._is_launch_running():
+                    print("❌ Launch process died during startup")
+                    
+                    # Log that process died (output is now in systemd journal)
+                    if self.process and self.process.poll() is not None:
+                        print(
+                            "💀 Process died - check systemd journal for detailed output")
+                    
+                    return False
+                
+                # Check which nodes are running
+                node_status = self._get_node_status()
+                running_nodes = [
+                    node for node, status in node_status.items() if "RUNNING" in status]
+                stopped_nodes = [
+                    node for node, status in node_status.items() if "STOPPED" in status]
+                
+                # Show progress periodically (journal-friendly)
+                elapsed = time.time() - start_time
+                if elapsed > 0 and int(elapsed * 10) % 10 == 0:  # Print every second
+                    if running_nodes and stopped_nodes:
+                        print(
+                            f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.all_expected_nodes)} running: {', '.join(running_nodes)}")
+                        print(f"   Not started: {', '.join(stopped_nodes)}")
+                    elif running_nodes:
+                        print(
+                            f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.all_expected_nodes)} running: {', '.join(running_nodes)}")
+                    else:
+                        print(
+                            f"⏳ Waiting for nodes to start... (no nodes detected yet)")
+                
+                # If all expected nodes are running, wait for stabilization with monitoring
+                if len(running_nodes) == len(self.all_expected_nodes):
+                    print(
+                        f"\n✅ All {len(running_nodes)} nodes detected: {', '.join(running_nodes)}")
+                    print(
+                        f"⏳ Monitoring nodes during {self.stabilization_wait}s stabilization period...")
+                    
+                    # Monitor nodes during stabilization period
+                    stabilization_start = time.time()
+                    stabilization_check_interval = 1.0  # Check every second during stabilization
+                    
+                    while time.time() - stabilization_start < self.stabilization_wait:
+                        # Check for shutdown request during stabilization
+                        if self.shutdown_requested:
+                            print("⚠️  Shutdown requested during stabilization - stopping nodes")
+                            self.stop()
+                            return False
+                        
+                        # Check for node failures during stabilization
+                        current_status = self._get_node_status()
+                        current_running = [
+                            node for node, status in current_status.items() if "RUNNING" in status]
+                        current_stopped = [
+                            node for node, status in current_status.items() if "STOPPED" in status]
+                        
+                        if current_stopped:
+                            # Node(s) failed during stabilization
+                            print(
+                                f"\n⚠️  Node failure detected during stabilization: {', '.join(current_stopped)}")
+                            
+                            # Get error messages for failed nodes
+                            fatal_messages = self._get_fatal_messages_for_nodes()
+                            for failed_node in current_stopped:
+                                if failed_node in fatal_messages:
+                                    print(
+                                        f"   {failed_node}: {fatal_messages[failed_node]}")
+                            
+                            # Break out of stabilization to handle the failure
+                            break
+                        
+                        # Show progress during stabilization (journal-friendly)
+                        remaining_time = self.stabilization_wait - \
+                            (time.time() - stabilization_start)
+                        # Only print every 2 seconds
+                        if remaining_time > 0 and int(remaining_time) % 2 == 0:
+                            print(
+                                f"⏳ Stabilizing... {remaining_time:.1f}s remaining ({len(current_running)}/{len(self.all_expected_nodes)} nodes)")
+                        
+                        time.sleep(stabilization_check_interval)
+                    
+                    # Final check after stabilization period
+                    final_node_status = self._get_node_status()
+                    final_running_nodes = [
+                        node for node, status in final_node_status.items() if "RUNNING" in status]
+                    
+                    if len(final_running_nodes) == len(self.all_expected_nodes):
+                        print(f"✅ Argo launch process started successfully")
+                        print(
+                            f"✅ All {len(final_running_nodes)} nodes running and stable: {', '.join(final_running_nodes)}")
+                        break  # Continue to monitoring phase
+                    else:
+                        failed_nodes = [
+                            node for node in self.all_expected_nodes if node not in final_running_nodes]
+                        print(f"⚠️  Some nodes failed during stabilization period")
+                        print(
+                            f"   Still running: {', '.join(final_running_nodes)}")
+                        print(f"   Failed nodes: {', '.join(failed_nodes)}")
+                        
+                        # Check if we have critical nodes running
+                        critical_running = [
+                            node for node in self.critical_nodes if node in final_running_nodes]
+                        
+                        if len(critical_running) == len(self.critical_nodes):
+                            print(
+                                f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                            print(
+                                f"✅ Argo will continue operating with {len(final_running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                            break  # Continue to monitoring phase
+                        elif len(final_running_nodes) >= 3:  # At least 3 nodes running
+                            print(
+                                f"✅ Sufficient nodes running ({len(final_running_nodes)}/{len(self.all_expected_nodes)})")
+                            print(
+                                f"✅ Argo will continue operating with available sensors")
+                            break  # Continue to monitoring phase
+                        else:
+                            print(
+                                f"❌ Insufficient nodes running ({len(final_running_nodes)}/{len(self.all_expected_nodes)})")
+                            print(
+                                f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in final_running_nodes])}")
+                            return False
+                
+                time.sleep(check_interval)
+            
+            # Check if we timed out
+            if time.time() - start_time >= timeout:
+                print(f"\n⚠️  Timeout reached after {timeout}s")
+                node_status = self._get_node_status()
+                running_nodes = [
+                    node for node, status in node_status.items() if "RUNNING" in status]
+                stopped_nodes = [
+                    node for node, status in node_status.items() if "STOPPED" in status]
+                
+                if running_nodes:
+                    failed_nodes = [
+                        node for node in self.all_expected_nodes if node not in running_nodes]
+                    print(
+                        f"✅ {len(running_nodes)} nodes running: {', '.join(running_nodes)}")
+                    if failed_nodes:
+                        print(
+                            f"⚠️  {len(failed_nodes)} nodes not started: {', '.join(failed_nodes)}")
+                    
+                    # Check if we have critical nodes running
+                    critical_running = [
+                        node for node in self.critical_nodes if node in running_nodes]
+                    
+                    if len(critical_running) == len(self.critical_nodes):
+                        print(
+                            f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                        print(
+                            f"✅ Argo will continue operating with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                    elif len(running_nodes) >= 3:  # At least 3 nodes running
+                        print(
+                            f"✅ Sufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
+                        print(
+                            f"✅ Argo will continue operating with available sensors")
+                    else:
+                        print(
+                            f"❌ Insufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
+                        print(
+                            f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in running_nodes])}")
+                        return False
+                else:
+                    print(f"❌ No nodes running after timeout")
+                    return False
+                
+        except Exception as e:
+            print(f"❌ Error starting Argo: {e}")
+            return False
+        
+        # Create ROS2 services for lifecycle management
+        self._create_lifecycle_services()
+        
+        print("🔄 Starting continuous monitoring with ROS2 integration...")
+        print("   Press Ctrl+C to stop")
+        print("   NOTE: Node failures will be logged but NOT restarted for debugging")
+        print("   ROS2 services available for remote control")
+        
+        # Publish initial status
+        self._publish_status_update("Argo lifecycle manager running")
+        
+        try:
+            last_check_time = time.time()
+            check_interval = 300  # Check every 5 minutes (much less frequent)
+            
+            while not self.shutdown_requested and (rclpy.ok() if self.ros2_node else True):
+                # Check shutdown flag FIRST before any operations
+                if self.shutdown_requested:
+                    break
+                
+                # Spin ROS2 node to process service requests (if available)
+                if self.ros2_node:
+                    try:
+                        rclpy.spin_once(self.ros2_node, timeout_sec=0.1)
+                    except Exception:
+                        # Context may be shutting down
+                        if self.shutdown_requested:
+                            break
+                else:
+                    time.sleep(0.1)
+                
+                # Periodic status check
+                current_time = time.time()
+                if current_time - last_check_time >= check_interval:
+                    last_check_time = current_time
+                    
+                    # Check node status
+                    node_status = self._get_node_status()
+                    running_nodes = [
+                        node for node, status in node_status.items() if "RUNNING" in status]
+                    stopped_nodes = [
+                        node for node, status in node_status.items() if "STOPPED" in status]
+                    
+                    # Publish status update
+                    status_msg = f"Running: {len(running_nodes)}/{len(self.all_expected_nodes)}"
+                    self._publish_status_update(status_msg)
+                    
+                    if stopped_nodes:
+                        # Log stopped nodes but do NOT restart them
+                        print(
+                            f"⚠️  {len(stopped_nodes)} nodes stopped: {', '.join(stopped_nodes)}")
+                        
+                        # Check if critical nodes are still running
+                        critical_running = [
+                            n for n in self.critical_nodes if n in running_nodes]
+                        critical_stopped = [
+                            n for n in self.critical_nodes if n in stopped_nodes]
+                        
+                        if critical_stopped:
+                            print(
+                                f"❌ CRITICAL NODES STOPPED: {', '.join(critical_stopped)}")
+                            print(
+                                f"   System will continue with remaining nodes for debugging")
+                            print(f"   Check systemd journal for error details")
+                            self._publish_status_update(f"CRITICAL: {', '.join(critical_stopped)} stopped")
+                        else:
+                            print(
+                                f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                        
+                        # Show system status
+                        if len(running_nodes) >= 3:
+                            print(
+                                f"✅ System operational with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                        else:
+                            print(
+                                f"⚠️  Low node count: {len(running_nodes)}/{len(self.all_expected_nodes)} nodes running")
+                
+        except KeyboardInterrupt:
+            print("\n🛑 Stopping continuous monitoring...")
+            self.shutdown_requested = True
+        except Exception as e:
+            print(f"❌ Error in continuous mode: {e}")
+            self._publish_status_update(f"Error: {e}")
+            self.shutdown_requested = True
+        finally:
+            # Publish final status before cleanup
+            self._publish_status_update("Argo lifecycle manager stopping")
+            
+            # Stop all nodes first only if they are actually running
+            if self._is_launch_running():
+                self.stop()
+            
+            # Clean up ROS2 last
+            self._cleanup_ros2()
+            
+            # Ensure we don't relaunch after shutdown
+            self.shutdown_requested = True
+            
+            # Explicitly exit if shutdown was requested
+            if self.shutdown_requested:
+                print("✅ Lifecycle manager shutdown complete - exiting")
+                sys.exit(0)
+        
+        return True  # Always return True for clean exit
+    
+    def _is_service_active(self) -> bool:
+        """Check if the service is running"""
+        try:
+            result = subprocess.run(['systemctl', 'is-active', 'argo_launch_standard.service'],
+                                    capture_output=True, text=True, timeout=2)
+            return result.returncode == 0 and result.stdout.strip() == 'active'
+        except Exception:
+            return False
 
 
 def main():
