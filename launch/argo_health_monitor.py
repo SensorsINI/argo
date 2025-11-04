@@ -23,8 +23,13 @@ from rclpy.node import Node
 from std_msgs.msg import String, Bool
 from std_srvs.srv import Trigger
 
+# Add argo nodes path for ArgoBaseNode import
+argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(argo_dir, 'nodes'))
+from support.argo_base_node import ArgoBaseNode
 
-class ArgoHealthMonitor(Node):
+
+class ArgoHealthMonitor(ArgoBaseNode):
     """Monitor health status of all Argo ROS2 nodes"""
     
     def __init__(self):
@@ -117,6 +122,9 @@ class ArgoHealthMonitor(Node):
         self.get_logger().info(f"Monitoring {len(self.node_configs)} nodes")
         self.get_logger().info(f"Subscribed to {len(self.health_subscribers)} health topics")
         self.get_logger().info(f"⚡ Fast polling enabled (every {self.fast_poll_period}s) for first {self.startup_duration}s")
+        
+        # Set self as healthy after initialization
+        self.set_healthy("Health monitor initialized successfully")
     
     def _subscribe_to_health_topics(self):
         """Subscribe to health topics published by ArgoBaseNode nodes"""
@@ -182,14 +190,19 @@ class ArgoHealthMonitor(Node):
             )
             
             if result.returncode == 0:
+                # We can communicate with ROS2 daemon, so we are healthy
+                self.set_healthy("Able to poll running nodes.")
+                
                 # ros2 node list returns node names with '/' prefix (e.g., '/controller_node')
                 # Normalize to remove '/' prefix and filter out warnings/empty lines
                 node_lines = [line.strip() for line in result.stdout.strip().split('\n') if line.strip() and not line.startswith('WARNING')]
                 running_nodes = set([name.lstrip('/') for name in node_lines])  # Remove '/' prefix
             else:
+                self.set_unhealthy(f"Failed to query ROS2 node list, return code: {result.returncode}")
                 running_nodes = set()
         except Exception as e:
             self.get_logger().warn(f"Failed to get node list: {e}")
+            self.set_unhealthy(f"Failed to query ROS2 node list: {e}")
             running_nodes = set()
         
         # Check each configured node
@@ -408,19 +421,14 @@ class ArgoHealthMonitor(Node):
         
         return response
 
+    def _cleanup_on_exit(self):
+        """Custom cleanup on shutdown."""
+        self.get_logger().info("Argo Health Monitor shutting down.")
+
 
 def main(args=None):
-    rclpy.init(args=args)
-    
-    node = ArgoHealthMonitor()
-    
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    # Standardized run function from ArgoBaseNode
+    ArgoBaseNode.run_node(ArgoHealthMonitor, args)
 
 
 if __name__ == '__main__':
