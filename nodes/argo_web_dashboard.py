@@ -1027,10 +1027,17 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Update node status (expensive operation - skip in low-power mode)
             node_status = self.node_manager.get_node_status()
             
+            # Normalize node lists: strip .py extension from physical_robot_nodes for comparison
+            # node_manager returns keys without .py (e.g., "gps"), but physical_robot_nodes has .py (e.g., "gps.py")
+            normalized_physical_robot_nodes = {
+                node.rstrip('.py') if node.endswith('.py') else node 
+                for node in self.physical_robot_nodes
+            }
+            
             # --- REFACTORED: Filter status to only include nodes from the physical_robot group ---
             filtered_status = {
                 node: info for node, info in node_status.items()
-                if node in self.physical_robot_nodes or node in self.physical_robot_special_nodes
+                if node in normalized_physical_robot_nodes or node in self.physical_robot_special_nodes
             }
 
             running_nodes = [node for node, info in filtered_status.items() if info.get('running', False)]
@@ -1121,11 +1128,6 @@ class ArgoWebDashboard(ArgoBaseNode):
         Runs at low rate (1/5 Hz) independently of HTTP requests to minimize network traffic.
         """
         try:
-            # This method is now triggered by a flag from the main spin loop
-            if not self._trigger_health_query:
-                return
-            self._trigger_health_query = False # Reset flag
-
             if not self.health_status_client.wait_for_service(timeout_sec=0.5):
                 self.get_logger().debug("Health status service not available")
                 return  # Service not available, skip
@@ -1172,11 +1174,6 @@ class ArgoWebDashboard(ArgoBaseNode):
         Runs independently of HTTP requests to minimize remote network traffic.
         """
         try:
-            # This method is now triggered by a flag from the main spin loop
-            if not self._trigger_battery_query:
-                return
-            self._trigger_battery_query = False # Reset flag
-            
             # Skip if in low-power mode (no viewers) - battery status not needed when dashboard not in use
             if self.low_power_mode:
                 self.get_logger().debug("Skipping battery status update in low-power mode")
@@ -1501,6 +1498,8 @@ Troubleshooting:
         last_status_update = time.time()
         last_health_check = time.time()
         last_viewer_check = time.time()
+        last_health_service_query = time.time()
+        last_battery_service_query = time.time()
         
         while rclpy.ok():
             # Spin once with a short timeout to handle ROS callbacks
@@ -1526,11 +1525,15 @@ Troubleshooting:
                 node._check_viewer_activity()
                 last_viewer_check = now
             
-            # --- Handle asynchronous service calls triggered by timers ---
-            if node._trigger_health_query:
+            # --- Query health service for node counts (1/5 Hz = 5 seconds) ---
+            if now - last_health_service_query > node.health_service_query_period:
                 node._update_node_health_from_service()
-            if node._trigger_battery_query:
+                last_health_service_query = now
+            
+            # --- Query battery service as fallback (1/10 Hz = 10 seconds) ---
+            if now - last_battery_service_query > node.battery_service_query_period:
                 node._update_battery_status_from_service()
+                last_battery_service_query = now
             
     except KeyboardInterrupt:
         print("\n🛑 Shutting down web dashboard...")
