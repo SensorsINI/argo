@@ -306,3 +306,64 @@ The unified simulator bridge replaces the old separate bridges:
 4. Remove old bridge files (optional)
 
 This unified approach reduces code duplication and provides a consistent interface for both simulation modes.
+
+## Bag File Playback with Visualization
+
+When playing back recorded bag files in Foxglove, you need additional nodes running to properly visualize the data:
+
+### Required for Visualization
+
+The visualization markers (`/visualization_marker_array`) are recorded in the bag, but they need:
+1. **Transform publisher** (`argo_transform_publisher.py`) - Provides `/tf` transforms for base_link → map coordinate frames
+2. **Visualization node** (`argo_boat_visualization.py`) - Recreates markers from source topics (optional, if markers weren't recorded)
+3. **Sailing area publisher** (`sailing_area_publisher.py`) - Provides boundaries/waypoints/hazards (optional)
+
+### Usage
+
+Use the dedicated bag playback launch file:
+
+```bash
+# Play back a bag file with full visualization support
+ros2 launch launch/argo_bag_playback.py bag_file:=~/argo/bags/argo_20251105_141014\ first\ dry\ sail
+
+# With custom options
+ros2 launch launch/argo_bag_playback.py \
+    bag_file:=~/argo/bags/your_bag_file \
+    use_foxglove:=true \
+    use_sailing_area:=true \
+    use_visualization:=true \
+    use_transform:=true
+```
+
+### What Gets Launched
+
+The launch file automatically starts:
+1. **Bag playback** (`ros2 bag play`) - Republishes all recorded topics
+2. **Transform publisher** - Publishes `/tf` transforms from GPS/pose data in the bag
+3. **Visualization node** - Subscribes to replayed topics and republishes visualization markers
+4. **Sailing area publisher** - Provides map boundaries/waypoints (if available)
+5. **Foxglove bridge** - Connects to Foxglove Studio at `ws://localhost:8765`
+
+### Connecting Foxglove
+
+1. Start the playback launch file
+2. Open Foxglove Studio
+3. Connect to `ws://localhost:8765`
+4. The visualization markers should appear in the 3D panel
+
+### Troubleshooting
+
+**Visualization markers not showing:**
+- Check that `/tf` transforms are being published: `ros2 topic echo /tf`
+- Verify visualization node is running: `ros2 node list | grep visualization`
+- Check that source topics are in the bag: `ros2 bag info /path/to/bag`
+
+**Transforms missing:**
+- The transform publisher needs `/fix` (GPS) and `/pose` (heading) topics from the bag
+- If these topics weren't recorded, transforms won't be available
+- Check bag contents: `ros2 bag info /path/to/bag`
+
+**Sailing area not showing:**
+- The sailing_area_publisher needs map configuration
+- Check if map data is available: `ros2 topic echo /sailing_boundaries`
+- If not needed, disable with `use_sailing_area:=false`
