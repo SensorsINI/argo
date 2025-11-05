@@ -529,7 +529,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                     return
             
             # Log state changes with INFO level
-            if prev_state is not None and prev_state != new_state:
+            state_changed = prev_state is not None and prev_state != new_state
+            if state_changed:
                 mode_str = '👤 HUMAN' if new_state else '🤖 ROBOT'
                 prev_mode_str = '👤 HUMAN' if prev_state else '🤖 ROBOT'
                 self.get_logger().info(
@@ -552,6 +553,10 @@ class ArgoWebDashboard(ArgoBaseNode):
                 )
             
             self._update_data_age_indicators()
+        
+        # Trigger immediate UI update for critical state change (no race condition - state already updated)
+        if state_changed:
+            self._trigger_critical_state_update()
     
     def battery_voltage_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -924,6 +929,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         else:
             self.state['data_source'] = 'Offline'
     
+    def _trigger_critical_state_update(self):
+        """Trigger immediate UI update for critical state changes.
+        
+        This is a no-op on the backend - the frontend polls /api/status/critical
+        frequently to get reactive updates. We just log that state changed.
+        """
+        # State is already updated in the callback with proper locking
+        # Frontend will pick it up via fast polling of /api/status/critical
+        # No race condition because state update happened before this call
+        pass
+    
     def _update_boat_data_received(self, data_type: str):
         """Update timestamp when boat data is received (not just human_controlled)"""
         now = time.time()
@@ -1058,11 +1074,23 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def controller_state_cb(self, msg):
         with self.state_lock:
+            prev_controller = self.state.get('controller_type')
             self.state['controller_type'] = msg.data
+            controller_changed = prev_controller != msg.data
+        
+        # Trigger immediate UI update for critical state change (no race condition - state already updated)
+        if controller_changed:
+            self._trigger_critical_state_update()
     
     def controller_pause_state_cb(self, msg):
         with self.state_lock:
+            prev_paused = self.state.get('controller_paused')
             self.state['controller_paused'] = msg.data
+            paused_changed = prev_paused != msg.data
+        
+        # Trigger immediate UI update for critical state change (no race condition - state already updated)
+        if paused_changed:
+            self._trigger_critical_state_update()
     
     def recording_status_cb(self, msg):
         """Callback for recording status updates."""
@@ -1070,7 +1098,13 @@ class ArgoWebDashboard(ArgoBaseNode):
             return
         
         with self.state_lock:
+            prev_recording = self.state.get('recording')
             self.state['recording'] = msg.data
+            recording_changed = prev_recording != msg.data
+        
+        # Trigger immediate UI update for critical state change (no race condition - state already updated)
+        if recording_changed:
+            self._trigger_critical_state_update()
     
     def _handle_health_request(self, request, response):
         """Override ArgoBaseNode health service callback with flag-based approach"""
@@ -1454,6 +1488,17 @@ class ArgoWebDashboard(ArgoBaseNode):
             """Get current system status as JSON."""
             with self.state_lock:
                 return jsonify(self.state.copy())
+        
+        @self.app.route('/api/status/critical')
+        def get_critical_status():
+            """Get only critical status fields (human_controlled, recording, controller_type) for fast polling."""
+            with self.state_lock:
+                return jsonify({
+                    'human_controlled': self.state.get('human_controlled'),
+                    'recording': self.state.get('recording'),
+                    'controller_type': self.state.get('controller_type'),
+                    'controller_paused': self.state.get('controller_paused')
+                })
         
         @self.app.route('/api/toggle_pause', methods=['POST'])
         def toggle_pause():

@@ -1,7 +1,8 @@
 # Enhanced parameters for argo control with modular controllers
-# Supports both single-node (control_refactored.py) and two-node (controller.py + rudder_sail_radio.py) systems
+# Two-node system: controller.py (high-level control) + rudder_sail_radio.py (low-level arbitration)
 
-# Global parameters (all nodes)
+# Global parameters (applied to all nodes)
+# The /** wildcard is ROS2 parameter syntax that applies these parameters to ALL nodes
 /**:
   ros__parameters:
     argo:
@@ -13,16 +14,7 @@
       publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz) - 2Hz sufficient for visualization
       simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics simulation
 
-# Single-node system (control_refactored.py)
-control_node:
-  ros__parameters:
-    controller_type: "proportional"  # Options: "proportional", "wind_aware"
-    data_collection_enabled: false
-    rudder_gain: 2.0
-    rudder_full_scale_deg: 60.0
-    param_file_path: "argo.yaml"
-
-# Two-node system: High-level controller (controller.py)
+# High-level controller (controller.py)
 controller_node:
   ros__parameters:
     controller_type: "proportional"  # Options: "proportional", "wind_aware"
@@ -31,7 +23,7 @@ controller_node:
     rudder_full_scale_deg: 60.0
     param_file_path: "argo.yaml"
 
-# Two-node system: Low-level arbitration (rudder_sail_radio.py)
+# Low-level arbitration and hardware interface (rudder_sail_radio.py)
 rudder_sail_radio_node:
   ros__parameters:
     human_override_timeout: 5.0      # Seconds after last human activity before robot can take control

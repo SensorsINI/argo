@@ -206,6 +206,14 @@
         let connectionState = null; // 'connected' or 'disconnected'
         let connectionStateChangeTime = null;
         let connectionTimerInterval = null;
+        
+        // Critical state tracking for reactive updates
+        let lastCriticalState = {
+            human_controlled: null,
+            recording: null,
+            controller_type: null,
+            controller_paused: null
+        };
 
         // Format elapsed time for display
         function formatElapsedTime(seconds) {
@@ -266,7 +274,113 @@
             }
         }
 
-        // Fetch status every 2 seconds
+        // Update critical UI elements reactively (recording, human_controlled, controller)
+        function updateCriticalUI(criticalData) {
+            // Only update if state actually changed to avoid unnecessary DOM updates
+            let needsUpdate = false;
+            
+            if (criticalData.human_controlled !== lastCriticalState.human_controlled) {
+                needsUpdate = true;
+                lastCriticalState.human_controlled = criticalData.human_controlled;
+            }
+            if (criticalData.recording !== lastCriticalState.recording) {
+                needsUpdate = true;
+                lastCriticalState.recording = criticalData.recording;
+            }
+            if (criticalData.controller_type !== lastCriticalState.controller_type) {
+                needsUpdate = true;
+                lastCriticalState.controller_type = criticalData.controller_type;
+            }
+            if (criticalData.controller_paused !== lastCriticalState.controller_paused) {
+                needsUpdate = true;
+                lastCriticalState.controller_paused = criticalData.controller_paused;
+            }
+            
+            if (!needsUpdate) {
+                return; // No changes, skip UI update
+            }
+            
+            // Update critical UI elements
+            updateCriticalUIElements(criticalData);
+        }
+        
+        // Update only critical UI elements (called from both fast and regular polling)
+        function updateCriticalUIElements(data) {
+            // Controller mode
+            if (data.human_controlled === null || data.human_controlled === undefined) {
+                document.getElementById('control-mode').textContent = '❓ UNKNOWN';
+            } else {
+                document.getElementById('control-mode').textContent = 
+                    data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
+            }
+            
+            // Recording status
+            const recordingBtn = document.getElementById('recording-toggle-btn');
+            if (data.recording === true) {
+                recordingBtn.textContent = '⏹️ Stop Recording';
+                recordingBtn.className = 'btn btn-warning';
+            } else if (data.recording === false) {
+                recordingBtn.textContent = '🔴 Start Recording';
+                recordingBtn.className = 'btn btn-success';
+            } else {
+                recordingBtn.textContent = '🔴 Recording: Unknown';
+                recordingBtn.className = 'btn btn-secondary';
+            }
+            recordingBtn.disabled = false;
+            
+            // Controller type
+            if (data.controller_type !== undefined) {
+                document.getElementById('controller-type').textContent = data.controller_type;
+            }
+        }
+        
+        // Fast polling for critical states (only when page is visible)
+        let criticalStatusInterval = null;
+        let isPageVisible = true;
+        
+        function updateCriticalStatus() {
+            // Only poll if page is visible (reduces CPU when tab is hidden)
+            if (!isPageVisible) {
+                return;
+            }
+            
+            fetch('/api/status/critical')
+                .then(response => response.json())
+                .then(data => {
+                    updateCriticalUI(data);
+                    // Also update statusData for consistency
+                    if (statusData) {
+                        statusData.human_controlled = data.human_controlled;
+                        statusData.recording = data.recording;
+                        statusData.controller_type = data.controller_type;
+                        statusData.controller_paused = data.controller_paused;
+                    }
+                })
+                .catch(error => {
+                    // Silently fail - regular polling will catch it
+                    console.debug('Critical status fetch failed:', error);
+                });
+        }
+        
+        // Handle page visibility changes (pause polling when tab is hidden)
+        document.addEventListener('visibilitychange', function() {
+            isPageVisible = !document.hidden;
+            if (isPageVisible) {
+                // Page became visible - resume fast polling
+                if (!criticalStatusInterval) {
+                    updateCriticalStatus(); // Immediate update
+                    criticalStatusInterval = setInterval(updateCriticalStatus, 1000); // 1s when visible
+                }
+            } else {
+                // Page hidden - stop fast polling (regular 2s polling continues)
+                if (criticalStatusInterval) {
+                    clearInterval(criticalStatusInterval);
+                    criticalStatusInterval = null;
+                }
+            }
+        });
+        
+        // Fetch full status every 2 seconds
         function updateStatus() {
             fetch('/api/status')
                 .then(response => response.json())
@@ -274,6 +388,11 @@
                     statusData = data;
                     updateUI(data);
                     updateConnectionStatus(true);
+                    // Update critical state tracking
+                    lastCriticalState.human_controlled = data.human_controlled;
+                    lastCriticalState.recording = data.recording;
+                    lastCriticalState.controller_type = data.controller_type;
+                    lastCriticalState.controller_paused = data.controller_paused;
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);
@@ -478,14 +597,13 @@
                 document.getElementById('home-card').style.display = 'none';
             }
             
-            // Controller
-            if (data.human_controlled === null || data.human_controlled === undefined) {
-                document.getElementById('control-mode').textContent = '❓ UNKNOWN';
-            } else {
-                document.getElementById('control-mode').textContent = 
-                    data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
-            }
-            document.getElementById('controller-type').textContent = data.controller_type;
+            // Controller (updated reactively via updateCriticalUIElements, but also update here for consistency)
+            updateCriticalUIElements({
+                human_controlled: data.human_controlled,
+                recording: data.recording,
+                controller_type: data.controller_type,
+                controller_paused: data.controller_paused
+            });
             
             // Update controller button highlighting based on current controller type
             // Controller publishes class names like "ProportionalHeadingController", "WindAwareController", "ReturnToHomeController"
@@ -524,19 +642,8 @@
             }
             pauseBtn.disabled = false;
             
-            // Recording status - update toggle button
-            const recordingBtn = document.getElementById('recording-toggle-btn');
-            if (data.recording === true) {
-                recordingBtn.textContent = '⏹️ Stop Recording';
-                recordingBtn.className = 'btn btn-warning';
-            } else if (data.recording === false) {
-                recordingBtn.textContent = '🔴 Start Recording';
-                recordingBtn.className = 'btn btn-success';
-            } else {
-                recordingBtn.textContent = '🔴 Recording: Unknown';
-                recordingBtn.className = 'btn btn-secondary';
-            }
-            recordingBtn.disabled = false;
+            // Recording status (updated reactively via updateCriticalUIElements, but also update here for consistency)
+            // No need to duplicate - updateCriticalUIElements handles it
             
             // System status - update toggle button
             const systemBtn = document.getElementById('system-toggle-btn');
@@ -739,8 +846,18 @@
         }
 
         // Auto-update every 2 seconds
+        // Initial status update
         updateStatus();
+        
+        // Regular full status polling (every 2 seconds)
         setInterval(updateStatus, 2000);
+        
+        // Fast critical status polling (every 1 second when page is visible, stopped when hidden)
+        // This reduces CPU load when the dashboard tab is not active
+        updateCriticalStatus(); // Initial update
+        if (isPageVisible) {
+            criticalStatusInterval = setInterval(updateCriticalStatus, 1000);
+        }
     </script>
 </body>
 </html>
