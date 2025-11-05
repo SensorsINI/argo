@@ -62,10 +62,19 @@ class ArgoHealthMonitor(ArgoBaseNode):
         self.using_fast_poll = True
         
         # Load all node configs (normal + simulation) and build mappings
+        # Use explicit groups to determine which nodes belong to which mode
+        groups = self.config.get('groups', {})
+        self.physical_robot_nodes = set(groups.get('physical_robot', []))
+        self.simulation_nodes = set(groups.get('simulation', []))
+        
+        # Load node configs from both nodes and simulation_nodes sections
         for node_cfg in self.config.get('nodes', []):
-            self.node_configs[node_cfg['name']] = node_cfg
+            node_name = node_cfg['name']
+            self.node_configs[node_name] = node_cfg
         for node_cfg in self.config.get('simulation_nodes', []):
-            self.node_configs[node_cfg['name']] = node_cfg
+            node_name = node_cfg['name']
+            # Always add to configs (may override normal config if both exist)
+            self.node_configs[node_name] = node_cfg
         
         # Build executable -> health topic mapping
         self._build_executable_mapping()
@@ -162,6 +171,8 @@ class ArgoHealthMonitor(ArgoBaseNode):
                                 }
                             self.node_health[exec_filename]['healthy'] = msg.data
                             self.node_health[exec_filename]['last_seen'] = time.time()
+                            # Always update ros2_node_name (may have been None initially)
+                            self.node_health[exec_filename]['ros2_node_name'] = ros2_node_name
                         return health_callback
                     
                     callback = create_health_callback(filename)
@@ -231,20 +242,44 @@ class ArgoHealthMonitor(ArgoBaseNode):
             # Check if node is running (ros2_node_name from YAML should match without '/' prefix)
             is_running = ros2_node_name in running_nodes
             
+            # Skip simulation-only nodes when they're not running (we're not in simulation mode)
+            # Use explicit groups to determine which nodes are simulation-only
+            # A node is simulation-only if it's in simulation group but NOT in physical_robot group
+            is_simulation_only = (ros2_node_name in self.simulation_nodes and 
+                                 ros2_node_name not in self.physical_robot_nodes)
+            
+            if is_simulation_only and not is_running:
+                # Simulation-only node not running - skip health check (not an error)
+                # Remove from health tracking if it exists (cleanup)
+                if health_key in self.node_health:
+                    del self.node_health[health_key]
+                continue
+            
             # Only update if we don't have a health topic subscription for this node
             # (health topic subscriptions take precedence)
             # Note: health_subscribers uses filename for regular nodes
             # For special nodes, executable is a command string (e.g., "ros2 run package node")
             # so we need to handle them differently
-            if is_special:
-                # Special nodes don't have health topics, never skip
-                pass
-            else:
+            has_health_sub = False
+            if not is_special:
                 # Regular nodes: check if we have a health topic subscription
                 filename_for_sub = os.path.basename(executable)
-                if filename_for_sub in self.health_subscribers:
+                has_health_sub = filename_for_sub in self.health_subscribers
+                if has_health_sub:
+                    # Node has health topic subscription - check if it's actually publishing
+                    # If health topic subscription exists but node isn't running and hasn't published,
+                    # we should still initialize the entry if it doesn't exist
+                    if health_key not in self.node_health:
+                        self.node_health[health_key] = {
+                            'healthy': None,
+                            'last_seen': 0.0,
+                            'pid': None,
+                            'ros2_node_name': ros2_node_name
+                        }
+                    # Don't update via polling - health topic will update it
                     continue
             
+            # For nodes without health topic subscriptions (or special nodes), use polling
             if health_key not in self.node_health:
                 self.node_health[health_key] = {
                     'healthy': False,
@@ -387,11 +422,27 @@ class ArgoHealthMonitor(ArgoBaseNode):
             
             # node_health is keyed by .py filenames for regular nodes (e.g., 'gps.py')
             # or by node name for special nodes (e.g., 'foxglove_bridge')
-            for health_key, health in self.node_health.items():
+            for health_key, health in list(self.node_health.items()):
                 # Find node config by matching either:
                 # 1. For special nodes: match by node name (cfg['name'] == health_key)
                 # 2. For regular nodes: match by executable filename (os.path.basename(executable) == health_key)
                 node_cfg = None
+                ros2_node_name = health.get('ros2_node_name')
+                
+                # Skip simulation-only nodes that aren't running (not expected in physical robot mode)
+                # Use explicit groups to determine which nodes are simulation-only
+                if ros2_node_name:
+                    is_simulation_only = (ros2_node_name in self.simulation_nodes and 
+                                         ros2_node_name not in self.physical_robot_nodes)
+                    if is_simulation_only:
+                        # Check if node appears to be running based on health data
+                        # If healthy is None and last_seen is 0, it's likely not running
+                        health_status = health.get('healthy')
+                        last_seen = health.get('last_seen', 0.0)
+                        if health_status is None and last_seen == 0.0:
+                            # Simulation-only node not running - skip it (don't include in status)
+                            continue
+                
                 for cfg in self.node_configs.values():
                     is_special = cfg.get('special', False)
                     if is_special:

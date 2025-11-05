@@ -222,3 +222,12 @@ groups:
     - sailing_area_publisher
     - argo_health_monitor
     - foxglove_bridge
+
+  simulation:
+    # This group defines all nodes that should be launched in simulation mode
+    - argo_unified_simulator_bridge
+    - controller_node
+    - sailing_area_publisher
+    - foxglove_bridge
+    - argo_transform_publisher
+    - argo_boat_visualization
