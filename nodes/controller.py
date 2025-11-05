@@ -142,6 +142,7 @@ from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
 from std_srvs.srv import Trigger, SetBool
 from rclpy.parameter import Parameter
+from rcl_interfaces.msg import SetParametersResult
 
 
 
@@ -582,7 +583,9 @@ class ControllerNode(ArgoBaseNode):
             Bool, '/controller_pause_state', 10
         )
 
-        # Service for controller switching (for web dashboard)
+        # Service for controller switching (legacy - kept for backwards compatibility)
+        # Controller switching now happens automatically via parameter change callback.
+        # The web dashboard only needs to set the 'controller_type' parameter.
         self.switch_controller_service = self.create_service(
             Trigger,
             f'{self.get_name()}/switch_controller',
@@ -636,6 +639,9 @@ class ControllerNode(ArgoBaseNode):
 
         # Initialize controller
         self._initialize_controller()
+        
+        # Add parameter change callback to automatically switch controller when parameter changes
+        self.add_on_set_parameters_callback(self._on_parameters_set)
         
         # Publish initial pause state
         self._publish_pause_state()
@@ -720,10 +726,17 @@ class ControllerNode(ArgoBaseNode):
             self.param_timer = None
             self.get_logger().info("Parameter file monitoring disabled for performance")
 
-    def _initialize_controller(self):
-        """Initialize the controller based on parameters."""
-        controller_type = self.get_parameter(
-            'controller_type').get_parameter_value().string_value
+    def _initialize_controller(self, controller_type: str = None):
+        """Initialize the controller based on parameters.
+        
+        Args:
+            controller_type: Controller type to initialize. If None, reads from parameter.
+        """
+        if controller_type is None:
+            controller_type = self.get_parameter(
+                'controller_type').get_parameter_value().string_value
+        # Normalize to handle both parameter values and direct calls
+        controller_type = controller_type.strip().lower() if isinstance(controller_type, str) else str(controller_type).strip().lower()
 
         config = {
             'rudder_gain': self.get_parameter('rudder_gain').get_parameter_value().double_value,
@@ -748,13 +761,23 @@ class ControllerNode(ArgoBaseNode):
         self.get_logger().info(
             f"Initialized controller: {self.controller.name}")
 
-    def switch_controller(self, controller_type: str):
-        """Switch to a different controller type."""
+    def switch_controller(self, controller_type: str = None):
+        """Switch to a different controller type.
+        
+        Args:
+            controller_type: Controller type to switch to. If None, reads from parameter.
+        
+        Note: When called from parameter callback, pass the controller_type directly
+        to avoid reading stale parameter value.
+        """
         old_controller = self.controller.name if self.controller else "None"
 
-        # Update parameter and reinitialize
-        self.set_parameter(Parameter('controller_type', value=controller_type))
-        self._initialize_controller()
+        # Reinitialize controller with the new type
+        # If controller_type is provided, use it directly; otherwise read from parameter
+        if controller_type is not None:
+            self._initialize_controller(controller_type=controller_type)
+        else:
+            self._initialize_controller()
 
         if self.controller:
             self.controller.reset()
@@ -762,27 +785,74 @@ class ControllerNode(ArgoBaseNode):
         self.get_logger().info(
             f"Switched controller from {old_controller} to {self.controller.name}")
     
+    def _on_parameters_set(self, params):
+        """Callback for parameter changes - automatically switches controller when controller_type changes."""
+        result = SetParametersResult()
+        result.successful = True
+        
+        for param in params:
+            if param.name == 'controller_type' and param.type_ == Parameter.Type.STRING:
+                # Get the NEW parameter value from the callback (this is the value being set)
+                # param.value can be either a string directly or a ParameterValue object
+                # Try string_value first (ParameterValue object), then fall back to direct value
+                if hasattr(param.value, 'string_value'):
+                    new_controller_type = param.value.string_value.strip().lower()
+                elif isinstance(param.value, str):
+                    new_controller_type = param.value.strip().lower()
+                else:
+                    new_controller_type = str(param.value).strip().lower()
+                
+                self.get_logger().debug(f"Parameter callback: controller_type set to '{new_controller_type}' (current: {self.controller.name if self.controller else 'None'})")
+                
+                # Validate controller type
+                valid_types = ['proportional', 'wind_aware', 'return_to_home']
+                if new_controller_type not in valid_types:
+                    result.successful = False
+                    result.reason = f"Invalid controller type '{new_controller_type}'. Valid types: {', '.join(valid_types)}"
+                    self.get_logger().warn(result.reason)
+                    return result
+                
+                # Check if controller is already the requested type
+                current_controller_name = self.controller.name if self.controller else "None"
+                if (new_controller_type == 'proportional' and current_controller_name == 'ProportionalHeadingController') or \
+                   (new_controller_type == 'wind_aware' and current_controller_name == 'WindAwareController') or \
+                   (new_controller_type == 'return_to_home' and current_controller_name == 'ReturnToHomeController'):
+                    self.get_logger().debug(f"Controller is already {current_controller_name} (requested: {new_controller_type}), no switch needed")
+                    return result
+                
+                # Switch to the new controller type
+                # Pass new_controller_type directly to avoid reading parameter (which might be stale)
+                old_controller = current_controller_name
+                try:
+                    self.switch_controller(controller_type=new_controller_type)
+                    self.get_logger().info(f"Controller automatically switched from {old_controller} to {self.controller.name} via parameter change (new type: {new_controller_type})")
+                except Exception as e:
+                    result.successful = False
+                    result.reason = f"Error switching controller: {str(e)}"
+                    self.get_logger().error(result.reason)
+                    return result
+        
+        return result
+    
     def _handle_switch_controller(self, request, response):
-        """Service handler for switching controller types via web dashboard."""
+        """Service handler for switching controller types (legacy - now handled by parameter callback).
+        
+        This service is kept for backwards compatibility, but controller switching
+        now happens automatically via parameter change callback when the parameter is set.
+        """
         try:
-            # For Trigger service, we'll use a workaround since it doesn't have a data field
-            # The web dashboard should pass controller type via a parameter or separate topic
-            # For now, we'll cycle through controller types or default to RTH
-            # TODO: Implement proper service type with string parameter
+            # Read the current controller_type parameter value
+            controller_type_param = self.get_parameter('controller_type')
+            controller_type = controller_type_param.get_parameter_value().string_value.strip().lower()
             
-            # Default to return_to_home for emergency RTH button
-            controller_type = 'return_to_home'
-            
-            old_controller = self.controller.name if self.controller else "None"
-            self.switch_controller(controller_type)
-            
+            current_controller_name = self.controller.name if self.controller else "None"
             response.success = True
-            response.message = f"Switched from {old_controller} to {self.controller.name}"
-            self.get_logger().info(f"Controller switched via service: {response.message}")
+            response.message = f"Controller is {current_controller_name}. To switch, set the 'controller_type' parameter."
+            self.get_logger().info(f"Switch controller service called - current: {current_controller_name}")
             
         except Exception as e:
             response.success = False
-            response.message = f"Error switching controller: {str(e)}"
+            response.message = f"Error: {str(e)}"
             self.get_logger().error(response.message)
         
         return response
@@ -1011,6 +1081,11 @@ class ControllerNode(ArgoBaseNode):
         if not is_context_valid(self):
             return
             
+        # Publish controller state even when paused or in human mode (for dashboard display)
+        if self.controller:
+            state_msg = String(data=self.controller.name)
+            safe_publish(self.pub_controller_state, state_msg, self)
+        
         # Check if node is paused - when paused, unconditionally default to human control
         if self.is_paused():
             # When paused, no autonomous commands are published, which causes
@@ -1120,16 +1195,14 @@ class ControllerNode(ArgoBaseNode):
             if control_command:
                 safe_publish(self.pub_rudder_sail_cmd, control_command.to_vector3(), self)
             
-            # Publish current controller state for web dashboard
-            if self.controller:
-                state_msg = String(data=self.controller.name)
-                safe_publish(self.pub_controller_state, state_msg, self)
-
-                # Only format debug string if debug logging is enabled (CPU optimization)
-                if self.get_logger().get_effective_level() <= 10:  # DEBUG level
-                    debug_msg = (f"Target: {self.boat_state.target_heading:.1f}, Current: {self.boat_state.compass_heading:.1f}, "
-                                f"Controller: {self.controller.name}, Rudder: {control_command.rudder:.2f}, Sail: {control_command.sail:.2f}")
-                    safe_log(self, 'debug', debug_msg)
+            # Note: Controller state is already published at the start of timer_callback
+            # so it's available even when in human mode or paused
+            
+            # Only format debug string if debug logging is enabled (CPU optimization)
+            if self.get_logger().get_effective_level() <= 10:  # DEBUG level
+                debug_msg = (f"Target: {self.boat_state.target_heading:.1f}, Current: {self.boat_state.compass_heading:.1f}, "
+                            f"Controller: {self.controller.name}, Rudder: {control_command.rudder:.2f}, Sail: {control_command.sail:.2f}")
+                safe_log(self, 'debug', debug_msg)
 
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""

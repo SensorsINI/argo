@@ -34,10 +34,13 @@ from typing import Dict, Any, Optional
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, Float64, Float32, String, Int32, UInt8
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
 from std_srvs.srv import Trigger, SetBool
+from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue, ParameterType
 
 # Flask web server
 from flask import Flask, render_template, jsonify, request
@@ -109,6 +112,10 @@ class ArgoWebDashboard(ArgoBaseNode):
             'cpu_temp': None,
             'pcb_temp': None,
             'air_temp': None,
+            
+            # Humidity and saltwater sensor
+            'relative_humidity': None,
+            'saltwater_voltage': None,
             
             # Node health (from health service)
             'nodes_healthy': 0,
@@ -196,6 +203,10 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.controller_switch_client = self.create_client(Trigger, '/controller_node/switch_controller')
         self.battery_status_client = self.create_client(Trigger, '/battery_status')
         self.health_status_client = self.create_client(Trigger, '/argo/health/status')
+        
+        # Parameter service client for setting controller type parameter
+        # ROS2 nodes expose parameter services when start_parameter_services=True (default)
+        self.controller_param_client = self.create_client(SetParameters, '/controller_node/set_parameters')
         
         # Load node configuration from argo_nodes.yaml to know expected total count
         (self.physical_robot_nodes, 
@@ -425,6 +436,12 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Float32, '/temperature_air', self.air_temp_cb, self.volatile_qos)
         )
         self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/relative_humidity', self.humidity_cb, self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/saltwater_voltage', self.saltwater_voltage_cb, self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
             self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
         )
         self._topic_subscriptions.append(
@@ -576,6 +593,22 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         with self.state_lock:
             self.state['air_temp'] = msg.data
+    
+    def humidity_cb(self, msg):
+        """Callback for relative humidity."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['relative_humidity'] = msg.data
+    
+    def saltwater_voltage_cb(self, msg):
+        """Callback for saltwater sensor voltage."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['saltwater_voltage'] = msg.data
     
     def compass_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -1268,6 +1301,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                         battery_voltage = raw_data.get('battery_voltage')
                         battery_pct = raw_data.get('battery_remaining_pct')
                         pcb_temperature = raw_data.get('pcb_temperature')
+                        relative_humidity = raw_data.get('relative_humidity')
+                        saltwater_voltage = raw_data.get('saltwater_voltage')
                         time_to_full = raw_data.get('time_to_full_hours')
                         time_to_empty = raw_data.get('time_to_empty_hours')
                         
@@ -1288,6 +1323,12 @@ class ArgoWebDashboard(ArgoBaseNode):
                             # Update PCB temperature if missing from topic
                             if self.state.get('pcb_temp') is None and pcb_temperature is not None:
                                 self.state['pcb_temp'] = pcb_temperature
+                            # Update humidity if missing from topic
+                            if self.state.get('relative_humidity') is None and relative_humidity is not None:
+                                self.state['relative_humidity'] = relative_humidity
+                            # Update saltwater voltage if missing from topic
+                            if self.state.get('saltwater_voltage') is None and saltwater_voltage is not None:
+                                self.state['saltwater_voltage'] = saltwater_voltage
                             # Always update time estimates from service (topics don't provide this)
                             if time_to_full is not None:
                                 self.state['battery_time_to_full'] = time_to_full
@@ -1362,40 +1403,62 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         @self.app.route('/api/controller/switch', methods=['POST'])
         def switch_controller():
-            """Switch controller type."""
+            """Switch controller type using ROS2 parameters."""
             data = request.get_json()
             controller_type = data.get('type', '')
             
             if controller_type not in ['proportional', 'wind_aware', 'return_to_home']:
                 return jsonify({'success': False, 'message': 'Invalid controller type'}), 400
             
-            # Create request with controller type in data field (non-standard Trigger usage)
-            # Note: Trigger service doesn't have data field, so we need custom service type
-            # For now, use topic publishing as fallback
             try:
-                # Direct service call - controller.py needs to parse this
-                if not self.controller_switch_client.wait_for_service(timeout_sec=1.0):
-                    return jsonify({'success': False, 'message': 'Service unavailable'}), 503
+                # Check if parameter service is available
+                if not self.controller_param_client.wait_for_service(timeout_sec=2.0):
+                    return jsonify({'success': False, 'message': 'Controller parameter service unavailable'}), 503
                 
-                # Use Trigger service - pass type via separate parameter topic
-                # Workaround: publish controller type to a topic, then call service
-                # Better solution: define custom service type with string parameter
+                # Set the controller_type parameter using parameter service
+                # The parameter change callback will automatically switch the controller
+                param_msg = ParameterMsg()
+                param_msg.name = 'controller_type'
+                param_msg.value = ParameterValue()
+                param_msg.value.type = ParameterType.PARAMETER_STRING
+                param_msg.value.string_value = controller_type
                 
-                # For now, use subprocess to call with ros2 cli
-                cmd = [
-                    'bash', '-c',
-                    f'source /opt/ros/humble/setup.bash && '
-                    f'ros2 service call /controller_node/switch_controller std_srvs/srv/Trigger'
-                ]
+                set_param_request = SetParameters.Request()
+                set_param_request.parameters = [param_msg]
                 
-                # TODO: This needs proper implementation with custom service type
-                # For now, return not implemented
-                return jsonify({
-                    'success': False, 
-                    'message': f'Controller switching to {controller_type} - needs implementation'
-                }), 501
+                set_future = self.controller_param_client.call_async(set_param_request)
+                rclpy.spin_until_future_complete(self, set_future, timeout_sec=2.0)
                 
+                if not set_future.done():
+                    return jsonify({
+                        'success': False,
+                        'message': 'Parameter set operation timed out'
+                    }), 504
+                
+                set_result = set_future.result()
+                if not set_result.results or not set_result.results[0].successful:
+                    reason = set_result.results[0].reason if set_result.results else "Unknown error"
+                    return jsonify({
+                        'success': False,
+                        'message': f'Failed to set parameter: {reason}'
+                    }), 500
+                
+                # Parameter change callback will automatically switch the controller
+                # No need to call the service - the parameter change triggers the switch
+                # The parameter service result already indicates if the switch was successful
+                if set_result.results[0].successful:
+                    return jsonify({
+                        'success': True,
+                        'message': f'Controller switched to {controller_type} (parameter change callback handled the switch)'
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': f'Failed to switch controller: {set_result.results[0].reason}'
+                    }), 500
+                    
             except Exception as e:
+                self.get_logger().error(f"Error switching controller: {e}")
                 return jsonify({'success': False, 'message': str(e)}), 500
         
         @self.app.route('/api/recording/toggle', methods=['POST'])

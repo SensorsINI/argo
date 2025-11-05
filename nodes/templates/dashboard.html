@@ -31,6 +31,9 @@
                     <span class="label">Health:</span>
                     <span class="value" id="nodes-health">-/-</span>
                 </div>
+            </div>
+            <div class="node-summary" id="node-summary"></div>
+            <div class="status-grid">
                 <!-- Row 2: Battery information -->
                 <div class="status-item">
                     <span class="label">Battery:</span>
@@ -57,8 +60,16 @@
                     <span class="label">Air Temp:</span>
                     <span class="value" id="air-temp">-- °C</span>
                 </div>
+                <!-- Row 4: Humidity and Saltwater Sensor -->
+                <div class="status-item">
+                    <span class="label">Humidity:</span>
+                    <span class="value" id="humidity-status">-- %</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Saltwater:</span>
+                    <span class="value" id="saltwater-status">-- V</span>
+                </div>
             </div>
-            <div class="node-summary" id="node-summary"></div>
         </div>
 
         <!-- GPS Status Card -->
@@ -118,19 +129,23 @@
                     <span class="value" id="controller-type">Unknown</span>
                 </div>
             </div>
+            <div style="margin-top: 8px; font-size: 0.85em; color: #666;">
+                Mode: Current control authority (Human vs Robot)<br>
+                Type: Active controller algorithm (shown even in Human mode)
+            </div>
         </div>
 
-        <!-- Controller Actions -->
+        <!-- Controller Selection -->
         <div class="card">
-            <h2>Controller Actions</h2>
+            <h2>Controller Selection</h2>
             <div class="button-grid">
-                <button class="btn btn-warning" onclick="switchController('return_to_home')">
+                <button class="btn btn-secondary" id="btn-return-to-home" onclick="switchController('return_to_home')">
                     🏠 Return to Home
                 </button>
-                <button class="btn btn-secondary" onclick="switchController('proportional')">
+                <button class="btn btn-secondary" id="btn-proportional" onclick="switchController('proportional')">
                     🎯 Proportional
                 </button>
-                <button class="btn btn-secondary" onclick="switchController('wind_aware')">
+                <button class="btn btn-secondary" id="btn-wind-aware" onclick="switchController('wind_aware')">
                     🌬️ Wind Aware
                 </button>
             </div>
@@ -330,6 +345,12 @@
             document.getElementById('air-temp').textContent = 
                 data.air_temp !== null && data.air_temp !== undefined ? `${data.air_temp.toFixed(1)} °C` : '-- °C';
             
+            // Humidity and Saltwater Sensor
+            document.getElementById('humidity-status').textContent = 
+                data.relative_humidity !== null && data.relative_humidity !== undefined ? `${data.relative_humidity.toFixed(1)} %` : '-- %';
+            document.getElementById('saltwater-status').textContent = 
+                data.saltwater_voltage !== null && data.saltwater_voltage !== undefined ? `${data.saltwater_voltage.toFixed(3)} V` : '-- V';
+            
             // GPS
             document.getElementById('gps-lock').textContent = 
                 data.gps_locked ? '🟢 LOCKED' : '🔴 NO LOCK';
@@ -376,6 +397,29 @@
             document.getElementById('control-mode').textContent = 
                 data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
             document.getElementById('controller-type').textContent = data.controller_type;
+            
+            // Update controller button highlighting based on current controller type
+            // Controller publishes class names like "ProportionalHeadingController", "WindAwareController", "ReturnToHomeController"
+            const controllerType = (data.controller_type || '').toLowerCase();
+            const btnReturnToHome = document.getElementById('btn-return-to-home');
+            const btnProportional = document.getElementById('btn-proportional');
+            const btnWindAware = document.getElementById('btn-wind-aware');
+            
+            // Reset all buttons to secondary
+            btnReturnToHome.className = 'btn btn-secondary';
+            btnProportional.className = 'btn btn-secondary';
+            btnWindAware.className = 'btn btn-secondary';
+            
+            // Highlight the active controller based on class name
+            // Controller class names: ProportionalHeadingController, WindAwareController, ReturnToHomeController
+            if (controllerType.includes('returntohome') || controllerType.includes('return_to_home') || 
+                controllerType.includes('return') && controllerType.includes('home')) {
+                btnReturnToHome.className = 'btn btn-warning';
+            } else if (controllerType.includes('proportionalheading') || controllerType.includes('proportional')) {
+                btnProportional.className = 'btn btn-warning';
+            } else if (controllerType.includes('windaware') || controllerType.includes('wind_aware')) {
+                btnWindAware.className = 'btn btn-warning';
+            }
             
             // Pause status - update toggle button
             const pauseBtn = document.getElementById('pause-toggle-btn');
@@ -509,12 +553,25 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ type: type })
                     })
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.success ? `✅ ${data.message}` : `⚠️ ${data.message}`);
-                        updateStatus();
+                    .then(response => {
+                        if (!response.ok) {
+                            return response.json().then(data => {
+                                throw new Error(data.message || 'Service call failed');
+                            });
+                        }
+                        return response.json();
                     })
-                    .catch(error => alert(`❌ Error: ${error}`));
+                    .then(data => {
+                        if (data.success) {
+                            alert(`✅ ${data.message}`);
+                            updateStatus();
+                        } else {
+                            alert(`⚠️ ${data.message}`);
+                        }
+                    })
+                    .catch(error => {
+                        alert(`❌ Error: ${error.message || error}`);
+                    });
                 }
             );
         }
