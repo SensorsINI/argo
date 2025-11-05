@@ -336,36 +336,34 @@ class GpsNode(ArgoBaseNode):
             self.get_logger().warn(f"Failed to restore GPS continuous mode: {e}")
 
     # --- UBX reset mechanisms (CFG-RST) ---
-    def gps_reset(self, reset_type: int = 0x00, nav_bbr_mask: int = 0x0000, reset_mode: int = 0x08) -> bool:
+    def gps_reset(self, nav_bbr_mask: int = 0x0000, reset_mode: int = 0x08) -> bool:
         """
         Send UBX-CFG-RST to reset the GPS module.
         
         Args:
-            reset_type: Reset type (0x00=HW reset, 0x01=controlled SW reset, 0x02=controlled SW reset GNSS only)
             nav_bbr_mask: Navigation BBR (battery-backed RAM) mask:
                           - 0x0001: Hot start (clear ephemeris, keep almanac/position/time)
                           - 0x0002: Warm start (clear ephemeris/almanac, keep position/time)
-                          - 0x0004: Cold start (clear all data)
-            reset_mode: Reset mode (0x08=controlled reset, 0x09=HW reset immediately)
+                          - 0x0004: Cold start (clear all data: ephemeris, almanac, position, time)
+            reset_mode: Reset mode:
+                          - 0x08: Controlled software reset (GNSS stops then restarts, preserves config)
+                          - 0x09: Hardware reset immediately (full reset, may lose config)
         
         Returns:
             True if reset command was sent successfully (note: GPS will reset, so ACK may not be received)
+        
+        Note:
+            For u-blox NEO-M9N, UBX-CFG-RST does not have a separate resetType field.
+            The resetMode determines the type of reset (controlled vs hardware).
         """
         if not (self.serial_port and self.serial_port.is_open):
             return False
-        
-        # For controlled software reset, set resetType in resetMode
-        actual_reset_mode = reset_mode
-        if reset_type == 0x01:  # Controlled SW reset
-            actual_reset_mode = 0x08 | 0x00  # Controlled reset, GNSS stop then start
-        elif reset_type == 0x02:  # Controlled SW reset GNSS only
-            actual_reset_mode = 0x08 | 0x01  # Controlled reset, GNSS only
         
         # UBX-CFG-RST payload: navBbrMask (2 bytes), resetMode (1 byte), reserved1 (1 byte)
         payload = bytes([
             (nav_bbr_mask >> 8) & 0xFF,  # navBbrMask MSB
             nav_bbr_mask & 0xFF,          # navBbrMask LSB
-            actual_reset_mode,            # resetMode
+            reset_mode & 0xFF,           # resetMode (0x08=controlled, 0x09=hardware)
             0x00                          # reserved1
         ])
         
@@ -378,9 +376,10 @@ class GpsNode(ArgoBaseNode):
         
         NOTE: This performs a controlled software reset which may temporarily stop NMEA output.
         After calling this, ensure enable_nmea_sentences() is called to restore NMEA output.
+        Time-To-First-Fix (TTFF) after cold start: ~24-29 seconds under good conditions.
         """
-        self.get_logger().info("Performing GPS cold start reset (clearing all data)...")
-        return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0004, reset_mode=0x08)
+        self.get_logger().info("Performing GPS cold start reset (clearing all data: ephemeris, almanac, position, time)...")
+        return self.gps_reset(nav_bbr_mask=0x0004, reset_mode=0x08)
 
     def clear_navigation_data(self) -> bool:
         """Clear navigation BBR data (ephemeris, almanac) without doing a full reset.
@@ -416,19 +415,29 @@ class GpsNode(ArgoBaseNode):
         return ok
 
     def gps_warm_start(self) -> bool:
-        """Perform a warm start reset - clears ephemeris and almanac, keeps position and time."""
-        self.get_logger().info("Performing GPS warm start reset (clearing ephemeris/almanac)...")
-        return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0002, reset_mode=0x08)
+        """Perform a warm start reset - clears ephemeris and almanac, keeps position and time.
+        
+        Time-To-First-Fix (TTFF) after warm start: ~15-30 seconds.
+        """
+        self.get_logger().info("Performing GPS warm start reset (clearing ephemeris/almanac, keeping position/time)...")
+        return self.gps_reset(nav_bbr_mask=0x0002, reset_mode=0x08)
 
     def gps_hot_start_reset(self) -> bool:
-        """Perform a hot start reset - clears ephemeris only, keeps almanac, position, and time."""
-        self.get_logger().info("Performing GPS hot start reset (clearing ephemeris only)...")
-        return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0001, reset_mode=0x08)
+        """Perform a hot start reset - clears ephemeris only, keeps almanac, position, and time.
+        
+        Time-To-First-Fix (TTFF) after hot start: ~2 seconds (fastest).
+        """
+        self.get_logger().info("Performing GPS hot start reset (clearing ephemeris only, keeping almanac/position/time)...")
+        return self.gps_reset(nav_bbr_mask=0x0001, reset_mode=0x08)
 
     def gps_gnss_restart(self) -> bool:
-        """Perform a GNSS-only restart - restarts GNSS tasks without reloading configuration."""
-        self.get_logger().info("Performing GPS GNSS-only restart...")
-        return self.gps_reset(reset_type=0x02, nav_bbr_mask=0x0000, reset_mode=0x08)
+        """Perform a GNSS-only restart - restarts GNSS tasks without reloading configuration.
+        
+        This uses a controlled software reset with no BBR clear (navBbrMask=0x0000).
+        Fastest reset option, doesn't clear any data.
+        """
+        self.get_logger().info("Performing GPS GNSS-only restart (no data cleared)...")
+        return self.gps_reset(nav_bbr_mask=0x0000, reset_mode=0x08)
 
     def gps_factory_reset(self) -> bool:
         """Perform a hardware factory reset - completely restores factory defaults.
@@ -445,7 +454,7 @@ class GpsNode(ArgoBaseNode):
         self.get_logger().warn("WARNING: All configuration will be lost! GPS must be re-configured after reset.")
         # Hardware reset immediately (reset_mode=0x09) with cold start mask
         # This performs a full hardware reset, not just a controlled software reset
-        return self.gps_reset(reset_type=0x01, nav_bbr_mask=0x0004, reset_mode=0x09)
+        return self.gps_reset(nav_bbr_mask=0x0004, reset_mode=0x09)
 
     def check_and_reset_if_needed(self):
         """Check if GPS has been without a fix for too long and trigger reset if needed.
@@ -472,18 +481,22 @@ class GpsNode(ArgoBaseNode):
                         f"GPS has {self.satellites_used} satellites in view but no fix after "
                         f"{time_with_satellites/60:.1f} minutes. "
                         f"This likely indicates stale satellite data. Clearing navigation data...")
-                    # Use clear_navigation_data() instead of cold_start() to avoid stopping NMEA output
+                    # Use clear_navigation_data() for this case (satellites visible but no fix)
+                    # This is less aggressive than cold start and preserves NMEA output
                     if self.clear_navigation_data():
                         self.last_reset_time = current_time
                         self.last_fix_time = current_time
-                        self.get_logger().info("Navigation data cleared. GPS will reacquire fresh satellite data...")
+                        self.get_logger().info("Navigation data cleared. Waiting 25 seconds for GPS to process clear command...")
+                        time.sleep(25.0)  # Allow time for GPS to clear BBR and start reacquiring
+                        self.get_logger().info("Navigation data clear completed. GPS should reacquire fix with fresh satellite data...")
                     else:
                         self.get_logger().error("Failed to clear navigation data, trying warm start instead...")
                         # Fallback to warm start if CFG-CFG fails
                         if self.gps_warm_start():
                             self.last_reset_time = current_time
                             self.last_fix_time = current_time
-                            time.sleep(3.0)  # Give GPS more time after warm start
+                            self.get_logger().info("Warm start reset sent. Waiting 15 seconds for GPS to reinitialize...")
+                            time.sleep(15.0)  # Allow time for warm start TTFF + NMEA re-enable
                             self.enable_nmea_sentences()
                             self.get_logger().info("Warm start completed. GPS will reacquire fresh satellite data...")
                     return
@@ -497,21 +510,46 @@ class GpsNode(ArgoBaseNode):
                     (current_time - self.last_reset_time) >= self.min_reset_interval_seconds):
                     self.get_logger().warn(
                         f"GPS has been without fix for {time_without_fix/60:.1f} minutes. "
-                        f"Clearing stale navigation data...")
-                    # Try clear_navigation_data first (safer, doesn't stop NMEA)
-                    if self.clear_navigation_data():
+                        f"Performing hardware factory reset to clear all state and recover from potential firmware issues...")
+                    # For extended no-fix periods (10+ minutes), use hardware factory reset to clear ALL state
+                    # This is more aggressive than cold start - it performs a full hardware reset (like power cycle)
+                    # which can recover from firmware bugs, illegal commands, or hung states
+                    # Hardware reset (0x09) clears ALL configuration, so GPS must be fully reconfigured
+                    if self.gps_factory_reset():
                         self.last_reset_time = current_time
                         self.last_fix_time = current_time
-                        self.get_logger().info("Navigation data cleared. Waiting for satellite acquisition...")
+                        self.get_logger().warn("Hardware factory reset sent. GPS will reboot and all configuration will be cleared.")
+                        self.get_logger().info("Waiting 5 seconds for GPS to reboot after hardware reset...")
+                        time.sleep(5.0)  # Give GPS time to reboot after hardware reset
+                        # Close and reopen serial port (GPS may have reset to default baud rate)
+                        if self.serial_port and self.serial_port.is_open:
+                            self.serial_port.close()
+                            self.get_logger().debug("Closed serial port for GPS reboot")
+                        time.sleep(2.0)  # Additional wait for GPS to fully boot
+                        # Reopen serial port (may need to try different baud rates)
+                        try:
+                            self.serial_port = serial.Serial(self.serial_port_name, self.baud_rate, timeout=1.0)
+                            time.sleep(1.0)  # Allow serial port to stabilize
+                            self.get_logger().info("Serial port reopened after GPS reboot")
+                        except Exception as e:
+                            self.get_logger().error(f"Failed to reopen serial port after factory reset: {e}")
+                            # Try to recover by reopening with setup
+                            self.setup_gps()
+                            return
+                        # Reconfigure GPS completely (factory reset cleared all config)
+                        self.get_logger().info("Reconfiguring GPS after factory reset...")
+                        self.setup_gps()  # Full reconfiguration (port, NMEA, hot start, PPS)
+                        self.get_logger().info("Hardware factory reset completed. GPS should reacquire satellites within 30-60 seconds.")
                     else:
-                        # Fallback to warm start if clear fails
-                        self.get_logger().warn("Navigation clear failed, trying warm start reset...")
+                        # Fallback to warm start if cold start fails
+                        self.get_logger().warn("Cold start failed, trying warm start reset...")
                         if self.gps_warm_start():
                             self.last_reset_time = current_time
                             self.last_fix_time = current_time
-                            time.sleep(3.0)  # Give GPS more time after warm start
+                            self.get_logger().info("Warm start reset sent. Waiting 15 seconds for GPS to reinitialize...")
+                            time.sleep(15.0)  # Allow time for warm start TTFF (~15-30s) + NMEA re-enable + margin
                             self.enable_nmea_sentences()
-                            self.get_logger().info("GPS warm start completed. Waiting for satellite acquisition...")
+                            self.get_logger().info("Warm start completed. GPS should reacquire satellites within 30-60 seconds.")
                         else:
                             self.get_logger().error("Failed to send GPS reset command")
         else:
@@ -1388,9 +1426,26 @@ class GpsNode(ArgoBaseNode):
         # Only timeout if:
         # 1. No valid NMEA data received for timeout period
         # 2. AND no satellites are currently in view (satellites_used == 0)
+        # 3. AND no reset was recently performed (GPS may be reinitializing after reset)
+        # 4. AND we're not within the reset check window (to allow reset to trigger)
         # This allows GPS to work normally when satellites are visible but fix acquisition takes time
+        # and prevents premature exit when GPS is recovering from a reset
+        time_since_last_reset = None
+        if self.last_reset_time is not None:
+            time_since_last_reset = current_time - self.last_reset_time
+        
+        # Don't exit if reset was recent (within 2 minutes) - GPS may still be reacquiring
+        reset_recent = (time_since_last_reset is not None and 
+                       time_since_last_reset < 120.0)
+        
+        # Don't exit if we're close to the reset timeout (within 1 minute) - let reset check run
+        time_without_fix = current_time - self.last_fix_time
+        reset_pending = (time_without_fix >= (self.no_fix_reset_timeout_seconds - 60.0))
+        
         if (current_time - self.last_data_received_time > self.gps_timeout_seconds and 
-            not has_satellites):
+            not has_satellites and
+            not reset_recent and
+            not reset_pending):
             self.get_logger().error(
                 f"CRITICAL: GPS communication timeout - no data received for {self.gps_timeout_seconds} seconds")
             self.get_logger().error(
@@ -1398,6 +1453,15 @@ class GpsNode(ArgoBaseNode):
             self.set_unhealthy("GPS device not accessible")
             import sys
             sys.exit(1)
+        elif (current_time - self.last_data_received_time > self.gps_timeout_seconds and 
+              not has_satellites):
+            # Log why we're not exiting (for debugging)
+            if reset_recent:
+                self.get_logger().debug(
+                    f"GPS timeout detected but not exiting: reset was recent ({time_since_last_reset:.1f}s ago)")
+            elif reset_pending:
+                self.get_logger().debug(
+                    f"GPS timeout detected but not exiting: reset check pending (no fix for {time_without_fix/60:.1f} min)")
 
         # The `in_waiting` check is not strictly necessary because `readline()`
         # with a timeout will block until a line is received or the timeout occurs.
