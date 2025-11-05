@@ -11,7 +11,10 @@
         <!-- Header -->
         <header class="header">
             <h1>🚢 ARGO CONTROL</h1>
-            <div class="status-badge" id="connection-status">🟢 CONNECTED</div>
+            <div style="display: flex; align-items: center; gap: 5px;">
+                <div class="status-badge" id="connection-status">🟢 CONNECTED</div>
+                <span class="status-timer" id="connection-timer"></span>
+            </div>
         </header>
 
         <!-- System Status Card -->
@@ -198,6 +201,70 @@
     <script>
         let statusData = {};
         let pendingAction = null;
+        
+        // Connection state tracking
+        let connectionState = null; // 'connected' or 'disconnected'
+        let connectionStateChangeTime = null;
+        let connectionTimerInterval = null;
+
+        // Format elapsed time for display
+        function formatElapsedTime(seconds) {
+            if (seconds < 60) {
+                return `${Math.floor(seconds)}s`;
+            } else if (seconds < 3600) {
+                const minutes = Math.floor(seconds / 60);
+                const secs = Math.floor(seconds % 60);
+                return `${minutes}m ${secs}s`;
+            } else {
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                return `${hours}h ${minutes}m`;
+            }
+        }
+
+        // Update connection timer display
+        function updateConnectionTimer() {
+            if (connectionStateChangeTime === null) {
+                document.getElementById('connection-timer').textContent = '';
+                return;
+            }
+            
+            const elapsed = (Date.now() - connectionStateChangeTime) / 1000;
+            const timerText = formatElapsedTime(elapsed);
+            document.getElementById('connection-timer').textContent = `(${timerText})`;
+        }
+
+        // Update connection status and track state changes
+        function updateConnectionStatus(isConnected) {
+            const newState = isConnected ? 'connected' : 'disconnected';
+            const statusElement = document.getElementById('connection-status');
+            const timerElement = document.getElementById('connection-timer');
+            
+            // Check if state changed
+            if (connectionState !== newState) {
+                connectionState = newState;
+                connectionStateChangeTime = Date.now();
+                
+                // Update status badge
+                if (isConnected) {
+                    statusElement.textContent = '🟢 CONNECTED';
+                    statusElement.className = 'status-badge status-ok';
+                } else {
+                    statusElement.textContent = '🔴 DISCONNECTED';
+                    statusElement.className = 'status-badge status-error';
+                }
+                
+                // Start/restart timer interval
+                if (connectionTimerInterval) {
+                    clearInterval(connectionTimerInterval);
+                }
+                connectionTimerInterval = setInterval(updateConnectionTimer, 1000);
+                updateConnectionTimer(); // Update immediately
+            } else {
+                // State unchanged, just update timer
+                updateConnectionTimer();
+            }
+        }
 
         // Fetch status every 2 seconds
         function updateStatus() {
@@ -206,13 +273,11 @@
                 .then(data => {
                     statusData = data;
                     updateUI(data);
-                    document.getElementById('connection-status').textContent = '🟢 CONNECTED';
-                    document.getElementById('connection-status').className = 'status-badge status-ok';
+                    updateConnectionStatus(true);
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);
-                    document.getElementById('connection-status').textContent = '🔴 DISCONNECTED';
-                    document.getElementById('connection-status').className = 'status-badge status-error';
+                    updateConnectionStatus(false);
                 });
         }
 
