@@ -5,8 +5,8 @@
 # Priority: tobi-s24 (15) > tobi-wlan (10) > uzh-iot (5)
 # 
 # SAFETY FEATURES:
-# - Only runs when called by systemd timer (every 2 minutes)
-# - Prevents connection changes if already on preferred network
+# - Only runs when called by systemd timer (every 1 minute)
+# - Checks for higher-priority preferred networks even when already on preferred network
 # - Includes connection stability checks
 # - Logs all actions for debugging
 
@@ -135,21 +135,46 @@ main() {
     
     log_message "Current connection: $CURRENT_CONNECTION"
     
-    # Check if current connection is already a preferred network
-    for preferred in "${PREFERRED_NETWORKS[@]}"; do
-        if [ "$CURRENT_CONNECTION" = "$preferred" ]; then
-            log_message "Already connected to preferred network: $preferred"
-            return 0
-        fi
-    done
-    
-    # Current connection is not preferred, check for preferred networks
-    log_message "Current connection ($CURRENT_CONNECTION) is not preferred, checking for better options"
-    
     # Check if current connection is stable before switching
     if ! is_connection_stable "$CURRENT_CONNECTION"; then
         return 0
     fi
+    
+    # Check if we're already on the highest-priority preferred network
+    # The array is ordered by priority (tobi-s24 first, then tobi-wlan)
+    IS_ON_PREFERRED=false
+    CURRENT_PRIORITY_INDEX=-1
+    
+    for i in "${!PREFERRED_NETWORKS[@]}"; do
+        if [ "$CURRENT_CONNECTION" = "${PREFERRED_NETWORKS[$i]}" ]; then
+            IS_ON_PREFERRED=true
+            CURRENT_PRIORITY_INDEX=$i
+            log_message "Current connection is preferred network: ${PREFERRED_NETWORKS[$i]} (priority index $i)"
+            break
+        fi
+    done
+    
+    # If on a preferred network, only check for higher-priority ones
+    if [ "$IS_ON_PREFERRED" = true ]; then
+        # Check if there's a higher-priority preferred network available
+        for i in "${!PREFERRED_NETWORKS[@]}"; do
+            if [ $i -lt $CURRENT_PRIORITY_INDEX ]; then
+                # This is a higher-priority network
+                if is_network_available "${PREFERRED_NETWORKS[$i]}"; then
+                    log_message "Higher-priority preferred network ${PREFERRED_NETWORKS[$i]} is available, switching"
+                    if connect_to_network "${PREFERRED_NETWORKS[$i]}"; then
+                        record_connection_change "${PREFERRED_NETWORKS[$i]}"
+                        return 0
+                    fi
+                fi
+            fi
+        done
+        log_message "Already on highest-priority preferred network, staying on: $CURRENT_CONNECTION"
+        return 0
+    fi
+    
+    # Current connection is not preferred, check for any preferred networks
+    log_message "Current connection ($CURRENT_CONNECTION) is not preferred, checking for better options"
     
     for preferred in "${PREFERRED_NETWORKS[@]}"; do
         if is_network_available "$preferred"; then
