@@ -281,6 +281,12 @@
             }
             
             const nodeSummaryEl = document.getElementById('node-summary');
+            
+            // Check if health data has been received from service
+            // Must be explicitly true (not just truthy) to show health status
+            const healthDataReceived = data.health_data_received === true;
+            const nodesUnknown = data.nodes_unknown || 0;
+            
             if (nonRunningNodes.length > 0 || unhealthyNodes.length > 0) {
                 const parts = [];
                 if (nonRunningNodes.length > 0) {
@@ -300,7 +306,17 @@
                 nodeSummaryText = parts.join(' | ');
                 nodeSummaryEl.textContent = nodeSummaryText;
                 nodeSummaryEl.className = 'node-summary summary-warning';
+            } else if (!healthDataReceived || nodesUnknown > 0) {
+                // Health status is unknown/TBD - show pending status
+                if (!healthDataReceived) {
+                    nodeSummaryText = '⏳ Health status pending...';
+                } else if (nodesUnknown > 0) {
+                    nodeSummaryText = `❓ Health status unknown for ${nodesUnknown} node${nodesUnknown > 1 ? 's' : ''}`;
+                }
+                nodeSummaryEl.textContent = nodeSummaryText;
+                nodeSummaryEl.className = 'node-summary summary-warning';
             } else {
+                // All nodes have known health status and are healthy
                 nodeSummaryText = '✅ All nodes running and healthy';
                 nodeSummaryEl.textContent = nodeSummaryText;
                 nodeSummaryEl.className = 'node-summary summary-ok';

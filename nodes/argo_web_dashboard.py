@@ -113,7 +113,9 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Node health (from health service)
             'nodes_healthy': 0,
             'nodes_unhealthy': 0,
+            'nodes_unknown': 0,  # Nodes with unknown/TBD health status
             'nodes_unhealthy_list': [],  # List of unhealthy node names
+            'health_data_received': False,  # Track if health data has been received from service
             'nodes_expected_total': 0,  # Total from argo_nodes.yaml (includes excluded services)
             
             # GPS
@@ -1121,6 +1123,14 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Get the list of all nodes defined in the YAML, including excluded ones, for health checks
             all_defined_nodes = list(all_node_configs.keys())
             
+            # Also include services from the services section (they're ROS2 nodes too)
+            services_config = config.get('services', [])
+            for service in services_config:
+                service_name = service.get('name')
+                if service_name and service_name not in all_defined_nodes:
+                    # Add service to total count if not already in nodes section
+                    all_defined_nodes.append(service_name)
+            
             return launched_nodes, special_nodes, all_defined_nodes
         except Exception as e:
             self.get_logger().error(f"Could not load node lists from YAML: {e}")
@@ -1162,25 +1172,40 @@ class ArgoWebDashboard(ArgoBaseNode):
                         nodes_data = health_data.get('nodes', {})
                         
                         # Count healthy and unhealthy nodes, and collect unhealthy node names
+                        # Note: Nodes with health_status=None are not counted (status unknown)
                         healthy_count = 0
                         unhealthy_count = 0
+                        unknown_count = 0  # Track nodes with unknown health status
                         unhealthy_nodes = []
+                        total_nodes_with_status = 0  # Total nodes with known status (healthy + unhealthy)
                         
                         for node_name, node_info in nodes_data.items():
                             health_status = node_info.get('healthy')
                             if health_status is True:
                                 healthy_count += 1
+                                total_nodes_with_status += 1
                             elif health_status is False:
                                 unhealthy_count += 1
+                                total_nodes_with_status += 1
                                 # Store node name (remove .py extension for display)
                                 display_name = node_name.rstrip('.py') if node_name.endswith('.py') else node_name
                                 unhealthy_nodes.append(display_name)
+                            else:
+                                # health_status is None - status unknown/TBD
+                                unknown_count += 1
+                        
+                        # Total expected nodes = nodes with known status + nodes with unknown status
+                        # This matches what health monitor actually returns
+                        total_expected = len(nodes_data)  # Total nodes returned by health monitor
                         
                         with self.state_lock:
                             self.state['nodes_healthy'] = healthy_count
                             self.state['nodes_unhealthy'] = unhealthy_count
                             self.state['nodes_unhealthy_list'] = unhealthy_nodes
-                            self.get_logger().debug(f"Updated health counts: {healthy_count} healthy, {unhealthy_count} unhealthy: {unhealthy_nodes}")
+                            self.state['nodes_unknown'] = unknown_count  # Track unknown health status
+                            self.state['nodes_expected_total'] = total_expected  # Update from actual health service response
+                            self.state['health_data_received'] = True  # Mark that we've received health data
+                            self.get_logger().debug(f"Updated health counts: {healthy_count} healthy, {unhealthy_count} unhealthy, {unknown_count} unknown, {total_expected} total: {unhealthy_nodes}")
                     except (json.JSONDecodeError, KeyError) as e:
                         self.get_logger().warn(f"Error parsing health service response: {e}")
                 else:

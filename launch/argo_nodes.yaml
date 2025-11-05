@@ -123,12 +123,48 @@ nodes:
     description: "Foxglove Studio bridge (ROS2 package)"
     special: true  # Launched via ros2 run, not direct Python
     
-  # Excluded Nodes (run as independent systemd services)
-  # These are monitored but not launched by this system:
-  # - argo_power_control (runs as argo_power_control.service)
-  # - argo_battery_water (runs as argo_battery_water.service)
-  # - argo_health_monitor (runs as argo_health_monitor.service)
-  # - bno085 (runs as argo_bno085.service when available)
+# Systemd Services Section
+# ========================
+# Unified definition of ROS2 nodes that run as independent systemd services.
+# These are ROS2 nodes (like nodes in the 'nodes' section above) but are managed
+# as systemd services rather than by the lifecycle manager.
+#
+# All services listed here:
+# - Are ROS2 nodes (can be monitored via health topics/services)
+# - Run as independent systemd services (not launched by lifecycle manager)
+# - Are included in total component counts (nodes + services)
+# - Should be marked as excluded: true in the 'nodes' section above for backward compatibility
+#
+# This unified section allows:
+# - Clear separation of launched nodes vs services
+# - Accurate total component counts (nodes + services)
+# - Single source of truth for service definitions
+services:
+  - name: argo_power_control
+    executable: power_control/argo_power_control.py
+    service_name: argo_power_control.service
+    description: "Power control, button monitoring, and LED status"
+    critical: true
+    
+  - name: argo_battery_water
+    executable: nodes/argo_battery_water.py
+    service_name: argo_battery_water.service
+    description: "Battery voltage and water intrusion monitoring"
+    critical: true
+    health_topic: "/battery_water_node_health"
+    
+  - name: argo_health_monitor
+    executable: launch/argo_health_monitor.py
+    service_name: argo_health_monitor.service
+    description: "Node health monitoring and aggregation service"
+    critical: true
+    
+  - name: bno085
+    executable: nodes/bno085_driver_launcher.sh  # Shell script that launches C++ driver
+    service_name: argo_bno085.service
+    description: "BNO085 IMU driver (C++ ROS2 node)"
+    critical: true
+    special: true  # Launched via shell script, not direct Python
 
 # Simulation Mode Configuration
 simulation_config:
