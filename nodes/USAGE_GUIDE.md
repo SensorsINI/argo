@@ -8,15 +8,15 @@ This guide shows how to use the new two-node control system that separates high-
 ```bash
 # Terminal 1: Low-level control and arbitration
 cd ~/argo
-python3 nodes/rudder_sail_radio.py --ros-args --params-file nodes/argo_two_node.yaml
+python3 nodes/rudder_sail_radio.py --ros-args --params-file nodes/argo.yaml
 
 # Terminal 2: High-level autonomous control
 cd ~/argo  
-python3 nodes/controller.py --ros-args --params-file nodes/argo_two_node.yaml
+python3 nodes/controller.py --ros-args --params-file nodes/argo.yaml
 
-# Terminal 3: Test the system (optional)
+# Terminal 3: Monitor system status (optional)
 cd ~/argo
-python3 nodes/test_two_node_system.py
+ros2 topic echo /human_controlled
 ```
 
 ### 2. Monitor System Status
@@ -84,7 +84,7 @@ ros2 topic echo /control_authority
 
 ## Configuration Options
 
-### Basic Configuration (argo_two_node.yaml)
+### Basic Configuration (argo.yaml)
 ```yaml
 # High-level controller
 controller_node:
@@ -238,6 +238,3 @@ Sensors → controller.py → /rudder_sail_cmd → rudder_sail_radio.py → Hard
 ```
 
 The key innovation is the **human priority arbitration** in `rudder_sail_radio.py` that ensures humans can always immediately take control without any mode switches or button presses - just move the radio controls and you have instant authority over the boat.
-
-
-

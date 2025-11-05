@@ -99,6 +99,7 @@ import rclpy
 from std_msgs.msg import Bool, Float64
 from geometry_msgs.msg import Vector3
 from rclpy.parameter import Parameter
+from rcl_interfaces.msg import SetParametersResult
 
 import argparse
 import argcomplete
@@ -135,7 +136,11 @@ OUTLIER_LOG_THROTTLE_S = 60.0
 HUMAN_CONTROL_TIMEOUT_S = 2.0
 
 # Default parameter values
-DEFAULT_DEADBAND_THRESHOLD = 0.18 # servo command threshold away from zero rudder on scale -1 to +1 for human control to take over (5σ measured)
+# NOTE: These defaults are only used if the parameter is not set in the YAML configuration file.
+# The launch system loads parameters from nodes/argo.yaml via --params-file,
+# which overrides these defaults. To change the value, edit the YAML file or use ros2 param set.
+# YAML file location: nodes/argo.yaml (rudder_sail_radio_node section)
+DEFAULT_DEADBAND_THRESHOLD = 0.1875 # servo command threshold away from zero rudder on scale -1 to +1 for human control to take over (5σ measured)
 DEFAULT_SAFETY_MAX_RUDDER = 1.0 # limit rudder comamnd to this magnitude in case of mechanical constraints
 DEFAULT_SAFETY_MAX_SAIL = 1.0 # limit sail comamnd to this magnitude in case of mechanical constraints
 
@@ -343,6 +348,9 @@ class RudderSailRadioNode(ArgoBaseNode):
     def __init__(self, debug_mode: bool = False):
         super().__init__('rudder_sail_radio_node')
 
+        # Set default logging level to INFO
+        self.get_logger().set_level(rclpy.logging.LoggingSeverity.INFO)
+
         # Initialize pause service with namespaced name
         # Removed pause service - rudder_sail_radio node doesn't need pause functionality
 
@@ -373,6 +381,22 @@ class RudderSailRadioNode(ArgoBaseNode):
             'safety_max_rudder').get_parameter_value().double_value
         self.safety_max_sail = self.get_parameter(
             'safety_max_sail').get_parameter_value().double_value
+        
+        # Log parameter values for debugging
+        self.get_logger().info(
+            f"Control authority parameters: deadband_threshold={self.deadband_threshold:.3f}, "
+            f"human_override_timeout={self.human_override_timeout:.1f}s, "
+            f"safety_max_rudder={self.safety_max_rudder:.2f}, safety_max_sail={self.safety_max_sail:.2f}")
+        
+        # Warn if deadband_threshold doesn't match expected default
+        if abs(self.deadband_threshold - DEFAULT_DEADBAND_THRESHOLD) > 0.001:
+            self.get_logger().warn(
+                f"⚠️  deadband_threshold={self.deadband_threshold:.3f} does not match default={DEFAULT_DEADBAND_THRESHOLD:.3f}. "
+                f"ROS2 may be using a stored parameter value. To reset, use: "
+                f"ros2 param set /rudder_sail_radio_node deadband_threshold {DEFAULT_DEADBAND_THRESHOLD}")
+        
+        # Add parameter callback to handle runtime parameter changes
+        self.add_on_set_parameters_callback(self._on_parameters_set)
 
         # Enhanced control logging state
         self.last_control_switch_time = time.time()
@@ -390,13 +414,17 @@ class RudderSailRadioNode(ArgoBaseNode):
         self.last_auto_update = 0.0
 
         # Control arbitration state
-        self.human_controlled = True  # Start in human control for safety
+        # Initialize based on radio input availability (will be updated after first radio read)
+        self.human_controlled = False  # Start as robot control, will be set to True if radio input exists
         self.last_human_activity = 0.0  # Initialize to 0, will be set when actual radio activity is detected
         self.last_logged_control_mode = None
 
         # Track previous radio values for human activity detection
         self.prev_radio_rudder = 0.0
         self.prev_radio_sail = 0.0
+        
+        # Track if radio was previously invalid (0 or out of range) to detect radio turn-on
+        self._radio_was_invalid = True  # Start assuming radio is off/invalid
 
         # Throttling for clamp warning logs
         self.last_clamp_warning_time = 0.0
@@ -406,6 +434,11 @@ class RudderSailRadioNode(ArgoBaseNode):
         
         # Track previous radio health state for change detection
         self.prev_radio_healthy = None  # None = unknown, True = healthy, False = unhealthy
+        
+        # Debug logging throttling (log 1 out of every 100 messages)
+        self._debug_control_authority_counter = 0
+        self._debug_human_activity_counter = 0
+        self._debug_small_change_counter = 0
         
         # Change detection for publishing optimization
         self.prev_published_radio_rudder = None
@@ -421,7 +454,7 @@ class RudderSailRadioNode(ArgoBaseNode):
         # Minimum change threshold for publishing (1% of full range)
         self.PUBLISH_CHANGE_THRESHOLD = 0.01  # 1% of -1 to +1 range
         # Maximum time between publishes even if no change (ensure subscribers know we're alive)
-        self.MAX_PUBLISH_INTERVAL = 1.0  # 1 second
+        self.MAX_PUBLISH_INTERVAL = 5.0  # 5 seconds
         
         # Cache message objects to avoid allocation overhead
         self._radio_msg_cache = Vector3()
@@ -484,6 +517,28 @@ class RudderSailRadioNode(ArgoBaseNode):
 
         # Initialize servos to high impedance mode for safety
         self.set_servo_high_impedance()
+        
+        # Do an initial radio read to set human_controlled based on radio availability
+        # This ensures the published topic reflects the actual radio state at startup
+        try:
+            initial_rudder = self.read_sysfs_pw(RADIO_RUDDER_PATH)
+            initial_sail = self.read_sysfs_pw(RADIO_SAIL_PATH)
+            if (500 < initial_rudder < 2500 and 500 < initial_sail < 2500):
+                # Radio input is available - human has control
+                self.human_controlled = True
+                self.last_human_activity = time.time()
+                self._radio_was_invalid = False
+                self.get_logger().info("Radio input detected at startup - Human control enabled")
+            else:
+                # Radio input not available - robot control
+                self.human_controlled = False
+                self._radio_was_invalid = True
+                self.get_logger().info("No radio input at startup - Robot control enabled")
+        except Exception as e:
+            # If we can't read radio at startup, assume it's off
+            self.human_controlled = False
+            self._radio_was_invalid = True
+            self.get_logger().debug(f"Could not read radio at startup: {e} - assuming robot control")
 
         # Register cleanup handlers for graceful shutdown
         import atexit
@@ -584,6 +639,9 @@ class RudderSailRadioNode(ArgoBaseNode):
 
         # Validate and normalize radio inputs
         if not (500 < radio_rudder_pw_us < 2500 and 500 < radio_sail_pw_us < 2500):
+            # Mark radio as invalid (off or out of range)
+            self._radio_was_invalid = True
+            
             # Determine the specific cause of health failure
             # Use normalized messages to prevent log spam from changing values
             if radio_rudder_pw_us == 0.0 and radio_sail_pw_us == 0.0:
@@ -620,9 +678,27 @@ class RudderSailRadioNode(ArgoBaseNode):
 
         self.last_radio_update = time.time()
 
+        # Check if radio just switched on (transition from invalid/0 to valid)
+        # This immediately grants human control when radio is turned on
+        if self._radio_was_invalid:
+            # Radio was previously invalid/off, now it's valid - human just turned on radio
+            self.last_human_activity = time.time()
+            self.human_controlled = True
+            self._radio_was_invalid = False
+            self.get_logger().info(
+                f"Radio input detected - Human control immediately granted (rudder: {self.radio_rudder:.3f}, sail: {self.radio_sail:.3f})")
+            # Update previous values to current so we don't trigger false change detection
+            self.prev_radio_rudder = self.radio_rudder
+            self.prev_radio_sail = self.radio_sail
+            return True
+
         # Detect human activity based on significant radio input changes
         rudder_change = abs(self.radio_rudder - self.prev_radio_rudder)
         sail_change = abs(self.radio_sail - self.prev_radio_sail)
+        
+        # Store change values for periodic status logging
+        self._last_rudder_change = rudder_change
+        self._last_sail_change = sail_change
 
         if rudder_change > self.deadband_threshold or sail_change > self.deadband_threshold:
             self.last_human_activity = time.time()
@@ -630,10 +706,21 @@ class RudderSailRadioNode(ArgoBaseNode):
             self._last_activity_time = time.time()  # Track for adaptive timer frequencies (wake up!)
             if not self.human_controlled:
                 self.get_logger().info(
-                    f"Human activity detected (rudder: {rudder_change:.3f}, sail: {sail_change:.3f})")
+                    f"Human activity detected (rudder: {rudder_change:.3f}, sail: {sail_change:.3f}, deadband: {self.deadband_threshold:.3f})")
+            else:
+                # Throttle debug logging to 1 in 100 messages
+                self._debug_human_activity_counter += 1
+                if self._debug_human_activity_counter % 100 == 0:
+                    self.get_logger().debug(
+                        f"Human activity continues (rudder: {rudder_change:.3f}, sail: {sail_change:.3f}, deadband: {self.deadband_threshold:.3f})")
         elif rudder_change > 0.001 or sail_change > 0.001:  # Small changes also update timestamp
             self._last_radio_value_change_time = time.time()  # Track any change for adaptive reads
             self._last_activity_time = time.time()  # Even small radio changes wake up timers
+            # Throttle debug logging to 1 in 100 messages
+            self._debug_small_change_counter += 1
+            if self._debug_small_change_counter % 100 == 0:
+                self.get_logger().debug(
+                    f"Small radio change (rudder: {rudder_change:.3f}, sail: {sail_change:.3f}, deadband: {self.deadband_threshold:.3f}) - not enough to update human_activity")
 
         # Update previous values for next comparison
         self.prev_radio_rudder = self.radio_rudder
@@ -677,6 +764,10 @@ class RudderSailRadioNode(ArgoBaseNode):
         if self.last_human_activity == 0.0:
             # No human activity detected yet, robot can take control immediately
             reason = "no_human_activity_detected_yet"
+            # Throttle debug logging to 1 in 100 messages
+            self._debug_control_authority_counter += 1
+            if self._debug_control_authority_counter % 100 == 0:
+                self.get_logger().debug(f"Control authority: ROBOT (last_human_activity=0.0, deadband_threshold={self.deadband_threshold:.3f})")
             return False, reason  # Robot control
         
         time_since_human_activity = current_time - self.last_human_activity
@@ -684,6 +775,10 @@ class RudderSailRadioNode(ArgoBaseNode):
         # Human has control if there's been recent activity
         if time_since_human_activity < self.human_override_timeout:
             reason = f"human_activity_within_{self.human_override_timeout:.1f}s (last_activity: {time_since_human_activity:.1f}s ago)"
+            # Throttle debug logging to 1 in 100 messages
+            self._debug_control_authority_counter += 1
+            if self._debug_control_authority_counter % 100 == 0:
+                self.get_logger().debug(f"Control authority: HUMAN (time_since={time_since_human_activity:.2f}s < timeout={self.human_override_timeout:.1f}s, deadband={self.deadband_threshold:.3f})")
             return True, reason  # Human control
 
         # Robot can take control after human timeout expires
@@ -699,7 +794,60 @@ class RudderSailRadioNode(ArgoBaseNode):
         else:
             reason += " (no_autonomous_controller)"
 
+        # Throttle debug logging to 1 in 100 messages
+        self._debug_control_authority_counter += 1
+        if self._debug_control_authority_counter % 100 == 0:
+            self.get_logger().debug(f"Control authority: ROBOT (time_since={time_since_human_activity:.2f}s >= timeout={self.human_override_timeout:.1f}s, deadband={self.deadband_threshold:.3f})")
         return False, reason  # Robot control
+
+    def _on_parameters_set(self, parameters):
+        """Callback for parameter changes - handles runtime parameter updates."""
+        result = SetParametersResult()
+        result.successful = True
+        
+        for param in parameters:
+            param_name = param.name
+            
+            # Get parameter value - handle both ParameterValue object and direct value
+            if hasattr(param, 'value'):
+                param_value = param.value
+            else:
+                param_value = param.get_parameter_value()
+            
+            # Extract double value from ParameterValue object or use directly
+            if hasattr(param_value, 'double_value'):
+                double_value = param_value.double_value
+            elif isinstance(param_value, (int, float)):
+                double_value = float(param_value)
+            else:
+                self.get_logger().warn(f"Parameter {param_name} has unexpected value type: {type(param_value)}")
+                continue
+            
+            if param_name == 'deadband_threshold':
+                old_value = self.deadband_threshold
+                self.deadband_threshold = double_value
+                self.get_logger().info(
+                    f"✅ Parameter updated: deadband_threshold changed from {old_value:.3f} to {double_value:.3f}")
+                
+            elif param_name == 'human_override_timeout':
+                old_value = self.human_override_timeout
+                self.human_override_timeout = double_value
+                self.get_logger().info(
+                    f"✅ Parameter updated: human_override_timeout changed from {old_value:.1f}s to {double_value:.1f}s")
+                
+            elif param_name == 'safety_max_rudder':
+                old_value = self.safety_max_rudder
+                self.safety_max_rudder = double_value
+                self.get_logger().info(
+                    f"✅ Parameter updated: safety_max_rudder changed from {old_value:.2f} to {double_value:.2f}")
+                
+            elif param_name == 'safety_max_sail':
+                old_value = self.safety_max_sail
+                self.safety_max_sail = double_value
+                self.get_logger().info(
+                    f"✅ Parameter updated: safety_max_sail changed from {old_value:.2f} to {double_value:.2f}")
+        
+        return result
 
     def apply_safety_limits(self, rudder, sail):
         """Apply safety limits to control commands."""
@@ -798,6 +946,22 @@ class RudderSailRadioNode(ArgoBaseNode):
             self._last_activity_time = current_time  # Track activity for adaptive timers
 
         self.human_controlled = new_human_controlled
+        
+        # Log periodic status (every 10 seconds) to help debug control authority
+        if not hasattr(self, '_last_status_log_time'):
+            self._last_status_log_time = 0.0
+        if current_time - self._last_status_log_time > 10.0:
+            time_since_human = current_time - self.last_human_activity if self.last_human_activity > 0 else float('inf')
+            rudder_change = getattr(self, '_last_rudder_change', 0.0)
+            sail_change = getattr(self, '_last_sail_change', 0.0)
+            self.get_logger().info(
+                f"Control status: human_controlled={self.human_controlled}, "
+                f"last_human_activity={time_since_human:.1f}s ago, "
+                f"deadband={self.deadband_threshold:.3f}, "
+                f"timeout={self.human_override_timeout:.1f}s, "
+                f"rudder_change={rudder_change:.3f}, "
+                f"sail_change={sail_change:.3f}")
+            self._last_status_log_time = current_time
 
         # 5. Select control commands based on authority
         if self.human_controlled:
@@ -897,6 +1061,7 @@ class RudderSailRadioNode(ArgoBaseNode):
             self._human_msg_cache.data = self.human_controlled
             self.pub_human_controlled.publish(self._human_msg_cache)
             self.prev_published_human_controlled = self.human_controlled
+            self.last_status_publish_time = current_time  # Update timestamp for timeout tracking
 
         # Publish detailed control authority info (only on change or timeout)
         authority_x = 1.0 if self.human_controlled else 0.0

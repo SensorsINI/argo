@@ -34,8 +34,8 @@ controller_node:
 # Two-node system: Low-level arbitration (rudder_sail_radio.py)
 rudder_sail_radio_node:
   ros__parameters:
-    human_override_timeout: 2.0      # Seconds after last human activity before robot can take control
-    deadband_threshold: 0.05         # Minimum change in radio input to count as human activity
+    human_override_timeout: 5.0      # Seconds after last human activity before robot can take control
+    deadband_threshold: 0.1875          # Minimum change in radio input to count as human activity (5σ measured)
     safety_max_rudder: 1.0          # Maximum rudder command magnitude
     safety_max_sail: 1.0            # Maximum sail command magnitude
     param_file_path: "argo.yaml"
@@ -58,5 +58,5 @@ argo_boat_visualization:
 # rudder_sail_radio_node:
 #   ros__parameters:
 #     human_override_timeout: 5.0     # Longer timeout
-#     deadband_threshold: 0.02        # More sensitive
+#     deadband_threshold: 0.3          # Standard threshold (5σ measured)
 #     safety_max_rudder: 0.8          # Conservative limits

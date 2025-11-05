@@ -1,6 +1,6 @@
 {
   "charging_slope_v_per_s": 0.00028200333706844853,
-  "discharging_slope_v_per_s": -0.0003500297363159907,
-  "timestamp": "2025-11-05T06:41:16.957381",
+  "discharging_slope_v_per_s": -8.990240773277339e-05,
+  "timestamp": "2025-11-05T12:10:53.876245",
   "sample_count": 60
 }
