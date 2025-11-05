@@ -8,10 +8,13 @@
 #   -n N    Show last N lines (default: 20, ignored when PATTERN provided)
 #   -f      Follow mode (tail -f behavior, default)
 #   -e      Error check mode: search all logs for ERROR/WARN/FATAL [with optional PATTERN]
+#           When combined with -f, shows recent errors (default: last 1 minute) then follows
+#   -t TIME Time window for recent logs (e.g., "1m", "5m", "1h", "30s")
+#           Default: 1 minute when using -ef combination
 #   -a      Show all logs for last 2 boots with optional PATTERN filter
 #   -h      Show this help
-#   PATTERN Optional grep pattern to filter logs (searches ALL logs, not just last N)
-#           Examples: "controller", "anem_node", "rudder"
+#   PATTERN Optional grep pattern to filter logs (extended regex supported)
+#           Examples: "controller", "anem_node", "rudder", "(controller|dashboard)"
 
 # Default options
 LINES=20
@@ -19,6 +22,7 @@ FOLLOW=true
 GREP_PATTERN=""
 ERROR_CHECK=false
 ALL_LOGS=false
+TIME_WINDOW=""
 
 # Color codes for each service
 COLOR_ARGO_LAUNCH='\e[0;96m'      # Cyan for argo-launch
@@ -39,7 +43,7 @@ SERVICE_POWER="argo_power_control.service"
 SERVICE_IMU="argo_bno085.service"
 
 # Parse command line options
-while getopts "n:feha" opt; do
+while getopts "n:fet:ha" opt; do
     case $opt in
         n)
             LINES=$OPTARG
@@ -49,7 +53,10 @@ while getopts "n:feha" opt; do
             ;;
         e)
             ERROR_CHECK=true
-            FOLLOW=false
+            # Don't disable FOLLOW when -e is used - allow -ef combination
+            ;;
+        t)
+            TIME_WINDOW="$OPTARG"
             ;;
         a)
             ALL_LOGS=true
@@ -66,11 +73,15 @@ while getopts "n:feha" opt; do
             echo "  -f      Follow mode (default, live tail)"
             echo "  -e      Error check mode: scan ALL logs for ERROR/WARN/FATAL"
             echo "          Optional PATTERN filters by node/service name"
+            echo "          When combined with -f, shows recent errors then follows"
+            echo "  -t TIME Time window for recent logs (e.g., \"1m\", \"5m\", \"1h\", \"30s\")"
+            echo "          Default: 1 minute when using -ef combination"
             echo "  -a      Show all logs since last 2 boots with optional PATTERN filter"
             echo "  -h      Show this help"
             echo ""
             echo "Arguments:"
-            echo "  PATTERN Optional grep pattern to filter logs (scans ALL logs)"
+            echo "  PATTERN Optional grep pattern to filter logs (extended regex supported)"
+            echo "          Examples: 'controller', '(controller|dashboard)', 'anem.*node'"
             echo ""
             echo "Services monitored:"
             echo "  - ${SERVICE_ARGO} (cyan)"
@@ -86,8 +97,11 @@ while getopts "n:feha" opt; do
             echo "  argo_logs.sh                    # Follow all logs (live)"
             echo "  argo_logs.sh -n 50              # Show last 50 lines"
             echo "  argo_logs.sh controller         # Scan ALL logs for 'controller'"
-            echo "  argo_logs.sh -e                 # Check for any errors/warnings"
-            echo "  argo_logs.sh -e anem            # Check for errors in anem node"
+            echo "  argo_logs.sh -e                 # Check for any errors/warnings (ALL logs)"
+            echo "  argo_logs.sh -e anem            # Check for errors in anem node (ALL logs)"
+            echo "  argo_logs.sh -ef controller     # Show recent errors matching 'controller', then follow"
+            echo "  argo_logs.sh -ef '(controller|dashboard)'  # Show errors matching either, then follow"
+            echo "  argo_logs.sh -ef -t 5m          # Show last 5 minutes of errors, then follow"
             echo "  argo_logs.sh -a                 # Show all logs (no filtering)"
             echo "  argo_logs.sh -a controller      # Show all logs filtered by 'controller'"
             exit 0
@@ -103,10 +117,20 @@ done
 shift $((OPTIND-1))
 GREP_PATTERN="$1"
 
+# Set default time window for -ef combination
+if [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ] && [ -z "$TIME_WINDOW" ]; then
+    TIME_WINDOW="1m"
+fi
+
 # --- Main Execution ---
 
 echo "📋 Argo Multi-Service Logs"
-if [ "$ERROR_CHECK" = true ]; then
+if [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ]; then
+    echo "🚨 Error Follow Mode: Recent errors (last ${TIME_WINDOW}) + follow"
+    if [ -n "$GREP_PATTERN" ]; then
+        echo "🔍 Filter: $GREP_PATTERN"
+    fi
+elif [ "$ERROR_CHECK" = true ]; then
     echo "🚨 Error Check Mode: Scanning ALL logs for ERROR/WARN/FATAL"
     if [ -n "$GREP_PATTERN" ]; then
         echo "🔍 Filter: $GREP_PATTERN"
@@ -163,6 +187,12 @@ journalctl_cmd+=" -u $SERVICE_ARGO -u $SERVICE_BATTERY -u $SERVICE_POWER -u $SER
 # Add options based on flags
 if [ "$ALL_LOGS" = true ]; then
     journalctl_cmd+=" --boot=-1..0"
+elif [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ]; then
+    # -ef combination: show recent errors, then follow
+    if [ -n "$TIME_WINDOW" ]; then
+        journalctl_cmd+=" --since \"${TIME_WINDOW} ago\""
+    fi
+    journalctl_cmd+=" -f"
 elif [ "$FOLLOW" = true ]; then
     journalctl_cmd+=" -n $LINES -f"
 # If not following and no pattern/error check, limit lines
@@ -175,11 +205,16 @@ journalctl_cmd+=" --output=short-iso-precise"
 # Build the full command pipeline
 full_cmd="$journalctl_cmd 2>/dev/null"
 
+# Apply filters: when -ef is used with pattern, we need both error keywords AND pattern
 if [ "$ERROR_CHECK" = true ]; then
+    # First filter for errors
     full_cmd+=" | grep --line-buffered -iE 'ERROR|WARN|FATAL'"
-fi
-
-if [ -n "$GREP_PATTERN" ]; then
+    # Then filter for pattern if provided
+    if [ -n "$GREP_PATTERN" ]; then
+        full_cmd+=" | grep --line-buffered -iE '$GREP_PATTERN'"
+    fi
+elif [ -n "$GREP_PATTERN" ]; then
+    # Just pattern filtering
     full_cmd+=" | grep --line-buffered -iE '$GREP_PATTERN'"
 fi
 
