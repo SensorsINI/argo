@@ -18,6 +18,7 @@
         <div class="card">
             <h2>System Status</h2>
             <div class="status-grid">
+                <!-- Row 1: System, Nodes, Health -->
                 <div class="status-item">
                     <span class="label">System:</span>
                     <span class="value" id="system-status">⏳ Loading...</span>
@@ -30,6 +31,7 @@
                     <span class="label">Health:</span>
                     <span class="value" id="nodes-health">-/-</span>
                 </div>
+                <!-- Row 2: Battery information -->
                 <div class="status-item">
                     <span class="label">Battery:</span>
                     <span class="value" id="battery-status">-.- V (--%)</span>
@@ -38,6 +40,11 @@
                     <span class="label">Charging:</span>
                     <span class="value" id="charging-status">???</span>
                 </div>
+                <div class="status-item">
+                    <span class="label">USB Power:</span>
+                    <span class="value" id="usb-power">???</span>
+                </div>
+                <!-- Row 3: Temperatures -->
                 <div class="status-item">
                     <span class="label">CPU Temp:</span>
                     <span class="value" id="cpu-temp">-- °C</span>
@@ -50,18 +57,15 @@
                     <span class="label">Air Temp:</span>
                     <span class="value" id="air-temp">-- °C</span>
                 </div>
-                <div class="status-item">
-                    <span class="label">USB Power:</span>
-                    <span class="value" id="usb-power">???</span>
-                </div>
             </div>
-            <div class="battery-time" id="battery-time"></div>
+            <div class="node-summary" id="node-summary"></div>
         </div>
 
         <!-- GPS Status Card -->
         <div class="card">
             <h2>GPS & Navigation</h2>
             <div class="status-grid">
+                <!-- Row 1: GPS Lock, Position, Speed/Course -->
                 <div class="status-item">
                     <span class="label">GPS Lock:</span>
                     <span class="value" id="gps-lock">🔴 NO LOCK</span>
@@ -71,16 +75,13 @@
                     <span class="value" id="gps-position">--</span>
                 </div>
                 <div class="status-item">
-                    <span class="label">Heading:</span>
+                    <span class="label">Speed/Course:</span>
+                    <span class="value" id="gps-speed-course">-.-- kts @ ---°</span>
+                </div>
+                <!-- Row 2: IMU Bearing, Wind -->
+                <div class="status-item">
+                    <span class="label">IMU Bearing:</span>
                     <span class="value" id="compass-heading">--- °</span>
-                </div>
-                <div class="status-item">
-                    <span class="label">Speed:</span>
-                    <span class="value" id="gps-speed">-.-- kts</span>
-                </div>
-                <div class="status-item">
-                    <span class="label">Course:</span>
-                    <span class="value" id="gps-course">--- °</span>
                 </div>
                 <div class="status-item">
                     <span class="label">Wind:</span>
@@ -139,17 +140,14 @@
         <div class="card">
             <h2>System Control</h2>
             <div class="button-grid">
-                <button class="btn btn-primary" onclick="togglePause()">
-                    ⏸️ Pause/Resume Nodes
+                <button class="btn" id="pause-toggle-btn" onclick="togglePause()">
+                    ⏸️ Pause: Unknown
                 </button>
-                <button class="btn btn-success" onclick="startRecording()">
-                    🔴 Start Recording
+                <button class="btn" id="recording-toggle-btn" onclick="toggleRecording()">
+                    🔴 Recording: Unknown
                 </button>
-                <button class="btn btn-warning" onclick="stopRecording()">
-                    ⏹️ Stop Recording
-                </button>
-                <button class="btn btn-danger" onclick="confirmStop()">
-                    🛑 Stop System
+                <button class="btn" id="system-toggle-btn" onclick="toggleSystem()">
+                    🛑 System: Unknown
                 </button>
             </div>
         </div>
@@ -224,11 +222,33 @@
                     `${data.nodes_running}/${data.nodes_total}`;
             }
             
-            // Battery
-            if (data.battery_voltage && data.battery_pct) {
-                document.getElementById('battery-status').textContent = 
-                    `${data.battery_voltage.toFixed(1)} V (${data.battery_pct.toFixed(0)}%)`;
+            // Battery - include voltage, percentage, and time estimate
+            let batteryText = '';
+            if (data.battery_voltage && data.battery_pct !== null && data.battery_pct !== undefined) {
+                batteryText = `${data.battery_voltage.toFixed(1)} V (${data.battery_pct.toFixed(0)}%)`;
+                
+                // Add time estimate
+                if (data.battery_time_to_full !== null && data.battery_time_to_full !== undefined) {
+                    if (data.battery_time_to_full < 0.1) {
+                        batteryText += ' - Full';
+                    } else if (data.battery_time_to_full < 1.0) {
+                        batteryText += ` - ${Math.round(data.battery_time_to_full * 60)}m to full`;
+                    } else {
+                        batteryText += ` - ${data.battery_time_to_full.toFixed(1)}h to full`;
+                    }
+                } else if (data.battery_time_to_empty !== null && data.battery_time_to_empty !== undefined) {
+                    if (data.battery_time_to_empty < 0.1) {
+                        batteryText += ' - <6m left';
+                    } else if (data.battery_time_to_empty < 1.0) {
+                        batteryText += ` - ${Math.round(data.battery_time_to_empty * 60)}m left`;
+                    } else {
+                        batteryText += ` - ${data.battery_time_to_empty.toFixed(1)}h left`;
+                    }
+                }
+            } else {
+                batteryText = '-.- V (--%)';
             }
+            document.getElementById('battery-status').textContent = batteryText;
             
             document.getElementById('charging-status').textContent = 
                 data.battery_charging === true ? '🔌 YES' :
@@ -238,26 +258,53 @@
                 data.battery_usb_power === true ? '⚡ YES' :
                 data.battery_usb_power === false ? '❌ NO' : '???';
             
-            // Battery time estimates
-            let batteryTimeText = '';
-            if (data.battery_time_to_full !== null && data.battery_time_to_full !== undefined) {
-                if (data.battery_time_to_full < 0.1) {
-                    batteryTimeText = '⏱️ Fully charged (< 6 min to full)';
-                } else if (data.battery_time_to_full < 1.0) {
-                    batteryTimeText = `⏱️ Time to full: ${Math.round(data.battery_time_to_full * 60)} min`;
-                } else {
-                    batteryTimeText = `⏱️ Time to full: ${data.battery_time_to_full.toFixed(1)} hours`;
-                }
-            } else if (data.battery_time_to_empty !== null && data.battery_time_to_empty !== undefined) {
-                if (data.battery_time_to_empty < 0.1) {
-                    batteryTimeText = '⚠️ Battery nearly depleted (< 6 min)';
-                } else if (data.battery_time_to_empty < 1.0) {
-                    batteryTimeText = `⏱️ Est. runtime: ${Math.round(data.battery_time_to_empty * 60)} min`;
-                } else {
-                    batteryTimeText = `⏱️ Est. runtime: ${data.battery_time_to_empty.toFixed(1)} hours`;
+            // Node summary - show non-running or non-healthy nodes
+            let nodeSummaryText = '';
+            const nonRunningNodes = [];
+            const unhealthyNodes = [];
+            
+            // Check nodes_list for non-running nodes
+            if (data.nodes_list) {
+                for (const [node, status] of Object.entries(data.nodes_list)) {
+                    if (status.includes('STOPPED')) {
+                        nonRunningNodes.push(node);
+                    }
                 }
             }
-            document.getElementById('battery-time').textContent = batteryTimeText;
+            
+            // Get unhealthy node names from backend
+            if (data.nodes_unhealthy_list && data.nodes_unhealthy_list.length > 0) {
+                unhealthyNodes.push(...data.nodes_unhealthy_list);
+            } else if (data.nodes_unhealthy && data.nodes_unhealthy > 0) {
+                // Fallback to count if names not available
+                unhealthyNodes.push(`${data.nodes_unhealthy} unhealthy`);
+            }
+            
+            const nodeSummaryEl = document.getElementById('node-summary');
+            if (nonRunningNodes.length > 0 || unhealthyNodes.length > 0) {
+                const parts = [];
+                if (nonRunningNodes.length > 0) {
+                    if (nonRunningNodes.length <= 3) {
+                        parts.push(`⚠️ Stopped: ${nonRunningNodes.join(', ')}`);
+                    } else {
+                        parts.push(`⚠️ ${nonRunningNodes.length} stopped nodes`);
+                    }
+                }
+                if (unhealthyNodes.length > 0) {
+                    if (unhealthyNodes.length <= 3) {
+                        parts.push(`❌ Unhealthy: ${unhealthyNodes.join(', ')}`);
+                    } else {
+                        parts.push(`❌ ${unhealthyNodes.length} unhealthy nodes`);
+                    }
+                }
+                nodeSummaryText = parts.join(' | ');
+                nodeSummaryEl.textContent = nodeSummaryText;
+                nodeSummaryEl.className = 'node-summary summary-warning';
+            } else {
+                nodeSummaryText = '✅ All nodes running and healthy';
+                nodeSummaryEl.textContent = nodeSummaryText;
+                nodeSummaryEl.className = 'node-summary summary-ok';
+            }
             
             // Temperatures
             document.getElementById('cpu-temp').textContent = 
@@ -280,14 +327,15 @@
                 document.getElementById('gps-position').textContent = '--';
             }
             
+            // Speed/Course combined
+            const speed = data.gps_sog ? `${data.gps_sog.toFixed(2)} kts` : '-.-- kts';
+            const course = data.gps_cog ? `${Math.round(data.gps_cog)}°` : '---°';
+            document.getElementById('gps-speed-course').textContent = 
+                `${speed} @ ${course}`;
+            
+            // IMU Bearing (Heading)
             document.getElementById('compass-heading').textContent = 
                 data.compass_heading ? `${Math.round(data.compass_heading)}°` : '--- °';
-            
-            document.getElementById('gps-speed').textContent = 
-                data.gps_sog ? `${data.gps_sog.toFixed(2)} kts` : '-.-- kts';
-            
-            document.getElementById('gps-course').textContent = 
-                data.gps_cog ? `${Math.round(data.gps_cog)}°` : '--- °';
             
             // Wind
             if (data.wind_speed !== null && data.wind_angle !== null) {
@@ -312,6 +360,48 @@
             document.getElementById('control-mode').textContent = 
                 data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
             document.getElementById('controller-type').textContent = data.controller_type;
+            
+            // Pause status - update toggle button
+            const pauseBtn = document.getElementById('pause-toggle-btn');
+            if (data.controller_paused === true) {
+                pauseBtn.textContent = '▶️ Resume Controller';
+                pauseBtn.className = 'btn btn-success';
+            } else if (data.controller_paused === false) {
+                pauseBtn.textContent = '⏸️ Pause Controller';
+                pauseBtn.className = 'btn btn-warning';
+            } else {
+                pauseBtn.textContent = '⏸️ Pause: Unknown';
+                pauseBtn.className = 'btn btn-secondary';
+            }
+            pauseBtn.disabled = false;
+            
+            // Recording status - update toggle button
+            const recordingBtn = document.getElementById('recording-toggle-btn');
+            if (data.recording === true) {
+                recordingBtn.textContent = '⏹️ Stop Recording';
+                recordingBtn.className = 'btn btn-warning';
+            } else if (data.recording === false) {
+                recordingBtn.textContent = '🔴 Start Recording';
+                recordingBtn.className = 'btn btn-success';
+            } else {
+                recordingBtn.textContent = '🔴 Recording: Unknown';
+                recordingBtn.className = 'btn btn-secondary';
+            }
+            recordingBtn.disabled = false;
+            
+            // System status - update toggle button
+            const systemBtn = document.getElementById('system-toggle-btn');
+            if (data.system_running === true) {
+                systemBtn.textContent = '🛑 Stop System';
+                systemBtn.className = 'btn btn-danger';
+            } else if (data.system_running === false) {
+                systemBtn.textContent = '▶️ Start System';
+                systemBtn.className = 'btn btn-success';
+            } else {
+                systemBtn.textContent = '🛑 System: Unknown';
+                systemBtn.className = 'btn btn-secondary';
+            }
+            systemBtn.disabled = false;
             
             // Node details
             if (data.nodes_list) {
@@ -361,13 +451,30 @@
 
         // API Actions
         function togglePause() {
+            const btn = document.getElementById('pause-toggle-btn');
+            const originalText = btn.textContent;
+            
+            // Disable button during request
+            btn.disabled = true;
+            btn.textContent = '⏳ Processing...';
+            
             fetch('/api/toggle_pause', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
-                    alert(data.success ? `✅ ${data.message}` : `❌ ${data.message}`);
-                    updateStatus();
+                    if (data.success) {
+                        alert(`✅ ${data.message}`);
+                        updateStatus();
+                    } else {
+                        alert(`❌ ${data.message}`);
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
                 })
-                .catch(error => alert(`❌ Error: ${error}`));
+                .catch(error => {
+                    alert(`❌ Error: ${error}`);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
         }
 
         function switchController(type) {
@@ -396,40 +503,77 @@
             );
         }
 
-        function startRecording() {
-            fetch('/api/recording/start', { method: 'POST' })
+        function toggleRecording() {
+            const btn = document.getElementById('recording-toggle-btn');
+            const originalText = btn.textContent;
+            
+            // Disable button during request
+            btn.disabled = true;
+            btn.textContent = '⏳ Processing...';
+            
+            fetch('/api/recording/toggle', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
-                    alert(data.success ? `✅ Recording started` : `❌ ${data.message}`);
-                    updateStatus();
+                    if (data.success) {
+                        alert(`✅ ${data.message}`);
+                        updateStatus();
+                    } else {
+                        alert(`❌ ${data.message}`);
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
                 })
-                .catch(error => alert(`❌ Error: ${error}`));
+                .catch(error => {
+                    alert(`❌ Error: ${error}`);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
         }
 
-        function stopRecording() {
-            fetch('/api/recording/stop', { method: 'POST' })
+        function toggleSystem() {
+            // Get current state from status data
+            const isRunning = statusData.system_running;
+            
+            // Show confirmation modal for stop action
+            if (isRunning) {
+                showModal(
+                    '⚠️ Stop System',
+                    'This will stop all Argo nodes. Are you sure?',
+                    () => {
+                        performSystemToggle();
+                    }
+                );
+            } else {
+                // Start system - no confirmation needed
+                performSystemToggle();
+            }
+        }
+        
+        function performSystemToggle() {
+            const btn = document.getElementById('system-toggle-btn');
+            const originalText = btn.textContent;
+            
+            // Disable button during request
+            btn.disabled = true;
+            btn.textContent = '⏳ Processing...';
+            
+            fetch('/api/lifecycle/toggle', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
-                    alert(data.success ? `✅ Recording stopped` : `❌ ${data.message}`);
-                    updateStatus();
+                    if (data.success) {
+                        alert(`✅ ${data.message}`);
+                        updateStatus();
+                    } else {
+                        alert(`❌ ${data.message}`);
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
                 })
-                .catch(error => alert(`❌ Error: ${error}`));
-        }
-
-        function confirmStop() {
-            showModal(
-                '⚠️ Stop System',
-                'This will stop all Argo nodes. Are you sure?',
-                () => {
-                    fetch('/api/lifecycle/stop', { method: 'POST' })
-                        .then(response => response.json())
-                        .then(data => {
-                            alert(data.success ? `✅ System stopped` : `❌ ${data.message}`);
-                            updateStatus();
-                        })
-                        .catch(error => alert(`❌ Error: ${error}`));
-                }
-            );
+                .catch(error => {
+                    alert(`❌ Error: ${error}`);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
         }
 
         // Auto-update every 2 seconds

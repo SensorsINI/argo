@@ -265,27 +265,36 @@ class ArgoLifecycleManager:
         simulation_config = config.get('simulation_config', {})
         self.simulation_map_name = simulation_config.get('map_name')
         
-        # Load simulation nodes configuration
-        simulation_node_configs = config.get('simulation_nodes', [])
-        for node_cfg in simulation_node_configs:
-            name = node_cfg.get('name')
-            if not name:
-                continue
+        # Load simulation nodes from 'simulation' group (same pattern as physical_robot)
+        simulation_group = groups.get('simulation', [])
+        
+        for node_name in simulation_group:
+            if node_name not in node_config_map:
+                # Also check simulation_nodes list for nodes that might not be in main nodes list
+                # (like argo_unified_simulator_bridge which is simulation-only)
+                simulation_node_configs = config.get('simulation_nodes', [])
+                node_cfg = None
+                for sim_cfg in simulation_node_configs:
+                    if sim_cfg.get('name') == node_name:
+                        node_cfg = sim_cfg
+                        break
+                
+                if not node_cfg:
+                    print(f"⚠️  Warning: Node '{node_name}' from 'simulation' group not found in node lists.")
+                    continue
+            else:
+                node_cfg = node_config_map[node_name]
             
-            # Convert to the script name format used by the manager
-            script_name = name
-            if not node_cfg.get('special', False):
-                executable = node_cfg.get('executable', '')
-                script_name = os.path.basename(executable) if executable else f"{name}.py"
-            
-            # Store args if present (for nodes like simulator bridge that need --mode)
-            if node_cfg.get('args'):
-                self.simulation_node_args[script_name] = node_cfg.get('args', [])
+            script_name = os.path.basename(node_cfg.get('executable', ''))
             
             if node_cfg.get('special', False):
-                self.simulation_special_nodes.append(script_name)
+                # For special nodes, the "script_name" is just the node name
+                self.simulation_special_nodes.append(node_name)
             else:
                 self.simulation_expected_nodes.append(script_name)
+            
+            if node_cfg.get('args'):
+                self.simulation_node_args[script_name] = node_cfg.get('args', [])
             
             if node_cfg.get('critical', False):
                 self.simulation_critical_nodes.append(script_name)
@@ -1832,61 +1841,31 @@ class ArgoLifecycleManager:
             f"🚢 ARGO STATUS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)
         
-        # Check if argo_power_control.service is running
-        power_control_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_power_control.service'],
-                                    capture_output=True, text=True, timeout=2)
-            power_control_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            power_control_running = False
-
-        if power_control_running:
-            print("⚡ POWER CONTROL: 🟢 RUNNING")
-        else:
-            print("⚡ POWER CONTROL: 🔴 STOPPED")
-
-        # Check if argo_battery_water.service is running (independent service)
-        battery_service_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
-                                    capture_output=True, text=True, timeout=2)
-            battery_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            battery_service_running = False
-
-        if battery_service_running:
-            print("🔋 BATTERY MONITOR: 🟢 RUNNING")
-        else:
-            print("🔋 BATTERY MONITOR: 🔴 STOPPED")
+        # Check all systemd services status (compact one-line format)
+        def check_service_status(service_name):
+            """Helper to check if a systemd service is active"""
+            try:
+                result = subprocess.run(['systemctl', 'is-active', service_name],
+                                        capture_output=True, text=True, timeout=2)
+                return result.returncode == 0 and result.stdout.strip() == 'active'
+            except Exception:
+                return False
         
-        # Check if argo_bno085.service is running (BNO085 IMU driver)
-        bno085_service_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_bno085.service'],
-                                    capture_output=True, text=True, timeout=2)
-            bno085_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            bno085_service_running = False
-
-        if bno085_service_running:
-            print("🧭 BNO085 IMU: 🟢 RUNNING")
-        else:
-            print("🧭 BNO085 IMU: 🔴 STOPPED")
+        power_control_running = check_service_status('argo_power_control.service')
+        battery_service_running = check_service_status('argo_battery_water.service')
+        bno085_service_running = check_service_status('argo_bno085.service')
+        health_monitor_running = check_service_status('argo_health_monitor.service')
+        service_running = check_service_status('argo_launch_standard.service')
         
-        # Check if argo_launch.service is running
-        service_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_launch_standard.service'], 
-                                  capture_output=True, text=True, timeout=2)
-            service_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            service_running = False
+        # Display all services on one compact line
+        services_status = []
+        services_status.append(f"⚡ Power: {'🟢' if power_control_running else '🔴'}")
+        services_status.append(f"🔋 Battery: {'🟢' if battery_service_running else '🔴'}")
+        services_status.append(f"🧭 BNO085: {'🟢' if bno085_service_running else '🔴'}")
+        services_status.append(f"🏥 Health: {'🟢' if health_monitor_running else '🔴'}")
+        services_status.append(f"📋 Launch: {'🟢' if service_running else '🔴'}")
         
-        if service_running:
-            print("📋 LAUNCH SERVICE: 🟢 RUNNING")
-        else:
-            print("📋 LAUNCH SERVICE: 🔴 STOPPED")
+        print(" | ".join(services_status))
         
         # Get FATAL messages for stopped nodes if service is running
         node_fatal_messages = {}

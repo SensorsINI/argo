@@ -1,0 +1,25 @@
+[Unit]
+Description=Argo Health Monitor Service
+Documentation=file://%h/argo/launch/argo_health_monitor.py
+After=network.target
+Before=argo_launch_standard.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/argo/launch
+Environment=ROS_DOMAIN_ID=0
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/launch/argo_health_monitor.py'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+

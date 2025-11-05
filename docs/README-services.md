@@ -13,15 +13,16 @@ This document describes the systemd services that manage the Argo autonomous sai
 
 ## Service Overview
 
-The Argo system consists of 6 main systemd services that coordinate hardware, sensors, and ROS2 nodes:
+The Argo system consists of 7 main systemd services that coordinate hardware, sensors, and ROS2 nodes:
 
 | Service | Purpose | Critical | Dependencies |
 |---------|---------|----------|--------------|
 | `argo_power_control.service` | Power button, LED heartbeat, system control | Yes | network.target |
 | `argo_battery_water.service` | Battery and water monitoring | Yes | network.target |
 | `argo_bno085.service` | IMU driver (BNO085) | Yes | network.target |
+| `argo_health_monitor.service` | Node health monitoring and aggregation | Yes | network.target |
 | `argo_radio_servo_module.service` | Kernel module loader for radio/servo | Yes | network.target |
-| `argo_launch_standard.service` | Main ROS2 node launcher | Yes | bno085, radio_servo_module |
+| `argo_launch_standard.service` | Main ROS2 node launcher | Yes | bno085, radio_servo_module, health_monitor |
 | `argo_thermal_monitor.service` | Temperature monitoring | No | multi-user.target |
 
 ## Dependency Architecture
@@ -42,18 +43,18 @@ argo_power_control.service            argo_battery_water.service
     ↓
     ↓ (continues independently)
     ↓
-    ├─────────────────────────────────────────┐
-    ↓                                         ↓
-argo_bno085.service              argo_radio_servo_module.service
-  - IMU driver (essential)          - Kernel module loader
-  - Blocks launch until ready       - Blocks launch until ready
-  - Late shutdown                   - Provides radio/servo interface
-    ↓                                         ↓
-    └─────────────┬───────────────────────────┘
+    ├─────────────────────────────────────────────────────────────┐
+    ↓                    ↓                    ↓                   ↓
+argo_bno085.service  argo_health_monitor.service  argo_radio_servo_module.service
+  - IMU driver          - Health monitoring          - Kernel module loader
+  - Blocks launch       - Aggregates node status    - Blocks launch until ready
+  - Late shutdown       - Provides health service    - Provides radio/servo interface
+    ↓                    ↓                           ↓
+    └─────────────┬──────┴───────────────────────────┘
                   ↓
       argo_launch_standard.service
         - Main ROS2 launcher
-        - Requires: BNO085 + radio/servo
+        - Requires: BNO085 + health_monitor + radio/servo
         - Launches all ROS2 nodes
 
     ↓ (independent)
@@ -69,19 +70,24 @@ argo_thermal_monitor.service
    - Power control prefers battery monitoring but can start without it
    - Graceful dependency for LED status patterns
 
-2. **bno085 → launch_standard** (`Before` + `Wants`)
+2. **health_monitor → launch_standard** (`Before` + `Wants`)
+   - Launch service MUST wait for health monitor
+   - Provides aggregated health status for power control LED flashes
+   - Essential for system monitoring
+
+3. **bno085 → launch_standard** (`Before` + `Wants`)
    - Launch service MUST wait for IMU driver
    - Essential for autonomous navigation
 
-3. **radio_servo_module → launch_standard** (`Before` + `Wants`)
+4. **radio_servo_module → launch_standard** (`Before` + `Wants`)
    - Launch service MUST wait for radio/servo hardware
    - Essential for control interface
 
-4. **battery_water → shutdown.target** (`Before`)
+5. **battery_water → shutdown.target** (`Before`)
    - Battery monitoring stays active late into shutdown
    - Critical for safe power-off
 
-5. **bno085 → shutdown.target** (`Before`)
+6. **bno085 → shutdown.target** (`Before`)
    - IMU driver stays active late into shutdown
    - Proper hardware cleanup
 
@@ -110,6 +116,11 @@ argo_thermal_monitor.service
     │  - Initializes BNO085 IMU via I2C
     │  - Blocks launch_standard from starting
     │
+    ├─ argo_health_monitor.service starts
+    │  - Initializes health monitoring ROS2 node
+    │  - Provides aggregated health status service
+    │  - Blocks launch_standard from starting
+    │
     └─ argo_radio_servo_module.service starts
        - Loads kernel module
        - Initializes radio/servo hardware
@@ -118,7 +129,7 @@ argo_thermal_monitor.service
 [T+5s] Essential services ready
     ↓
     └─ argo_launch_standard.service starts
-       - Waits for BNO085 + radio_servo_module
+       - Waits for BNO085 + health_monitor + radio_servo_module
        - Launches all ROS2 nodes
        - GPS, anemometer, controller, etc.
     ↓
@@ -136,9 +147,10 @@ argo_thermal_monitor.service
 3. **Power Control** - First Argo service (LED, power button)
 4. **Battery/Water** - Monitoring services (independent start)
 5. **BNO085** - IMU driver (blocks launch)
-6. **Radio/Servo Module** - Kernel module (blocks launch)
-7. **Launch Standard** - Main ROS2 launcher (waits for 4-6)
-8. **Thermal Monitor** - Optional monitoring (independent)
+6. **Health Monitor** - Node health monitoring (blocks launch)
+7. **Radio/Servo Module** - Kernel module (blocks launch)
+8. **Launch Standard** - Main ROS2 launcher (waits for 5-7)
+9. **Thermal Monitor** - Optional monitoring (independent)
 
 ## Shutdown Sequence
 
@@ -324,7 +336,51 @@ WantedBy=multi-user.target
 
 ---
 
-### 4. argo_radio_servo_module.service
+### 4. argo_health_monitor.service
+
+**Purpose**: Node health monitoring and aggregation service
+
+**Configuration**:
+```ini
+[Unit]
+Description=Argo Health Monitor Service
+After=network.target
+Before=argo_launch_standard.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/argo/launch
+Environment=ROS_DOMAIN_ID=0
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/launch/argo_health_monitor.py'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Functions**:
+- Monitors health status of all ROS2 nodes
+- Aggregates health data from individual node health topics
+- Provides `/argo/health/status` service for system-wide health queries
+- Tracks node running status via `ros2 node list`
+- Distinguishes simulation-only nodes (not expected in physical robot mode)
+- Used by power control for LED flash count indication
+
+**Dependencies**:
+- Requires: network.target
+- Before: argo_launch_standard.service (blocks launch)
+- Started by: multi-user.target
+- Required by: argo_launch_standard.service (via Wants)
+
+**Installation**: `make install_health_monitor` in `launch/` directory
+
+---
+
+### 5. argo_radio_servo_module.service
 
 **Purpose**: Kernel module loader for radio/servo hardware
 
@@ -361,7 +417,7 @@ WantedBy=multi-user.target
 
 ---
 
-### 5. argo_launch_standard.service
+### 6. argo_launch_standard.service
 
 **Purpose**: Main ROS2 node launcher and coordinator
 
@@ -369,8 +425,8 @@ WantedBy=multi-user.target
 ```ini
 [Unit]
 Description=Argo Robot ROS2 Launch Service
-After=network.target argo_bno085.service argo_radio_servo_module.service
-Wants=argo_bno085.service argo_radio_servo_module.service
+After=network.target argo_bno085.service argo_radio_servo_module.service argo_health_monitor.service
+Wants=argo_bno085.service argo_radio_servo_module.service argo_health_monitor.service
 
 [Service]
 Type=simple
@@ -391,16 +447,16 @@ WantedBy=multi-user.target
 - Automatic restart on failure
 
 **Dependencies**:
-- Requires: network.target, argo_bno085.service, argo_radio_servo_module.service
-- Wants: argo_bno085.service, argo_radio_servo_module.service (must start)
+- Requires: network.target, argo_bno085.service, argo_radio_servo_module.service, argo_health_monitor.service
+- Wants: argo_bno085.service, argo_radio_servo_module.service, argo_health_monitor.service (must start)
 - Started by: multi-user.target
-- Blocked by: argo_bno085.service, argo_radio_servo_module.service (until ready)
+- Blocked by: argo_bno085.service, argo_health_monitor.service, argo_radio_servo_module.service (until ready)
 
 **Installation**: `make install-standard` in `launch/` directory
 
 ---
 
-### 6. argo_thermal_monitor.service
+### 7. argo_thermal_monitor.service
 
 **Purpose**: System temperature monitoring
 
@@ -450,23 +506,28 @@ sudo make battery-water-install
 cd /home/orangepi/argo/nodes
 sudo make bno085-service-install
 
-# 4. Install radio/servo module
+# 4. Install health monitor
+cd /home/orangepi/argo/launch
+sudo make install_health_monitor
+
+# 5. Install radio/servo module
 cd /home/orangepi/argo/nodes/pwm_capture_module
 sudo make install_module_service
 
-# 5. Install launch service
+# 6. Install launch service
 cd /home/orangepi/argo/launch
 sudo make install-standard
 
-# 6. (Optional) Install thermal monitor
+# 7. (Optional) Install thermal monitor
 cd /home/orangepi/argo/launch
 sudo make install_thermal_monitor
 
-# 7. Reload and enable all services
+# 8. Reload and enable all services
 sudo systemctl daemon-reload
 sudo systemctl enable argo_power_control.service
 sudo systemctl enable argo_battery_water.service
 sudo systemctl enable argo_bno085.service
+sudo systemctl enable argo_health_monitor.service
 sudo systemctl enable argo_radio_servo_module.service
 sudo systemctl enable argo_launch_standard.service
 ```
@@ -478,6 +539,7 @@ sudo systemctl enable argo_launch_standard.service
 systemctl status argo_power_control.service
 systemctl status argo_battery_water.service
 systemctl status argo_bno085.service
+systemctl status argo_health_monitor.service
 systemctl status argo_radio_servo_module.service
 systemctl status argo_launch_standard.service
 
@@ -613,7 +675,7 @@ systemd-analyze plot > boot.svg
 systemd-analyze critical-chain argo_launch_standard.service
 
 # Verify all Argo services
-for svc in argo_power_control argo_battery_water argo_bno085 argo_radio_servo_module argo_launch_standard; do
+for svc in argo_power_control argo_battery_water argo_bno085 argo_health_monitor argo_radio_servo_module argo_launch_standard; do
     echo "=== $svc ==="
     systemd-analyze verify /etc/systemd/system/$svc.service 2>&1 | head -5
 done
@@ -644,6 +706,10 @@ sudo systemctl stop argo_battery_water.service
 # BNO085
 sudo systemctl start argo_bno085.service
 sudo systemctl stop argo_bno085.service
+
+# Health Monitor
+sudo systemctl start argo_health_monitor.service
+sudo systemctl stop argo_health_monitor.service
 
 # Launch (main ROS2 system)
 sudo systemctl start argo_launch_standard.service

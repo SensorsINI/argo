@@ -471,6 +471,11 @@ class PowerController(ArgoBaseNode):
         self.last_lora_update = 0.0
         self.last_network_check = 0.0
         self.status_timeout = 10.0  # Consider unhealthy if no update for 10 seconds
+        
+        # Health monitor integration for comprehensive node health
+        self.health_monitor_unhealthy_count = 0
+        self.health_monitor_query_interval = 5.0  # Query every 5 seconds
+        self.last_health_monitor_query = 0.0
 
         # Desktop notification caching
         self.cached_desktop_user = None
@@ -1711,20 +1716,25 @@ class PowerController(ArgoBaseNode):
         # Explain red failure flashes
         if red_count > 0:
             failure_count = self.get_failure_count()
-            unhealthy_components = []
-            if not self.anemometer_healthy:
-                unhealthy_components.append("anem")
-            if not self.network_healthy:
-                unhealthy_components.append("network")
-            if not self.gps_healthy:
-                unhealthy_components.append("gps")
-            if not self.lora_healthy:
-                unhealthy_components.append("lora")
-            
-            if unhealthy_components:
-                parts.append(f"{failure_count} unhealthy: {', '.join(unhealthy_components)}")
+            # Use health monitor count if available, otherwise show local checks
+            if self.health_monitor_unhealthy_count > 0:
+                parts.append(f"{failure_count} unhealthy nodes")
             else:
-                parts.append(f"{failure_count} unverified")
+                # Fallback to local component checks
+                unhealthy_components = []
+                if not self.anemometer_healthy:
+                    unhealthy_components.append("anem")
+                if not self.network_healthy:
+                    unhealthy_components.append("network")
+                if not self.gps_healthy:
+                    unhealthy_components.append("gps")
+                if not self.lora_healthy:
+                    unhealthy_components.append("lora")
+                
+                if unhealthy_components:
+                    parts.append(f"{failure_count} unhealthy: {', '.join(unhealthy_components)}")
+                else:
+                    parts.append(f"{failure_count} unverified")
         
         # Explain blue status
         if blue_count > 0:
@@ -2652,6 +2662,10 @@ class PowerController(ArgoBaseNode):
             # LoRa signal strength monitoring
             self.lora_signal_sub = self.create_subscription(
                 Int32, '/lora_signal_strength', self._lora_signal_callback, 10)
+            
+            # Health monitor service client for comprehensive health status
+            self.health_monitor_client = self.create_client(
+                Trigger, '/argo/health/status')
 
             self.power_services_created = True
             self.get_logger().info("Power control ROS2 services created:")
@@ -3226,8 +3240,64 @@ class PowerController(ArgoBaseNode):
         if current_time - self.last_lora_update > self.status_timeout:
             self.lora_healthy = False
 
+    def _query_health_monitor(self):
+        """Query health monitor service for comprehensive node health status"""
+        import time
+        import json
+        current_time = time.time()
+        
+        # Throttle queries to avoid excessive service calls
+        if current_time - self.last_health_monitor_query < self.health_monitor_query_interval:
+            return
+        
+        # Only query if ROS2 is available and health monitor client exists
+        if not rclpy.ok() or not hasattr(self, 'health_monitor_client') or not self.health_monitor_client:
+            return
+        
+        try:
+            # Check if service is available
+            if not self.health_monitor_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().debug("Health monitor service not available")
+                return
+            
+            # Make service call
+            request = Trigger.Request()
+            future = self.health_monitor_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    try:
+                        health_data = json.loads(response.message)
+                        nodes_data = health_data.get('nodes', {})
+                        
+                        # Count unhealthy nodes
+                        unhealthy_count = 0
+                        for node_name, node_info in nodes_data.items():
+                            health_status = node_info.get('healthy')
+                            if health_status is False:
+                                unhealthy_count += 1
+                        
+                        self.health_monitor_unhealthy_count = unhealthy_count
+                        self.last_health_monitor_query = current_time
+                        self.get_logger().debug(f"Health monitor query: {unhealthy_count} unhealthy nodes")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        self.get_logger().debug(f"Error parsing health monitor response: {e}")
+        except Exception as e:
+            self.get_logger().debug(f"Error querying health monitor: {e}")
+    
     def get_failure_count(self) -> int:
         """Get the number of system failures for LED indication"""
+        # Query health monitor for comprehensive health status
+        self._query_health_monitor()
+        
+        # Use health monitor count if we've successfully queried it (even if count is 0)
+        # This ensures we use comprehensive health status when available
+        if self.last_health_monitor_query > 0:
+            return self.health_monitor_unhealthy_count
+        
+        # Fallback to local health checks (for backward compatibility when health monitor unavailable)
         # Check for timeouts first
         self._check_status_timeouts()
         

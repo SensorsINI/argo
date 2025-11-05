@@ -113,6 +113,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Node health (from health service)
             'nodes_healthy': 0,
             'nodes_unhealthy': 0,
+            'nodes_unhealthy_list': [],  # List of unhealthy node names
             'nodes_expected_total': 0,  # Total from argo_nodes.yaml (includes excluded services)
             
             # GPS
@@ -283,17 +284,21 @@ class ArgoWebDashboard(ArgoBaseNode):
                 self.get_logger().error(f"Error shutting down Werkzeug server: {e}")
         else:
             self.get_logger().warn("Could not shut down Flask server: wsgi_server not found.")
-
-        # Cancel all timers
+        
+        # Wait for Flask thread to finish (with timeout)
+        if hasattr(self, 'flask_thread') and self.flask_thread.is_alive():
+            self.get_logger().info("Waiting for Flask thread to finish...")
+            self.flask_thread.join(timeout=2.0)
+            if self.flask_thread.is_alive():
+                self.get_logger().warn("Flask thread did not finish within timeout")
+        
+        # Cancel all timers (if any were created)
         for timer_name in ['status_timer', 'health_timer', 'battery_service_timer', 'health_service_timer', 'viewer_activity_timer']:
             if hasattr(self, timer_name):
                 try:
                     getattr(self, timer_name).cancel()
                 except Exception:
                     pass
-        
-        # Give a moment for shutdown to propagate
-        time.sleep(0.5)
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully (only once)"""
@@ -302,13 +307,15 @@ class ArgoWebDashboard(ArgoBaseNode):
             return
 
         self.get_logger().info(f"Received signal {signum}, requesting shutdown...")
-        # Setting this flag prevents re-entry
+        # Setting this flag prevents re-entry and allows main loop to break
         self.signal_received = True
-
-        # To break the main loop in main(), we must call rclpy.shutdown().
-        # It's safest to do this from within the ROS context, so we create a short
-        # one-shot timer to schedule the shutdown. This avoids race conditions.
-        self.create_timer(1.0, lambda: rclpy.shutdown())
+        
+        # Shutdown ROS2 context immediately to break any blocking operations
+        # This will cause rclpy.ok() to return False, breaking the main loop
+        try:
+            rclpy.shutdown()
+        except Exception as e:
+            self.get_logger().warn(f"Error shutting down ROS2 context: {e}")
     
     def _check_for_running_dashboard(self):
         """Check for running web dashboard processes and refuse to start if found."""
@@ -417,6 +424,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
         self._topic_subscriptions.append(
             self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/argo/recording/status', self.recording_status_cb, 10)
         )
         
         # LoRa sources (fallback when WiFi unavailable)
@@ -956,6 +966,14 @@ class ArgoWebDashboard(ArgoBaseNode):
         with self.state_lock:
             self.state['controller_paused'] = msg.data
     
+    def recording_status_cb(self, msg):
+        """Callback for recording status updates."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['recording'] = msg.data
+    
     def _handle_health_request(self, request, response):
         """Override ArgoBaseNode health service callback with flag-based approach"""
         self.get_logger().info("🔥 HEALTH SERVICE CALLBACK CALLED!")
@@ -1143,9 +1161,10 @@ class ArgoWebDashboard(ArgoBaseNode):
                         health_data = json.loads(response.message)
                         nodes_data = health_data.get('nodes', {})
                         
-                        # Count healthy and unhealthy nodes
+                        # Count healthy and unhealthy nodes, and collect unhealthy node names
                         healthy_count = 0
                         unhealthy_count = 0
+                        unhealthy_nodes = []
                         
                         for node_name, node_info in nodes_data.items():
                             health_status = node_info.get('healthy')
@@ -1153,11 +1172,15 @@ class ArgoWebDashboard(ArgoBaseNode):
                                 healthy_count += 1
                             elif health_status is False:
                                 unhealthy_count += 1
+                                # Store node name (remove .py extension for display)
+                                display_name = node_name.rstrip('.py') if node_name.endswith('.py') else node_name
+                                unhealthy_nodes.append(display_name)
                         
                         with self.state_lock:
                             self.state['nodes_healthy'] = healthy_count
                             self.state['nodes_unhealthy'] = unhealthy_count
-                            self.get_logger().debug(f"Updated health counts: {healthy_count} healthy, {unhealthy_count} unhealthy")
+                            self.state['nodes_unhealthy_list'] = unhealthy_nodes
+                            self.get_logger().debug(f"Updated health counts: {healthy_count} healthy, {unhealthy_count} unhealthy: {unhealthy_nodes}")
                     except (json.JSONDecodeError, KeyError) as e:
                         self.get_logger().warn(f"Error parsing health service response: {e}")
                 else:
@@ -1179,21 +1202,27 @@ class ArgoWebDashboard(ArgoBaseNode):
                 self.get_logger().debug("Skipping battery status update in low-power mode")
                 return
             
-            # Check if topic data is missing - only query service if needed
+            # Check if topic data or time estimates are missing
+            # Time estimates are ONLY available from service, not topics
             with self.state_lock:
                 charging_from_topic = self.state.get('battery_charging')
                 usb_from_topic = self.state.get('battery_usb_power')
                 voltage_from_topic = self.state.get('battery_voltage')
                 pct_from_topic = self.state.get('battery_pct')
                 pcb_temp_from_topic = self.state.get('pcb_temp')
+                time_to_full = self.state.get('battery_time_to_full')
+                time_to_empty = self.state.get('battery_time_to_empty')
             
-            # Only query service if any topic data is missing (None)
-            # Query if charging, USB power, voltage, pct, or PCB temp is missing
-            if (charging_from_topic is not None and usb_from_topic is not None and 
-                voltage_from_topic is not None and pct_from_topic is not None and 
-                pcb_temp_from_topic is not None):
-                self.get_logger().debug("Topics have all data, no need to query service")
-                return  # Topics have all data, no need to query service
+            # Always query service if time estimates are missing (topics don't provide these)
+            # Also query if any other topic data is missing
+            needs_time_estimates = (time_to_full is None and time_to_empty is None)
+            needs_other_data = (charging_from_topic is None or usb_from_topic is None or 
+                               voltage_from_topic is None or pct_from_topic is None or 
+                               pcb_temp_from_topic is None)
+            
+            if not needs_time_estimates and not needs_other_data:
+                self.get_logger().debug("Topics have all data and time estimates available, skipping service query")
+                return  # All data available, no need to query service
             
             if not self.battery_status_client.wait_for_service(timeout_sec=5.0):
                 self.get_logger().debug("Battery status service not available after 5 seconds")
@@ -1214,6 +1243,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                         battery_voltage = raw_data.get('battery_voltage')
                         battery_pct = raw_data.get('battery_remaining_pct')
                         pcb_temperature = raw_data.get('pcb_temperature')
+                        time_to_full = raw_data.get('time_to_full_hours')
+                        time_to_empty = raw_data.get('time_to_empty_hours')
                         
                         # Only update if we got valid data and topic data is still missing
                         # This prevents overriding topic data if it arrived between check and response
@@ -1232,6 +1263,13 @@ class ArgoWebDashboard(ArgoBaseNode):
                             # Update PCB temperature if missing from topic
                             if self.state.get('pcb_temp') is None and pcb_temperature is not None:
                                 self.state['pcb_temp'] = pcb_temperature
+                            # Always update time estimates from service (topics don't provide this)
+                            if time_to_full is not None:
+                                self.state['battery_time_to_full'] = time_to_full
+                                self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
+                            if time_to_empty is not None:
+                                self.state['battery_time_to_empty'] = time_to_empty
+                                self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
                     except (json.JSONDecodeError, KeyError) as e:
                         self.get_logger().debug(f"Error parsing battery status response: {e}")
         except Exception as e:
@@ -1335,6 +1373,30 @@ class ArgoWebDashboard(ArgoBaseNode):
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e)}), 500
         
+        @self.app.route('/api/recording/toggle', methods=['POST'])
+        def toggle_recording():
+            """Toggle recording state (start if stopped, stop if started)."""
+            try:
+                # Get current recording state
+                with self.state_lock:
+                    is_recording = self.state.get('recording', False)
+                
+                # Choose appropriate client and service name based on current state
+                if is_recording:
+                    client = self.recording_stop_client
+                    service_name = '/argo/recording/stop'
+                else:
+                    client = self.recording_start_client
+                    service_name = '/argo/recording/start'
+                
+                return self._call_service(client, service_name)
+            except Exception as e:
+                return jsonify({
+                    'success': False, 
+                    'message': f'Error toggling recording: {str(e)}'
+                }), 500
+        
+        # Keep old endpoints for backwards compatibility
         @self.app.route('/api/recording/start', methods=['POST'])
         def start_recording():
             """Start data recording."""
@@ -1363,6 +1425,46 @@ class ArgoWebDashboard(ArgoBaseNode):
                     
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e)}), 500
+        
+        @self.app.route('/api/lifecycle/toggle', methods=['POST'])
+        def toggle_lifecycle():
+            """Toggle Argo system lifecycle (start if stopped, stop if started)."""
+            try:
+                # Get current system state
+                with self.state_lock:
+                    is_running = self.state.get('system_running', False)
+                
+                # Choose appropriate command based on current state
+                if is_running:
+                    command = 'stop'
+                    action = 'stopping'
+                else:
+                    command = 'run'
+                    action = 'starting'
+                
+                result = subprocess.run([
+                    'python3',
+                    os.path.join(self.argo_dir, 'launch', 'argo_lifecycle_manager.py'),
+                    command
+                ], capture_output=True, text=True, timeout=10)
+                
+                if result.returncode == 0:
+                    return jsonify({
+                        'success': True, 
+                        'message': f'System {action}...'
+                    })
+                else:
+                    error_msg = result.stderr.strip() if result.stderr else 'Unknown error'
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Failed to {action} system: {error_msg}'
+                    }), 500
+                    
+            except Exception as e:
+                return jsonify({
+                    'success': False, 
+                    'message': f'Error toggling system: {str(e)}'
+                }), 500
         
         @self.app.route('/api/lifecycle/stop', methods=['POST'])
         def lifecycle_stop():
@@ -1396,29 +1498,69 @@ class ArgoWebDashboard(ArgoBaseNode):
                 return jsonify({'success': False, 'message': 'Not running with managed Werkzeug server.'})
     
     def _call_service(self, client, service_name):
-        """Generic service call wrapper."""
+        """Generic service call wrapper with improved timeout and error handling."""
         try:
-            if not client.wait_for_service(timeout_sec=1.0):
-                return jsonify({'success': False, 'message': 'Service unavailable'}), 503
+            if not client.wait_for_service(timeout_sec=5.0):
+                return jsonify({
+                    'success': False, 
+                    'message': f'Service {service_name} unavailable (timeout waiting for service)'
+                }), 503
             
             request = Trigger.Request()
             future = client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            
+            # Use loop with shutdown check instead of blocking spin_until_future_complete
+            # This allows shutdown signals to interrupt long-running service calls
+            timeout = 10.0
+            start_time = time.time()
+            while not future.done() and (time.time() - start_time) < timeout:
+                if self.signal_received or not rclpy.ok():
+                    self.get_logger().debug("Shutdown requested during service call, cancelling")
+                    break
+                # Use short timeout to allow checking shutdown flag frequently
+                try:
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                except Exception:
+                    # Context may be shutting down
+                    if self.signal_received or not rclpy.ok():
+                        break
             
             if future.done():
-                response = future.result()
-                return jsonify({'success': response.success, 'message': response.message})
+                try:
+                    response = future.result()
+                    # Always include the service response message for detailed information
+                    return jsonify({
+                        'success': response.success, 
+                        'message': response.message if response.message else 'Service call completed'
+                    })
+                except Exception as e:
+                    # Handle case where future.result() raises exception
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Error getting service response: {str(e)}'
+                    }), 500
             else:
-                return jsonify({'success': False, 'message': 'Service call timeout'}), 504
+                return jsonify({
+                    'success': False, 
+                    'message': f'Service call to {service_name} timed out after 10 seconds'
+                }), 504
                 
         except Exception as e:
-            return jsonify({'success': False, 'message': str(e)}), 500
+            return jsonify({
+                'success': False, 
+                'message': f'Service call error: {str(e)}'
+            }), 500
     
     def run_flask(self):
         """Run Flask server in separate thread."""
         self.get_logger().info("Starting Werkzeug WSGI server...")
-        self.wsgi_server.serve_forever()
-        self.get_logger().info("Werkzeug WSGI server has shut down.")
+        try:
+            self.wsgi_server.serve_forever()
+        except Exception as e:
+            if not self.signal_received:
+                self.get_logger().error(f"Flask server error: {e}")
+        finally:
+            self.get_logger().info("Werkzeug WSGI server has shut down.")
 
 
 def main(args=None):
@@ -1501,9 +1643,13 @@ Troubleshooting:
         last_health_service_query = time.time()
         last_battery_service_query = time.time()
         
-        while rclpy.ok():
+        while rclpy.ok() and not node.signal_received:
             # Spin once with a short timeout to handle ROS callbacks
             executor.spin_once(timeout_sec=0.1)
+            
+            # Check shutdown flag immediately after spin
+            if node.signal_received:
+                break
             
             now = time.time()
             
@@ -1537,16 +1683,26 @@ Troubleshooting:
             
     except KeyboardInterrupt:
         print("\n🛑 Shutting down web dashboard...")
+        if node:
+            node.signal_received = True  # Set flag to ensure clean shutdown
     except Exception as e:
         print(f"\n❌ Error: {e}")
     finally:
         # Ensure proper cleanup
         if node:
             node.shutdown()
-            node.destroy_node()
+            try:
+                node.destroy_node()
+            except Exception as e:
+                print(f"Error destroying node: {e}")
             
-        if rclpy.ok():
-            rclpy.shutdown()
+        # Only shutdown if context is still valid (may already be shut down by signal handler)
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception as e:
+            # Context may already be shutdown - this is expected
+            pass
         print("🛑 Web dashboard shutdown complete.")
 
 

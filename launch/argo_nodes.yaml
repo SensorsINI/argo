@@ -115,12 +115,6 @@ nodes:
     critical: false
     description: "Publishes GeoJSON sailing boundaries for visualization"
     
-  - name: argo_health_monitor
-    executable: launch/argo_health_monitor.py
-    required: true
-    critical: true
-    description: "Monitors and aggregates health status from all nodes"
-    
   # Special Nodes (not launched directly but monitored)
   - name: foxglove_bridge
     executable: ros2 run foxglove_bridge foxglove_bridge
@@ -133,6 +127,7 @@ nodes:
   # These are monitored but not launched by this system:
   # - argo_power_control (runs as argo_power_control.service)
   # - argo_battery_water (runs as argo_battery_water.service)
+  # - argo_health_monitor (runs as argo_health_monitor.service)
   # - bno085 (runs as argo_bno085.service when available)
 
 # Simulation Mode Configuration
@@ -220,7 +215,6 @@ groups:
     - argo_transform_publisher
     - argo_boat_visualization
     - sailing_area_publisher
-    - argo_health_monitor
     - foxglove_bridge
 
   simulation:

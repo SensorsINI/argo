@@ -63,15 +63,8 @@ def generate_launch_description():
             node_configs = config.get('nodes', [])
             launch_actions.append(LogInfo(msg="Launching Argo in NORMAL mode"))
         
-        # Launch health monitor first (so it can monitor other nodes)
-        health_monitor_path = os.path.join(argo_dir, 'launch', 'argo_health_monitor.py')
-        health_monitor = ExecuteProcess(
-            cmd=['python3', health_monitor_path],
-            output='screen',
-            name='argo_health_monitor'
-        )
-        launch_actions.append(health_monitor)
-        launch_actions.append(LogInfo(msg="  - argo_health_monitor: Health monitoring started"))
+        # Health monitor runs as independent systemd service (argo_health_monitor.service)
+        # It monitors all nodes automatically, so we don't launch it here
         
         for node_cfg in node_configs:
             # Skip excluded nodes (monitored but not launched)

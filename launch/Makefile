@@ -15,7 +15,7 @@ REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 
 # Power control configuration moved to power_control/ directory
 
-.PHONY: help install uninstall enable disable start stop restart clean install-legacy uninstall-legacy enable-legacy disable-legacy install-standard uninstall-standard enable-standard disable-standard start-standard stop-standard restart-standard install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor install_thermal_monitor enable_thermal_monitor start_thermal_monitor stop_thermal_monitor status_thermal_monitor disable_thermal_monitor uninstall_thermal_monitor install_battery_water_monitor install_bno085
+.PHONY: help install uninstall enable disable start stop restart clean install-legacy uninstall-legacy enable-legacy disable-legacy install-standard uninstall-standard enable-standard disable-standard start-standard stop-standard restart-standard install_storage_monitor enable_storage_monitor start_storage_monitor stop_storage_monitor restart_storage_monitor status_storage_monitor disable_storage_monitor uninstall_storage_monitor install_thermal_monitor enable_thermal_monitor start_thermal_monitor stop_thermal_monitor status_thermal_monitor disable_thermal_monitor uninstall_thermal_monitor install_health_monitor uninstall_health_monitor install_battery_water_monitor install_bno085
 
 # Default target
 all: install
@@ -191,6 +191,31 @@ uninstall_storage_monitor: stop_storage_monitor disable_storage_monitor
 BATTERY_WATER_SERVICE_NAME = argo_battery_water
 BATTERY_WATER_SERVICE_FILE = ../nodes/argo_battery_water.service
 
+# Install Health Monitor service
+HEALTH_MONITOR_SERVICE_NAME = argo_health_monitor
+HEALTH_MONITOR_SERVICE_FILE = argo_health_monitor.service
+
+install_health_monitor:
+	@echo "📋 Installing argo health monitor systemd service..."
+	@sed -e "s/^User=.*/User=$(INSTALL_USER)/" \
+	    -e "s/^Group=.*/Group=$(INSTALL_USER)/" \
+	    -e "s#^WorkingDirectory=.*#WorkingDirectory=$(REPO_DIR)/launch#" \
+	    -e "s#/home/orangepi/argo#$(REPO_DIR)#g" \
+	    $(HEALTH_MONITOR_SERVICE_FILE) > /tmp/$(HEALTH_MONITOR_SERVICE_NAME).service
+	@sudo cp /tmp/$(HEALTH_MONITOR_SERVICE_NAME).service $(SERVICE_DIR)/
+	@rm -f /tmp/$(HEALTH_MONITOR_SERVICE_NAME).service
+	@sudo systemctl daemon-reload
+	@sudo systemctl enable $(HEALTH_MONITOR_SERVICE_NAME).service
+	@echo "✅ Health monitor service installed and enabled!"
+
+uninstall_health_monitor:
+	@echo "🗑️  Uninstalling argo health monitor service..."
+	@sudo systemctl stop $(HEALTH_MONITOR_SERVICE_NAME).service 2>/dev/null || true
+	@sudo systemctl disable $(HEALTH_MONITOR_SERVICE_NAME).service 2>/dev/null || true
+	@sudo rm -f $(SERVICE_DIR)/$(HEALTH_MONITOR_SERVICE_NAME).service
+	@sudo systemctl daemon-reload
+	@echo "✅ Health monitor service uninstalled!"
+
 # Install Battery & Water monitoring service
 install_battery_water_monitor:
 	@echo "📋 Installing argo battery & water monitor systemd service..."
@@ -307,6 +332,8 @@ help:
 	@echo ""
 	@echo "Component Services:"
 	@echo "  install_storage_monitor     - Install storage monitor systemd service"
+	@echo "  install_health_monitor      - Install health monitor systemd service"
+	@echo "  uninstall_health_monitor    - Uninstall health monitor systemd service"
 	@echo "  (see other targets for storage, thermal, power, etc.)"
 	@echo ""
 	@echo "Power Control System:"
