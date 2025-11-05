@@ -10,5 +10,12 @@
     "ruff.fixOnSave": false,
     "makefile.configureOnOpen": false,
     "git.autofetch": true,
-    "git.autofetchPeriod": 180
+    "git.autofetchPeriod": 180,
+    "files.trimTrailingWhitespace": false,
+    "files.exclude": {
+      "**/simulator/sailboat-playground/**": false
+    },
+    "files.watcherExclude": {
+      "**/simulator/sailboat-playground/.git/**": true
+    }
   }

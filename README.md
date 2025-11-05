@@ -135,7 +135,6 @@ Hardware interface and control nodes:
 - **Sensor Nodes**: `gps.py`, `imu.py`, `anem.py`, `argo_battery_water.py`, `temp_monitor.py`
 - **Control Nodes**: `rudder_sail_radio.py`, `controller.py`, `record.py`
 - **`pwm_capture_module/`** - Custom kernel module for radio control and servo interfaces
-- **`RTIMULib2/`** - IMU sensor fusion library
 - **Configuration files**: `argo.yaml`, calibration data, and support utilities
 
 ### `power_control/` - Hardware Power Management
