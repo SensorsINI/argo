@@ -32,6 +32,7 @@ echo "Recording Control:"
 echo "  ar   - Start data recording"
 echo "  ac   - Stop data recording"
 echo "  apb  - Play back latest recording with visualization"
+echo "  arr  - Re-record latest recording with visualization markers (for Foxglove import)"
 
 echo "GUI Control:"
 echo "  ag   - Launch Argo CLI GUI (interactive control)"
