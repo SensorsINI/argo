@@ -312,10 +312,13 @@
                     }
                 }
                 if (unhealthyNodes.length > 0) {
-                    if (unhealthyNodes.length <= 3) {
-                        parts.push(`❌ Unhealthy: ${unhealthyNodes.join(', ')}`);
+                    const maxDisplayNodes = 5;
+                    if (unhealthyNodes.length <= maxDisplayNodes) {
+                        parts.push(`❌ ${unhealthyNodes.length} unhealthy nodes: ${unhealthyNodes.join(', ')}`);
                     } else {
-                        parts.push(`❌ ${unhealthyNodes.length} unhealthy nodes`);
+                        const displayedNodes = unhealthyNodes.slice(0, maxDisplayNodes);
+                        const remainingCount = unhealthyNodes.length - maxDisplayNodes;
+                        parts.push(`❌ ${unhealthyNodes.length} unhealthy nodes: ${displayedNodes.join(', ')} (+${remainingCount} more)`);
                     }
                 }
                 nodeSummaryText = parts.join(' | ');
@@ -352,14 +355,31 @@
                 data.saltwater_voltage !== null && data.saltwater_voltage !== undefined ? `${data.saltwater_voltage.toFixed(3)} V` : '-- V';
             
             // GPS
-            document.getElementById('gps-lock').textContent = 
-                data.gps_locked ? '🟢 LOCKED' : '🔴 NO LOCK';
+            // Show "Last fix" when GPS is not locked but we have last valid coordinates
+            if (!data.gps_locked && data.gps_last_valid_latitude !== null && data.gps_last_valid_latitude !== undefined) {
+                document.getElementById('gps-lock').textContent = '🔴 Last fix';
+            } else {
+                document.getElementById('gps-lock').textContent = 
+                    data.gps_locked ? '🟢 LOCKED' : '🔴 NO LOCK';
+            }
             
-            if (data.gps_latitude && data.gps_longitude) {
-                const latDir = data.gps_latitude >= 0 ? 'N' : 'S';
-                const lonDir = data.gps_longitude >= 0 ? 'E' : 'W';
+            // Use current coordinates if available, otherwise use last valid coordinates
+            const displayLat = data.gps_latitude !== null && data.gps_latitude !== undefined 
+                ? data.gps_latitude 
+                : (data.gps_last_valid_latitude !== null && data.gps_last_valid_latitude !== undefined 
+                    ? data.gps_last_valid_latitude 
+                    : null);
+            const displayLon = data.gps_longitude !== null && data.gps_longitude !== undefined 
+                ? data.gps_longitude 
+                : (data.gps_last_valid_longitude !== null && data.gps_last_valid_longitude !== undefined 
+                    ? data.gps_last_valid_longitude 
+                    : null);
+            
+            if (displayLat !== null && displayLon !== null) {
+                const latDir = displayLat >= 0 ? 'N' : 'S';
+                const lonDir = displayLon >= 0 ? 'E' : 'W';
                 document.getElementById('gps-position').textContent = 
-                    `${Math.abs(data.gps_latitude).toFixed(6)}° ${latDir}, ${Math.abs(data.gps_longitude).toFixed(6)}° ${lonDir}`;
+                    `${Math.abs(displayLat).toFixed(6)}° ${latDir}, ${Math.abs(displayLon).toFixed(6)}° ${lonDir}`;
             } else {
                 document.getElementById('gps-position').textContent = '--';
             }
@@ -394,8 +414,12 @@
             }
             
             // Controller
-            document.getElementById('control-mode').textContent = 
-                data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
+            if (data.human_controlled === null || data.human_controlled === undefined) {
+                document.getElementById('control-mode').textContent = '❓ UNKNOWN';
+            } else {
+                document.getElementById('control-mode').textContent = 
+                    data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
+            }
             document.getElementById('controller-type').textContent = data.controller_type;
             
             // Update controller button highlighting based on current controller type

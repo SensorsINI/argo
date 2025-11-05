@@ -90,6 +90,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         self._trigger_health_query = False
         self._trigger_battery_query = False
         
+        # Track previous human_controlled state for change detection
+        self._prev_human_controlled_state = None
+        
         # Initialize state storage (thread-safe with lock)
         self.state_lock = threading.Lock()
         self.state = {
@@ -132,6 +135,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             'gps_longitude': None,
             'gps_cog': None,
             'gps_sog': None,
+            'gps_last_valid_latitude': None,  # Last valid GPS coordinates (preserved when fix is lost)
+            'gps_last_valid_longitude': None,  # Last valid GPS coordinates (preserved when fix is lost)
             
             # Navigation
             'compass_heading': None,
@@ -142,7 +147,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             'wind_temp': None,
             
             # Controller
-            'human_controlled': True,
+            'human_controlled': None,  # None = unknown until first message received
+            'last_human_controlled_update': None,  # Timestamp of last /human_controlled message
             'controller_type': 'Unknown',
             
             # Recording
@@ -396,6 +402,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/human_controlled', lambda msg: self.human_control_cb(msg, 'wifi'), 10)
         )
+        self.get_logger().info('📡 Subscribed to /human_controlled topic (from rudder_sail_radio_node)')
         self._topic_subscriptions.append(
             self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), self.volatile_qos)
         )
@@ -499,18 +506,50 @@ class ArgoWebDashboard(ArgoBaseNode):
         now = time.time()
         
         with self.state_lock:
+            # Track previous state for change detection
+            prev_state = self.state.get('human_controlled')
+            new_state = msg.data
+            
             # Always update if this is newer data or first data
             if source == 'wifi':
                 self.last_wifi_update['human_controlled'] = now
-                self.state['human_controlled'] = msg.data
+                self.state['human_controlled'] = new_state
+                self.state['last_human_controlled_update'] = now
                 self.state['data_source'] = 'WiFi'
             elif source == 'lora':
                 self.last_lora_update['human_controlled'] = now
                 # Only use LoRa data if WiFi is stale (>2 seconds old)
                 wifi_age = now - self.last_wifi_update.get('human_controlled', 0)
                 if wifi_age > 2.0:
-                    self.state['human_controlled'] = msg.data
+                    self.state['human_controlled'] = new_state
+                    self.state['last_human_controlled_update'] = now
                     self.state['data_source'] = 'LoRa'
+                else:
+                    # Using WiFi data, don't update state
+                    return
+            
+            # Log state changes with INFO level
+            if prev_state is not None and prev_state != new_state:
+                mode_str = '👤 HUMAN' if new_state else '🤖 ROBOT'
+                prev_mode_str = '👤 HUMAN' if prev_state else '🤖 ROBOT'
+                self.get_logger().info(
+                    f"Control mode changed: {prev_mode_str} → {mode_str} "
+                    f"(source: {source.upper()}, topic: /human_controlled)"
+                )
+            elif prev_state is None:
+                # First message received
+                mode_str = '👤 HUMAN' if new_state else '🤖 ROBOT'
+                self.get_logger().info(
+                    f"Control mode initialized: {mode_str} "
+                    f"(source: {source.upper()}, topic: /human_controlled)"
+                )
+            else:
+                # State unchanged, log at debug level
+                mode_str = '👤 HUMAN' if new_state else '🤖 ROBOT'
+                self.get_logger().debug(
+                    f"Control mode unchanged: {mode_str} "
+                    f"(source: {source.upper()}, topic: /human_controlled)"
+                )
             
             self._update_data_age_indicators()
     
@@ -742,24 +781,45 @@ class ArgoWebDashboard(ArgoBaseNode):
         with self.state_lock:
             if source == 'wifi':
                 self.last_wifi_update['gps_fix'] = now
-                self.state['gps_locked'] = (msg.status.status >= 0)
-                self.state['gps_latitude'] = msg.latitude if msg.latitude != 0.0 else None
-                self.state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
+                is_locked = (msg.status.status >= 0)
+                self.state['gps_locked'] = is_locked
+                
+                # Only update coordinates if we have a valid fix
+                if is_locked and msg.latitude != 0.0 and msg.longitude != 0.0:
+                    self.state['gps_latitude'] = msg.latitude
+                    self.state['gps_longitude'] = msg.longitude
+                    # Store last valid coordinates for display when fix is lost
+                    self.state['gps_last_valid_latitude'] = msg.latitude
+                    self.state['gps_last_valid_longitude'] = msg.longitude
+                # Don't clear coordinates when fix is lost - keep showing last valid position
+                
                 self.state['data_source'] = 'WiFi'
             elif source == 'lora':
                 self.last_lora_update['gps_fix'] = now
                 wifi_age = now - self.last_wifi_update.get('gps_fix', 0)
                 if wifi_age > 2.0:
-                    self.state['gps_locked'] = (msg.status.status >= 0)
-                    self.state['gps_latitude'] = msg.latitude if msg.latitude != 0.0 else None
-                    self.state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
+                    is_locked = (msg.status.status >= 0)
+                    self.state['gps_locked'] = is_locked
+                    
+                    # Only update coordinates if we have a valid fix
+                    if is_locked and msg.latitude != 0.0 and msg.longitude != 0.0:
+                        self.state['gps_latitude'] = msg.latitude
+                        self.state['gps_longitude'] = msg.longitude
+                        # Store last valid coordinates for display when fix is lost
+                        self.state['gps_last_valid_latitude'] = msg.latitude
+                        self.state['gps_last_valid_longitude'] = msg.longitude
+                    # Don't clear coordinates when fix is lost - keep showing last valid position
+                    
                     self.state['data_source'] = 'LoRa'
             
             # Set home position on first valid fix (always do this, even in low-power mode)
+            # Use last valid coordinates if current coordinates are None
+            current_lat_for_home = self.state['gps_latitude'] if self.state['gps_latitude'] is not None else self.state['gps_last_valid_latitude']
+            current_lon_for_home = self.state['gps_longitude'] if self.state['gps_longitude'] is not None else self.state['gps_last_valid_longitude']
             if (self.state['home_latitude'] is None and 
-                self.state['gps_latitude'] is not None):
-                self.state['home_latitude'] = self.state['gps_latitude']
-                self.state['home_longitude'] = self.state['gps_longitude']
+                current_lat_for_home is not None):
+                self.state['home_latitude'] = current_lat_for_home
+                self.state['home_longitude'] = current_lon_for_home
                 self.get_logger().info(
                     f"🏠 Home position set: {self.state['home_latitude']:.6f}°, "
                     f"{self.state['home_longitude']:.6f}°")
@@ -770,13 +830,16 @@ class ArgoWebDashboard(ArgoBaseNode):
                 return
             
             # Calculate distance and bearing to home (skip expensive calculations in low-power mode)
+            # Use current GPS coordinates if available, otherwise use last valid coordinates
+            current_lat = self.state['gps_latitude'] if self.state['gps_latitude'] is not None else self.state['gps_last_valid_latitude']
+            current_lon = self.state['gps_longitude'] if self.state['gps_longitude'] is not None else self.state['gps_last_valid_longitude']
             if (self.state['home_latitude'] is not None and 
-                self.state['gps_latitude'] is not None):
+                current_lat is not None):
                 self.state['distance_to_home'] = self._calculate_distance(
-                    self.state['gps_latitude'], self.state['gps_longitude'],
+                    current_lat, current_lon,
                     self.state['home_latitude'], self.state['home_longitude'])
                 self.state['bearing_to_home'] = self._calculate_bearing(
-                    self.state['gps_latitude'], self.state['gps_longitude'],
+                    current_lat, current_lon,
                     self.state['home_latitude'], self.state['home_longitude'])
             
             self._update_data_age_indicators()
@@ -1073,6 +1136,29 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.state['last_update'] = time.time()
                 self.get_logger().debug("Skipping system status update in low-power mode")
                 return
+            
+            # Check for stale human_controlled messages
+            # If we haven't received a message in 5 seconds (2s timeout + 3s buffer), assume robot control
+            now = time.time()
+            with self.state_lock:
+                last_update = self.state.get('last_human_controlled_update')
+                prev_state = self.state.get('human_controlled')
+                if last_update is not None:
+                    age = now - last_update
+                    if age > 5.0:  # 5 seconds (2s timeout + 3s buffer)
+                        if self.state['human_controlled']:
+                            self.get_logger().info(
+                                f"⚠️ Human control message stale ({age:.1f}s old), updating to ROBOT mode "
+                                f"(last message from /human_controlled topic)"
+                            )
+                            self.state['human_controlled'] = False
+                elif self.state['human_controlled']:
+                    # If we've never received a message but state is True, check if topic is publishing
+                    # If no message received for 5 seconds, assume robot control
+                    self.get_logger().warn(
+                        "⚠️ No human_controlled message received yet from /human_controlled topic, "
+                        "checking if rudder_sail_radio_node is publishing"
+                    )
             
             # Get CPU temperature (file I/O - skip in low-power mode)
             self._update_cpu_temp()
