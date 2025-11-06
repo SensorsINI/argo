@@ -101,6 +101,7 @@ from geometry_msgs.msg import Vector3, PoseStamped, Point
 from sensor_msgs.msg import NavSatFix
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Header, Float64
+from rosgraph_msgs.msg import Clock
 import math
 import numpy as np
 import sys
@@ -137,6 +138,21 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         # Log update rate
         self.get_logger().info(f"Visualization update rate: {self.update_rate:.1f} Hz")
+        
+        # Clock time for timestamp preservation during re-recording
+        # Subscribe to /clock topic to get simulated time from bag playback
+        # Use BEST_EFFORT reliability to match ros2 bag play --clock QoS
+        from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+        clock_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            depth=10
+        )
+        self.sim_time = None
+        self.create_subscription(
+            Clock, '/clock', 
+            self.clock_callback, 
+            clock_qos
+        )
         
         # Add parameter callback to handle runtime parameter changes (e.g., from Foxglove)
         self.add_on_set_parameters_callback(self._on_parameter_change)
@@ -198,13 +214,29 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         # Timer for publishing markers
         self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
-        
+    
         # Initialize health status - healthy when publishing successfully
         self.set_healthy("Boat visualization initialized")
         self.publish_success_count = 0
         self.publish_failure_count = 0
         
         self.get_logger().info("Argo boat visualization started")
+    
+    def clock_callback(self, msg):
+        """Update simulated time from /clock topic for timestamp preservation"""
+        # Store the clock time - this comes from ros2 bag play --clock
+        # and represents the original bag's timestamps
+        # msg.clock is a builtin_interfaces/Time object
+        self.sim_time = msg.clock
+    
+    def get_current_time(self):
+        """Get current time for message headers, using /clock if available (for re-recording)"""
+        # If /clock topic is available (during bag playback), use that time
+        # This preserves original timestamps even when playing at high speed
+        if self.sim_time is not None:
+            return self.sim_time
+        # Otherwise, use node's clock (normal operation)
+        return self.get_clock().now().to_msg()
     
     def sailing_boundaries_callback(self, msg):
         """Store sailing boundary markers for inclusion in visualization."""
@@ -310,7 +342,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 1
         marker.type = Marker.TRIANGLE_LIST
@@ -365,7 +397,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 2
         marker.type = Marker.CYLINDER
@@ -402,7 +434,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 3
         marker.type = Marker.TRIANGLE_LIST
@@ -488,7 +520,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 8  # Separate ID for rudder arrow
         marker.type = Marker.ARROW
@@ -563,7 +595,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 4
         marker.type = Marker.TRIANGLE_LIST
@@ -697,7 +729,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 5
         marker.type = Marker.ARROW
@@ -784,7 +816,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 6
         marker.type = Marker.ARROW
@@ -846,7 +878,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 7
         marker.type = Marker.ARROW
@@ -884,7 +916,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 10  # Separate ID range for labels (10-16)
         marker.type = Marker.TEXT_VIEW_FACING
@@ -917,7 +949,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 11
         marker.type = Marker.TEXT_VIEW_FACING
@@ -950,7 +982,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 12
         marker.type = Marker.TEXT_VIEW_FACING
@@ -982,7 +1014,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = 13
         marker.type = Marker.TEXT_VIEW_FACING

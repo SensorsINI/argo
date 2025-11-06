@@ -12,6 +12,14 @@ Features:
 - Automatic bag file naming with timestamps
 - Graceful shutdown handling
 - Integration with Argo lifecycle management
+- MCAP format support (default) with configuration via record.yaml
+- Standard ROS2 SQLite3 bags as fallback option
+
+Configuration:
+    Configuration is loaded from record.yaml in the same directory as this file.
+    - Set storage_format to "mcap" (default) or "sqlite3"
+    - Configure MCAP options in the mcap: section
+    - Use preset profiles: "fastwrite", "zstd_fast", "zstd_small"
 
 Usage:
     ros2 run argo record.py
@@ -25,6 +33,8 @@ import sys
 import subprocess
 import threading
 import logging
+import yaml
+import tempfile
 from datetime import datetime
 
 import rclpy
@@ -46,6 +56,9 @@ class ArgoRecordingNode(ArgoBaseNode):
         # Setup file logging for detailed debugging
         self._setup_file_logging()
 
+        # Load recording configuration
+        self._load_recording_config()
+
         # Configuration
         self.bagfiles_dir = os.path.join(os.path.expanduser('~'), 'argo', 'bags')
         self.current_bag_name = None
@@ -53,6 +66,7 @@ class ArgoRecordingNode(ArgoBaseNode):
         self.recording_process = None
         self.is_recording = False
         self.stopped_bag_name = None
+        self.mcap_config_file = None  # Temporary file for MCAP config
 
         # Ensure bagfiles directory exists
         os.makedirs(self.bagfiles_dir, exist_ok=True)
@@ -103,6 +117,7 @@ class ArgoRecordingNode(ArgoBaseNode):
 
         self._log_info("🚀 Argo Recording Node started")
         self._log_info(f"📁 Bagfiles directory: {self.bagfiles_dir}")
+        self._log_info(f"💾 Storage format: {self.storage_format}")
         self._log_info("🎮 Services available:")
         self._log_info(
             "   /argo/recording/start - Start recording (Trigger service)")
@@ -189,6 +204,63 @@ class ArgoRecordingNode(ArgoBaseNode):
         if self.file_logger:
             self.file_logger.error(message)
 
+    def _load_recording_config(self):
+        """Load recording configuration from record.yaml"""
+        config_path = os.path.join(os.path.dirname(__file__), 'record.yaml')
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            # Storage format (default: mcap)
+            self.storage_format = config.get('storage_format', 'mcap')
+            if self.storage_format not in ['mcap', 'sqlite3']:
+                self._log_warn(f"⚠️  Invalid storage_format '{self.storage_format}', defaulting to 'mcap'")
+                self.storage_format = 'mcap'
+            
+            # MCAP configuration (only used if storage_format is mcap)
+            self.mcap_config = config.get('mcap', {})
+            self.preset_profile = config.get('preset_profile', None)
+            
+            self._log_info(f"✅ Loaded recording config from {config_path}")
+            self._log_debug(f"Storage format: {self.storage_format}")
+            if self.storage_format == 'mcap':
+                if self.preset_profile:
+                    self._log_debug(f"MCAP preset profile: {self.preset_profile}")
+                else:
+                    self._log_debug(f"MCAP config: {self.mcap_config}")
+        
+        except FileNotFoundError:
+            self._log_warn(f"⚠️  Config file not found: {config_path}, using defaults")
+            self.storage_format = 'mcap'
+            self.mcap_config = {}
+            self.preset_profile = None
+        except Exception as e:
+            self._log_error(f"❌ Error loading config: {e}, using defaults")
+            self.storage_format = 'mcap'
+            self.mcap_config = {}
+            self.preset_profile = None
+
+    def _create_mcap_config_file(self) -> str:
+        """Create a temporary YAML file with MCAP writer configuration
+        
+        Note: This method should only be called when NOT using preset profiles.
+        When using preset profiles, --storage-preset-profile is used instead.
+        """
+        try:
+            # Create temporary file
+            fd, temp_path = tempfile.mkstemp(suffix='.yaml', prefix='mcap_config_', text=True)
+            
+            with os.fdopen(fd, 'w') as f:
+                # Write manual MCAP configuration
+                yaml.dump(self.mcap_config, f, default_flow_style=False)
+            
+            self._log_debug(f"Created temporary MCAP config file: {temp_path}")
+            return temp_path
+        
+        except Exception as e:
+            self._log_error(f"❌ Error creating MCAP config file: {e}")
+            return None
 
     def generate_bag_name(self) -> str:
         """Generate a unique bag name with timestamp"""
@@ -296,9 +368,31 @@ class ArgoRecordingNode(ArgoBaseNode):
             except Exception as e:
                 self._log_warn(f"⚠️  Error listing topics: {e}")
 
-            # Start rosbag recording process with proper ROS2 environment
-            # Use --include-hidden-topics to ensure all topics are recorded
-            cmd = ['bash', '-c', f'source /opt/ros/humble/setup.bash && ros2 bag record -a --include-hidden-topics -o {self.current_bag_name}']
+            # Build rosbag recording command with storage format and configuration
+            base_cmd = f'source /opt/ros/humble/setup.bash && ros2 bag record -a --include-hidden-topics -o {self.current_bag_name}'
+            
+            # Add storage format option
+            if self.storage_format == 'mcap':
+                base_cmd += ' -s mcap'
+                
+                # Configure MCAP recording
+                if self.preset_profile:
+                    # Use preset profile (no config file needed)
+                    base_cmd += f' --storage-preset-profile {self.preset_profile}'
+                    self._log_info(f"📝 Using MCAP preset profile: {self.preset_profile}")
+                else:
+                    # Create and use config file for manual configuration
+                    self.mcap_config_file = self._create_mcap_config_file()
+                    if self.mcap_config_file:
+                        base_cmd += f' --storage-config-file {self.mcap_config_file}'
+                        self._log_info("📝 Using MCAP manual configuration")
+                    else:
+                        self._log_warn("⚠️  Could not create MCAP config file, using defaults")
+            # For sqlite3, no storage format option needed (it's the default)
+            elif self.storage_format == 'sqlite3':
+                self._log_info("📝 Using standard ROS2 SQLite3 bag format")
+            
+            cmd = ['bash', '-c', base_cmd]
             self._log_debug(f"Rosbag command: {' '.join(cmd)}")
             self._log_debug("Creating subprocess for rosbag recording...")
             self.recording_process = subprocess.Popen(
@@ -351,6 +445,15 @@ class ArgoRecordingNode(ArgoBaseNode):
                         self.recording_process.kill()
                         self.recording_process.wait()
                 self.recording_process = None
+            
+            # Clean up temporary MCAP config file
+            if self.mcap_config_file and os.path.exists(self.mcap_config_file):
+                try:
+                    os.remove(self.mcap_config_file)
+                    self._log_debug(f"🧹 Cleaned up temporary MCAP config file: {self.mcap_config_file}")
+                except Exception as e:
+                    self._log_warn(f"⚠️  Could not remove MCAP config file: {e}")
+                self.mcap_config_file = None
         except Exception as e:
             self._log_warn(f"⚠️  Error during cleanup: {e}")
 
@@ -376,6 +479,15 @@ class ArgoRecordingNode(ArgoBaseNode):
                     self.recording_process.wait()
 
                 self.recording_process = None
+
+            # Clean up temporary MCAP config file
+            if self.mcap_config_file and os.path.exists(self.mcap_config_file):
+                try:
+                    os.remove(self.mcap_config_file)
+                    self._log_debug(f"🧹 Cleaned up temporary MCAP config file: {self.mcap_config_file}")
+                except Exception as e:
+                    self._log_warn(f"⚠️  Could not remove MCAP config file: {e}")
+                self.mcap_config_file = None
 
             # Log final bag information
             if self.current_bag_name and self.bag_path:

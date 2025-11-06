@@ -8,6 +8,7 @@
 #   ./argo_rerecord_bag.sh bags/argo_20251105_141014/ output_name  # Specify output name
 #   ./argo_rerecord_bag.sh bags/argo_20251105_141014/ output_name --no-sailing  # With options
 #   ./argo_rerecord_bag.sh bags/argo_20251105_141014/ output_name --rate 50.0  # Custom playback rate
+#   ./argo_rerecord_bag.sh bags/argo_20251105_141014/ output_name -y  # Skip confirmation prompt
 #
 # Note: Bash tab completion works for bag folder paths!
 #
@@ -108,11 +109,15 @@ if [ -n "$1" ] && [[ "$1" != --* ]]; then
     echo -e "Selected recording: ${GREEN}$BAG_NAME${NC}"
     echo -e "Source: ${CYAN}$SELECTED_BAG${NC}"
 else
-    # No argument provided - find the latest recording
-    LATEST_BAG=$(find "$BAGS_DIR" -maxdepth 1 -type d -name "argo_*" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+    # No argument provided - find the latest physical recording
+    # Exclude re-recordings that end with " (rerecorded)"
+    # Filter out directories containing " (rerecorded)" in their name
+    LATEST_BAG=$(find "$BAGS_DIR" -maxdepth 1 -type d -name "argo_*" -printf '%T@ %p\n' 2>/dev/null | \
+        grep -v " (rerecorded)" | sort -n | tail -1 | cut -d' ' -f2-)
     
     if [ -z "$LATEST_BAG" ]; then
         echo -e "${RED}❌ Error: No recording bags found in $BAGS_DIR${NC}"
+        echo -e "   (excluding re-recordings ending with ' (rerecorded)')"
         exit 1
     fi
     
@@ -158,6 +163,7 @@ USE_SAILING_AREA="true"
 USE_VISUALIZATION="true"
 USE_TRANSFORM="true"
 PLAYBACK_RATE="100.0"  # Default to 100x speed for maximum throughput
+SKIP_CONFIRMATION="false"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -183,21 +189,17 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        -y|--yes)
+            SKIP_CONFIRMATION="true"
+            shift
+            ;;
         *)
             echo -e "${YELLOW}⚠️  Unknown option: $1${NC}"
-            echo "Available options: --no-sailing, --no-visualization, --no-transform, --rate <value>"
+            echo "Available options: --no-sailing, --no-visualization, --no-transform, --rate <value>, -y/--yes"
             shift
             ;;
     esac
 done
-
-echo -e "${CYAN}🚀 Launching bag re-recording with visualization...${NC}"
-echo -e "   Sailing area: ${GREEN}$USE_SAILING_AREA${NC}"
-echo -e "   Visualization: ${GREEN}$USE_VISUALIZATION${NC}"
-echo -e "   Transform publisher: ${GREEN}$USE_TRANSFORM${NC}"
-echo -e "   Playback rate: ${GREEN}${PLAYBACK_RATE}x${NC} ${CYAN}(maximum speed)${NC}"
-echo -e "   Output bag name: ${GREEN}$OUTPUT_BAG${NC}"
-echo ""
 
 # Build launch command with proper path handling
 # Use absolute path to handle spaces in bag file names
@@ -209,15 +211,56 @@ LAUNCH_CMD="$LAUNCH_CMD use_visualization:=$USE_VISUALIZATION"
 LAUNCH_CMD="$LAUNCH_CMD use_transform:=$USE_TRANSFORM"
 LAUNCH_CMD="$LAUNCH_CMD playback_rate:=$PLAYBACK_RATE"
 
-echo -e "${CYAN}▶️  Starting re-recording...${NC}"
-echo -e "${CYAN}   This will:${NC}"
-echo -e "   1. Play back the original bag file"
-echo -e "   2. Run visualization nodes to generate markers"
-echo -e "   3. Record everything to a new bag file"
-echo -e "   4. Stop automatically when playback completes"
+# Display what will be done
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${CYAN}📦 Re-recording Plan${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo -e "   ${CYAN}Input bag:${NC}  ${GREEN}$SELECTED_BAG${NC}"
+echo -e "   ${CYAN}Input size:${NC} ${GREEN}$BAG_SIZE${NC}"
+echo ""
+echo -e "   ${CYAN}Output bag:${NC} ${GREEN}$BAGS_DIR/$OUTPUT_BAG${NC}"
+echo ""
+echo -e "   ${CYAN}Configuration:${NC}"
+echo -e "      • Sailing area:          ${GREEN}$USE_SAILING_AREA${NC}"
+echo -e "      • Visualization markers: ${GREEN}$USE_VISUALIZATION${NC}"
+echo -e "      • Transform publisher:   ${GREEN}$USE_TRANSFORM${NC}"
+echo -e "      • Playback rate:         ${GREEN}${PLAYBACK_RATE}x${NC} ${CYAN}(maximum speed)${NC}"
+echo ""
+echo -e "   ${CYAN}Process:${NC}"
+echo -e "      1. Play back the original bag file at ${GREEN}${PLAYBACK_RATE}x${NC} speed"
+echo -e "      2. Run visualization nodes to generate markers"
+echo -e "      3. Record everything (original topics + visualization) to new bag"
+echo -e "      4. Stop automatically when playback completes"
+echo ""
+echo -e "   ${CYAN}Output format:${NC} ${GREEN}MCAP${NC} (configurable via nodes/record.yaml)"
 echo ""
 echo -e "${YELLOW}💡 Tip: The output bag can be imported directly into Foxglove Studio${NC}"
 echo -e "${YELLOW}   No need to run foxglove_bridge - just import the bag file!${NC}"
+echo ""
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+# Confirmation prompt (unless -y/--yes flag is set)
+if [ "$SKIP_CONFIRMATION" != "true" ]; then
+    read -p "Proceed with re-recording? (Y/n): " -n 1 -r
+    echo ""
+    # Default to Yes (empty reply or Y/y), only exit on explicit N/n
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        echo -e "${YELLOW}⚠️  Re-recording cancelled by user${NC}"
+        exit 0
+    fi
+    echo ""
+fi
+
+# Silently remove existing re-recording if it exists (to allow overwriting)
+OUTPUT_PATH="$BAGS_DIR/$OUTPUT_BAG"
+if [ -d "$OUTPUT_PATH" ]; then
+    echo -e "${CYAN}🗑️  Removing previous re-recording: ${GREEN}$OUTPUT_BAG${NC}"
+    rm -rf "$OUTPUT_PATH"
+fi
+
+echo -e "${CYAN}▶️  Starting re-recording...${NC}"
 echo ""
 
 # Execute the launch command

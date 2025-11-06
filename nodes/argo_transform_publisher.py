@@ -28,6 +28,7 @@ Subscribed Topics:
 import rclpy
 from geometry_msgs.msg import TransformStamped, Vector3
 from sensor_msgs.msg import NavSatFix
+from rosgraph_msgs.msg import Clock
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 import math
 import numpy as np
@@ -75,6 +76,21 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
         self.create_subscription(Vector3, '/accel', self.accel_callback, 10)
         
+        # Clock time for timestamp preservation during re-recording
+        # Subscribe to /clock topic to get simulated time from bag playback
+        # Use BEST_EFFORT reliability to match ros2 bag play --clock QoS
+        from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+        clock_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            depth=10
+        )
+        self.sim_time = None
+        self.create_subscription(
+            Clock, '/clock', 
+            self.clock_callback, 
+            clock_qos
+        )
+        
         # Publish static transforms at startup
         self.publish_static_transforms()
         
@@ -98,6 +114,22 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.publish_failure_count = 0
         
         self.get_logger().info("Argo transform publisher started")
+    
+    def clock_callback(self, msg):
+        """Update simulated time from /clock topic for timestamp preservation"""
+        # Store the clock time - this comes from ros2 bag play --clock
+        # and represents the original bag's timestamps
+        # msg.clock is a builtin_interfaces/Time object
+        self.sim_time = msg.clock
+    
+    def get_current_time(self):
+        """Get current time for message headers, using /clock if available (for re-recording)"""
+        # If /clock topic is available (during bag playback), use that time
+        # This preserves original timestamps even when playing at high speed
+        if self.sim_time is not None:
+            return self.sim_time
+        # Otherwise, use node's clock (normal operation)
+        return self.get_clock().now().to_msg()
     
     def lonlat_to_xy(self, lon, lat):
         """Converts longitude/latitude to local x/y meters using an equirectangular projection."""
@@ -172,7 +204,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         
         # GPS antenna offset (assuming GPS is mounted forward and up from boat center)
         gps_transform = TransformStamped()
-        gps_transform.header.stamp = self.get_clock().now().to_msg()
+        gps_transform.header.stamp = self.get_current_time()
         gps_transform.header.frame_id = "base_link"
         gps_transform.child_frame_id = "gps_link"
         gps_transform.transform.translation.x = 0.1  # 10cm forward
@@ -186,7 +218,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         
         # Compass/IMU offset (assuming IMU is at boat center)
         compass_transform = TransformStamped()
-        compass_transform.header.stamp = self.get_clock().now().to_msg()
+        compass_transform.header.stamp = self.get_current_time()
         compass_transform.header.frame_id = "base_link"
         compass_transform.child_frame_id = "compass_link"
         compass_transform.transform.translation.x = 0.0
@@ -200,7 +232,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         
         # Wind sensor offset (assuming anemometer is mounted on mast)
         wind_transform = TransformStamped()
-        wind_transform.header.stamp = self.get_clock().now().to_msg()
+        wind_transform.header.stamp = self.get_current_time()
         wind_transform.header.frame_id = "base_link"
         wind_transform.child_frame_id = "wind_sensor_link"
         wind_transform.transform.translation.x = 0.0
@@ -214,7 +246,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         
         # Rudder offset (assuming rudder is at stern)
         rudder_transform = TransformStamped()
-        rudder_transform.header.stamp = self.get_clock().now().to_msg()
+        rudder_transform.header.stamp = self.get_current_time()
         rudder_transform.header.frame_id = "base_link"
         rudder_transform.child_frame_id = "rudder_link"
         rudder_transform.transform.translation.x = -0.2  # 20cm aft
@@ -242,7 +274,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
             
             # Map to odom transform (identity for now, could be used for odometry drift correction)
             map_to_odom = TransformStamped()
-            map_to_odom.header.stamp = self.get_clock().now().to_msg()
+            map_to_odom.header.stamp = self.get_current_time()
             map_to_odom.header.frame_id = "map"
             map_to_odom.child_frame_id = "odom"
             map_to_odom.transform.translation.x = 0.0
@@ -280,7 +312,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
             qz = cr * cp * sy - sr * sp * cy
             
             odom_to_base = TransformStamped()
-            odom_to_base.header.stamp = self.get_clock().now().to_msg()
+            odom_to_base.header.stamp = self.get_current_time()
             odom_to_base.header.frame_id = "odom"
             odom_to_base.child_frame_id = "base_link"
             

@@ -11,15 +11,16 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote
+.PHONY: help install-argo-cli install-deps install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote
 
 help:
 	@echo "Argo Robot Services Management"
 	@echo "=============================="
 	@echo ""
 	@echo "Hardware & Dependencies:"
-	@echo "  install-deps         - Install all ROS2 dependencies (foxglove-bridge, etc.)"
+	@echo "  install-deps         - Install all ROS2 dependencies (foxglove-bridge, rosbag2-mcap, etc.)"
 	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
+	@echo "  install-rosbag2-mcap - Install MCAP storage plugin for rosbag2 only"
 	@echo "  install-python-deps  - Install Python runtime dependencies (smbus2, pyserial, etc.)"
 	@echo "  install-simulation-deps - Install Python dependencies for the simulator"
 	@echo "  check-deps           - Check status of all dependencies"
@@ -123,17 +124,21 @@ simulate-remote:
 
 # ==================== DEPENDENCY INSTALLATION ====================
 
-install-deps: install-foxglove-bridge
+install-deps: install-foxglove-bridge install-rosbag2-mcap
 	@echo "✅ All ROS2 dependencies installed successfully!"
 	@echo ""
 	@echo "Installed packages:"
 	@echo "  - ros-$(ROS_DISTRO)-foxglove-bridge (C++ WebSocket bridge for Foxglove Studio)"
+	@echo "  - ros-$(ROS_DISTRO)-rosbag2-storage-mcap (MCAP storage format for rosbag2)"
 	@echo ""
 	@echo "Usage:"
 	@echo "  ros2 run foxglove_bridge foxglove_bridge                    # Start foxglove bridge"
 	@echo "  ros2 run foxglove_bridge foxglove_bridge --ros-args -p port:=8765  # Custom port"
 	@echo ""
 	@echo "Connect from Foxglove Studio: ws://$(shell hostname -I | awk '{print $$1}'):8765"
+	@echo ""
+	@echo "MCAP Recording:"
+	@echo "  ros2 bag record -s mcap -a -o my_bag  # Record with MCAP format"
 
 install-foxglove-bridge:
 	@echo "Installing Foxglove Bridge for ROS2..."
@@ -151,6 +156,26 @@ install-foxglove-bridge:
 	@echo "  1. Run your Python ROS2 node: python3 nodes/argo_battery_water.py"
 	@echo "  2. In another terminal: ros2 run foxglove_bridge foxglove_bridge"
 	@echo "  3. Connect Foxglove Studio to: ws://$(shell hostname -I | awk '{print $$1}'):8765"
+
+install-rosbag2-mcap:
+	@echo "Installing MCAP storage plugin for rosbag2..."
+	@if [ -z "$(ROS_DISTRO)" ]; then \
+		echo "❌ ROS_DISTRO environment variable not set!"; \
+		echo "   Make sure ROS2 is properly sourced: source /opt/ros/*/setup.bash"; \
+		exit 1; \
+	fi
+	@echo "Installing ros-$(ROS_DISTRO)-rosbag2-storage-mcap..."
+	sudo apt update
+	sudo apt install -y ros-$(ROS_DISTRO)-rosbag2-storage-mcap
+	@echo "✅ MCAP storage plugin installed successfully!"
+	@echo ""
+	@echo "🔧 MCAP Recording:"
+	@echo "  The Argo record node now uses MCAP format by default (configurable in nodes/record.yaml)"
+	@echo "  MCAP provides better performance, crash recovery, and cross-platform compatibility"
+	@echo ""
+	@echo "  Manual usage:"
+	@echo "    ros2 bag record -s mcap -a -o my_bag  # Record with MCAP format"
+	@echo "    ros2 bag play -s mcap path/to/bag.mcap  # Playback MCAP bag"
 
 check-deps:
 	@echo "Checking ROS2 Dependencies Status"
@@ -171,6 +196,13 @@ check-deps:
 		echo "❌ foxglove-bridge: Not installed"; \
 		echo "   Install with: make install-foxglove-bridge"; \
 	fi
+	@if dpkg -l | grep -q "ros-$(ROS_DISTRO)-rosbag2-storage-mcap"; then \
+		version=$$(dpkg -l | grep "ros-$(ROS_DISTRO)-rosbag2-storage-mcap" | awk '{print $$3}'); \
+		echo "✅ rosbag2-storage-mcap: Installed ($$version)"; \
+	else \
+		echo "❌ rosbag2-storage-mcap: Not installed"; \
+		echo "   Install with: make install-rosbag2-mcap"; \
+	fi
 	@echo ""
 	@echo "🔍 Network Info:"
 	@echo "   Your IP: $(shell hostname -I | awk '{print $$1}')"
@@ -178,6 +210,7 @@ check-deps:
 	@echo ""
 	@echo "🔍 Quick Test:"
 	@echo "   Test foxglove-bridge: ros2 run foxglove_bridge foxglove_bridge --help"
+	@echo "   Test MCAP storage: ros2 bag record -s mcap --help"
 
 install-simulation-deps: install-foxglove-bridge
 	@echo "Installing system and Python dependencies for sailboat-playground simulator..."

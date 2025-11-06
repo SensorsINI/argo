@@ -1,0 +1,47 @@
+# Argo Recording Configuration
+# ============================
+# Configuration file for ROS2 bag recording node
+# Located next to record.py in nodes/ directory
+
+# Storage format selection
+# Options: "mcap" (default, recommended) or "sqlite3" (standard ROS2 bags)
+storage_format: "mcap"
+
+# MCAP writer configuration
+# Only used when storage_format is "mcap"
+# See https://github.com/ros2/rosbag2/blob/rolling/rosbag2_storage_mcap/README.md#writer-configuration
+# for detailed documentation of these options
+mcap:
+  # CRC calculation options
+  noChunkCRC: false              # Disable CRC calculation for Chunks (ignored if noChunking=true)
+  noAttachmentCRC: false          # Disable CRC calculation for Attachments
+  enableDataCRC: false            # Enable CRC calculation for entire Data section (useful when noChunking=true)
+  noSummaryCRC: false             # Disable CRC calculation for Summary section
+  
+  # Chunking and indexing options
+  noChunking: false               # Write Schema/Channel/Message records directly (no chunks)
+  noMessageIndex: false           # Do not write Message Index records (reduces write overhead)
+  noSummary: false                # Do not write Summary section (faster writes, but no indexed access)
+  
+  # Chunk configuration (ignored if noChunking=true)
+  chunkSize: 786432               # Target uncompressed chunk size in bytes (default: 768KB)
+  
+  # Compression options (ignored if noChunking=true)
+  compression: "Zstd"             # Options: "None", "Lz4", "Zstd" (default: "Zstd")
+  compressionLevel: "Fastest"         # Options: "Fastest", "Fast", "Default", "Slow", "Slowest"
+  forceCompression: false          # Force compression on all chunks (even if not beneficial)
+  
+  # Advanced options (rarely needed)
+  # noRepeatedSchemas: false
+  # noRepeatedChannels: false
+  # noMetadataIndex: false
+  # noChunkIndex: false
+  # noStatistics: false
+  # noSummaryOffsets: false
+
+# Preset profiles (alternative to manual configuration)
+# If preset_profile is specified, it overrides manual mcap settings above
+# Options: "fastwrite", "zstd_fast", "zstd_small"
+# Uncomment to use a preset instead of manual configuration:
+# preset_profile: "zstd_fast"
+

@@ -10,6 +10,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Header
+from rosgraph_msgs.msg import Clock
 import os
 from pathlib import Path
 import math
@@ -21,6 +22,9 @@ class SailingAreaPublisher(Node):
     def __init__(self, map_name=None):
         super().__init__('sailing_area_publisher')
         self.map_name = map_name  # Specific map to use for origin (matches simulator bridge)
+        
+        # Initialize clock time for timestamp preservation (before any methods use it)
+        self.sim_time = None
         
         # Determine Argo repository directory dynamically
         script_path = Path(__file__).resolve()
@@ -65,6 +69,20 @@ class SailingAreaPublisher(Node):
         # Publish markers at startup
         self.publish_all_markers()
         
+        # Clock time for timestamp preservation during re-recording
+        # Subscribe to /clock topic to get simulated time from bag playback
+        # Use BEST_EFFORT reliability to match ros2 bag play --clock QoS
+        clock_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        self.create_subscription(
+            Clock, '/clock', 
+            self.clock_callback, 
+            clock_qos
+        )
+        
         # Create a timer to republish periodically (in case of reconnection)
         # Use shorter interval initially to ensure subscribers receive data
         self.republish_count = 0
@@ -72,6 +90,22 @@ class SailingAreaPublisher(Node):
         
         # Log comprehensive startup information
         self.log_startup_info()
+    
+    def clock_callback(self, msg):
+        """Update simulated time from /clock topic for timestamp preservation"""
+        # Store the clock time - this comes from ros2 bag play --clock
+        # and represents the original bag's timestamps
+        # msg.clock is a builtin_interfaces/Time object
+        self.sim_time = msg.clock
+    
+    def get_current_time(self):
+        """Get current time for message headers, using /clock if available (for re-recording)"""
+        # If /clock topic is available (during bag playback), use that time
+        # This preserves original timestamps even when playing at high speed
+        if self.sim_time is not None:
+            return self.sim_time
+        # Otherwise, use node's clock (normal operation)
+        return self.get_clock().now().to_msg()
     
     def load_sailing_areas(self):
         """Load all GeoJSON sailing area files"""
@@ -249,7 +283,7 @@ class SailingAreaPublisher(Node):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "map"
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = marker_id
         marker.action = Marker.ADD
@@ -300,7 +334,7 @@ class SailingAreaPublisher(Node):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "map"
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = marker_id
         marker.type = Marker.LINE_STRIP
@@ -343,7 +377,7 @@ class SailingAreaPublisher(Node):
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "map"
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = self.get_current_time()
         
         marker.id = marker_id
         marker.type = Marker.LINE_STRIP
