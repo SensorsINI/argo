@@ -1,0 +1,160 @@
+{
+  "configById": {
+    "3D!1ldu0mf": {
+      "topics": {
+        "/sailing_boundaries": {
+          "showOutlines": true,
+          "color": "#ea4800ff",
+          "visible": true
+        },
+        "/visualization_marker_array": {
+          "visible": true,
+          "namespaces": {
+            "argo_boat_labels": {
+              "visible": false
+            },
+            "argo_boat": {
+              "visible": true
+            }
+          },
+          "showOutlines": false
+        },
+        "/sailing_hazards": {
+          "visible": true
+        },
+        "/sailing_waypoints": {
+          "visible": true
+        },
+        "/visualization_marker": {
+          "visible": true,
+          "namespaces": {
+            "argo_boat": {
+              "visible": false
+            },
+            "argo_boat_labels": {
+              "visible": false
+            }
+          }
+        },
+        "/initialpose": {
+          "visible": true
+        },
+        "/move_base_simple/goal": {
+          "visible": true
+        }
+      },
+      "layers": {
+        "c0a2586b-a751-45e2-aa33-b2624a1acd9c": {
+          "layerId": "foxglove.Grid",
+          "instanceId": "c0a2586b-a751-45e2-aa33-b2624a1acd9c",
+          "visible": false
+        }
+      },
+      "cameraState": {
+        "perspective": false,
+        "distance": 55.790196350324656,
+        "phi": 17.03302097771284,
+        "thetaOffset": 8.124571886107649,
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-position",
+      "scene": {
+        "syncCamera": false,
+        "transforms": {
+          "visible": true
+        },
+        "backgroundColor": "#d1f3fc"
+      },
+      "transforms": {
+        "frame:map": {
+          "visible": true
+        },
+        "frame:base_link": {
+          "visible": true
+        },
+        "frame:rudder_link": {
+          "visible": false
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {},
+      "followTf": "map",
+      "enuFrameId": "map"
+    },
+    "map!4aioxrg": {
+      "topic": "/fix",
+      "zoomLevel": 20,
+      "center": {
+        "lat": 47.398154808892414,
+        "lon": 8.544838600000308
+      },
+      "customTileUrl": "",
+      "disabledTopics": [],
+      "followTopic": "/fix",
+      "followFrame": "",
+      "layer": "map",
+      "topicColors": {},
+      "maxNativeZoom": 18,
+      "topicConfig": {
+        "/fix": {
+          "historyMode": "all",
+          "pointDisplayMode": "dot",
+          "pointSize": 6
+        }
+      }
+    },
+    "Parameters!1f5pa9": {
+      "title": "Parameters"
+    },
+    "Tab!508p8q": {
+      "activeTabIdx": 0,
+      "tabs": [
+        {
+          "title": "Overview",
+          "layout": {
+            "direction": "column",
+            "first": "3D!1ldu0mf",
+            "second": {
+              "first": "map!4aioxrg",
+              "second": "Parameters!1f5pa9",
+              "direction": "row"
+            },
+            "splitPercentage": 44.2468263227576
+          }
+        }
+      ]
+    }
+  },
+  "layout": "Tab!508p8q",
+  "globalVariables": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "userNodes": {}
+}
