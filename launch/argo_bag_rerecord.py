@@ -113,11 +113,11 @@ def generate_launch_description():
     
     # Build ros2 bag record command with storage format support
     # Start with base command
-    # Note: We don't use --use-sim-time here because:
-    # - ros2 bag record records message header stamps by default (which is what we want)
-    # - Original messages from bag play should preserve their header stamps
-    # - Visualization nodes use /clock time for their header stamps (via our subscriptions)
-    record_base_cmd = 'ros2 bag record -a --include-hidden-topics -o "$1"'
+    # Use --use-sim-time to make ros2 bag record use /clock topic for log time
+    # This ensures Foxglove "log time" (when message was recorded) matches original robot time
+    # Without --use-sim-time, ros2 bag record uses wall-clock time for log time
+    # Note: ros2 bag record will wait for /clock messages before recording starts
+    record_base_cmd = 'ros2 bag record -a --include-hidden-topics --use-sim-time -o "$1"'
     
     # Add storage format option based on config
     # For MCAP, we'll create a temporary config file with unique name
@@ -169,9 +169,10 @@ def generate_launch_description():
     
     # Bag recording process - records ALL topics (original + visualization)
     # Start recording after a short delay to let nodes initialize
-    # Set ERROR log level to reduce verbosity
+    # Set WARNING log level to reduce verbosity
     # Uses MCAP format by default (configurable via record.yaml)
-    # ros2 bag record records message header.stamp by default (preserves original timestamps)
+    # --use-sim-time makes ros2 bag record use /clock topic for log time
+    # This ensures Foxglove "log time" (when message was recorded) matches original robot time
     # Original messages from bag play preserve their header stamps automatically
     # New visualization messages use /clock time for header stamps (via our node subscriptions)
     # This preserves original timestamps even when playing at 100x speed
