@@ -73,8 +73,6 @@ def generate_launch_description():
             
             node_name = node_cfg['name']
             executable = node_cfg['executable']
-            required = node_cfg.get('required', True)
-            critical = node_cfg.get('critical', False)
             description = node_cfg.get('description', '')
             
             # Handle special nodes (like foxglove_bridge)
@@ -88,7 +86,8 @@ def generate_launch_description():
                         node_action = ExecuteProcess(
                             cmd=['ros2', 'run', package, exec_name],
                             output='screen',
-                            name=node_name
+                            name=node_name,
+                            respawn=False  # All nodes start once, no respawning
                         )
                         launch_actions.append(node_action)
                         launch_actions.append(LogInfo(msg=f"  - {node_name}: {description}"))
@@ -127,18 +126,28 @@ def generate_launch_description():
             # Note: For non-package nodes, we use ExecuteProcess instead of Node
             # Add parameter file to command so nodes can load argo.yaml parameters
             cmd = ['python3', executable_path] + node_args + ['--ros-args', '--params-file', argo_yaml_path]
+            
+            # Simple logic: All nodes start once, no respawning
+            # Status and health monitoring will show which nodes are running or failed
+            # Explicitly set respawn=False and respawn_delay=None to prevent any respawning
             node_action = ExecuteProcess(
                 cmd=cmd,
                 output='screen',
                 name=node_name,
-                respawn=not critical,  # Only respawn non-critical nodes
+                respawn=False,  # All nodes attempt to start once, no automatic respawning
+                respawn_delay=None,  # Explicitly disable respawn delay
             )
             
-            launch_actions.append(node_action)
+            # Debug: Verify respawn is set correctly
+            if hasattr(node_action, '_ExecuteLocal__respawn'):
+                respawn_value = node_action._ExecuteLocal__respawn
+                launch_actions.append(LogInfo(
+                    msg=f"  - {node_name}: {description} [respawn={respawn_value}]"
+                ))
+            else:
+                launch_actions.append(LogInfo(msg=f"  - {node_name}: {description}"))
             
-            # Log node info
-            critical_str = " (CRITICAL)" if critical else ""
-            launch_actions.append(LogInfo(msg=f"  - {node_name}: {description}{critical_str}"))
+            launch_actions.append(node_action)
         
         return launch_actions
     
@@ -165,4 +174,3 @@ if __name__ == '__main__':
     ls = LaunchService()
     ls.include_launch_description(generate_launch_description())
     ls.run()
-
