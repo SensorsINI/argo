@@ -1,5 +1,43 @@
-# Argo Robot Services Makefile
-# Manages systemd services for ROS2 Argo robot
+# ============================================================================
+# Argo Autonomous Sailboat - Top Level Makefile
+# ============================================================================
+#
+# This Makefile provides centralized management for the Argo ROS2 autonomous
+# sailboat system, including hardware setup, dependencies, services, and
+# system configuration.
+#
+# QUICK START:
+#   make help                    - Show all available commands
+#   make install-all            - Complete hardware and dependency setup
+#   make install-argo-cli       - Install command-line aliases (al, aq, ar, ac, etc.)
+#   make -C launch install      - Install and enable Argo launch services
+#   make -C power_control install - Install power control system
+#
+# MAIN COMPONENTS:
+#   • Hardware & Dependencies   - ROS2 packages, Python deps, PWM modules
+#   • Service Management        - Lifecycle, power control, battery monitoring
+#   • System Configuration      - CPU tuning, WiFi, logging, MOTD
+#   • Simulation                - Local/remote simulation modes
+#   • Development Tools         - Git submodules, testing, debugging
+#
+# SERVICE ORGANIZATION:
+#   This top-level Makefile delegates to component Makefiles:
+#   • launch/Makefile           - ROS2 node lifecycle and launch services
+#   • power_control/Makefile    - Power button, LED, shutdown control
+#   • scripts/Makefile          - Battery monitoring and status display
+#   • system-monitoring/Makefile - Optional debugging and monitoring services
+#
+# IMPORTANT NOTES:
+#   • Most service operations are in launch/Makefile (use 'make -C launch <target>')
+#   • Convenience targets here forward to component Makefiles
+#   • Run 'make help' for complete list of available commands
+#   • Hardware changes typically require reboot to take effect
+#
+# For detailed documentation, see:
+#   • README.md                 - Project overview and getting started
+#   • launch/README.md          - Service management and lifecycle
+#   • power_control/README.md   - Power control system documentation
+# ============================================================================
 
 SERVICE_DIR = /etc/systemd/system
 LAUNCH_SERVICE = argo_launch.service
