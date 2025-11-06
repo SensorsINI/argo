@@ -241,6 +241,28 @@ echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
+# Check for MCAP plugin dependency before proceeding
+echo -e "${CYAN}🔍 Checking dependencies...${NC}"
+if ! ros2 bag record -s mcap --help >/dev/null 2>&1; then
+    echo -e "${RED}❌ ERROR: MCAP storage plugin is not installed!${NC}"
+    echo ""
+    echo -e "The bag re-recording requires the MCAP storage plugin for ros2 bag record."
+    echo -e "Install it with:"
+    echo ""
+    echo -e "   ${CYAN}source /opt/ros/humble/setup.bash${NC}"
+    echo -e "   ${CYAN}make install-rosbag2-mcap${NC}"
+    echo ""
+    echo -e "Or install all ROS2 dependencies:"
+    echo ""
+    echo -e "   ${CYAN}source /opt/ros/humble/setup.bash${NC}"
+    echo -e "   ${CYAN}make install-deps${NC}"
+    echo ""
+    echo -e "After installation, try the re-recording again."
+    exit 1
+fi
+echo -e "${GREEN}✅ MCAP storage plugin is available${NC}"
+echo ""
+
 # Confirmation prompt (unless -y/--yes flag is set)
 if [ "$SKIP_CONFIRMATION" != "true" ]; then
     read -p "Proceed with re-recording? (Y/n): " -n 1 -r

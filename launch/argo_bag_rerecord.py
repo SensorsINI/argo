@@ -30,6 +30,8 @@ import os
 import yaml
 import tempfile
 import atexit
+import subprocess
+import sys
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, ExecuteProcess, TimerAction, RegisterEventHandler, Shutdown, OpaqueFunction
 from launch.event_handlers import OnProcessExit, OnProcessStart, OnShutdown
@@ -37,6 +39,38 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from datetime import datetime
+
+
+def check_mcap_plugin_available():
+    """Check if MCAP storage plugin is available for ros2 bag record"""
+    try:
+        # Try to get help output which lists available storage plugins
+        result = subprocess.run(
+            ['ros2', 'bag', 'record', '--help'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        # Check if 'mcap' appears in the help output as a storage option
+        if 'mcap' in result.stdout or 'mcap' in result.stderr:
+            return True
+        
+        # Alternative: Try to check if the plugin package is installed
+        # This works by checking if ros2 bag record accepts -s mcap without error
+        test_result = subprocess.run(
+            ['ros2', 'bag', 'record', '-s', 'mcap', '--help'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        # If it doesn't error with "invalid choice", the plugin is available
+        if 'invalid choice' not in test_result.stderr.lower():
+            return True
+        
+        return False
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        # If ros2 command not found or times out, assume not available
+        return False
 
 
 def generate_launch_description():
@@ -65,6 +99,28 @@ def generate_launch_description():
     except (FileNotFoundError, Exception):
         # Use defaults if config file not found or invalid
         pass
+    
+    # Check if MCAP plugin is available when MCAP format is requested
+    if storage_format == 'mcap':
+        if not check_mcap_plugin_available():
+            error_msg = """
+❌ ERROR: MCAP storage plugin is not installed!
+
+The bag re-recording requires the MCAP storage plugin for ros2 bag record.
+Install it with:
+
+    source /opt/ros/humble/setup.bash
+    make install-rosbag2-mcap
+
+Or install all ROS2 dependencies:
+
+    source /opt/ros/humble/setup.bash
+    make install-deps
+
+After installation, try the re-recording again.
+"""
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
     
     # Launch arguments
     input_bag_arg = DeclareLaunchArgument(

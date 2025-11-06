@@ -60,6 +60,10 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.boat_roll = 0.0
         self.boat_pitch = 0.0
         
+        # GPS timestamp tracking - store the timestamp of the GPS message that provided current position
+        # This ensures transforms use the correct timestamp to match GPS data, preventing backwards movement
+        self.last_gps_timestamp = None
+        
         # Debug tracing
         self.debug_trace = self.declare_parameter('debug_trace', False).get_parameter_value().bool_value
         self.tf_publish_counter = 0
@@ -176,11 +180,15 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.current_lat = msg.latitude
         self.current_lon = msg.longitude
         
+        # Store the GPS message timestamp - this is critical for correct transform ordering
+        # Transforms that use this GPS position should use this timestamp, not the current clock time
+        self.last_gps_timestamp = msg.header.stamp
+        
         if self.debug_trace:
             # Convert to x,y for logging
             x, y = self.lonlat_to_xy(self.current_lon, self.current_lat)
             old_x, old_y = self.lonlat_to_xy(old_lon, old_lat) if old_lat != 0.0 or old_lon != 0.0 else (0.0, 0.0)
-            self.get_logger().debug(f"[TF_TRACE:GPS] GPS callback - lat={self.current_lat:.8f}, lon={self.current_lon:.8f}, x={x:.6f}, y={y:.6f} (was x={old_x:.6f}, y={old_y:.6f})")
+            self.get_logger().debug(f"[TF_TRACE:GPS] GPS callback - lat={self.current_lat:.8f}, lon={self.current_lon:.8f}, x={x:.6f}, y={y:.6f} (was x={old_x:.6f}, y={old_y:.6f}), timestamp={self.last_gps_timestamp}")
     
     def pose_callback(self, msg):
         """Update boat heading from pose topic"""
@@ -312,7 +320,13 @@ class ArgoTransformPublisher(ArgoBaseNode):
             qz = cr * cp * sy - sr * sp * cy
             
             odom_to_base = TransformStamped()
-            odom_to_base.header.stamp = self.get_current_time()
+            # Use GPS message timestamp if available, otherwise use current time
+            # This ensures transforms are ordered correctly with respect to GPS data
+            # and prevents backwards movement when GPS updates arrive
+            if self.last_gps_timestamp is not None:
+                odom_to_base.header.stamp = self.last_gps_timestamp
+            else:
+                odom_to_base.header.stamp = self.get_current_time()
             odom_to_base.header.frame_id = "odom"
             odom_to_base.child_frame_id = "base_link"
             
