@@ -7897,6 +7897,18 @@
 		)
 		(uuid "0f0ab76f-8bf4-46ad-aa99-dae6a43f7127")
 	)
+	(text "GREEN"
+		(exclude_from_sim no)
+		(at 121.92 42.672 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 0 255 0 1)
+			)
+			(justify right)
+		)
+		(uuid "16ac938e-c55a-4e97-8201-665585ef2b95")
+	)
 	(text "!PG configure as PU - signals USB power"
 		(exclude_from_sim no)
 		(at 111.76 83.566 0)
@@ -8021,6 +8033,20 @@
 		)
 		(uuid "33ca4453-97fa-4c69-a042-d94cdc66be9a")
 	)
+	(text "PH4 pin (GREEN) can be damaged by \novervoltage from FUSE voltage through coil!"
+		(exclude_from_sim no)
+		(at 193.548 120.904 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.254)
+				(bold yes)
+				(color 255 0 0 1)
+			)
+			(justify right)
+		)
+		(uuid "346ed081-cccd-478e-9dec-0e8e4847937e")
+	)
 	(text "Drive Q2A gate from voltage \ndivider to avoid overvoltage"
 		(exclude_from_sim no)
 		(at 170.434 145.796 0)
@@ -8045,6 +8071,20 @@
 			(justify right)
 		)
 		(uuid "39d8056d-86f0-437c-a0dd-56ec80e690ac")
+	)
+	(text "Add NFET to pull down on GREEN\nto avoid pin damage."
+		(exclude_from_sim no)
+		(at 115.57 67.056 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.254)
+				(bold yes)
+				(color 255 0 0 1)
+			)
+			(justify left)
+		)
+		(uuid "3cd65a0a-fca6-4c96-bf12-8c5f19807eb3")
 	)
 	(text "wrong fp"
 		(exclude_from_sim no)
@@ -8171,6 +8211,18 @@
 		)
 		(uuid "77539aab-0d7e-4838-84b3-78c6502c00b2")
 	)
+	(text "BLK"
+		(exclude_from_sim no)
+		(at 121.158 50.038 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 0 0 0 1)
+			)
+			(justify right)
+		)
+		(uuid "7de66091-e125-4349-a844-f7f42943e6a5")
+	)
 	(text "!ACOK configure as PU - signals MPC2672 has power"
 		(exclude_from_sim no)
 		(at 114.3 73.914 0)
@@ -8181,6 +8233,18 @@
 			(justify left)
 		)
 		(uuid "7fcf4265-2ea9-4ee8-ab02-3e46a257c8bb")
+	)
+	(text "WHITE"
+		(exclude_from_sim no)
+		(at 122.174 45.212 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 194 194 194 1)
+			)
+			(justify right)
+		)
+		(uuid "80c43244-01e0-4a8f-8b90-98cd67785c0a")
 	)
 	(text "!CHARGING configure as PU - signals battery is charging"
 		(exclude_from_sim no)
@@ -8531,6 +8595,32 @@
 			(justify left)
 		)
 		(uuid "e5b1071d-28e0-42c8-a6a2-229ff4b8d570")
+	)
+	(text "RED"
+		(exclude_from_sim no)
+		(at 121.158 47.752 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+			(justify right)
+		)
+		(uuid "e7c07bd9-5a1b-476d-97c8-4f8d25c77003")
+	)
+	(text "Add diode protection from GREEN (+) to 5V (-)\nto prevent GREEN from going much above 5V"
+		(exclude_from_sim no)
+		(at 215.392 134.874 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.254)
+				(bold yes)
+				(color 255 0 0 1)
+			)
+			(justify right)
+		)
+		(uuid "eed7824b-d73f-4180-b321-83124784eff9")
 	)
 	(text "R9 labeled 15k on rev3"
 		(exclude_from_sim no)

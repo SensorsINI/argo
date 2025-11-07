@@ -8,10 +8,13 @@
 #   -n N    Show last N lines (default: 20, ignored when PATTERN provided)
 #   -f      Follow mode (tail -f behavior, default)
 #   -e      Error check mode: search all logs for ERROR/WARN/FATAL [with optional PATTERN]
+#           When combined with -f, shows recent errors (default: last 1 minute) then follows
+#   -t TIME Time window for recent logs (e.g., "1m", "5m", "1h", "30s")
+#           Default: 1 minute when using -ef combination
 #   -a      Show all logs for last 2 boots with optional PATTERN filter
 #   -h      Show this help
-#   PATTERN Optional grep pattern to filter logs (searches ALL logs, not just last N)
-#           Examples: "controller", "anem_node", "rudder"
+#   PATTERN Optional grep pattern to filter logs (extended regex supported)
+#           Examples: "controller", "anem_node", "rudder", "(controller|dashboard)"
 
 # Default options
 LINES=20
@@ -19,6 +22,7 @@ FOLLOW=true
 GREP_PATTERN=""
 ERROR_CHECK=false
 ALL_LOGS=false
+TIME_WINDOW=""
 
 # Color codes for each service
 COLOR_ARGO_LAUNCH='\e[0;96m'      # Cyan for argo-launch
@@ -33,13 +37,13 @@ COLOR_ERROR='\e[1;91m'             # Bold bright red for ERROR
 COLOR_WARN='\e[1;33m'              # Bold dark yellow for WARN
 
 # Service names
-SERVICE_ARGO="argo_launch.service"
+SERVICE_ARGO="argo_launch_standard.service"
 SERVICE_BATTERY="argo_battery_water.service"
 SERVICE_POWER="argo_power_control.service"
 SERVICE_IMU="argo_bno085.service"
 
 # Parse command line options
-while getopts "n:feh:a" opt; do
+while getopts "n:fet:ha" opt; do
     case $opt in
         n)
             LINES=$OPTARG
@@ -49,7 +53,10 @@ while getopts "n:feh:a" opt; do
             ;;
         e)
             ERROR_CHECK=true
-            FOLLOW=false
+            # Don't disable FOLLOW when -e is used - allow -ef combination
+            ;;
+        t)
+            TIME_WINDOW="$OPTARG"
             ;;
         a)
             ALL_LOGS=true
@@ -66,17 +73,21 @@ while getopts "n:feh:a" opt; do
             echo "  -f      Follow mode (default, live tail)"
             echo "  -e      Error check mode: scan ALL logs for ERROR/WARN/FATAL"
             echo "          Optional PATTERN filters by node/service name"
+            echo "          When combined with -f, shows recent errors then follows"
+            echo "  -t TIME Time window for recent logs (e.g., \"1m\", \"5m\", \"1h\", \"30s\")"
+            echo "          Default: 1 minute when using -ef combination"
             echo "  -a      Show all logs since last 2 boots with optional PATTERN filter"
             echo "  -h      Show this help"
             echo ""
             echo "Arguments:"
-            echo "  PATTERN Optional grep pattern to filter logs (scans ALL logs)"
+            echo "  PATTERN Optional grep pattern to filter logs (extended regex supported)"
+            echo "          Examples: 'controller', '(controller|dashboard)', 'anem.*node'"
             echo ""
             echo "Services monitored:"
-            echo "  - argo_launch.service      (cyan)"
-            echo "  - argo_battery_water.service (yellow)"
-            echo "  - argo_power_control.service (green)"
-            echo "  - argo_bno085.service      (magenta)"
+            echo "  - ${SERVICE_ARGO} (cyan)"
+            echo "  - ${SERVICE_BATTERY} (yellow)"
+            echo "  - ${SERVICE_POWER} (green)"
+            echo "  - ${SERVICE_IMU} (magenta)"
             echo ""
             echo "Priority highlighting:"
             echo "  - ERROR lines              (bold bright red)"
@@ -86,9 +97,11 @@ while getopts "n:feh:a" opt; do
             echo "  argo_logs.sh                    # Follow all logs (live)"
             echo "  argo_logs.sh -n 50              # Show last 50 lines"
             echo "  argo_logs.sh controller         # Scan ALL logs for 'controller'"
-            echo "  argo_logs.sh -e                 # Check for any errors/warnings"
-            echo "  argo_logs.sh -e anem            # Check for errors in anem node"
-            echo "  argo_logs.sh -e controller      # Check for controller errors"
+            echo "  argo_logs.sh -e                 # Check for any errors/warnings (ALL logs)"
+            echo "  argo_logs.sh -e anem            # Check for errors in anem node (ALL logs)"
+            echo "  argo_logs.sh -ef controller     # Show recent errors matching 'controller', then follow"
+            echo "  argo_logs.sh -ef '(controller|dashboard)'  # Show errors matching either, then follow"
+            echo "  argo_logs.sh -ef -t 5m          # Show last 5 minutes of errors, then follow"
             echo "  argo_logs.sh -a                 # Show all logs (no filtering)"
             echo "  argo_logs.sh -a controller      # Show all logs filtered by 'controller'"
             exit 0
@@ -104,39 +117,26 @@ done
 shift $((OPTIND-1))
 GREP_PATTERN="$1"
 
-# Check if services exist
-check_service() {
-    local service=$1
-    if ! systemctl list-unit-files | grep -q "^${service}"; then
-        echo "Warning: ${service} not found" >&2
-        return 1
-    fi
-    return 0
-}
+# Set default time window for -ef combination
+if [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ] && [ -z "$TIME_WINDOW" ]; then
+    TIME_WINDOW="1m"
+fi
 
-# Apply ERROR and WARN highlighting to a line
-highlight_priority() {
-    local line="$1"
-    
-    # Check for ERROR first (higher priority)
-    if echo "$line" | grep -qi "ERROR"; then
-        echo -e "${COLOR_ERROR}${line}${RESET}"
-    # Then check for WARN
-    elif echo "$line" | grep -qi "WARN"; then
-        echo -e "${COLOR_WARN}${line}${RESET}"
-    else
-        echo "$line"
-    fi
-}
+# --- Main Execution ---
 
 echo "📋 Argo Multi-Service Logs"
-if [ "$ERROR_CHECK" = true ]; then
+if [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ]; then
+    echo "🚨 Error Follow Mode: Recent errors (last ${TIME_WINDOW}) + follow"
+    if [ -n "$GREP_PATTERN" ]; then
+        echo "🔍 Filter: $GREP_PATTERN"
+    fi
+elif [ "$ERROR_CHECK" = true ]; then
     echo "🚨 Error Check Mode: Scanning ALL logs for ERROR/WARN/FATAL"
     if [ -n "$GREP_PATTERN" ]; then
         echo "🔍 Filter: $GREP_PATTERN"
     fi
 elif [ "$ALL_LOGS" = true ]; then
-    echo "📜 All Logs Mode: Showing all logs"
+    echo "📜 All Logs Mode: Showing all logs from last 2 boots"
     if [ -n "$GREP_PATTERN" ]; then
         echo "🔍 Filter: $GREP_PATTERN"
     fi
@@ -148,394 +148,77 @@ else
     echo "📄 Static Mode: Last $LINES lines per service"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${COLOR_ARGO_LAUNCH}●${RESET} argo-launch.service (cyan)"
-echo -e "${COLOR_BATTERY}●${RESET} argo_battery_water.service (yellow)"
-echo -e "${COLOR_POWER}●${RESET} argo_power_control.service (green)"
-echo -e "${COLOR_IMU}●${RESET} argo_bno085.service (magenta)"
+echo -e "${COLOR_ARGO_LAUNCH}●${RESET} ${SERVICE_ARGO} (cyan)"
+echo -e "${COLOR_BATTERY}●${RESET} ${SERVICE_BATTERY} (yellow)"
+echo -e "${COLOR_POWER}●${RESET} ${SERVICE_POWER} (green)"
+echo -e "${COLOR_IMU}●${RESET} ${SERVICE_IMU} (magenta)"
 echo -e "${COLOR_ERROR}●${RESET} ERROR lines (bold bright red)"
 echo -e "${COLOR_WARN}●${RESET} WARN lines (bold dark yellow)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-if [ "$ERROR_CHECK" = true ]; then
-    # Error check mode - scan ALL logs for ERROR/WARN/FATAL with optional pattern filter
-    echo -e "${COLOR_ERROR}=== Scanning for errors/warnings ===${RESET}"
-    
-    # Build grep pattern for error messages
-    ERROR_PATTERN="ERROR\|WARN\|FATAL\|error\|warn\|fatal"
-    
-    # Combine with user pattern if provided
-    if [ -n "$GREP_PATTERN" ]; then
-        # Use grep pipeline to match both error keywords AND user pattern
-        journalctl --no-pager \
-            -u "$SERVICE_ARGO" \
-            -u "$SERVICE_BATTERY" \
-            -u "$SERVICE_POWER" \
-            -u "$SERVICE_IMU" \
-            --output=short-iso-precise \
-            2>/dev/null | \
-        grep -i "$ERROR_PATTERN" | \
-        grep "$GREP_PATTERN" | \
-        awk '
-        {
-            # Extract the core message (remove timestamps, process info, and variable numbers)
-            core_msg = $0
-            gsub(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+[+-][0-9]{4} [^:]+: /, "", core_msg)
-            gsub(/\[[0-9]+\.[0-9]+\]/, "", core_msg)
-            gsub(/\[[0-9]+\]/, "", core_msg)
-            # Remove variable timeout numbers (e.g., "for 46015s" -> "for XXXs")
-            gsub(/for [0-9]+s/, "for XXXs", core_msg)
-            # Remove variable channel numbers (e.g., "channels 0.0us" -> "channels X.Xus")
-            gsub(/channels [0-9]+\.[0-9]+us/, "channels X.Xus", core_msg)
-            # Remove any remaining numbers that might vary
-            gsub(/[0-9]+/, "X", core_msg)
-            
-            # Count occurrences of each core message
-            count[core_msg]++
-            if (count[core_msg] == 1) {
-                # Store the first occurrence for display
-                first_occurrence[core_msg] = $0
-            }
-        }
-        END {
-            # Display throttled results
-            for (msg in count) {
-                if (count[msg] == 1) {
-                    print first_occurrence[msg]
-                } else {
-                    # Show count for repeated messages
-                    print first_occurrence[msg] " " "\033[0;90m(+" count[msg]-1 " more)\033[0m"
-                }
-            }
-        }' | \
-        while IFS= read -r line; do
-            # Apply color based on error level and service
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
-                echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-            elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
-                echo -e "${COLOR_BATTERY}${line}${RESET}"
-            elif echo "$line" | grep -q "argo_power_control"; then
-                echo -e "${COLOR_POWER}${line}${RESET}"
-            elif echo "$line" | grep -q "bno08x_driver\|argo_bno085"; then
-                echo -e "${COLOR_IMU}${line}${RESET}"
-            else
-                echo "$line"
-            fi
-        done
-    else
-        # Just error keywords, no additional filtering
-        journalctl --no-pager \
-            -u "$SERVICE_ARGO" \
-            -u "$SERVICE_BATTERY" \
-            -u "$SERVICE_POWER" \
-            -u "$SERVICE_IMU" \
-            --output=short-iso-precise \
-            2>/dev/null | \
-        grep -i "$ERROR_PATTERN" | \
-        awk '
-        {
-            # Extract the core message (remove timestamps, process info, and variable numbers)
-            core_msg = $0
-            gsub(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+[+-][0-9]{4} [^:]+: /, "", core_msg)
-            gsub(/\[[0-9]+\.[0-9]+\]/, "", core_msg)
-            gsub(/\[[0-9]+\]/, "", core_msg)
-            # Remove variable timeout numbers (e.g., "for 46015s" -> "for XXXs")
-            gsub(/for [0-9]+s/, "for XXXs", core_msg)
-            # Remove variable channel numbers (e.g., "channels 0.0us" -> "channels X.Xus")
-            gsub(/channels [0-9]+\.[0-9]+us/, "channels X.Xus", core_msg)
-            # Remove any remaining numbers that might vary
-            gsub(/[0-9]+/, "X", core_msg)
-            
-            # Count occurrences of each core message
-            count[core_msg]++
-            if (count[core_msg] == 1) {
-                # Store the first occurrence for display
-                first_occurrence[core_msg] = $0
-            }
-        }
-        END {
-            # Display throttled results
-            for (msg in count) {
-                if (count[msg] == 1) {
-                    print first_occurrence[msg]
-                } else {
-                    # Show count for repeated messages
-                    print first_occurrence[msg] " " "\033[0;90m(+" count[msg]-1 " more)\033[0m"
-                }
-            }
-        }' | \
-        while IFS= read -r line; do
-            # Apply color based on error level and service
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
-                echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-            elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
-                echo -e "${COLOR_BATTERY}${line}${RESET}"
-            elif echo "$line" | grep -q "argo_power_control"; then
-                echo -e "${COLOR_POWER}${line}${RESET}"
-            elif echo "$line" | grep -q "bno08x_driver\|argo_bno085"; then
-                echo -e "${COLOR_IMU}${line}${RESET}"
-            else
-                echo "$line"
-            fi
-        done
-    fi
-elif [ "$ALL_LOGS" = true ]; then
-    # All logs mode - show logs from current and previous boot for shutdown/boot debugging
-    echo -e "${COLOR_ARGO_LAUNCH}=== argo-launch.service ===${RESET}"
-    if [ -n "$GREP_PATTERN" ]; then
-        journalctl -u "$SERVICE_ARGO" --boot=-1..0 --no-pager 2>/dev/null | \
-            grep "$GREP_PATTERN" | \
-            while IFS= read -r line; do
-                if echo "$line" | grep -qi "ERROR"; then
-                    echo -e "${COLOR_ERROR}${line}${RESET}"
-                elif echo "$line" | grep -qi "WARN"; then
-                    echo -e "${COLOR_WARN}${line}${RESET}"
-                else
-                    echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-                fi
-            done
-    else
-        journalctl -u "$SERVICE_ARGO" --boot=-1..0 --no-pager 2>/dev/null | \
-            while IFS= read -r line; do
-                if echo "$line" | grep -qi "ERROR"; then
-                    echo -e "${COLOR_ERROR}${line}${RESET}"
-                elif echo "$line" | grep -qi "WARN"; then
-                    echo -e "${COLOR_WARN}${line}${RESET}"
-                else
-                    echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-                fi
-            done
-    fi
-    echo ""
-    
-    echo -e "${COLOR_BATTERY}=== argo_battery_water.service ===${RESET}"
-    if [ -n "$GREP_PATTERN" ]; then
-        journalctl -u "$SERVICE_BATTERY" --boot=-1..0 --no-pager 2>/dev/null | \
-            grep "$GREP_PATTERN" | \
-            while IFS= read -r line; do
-                if echo "$line" | grep -qi "ERROR"; then
-                    echo -e "${COLOR_ERROR}${line}${RESET}"
-                elif echo "$line" | grep -qi "WARN"; then
-                    echo -e "${COLOR_WARN}${line}${RESET}"
-                else
-                    echo -e "${COLOR_BATTERY}${line}${RESET}"
-                fi
-            done
-    else
-        journalctl -u "$SERVICE_BATTERY" --no-pager 2>/dev/null | \
-            while IFS= read -r line; do
-                if echo "$line" | grep -qi "ERROR"; then
-                    echo -e "${COLOR_ERROR}${line}${RESET}"
-                elif echo "$line" | grep -qi "WARN"; then
-                    echo -e "${COLOR_WARN}${line}${RESET}"
-                else
-                    echo -e "${COLOR_BATTERY}${line}${RESET}"
-                fi
-            done
-    fi
-    echo ""
-    
-    echo -e "${COLOR_POWER}=== argo_power_control.service ===${RESET}"
-    if [ -n "$GREP_PATTERN" ]; then
-        journalctl -u "$SERVICE_POWER" --no-pager 2>/dev/null | \
-            grep "$GREP_PATTERN" | \
-            while IFS= read -r line; do
-                if echo "$line" | grep -qi "ERROR"; then
-                    echo -e "${COLOR_ERROR}${line}${RESET}"
-                elif echo "$line" | grep -qi "WARN"; then
-                    echo -e "${COLOR_WARN}${line}${RESET}"
-                else
-                    echo -e "${COLOR_POWER}${line}${RESET}"
-                fi
-            done
-    else
-        journalctl -u "$SERVICE_POWER" --no-pager 2>/dev/null | \
-            while IFS= read -r line; do
-                if echo "$line" | grep -qi "ERROR"; then
-                    echo -e "${COLOR_ERROR}${line}${RESET}"
-                elif echo "$line" | grep -qi "WARN"; then
-                    echo -e "${COLOR_WARN}${line}${RESET}"
-                else
-                    echo -e "${COLOR_POWER}${line}${RESET}"
-                fi
-            done
-    fi
-    echo ""
-    
-    echo -e "${COLOR_IMU}=== argo_bno085.service ===${RESET}"
-    if [ -n "$GREP_PATTERN" ]; then
-        journalctl -u "$SERVICE_IMU" --no-pager 2>/dev/null | \
-            grep "$GREP_PATTERN" | \
-            while IFS= read -r line; do
-                if echo "$line" | grep -qi "ERROR"; then
-                    echo -e "${COLOR_ERROR}${line}${RESET}"
-                elif echo "$line" | grep -qi "WARN"; then
-                    echo -e "${COLOR_WARN}${line}${RESET}"
-                else
-                    echo -e "${COLOR_IMU}${line}${RESET}"
-                fi
-            done
-    else
-        journalctl -u "$SERVICE_IMU" --no-pager 2>/dev/null | \
-            while IFS= read -r line; do
-                if echo "$line" | grep -qi "ERROR"; then
-                    echo -e "${COLOR_ERROR}${line}${RESET}"
-                elif echo "$line" | grep -qi "WARN"; then
-                    echo -e "${COLOR_WARN}${line}${RESET}"
-                else
-                    echo -e "${COLOR_IMU}${line}${RESET}"
-                fi
-            done
-    fi
-elif [ "$FOLLOW" = true ]; then
-    # Follow mode - use journalctl with multiple units and color them
-    # Use a single journalctl process but add service prefixes for identification
-    journalctl -n "$LINES" -f --no-pager \
-        -u "$SERVICE_ARGO" \
-        -u "$SERVICE_BATTERY" \
-        -u "$SERVICE_POWER" \
-        -u "$SERVICE_IMU" \
-        --output=short-iso-precise \
-        2>/dev/null | \
-    (if [ -n "$GREP_PATTERN" ]; then grep --line-buffered "$GREP_PATTERN"; else cat; fi) | \
+# Function to colorize log lines
+colorize_logs() {
     while IFS= read -r line; do
-        # First check for ERROR/WARN (highest priority)
+        # Priority highlighting for errors and warnings
         if echo "$line" | grep -qi "ERROR"; then
             echo -e "${COLOR_ERROR}${line}${RESET}"
         elif echo "$line" | grep -qi "WARN"; then
             echo -e "${COLOR_WARN}${line}${RESET}"
-        # Then check for service names in the log line (they appear in different formats)
-        elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch"; then
-            # Color the entire line cyan for argo-launch
+        # Service-specific coloring
+        elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch\|argo_health_monitor"; then
             echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
         elif echo "$line" | grep -q "argo_battery_water_node\|argo_battery_water"; then
-            # Color the entire line yellow for argo_battery_water
             echo -e "${COLOR_BATTERY}${line}${RESET}"
         elif echo "$line" | grep -q "argo_power_control"; then
-            # Color the entire line green for power_control
             echo -e "${COLOR_POWER}${line}${RESET}"
         elif echo "$line" | grep -q "bno08x_driver\|argo_bno085"; then
-            # Color the entire line magenta for BNO085 IMU
             echo -e "${COLOR_IMU}${line}${RESET}"
         else
-            # Default: no color (fallback)
-            echo "$line"
+            echo "$line" # No color
         fi
     done
-elif [ -n "$GREP_PATTERN" ]; then
-    # Pattern search mode - scan ALL logs (no line limit) for the pattern
-    echo -e "${COLOR_ARGO_LAUNCH}=== argo-launch.service ===${RESET}"
-    journalctl -u "$SERVICE_ARGO" --no-pager 2>/dev/null | \
-        grep "$GREP_PATTERN" | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            else
-                echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-            fi
-        done
-    echo ""
-    
-    echo -e "${COLOR_BATTERY}=== argo_battery_water.service ===${RESET}"
-    journalctl -u "$SERVICE_BATTERY" --no-pager 2>/dev/null | \
-        grep "$GREP_PATTERN" | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            else
-                echo -e "${COLOR_BATTERY}${line}${RESET}"
-            fi
-        done
-    echo ""
-    
-    echo -e "${COLOR_POWER}=== argo_power_control.service ===${RESET}"
-    journalctl -u "$SERVICE_POWER" --no-pager 2>/dev/null | \
-        grep "$GREP_PATTERN" | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            else
-                echo -e "${COLOR_POWER}${line}${RESET}"
-            fi
-        done
-    echo ""
-    
-    echo -e "${COLOR_IMU}=== argo_bno085.service ===${RESET}"
-    journalctl -u "$SERVICE_IMU" --no-pager 2>/dev/null | \
-        grep "$GREP_PATTERN" | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            else
-                echo -e "${COLOR_IMU}${line}${RESET}"
-            fi
-        done
-else
-    # Non-follow, non-pattern mode - just show last N lines from each service
-    echo -e "${COLOR_ARGO_LAUNCH}=== argo-launch.service ===${RESET}"
-    journalctl -u "$SERVICE_ARGO" -n "$LINES" --no-pager 2>/dev/null | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            else
-                echo -e "${COLOR_ARGO_LAUNCH}${line}${RESET}"
-            fi
-        done
-    echo ""
-    
-    echo -e "${COLOR_BATTERY}=== argo_battery_water.service ===${RESET}"
-    journalctl -u "$SERVICE_BATTERY" -n "$LINES" --no-pager 2>/dev/null | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            else
-                echo -e "${COLOR_BATTERY}${line}${RESET}"
-            fi
-        done
-    echo ""
-    
-    echo -e "${COLOR_POWER}=== argo_power_control.service ===${RESET}"
-    journalctl -u "$SERVICE_POWER" -n "$LINES" --no-pager 2>/dev/null | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            else
-                echo -e "${COLOR_POWER}${line}${RESET}"
-            fi
-        done
-    echo ""
-    
-    echo -e "${COLOR_IMU}=== argo_bno085.service ===${RESET}"
-    journalctl -u "$SERVICE_IMU" -n "$LINES" --no-pager 2>/dev/null | \
-        while IFS= read -r line; do
-            if echo "$line" | grep -qi "ERROR"; then
-                echo -e "${COLOR_ERROR}${line}${RESET}"
-            elif echo "$line" | grep -qi "WARN"; then
-                echo -e "${COLOR_WARN}${line}${RESET}"
-            else
-                echo -e "${COLOR_IMU}${line}${RESET}"
-            fi
-        done
+}
+
+# Construct the journalctl command
+journalctl_cmd="journalctl --no-pager"
+journalctl_cmd+=" -u $SERVICE_ARGO -u $SERVICE_BATTERY -u $SERVICE_POWER -u $SERVICE_IMU"
+
+# Add options based on flags
+if [ "$ALL_LOGS" = true ]; then
+    journalctl_cmd+=" --boot=-1..0"
+elif [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ]; then
+    # -ef combination: show recent errors, then follow
+    if [ -n "$TIME_WINDOW" ]; then
+        journalctl_cmd+=" --since \"${TIME_WINDOW} ago\""
+    fi
+    journalctl_cmd+=" -f"
+elif [ "$FOLLOW" = true ]; then
+    journalctl_cmd+=" -n $LINES -f"
+# If not following and no pattern/error check, limit lines
+elif [ -z "$GREP_PATTERN" ] && [ "$ERROR_CHECK" = false ]; then
+    journalctl_cmd+=" -n $LINES"
 fi
+
+journalctl_cmd+=" --output=short-iso-precise"
+
+# Build the full command pipeline
+full_cmd="$journalctl_cmd 2>/dev/null"
+
+# Apply filters: when -ef is used with pattern, we need both error keywords AND pattern
+if [ "$ERROR_CHECK" = true ]; then
+    # First filter for errors
+    full_cmd+=" | grep --line-buffered -iE 'ERROR|WARN|FATAL'"
+    # Then filter for pattern if provided
+    if [ -n "$GREP_PATTERN" ]; then
+        full_cmd+=" | grep --line-buffered -iE '$GREP_PATTERN'"
+    fi
+elif [ -n "$GREP_PATTERN" ]; then
+    # Just pattern filtering
+    full_cmd+=" | grep --line-buffered -iE '$GREP_PATTERN'"
+fi
+
+full_cmd+=" | colorize_logs"
+
+# Execute the command
+eval "$full_cmd"

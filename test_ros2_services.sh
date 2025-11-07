@@ -45,9 +45,15 @@ if ros2 service list | grep -q "/argo/lifecycle/status"; then
     ros2 service call /argo/lifecycle/status std_srvs/srv/Trigger --once || echo "  ⚠️  Service call failed"
     echo ""
 else
-    echo "  ℹ️  Lifecycle manager not running - start with:"
-    echo "     python3 launch/argo_lifecycle_manager.py run"
+    echo "This script will:"
+    echo "  1. Attempt to stop any running Argo system (using 'aq' alias)"
+    echo "  2. Start the Argo system in the background (using 'al' alias)"
+    echo "  3. Wait for services to initialize"
+    echo "  4. Call every known ROS2 service to check for hangs or errors"
+    echo "Prerequisites:"
+    echo "  - Aliases 'al' and 'aq' must be available and configured for argo_launch_standard.service"
     echo ""
+    exit 1
 fi
 
 if ros2 service list | grep -q "/argo/power/toggle_recording"; then

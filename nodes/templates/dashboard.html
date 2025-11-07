@@ -11,13 +11,17 @@
         <!-- Header -->
         <header class="header">
             <h1>🚢 ARGO CONTROL</h1>
-            <div class="status-badge" id="connection-status">🟢 CONNECTED</div>
+            <div style="display: flex; align-items: center; gap: 5px;">
+                <div class="status-badge" id="connection-status">🟢 CONNECTED</div>
+                <span class="status-timer" id="connection-timer"></span>
+            </div>
         </header>
 
         <!-- System Status Card -->
         <div class="card">
             <h2>System Status</h2>
             <div class="status-grid">
+                <!-- Row 1: System, Nodes, Health -->
                 <div class="status-item">
                     <span class="label">System:</span>
                     <span class="value" id="system-status">⏳ Loading...</span>
@@ -27,6 +31,14 @@
                     <span class="value" id="nodes-status">-/-</span>
                 </div>
                 <div class="status-item">
+                    <span class="label">Health:</span>
+                    <span class="value" id="nodes-health">-/-</span>
+                </div>
+            </div>
+            <div class="node-summary" id="node-summary"></div>
+            <div class="status-grid">
+                <!-- Row 2: Battery information -->
+                <div class="status-item">
                     <span class="label">Battery:</span>
                     <span class="value" id="battery-status">-.- V (--%)</span>
                 </div>
@@ -35,21 +47,39 @@
                     <span class="value" id="charging-status">???</span>
                 </div>
                 <div class="status-item">
+                    <span class="label">USB Power:</span>
+                    <span class="value" id="usb-power">???</span>
+                </div>
+                <!-- Row 3: Temperatures -->
+                <div class="status-item">
                     <span class="label">CPU Temp:</span>
                     <span class="value" id="cpu-temp">-- °C</span>
                 </div>
                 <div class="status-item">
-                    <span class="label">USB Power:</span>
-                    <span class="value" id="usb-power">???</span>
+                    <span class="label">PCB Temp:</span>
+                    <span class="value" id="pcb-temp">-- °C</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Air Temp:</span>
+                    <span class="value" id="air-temp">-- °C</span>
+                </div>
+                <!-- Row 4: Humidity and Saltwater Sensor -->
+                <div class="status-item">
+                    <span class="label">Humidity:</span>
+                    <span class="value" id="humidity-status">-- %</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Saltwater:</span>
+                    <span class="value" id="saltwater-status">-- V</span>
                 </div>
             </div>
-            <div class="battery-time" id="battery-time"></div>
         </div>
 
         <!-- GPS Status Card -->
         <div class="card">
             <h2>GPS & Navigation</h2>
             <div class="status-grid">
+                <!-- Row 1: GPS Lock, Position, Speed/Course -->
                 <div class="status-item">
                     <span class="label">GPS Lock:</span>
                     <span class="value" id="gps-lock">🔴 NO LOCK</span>
@@ -59,16 +89,13 @@
                     <span class="value" id="gps-position">--</span>
                 </div>
                 <div class="status-item">
-                    <span class="label">Heading:</span>
+                    <span class="label">Speed/Course:</span>
+                    <span class="value" id="gps-speed-course">-.-- kts @ ---°</span>
+                </div>
+                <!-- Row 2: IMU Bearing, Wind -->
+                <div class="status-item">
+                    <span class="label">IMU Bearing:</span>
                     <span class="value" id="compass-heading">--- °</span>
-                </div>
-                <div class="status-item">
-                    <span class="label">Speed:</span>
-                    <span class="value" id="gps-speed">-.-- kts</span>
-                </div>
-                <div class="status-item">
-                    <span class="label">Course:</span>
-                    <span class="value" id="gps-course">--- °</span>
                 </div>
                 <div class="status-item">
                     <span class="label">Wind:</span>
@@ -105,19 +132,23 @@
                     <span class="value" id="controller-type">Unknown</span>
                 </div>
             </div>
+            <div style="margin-top: 8px; font-size: 0.85em; color: #666;">
+                Mode: Current control authority (Human vs Robot)<br>
+                Type: Active controller algorithm (shown even in Human mode)
+            </div>
         </div>
 
-        <!-- Controller Actions -->
+        <!-- Controller Selection -->
         <div class="card">
-            <h2>Controller Actions</h2>
+            <h2>Controller Selection</h2>
             <div class="button-grid">
-                <button class="btn btn-warning" onclick="switchController('return_to_home')">
+                <button class="btn btn-secondary" id="btn-return-to-home" onclick="switchController('return_to_home')">
                     🏠 Return to Home
                 </button>
-                <button class="btn btn-secondary" onclick="switchController('proportional')">
+                <button class="btn btn-secondary" id="btn-proportional" onclick="switchController('proportional')">
                     🎯 Proportional
                 </button>
-                <button class="btn btn-secondary" onclick="switchController('wind_aware')">
+                <button class="btn btn-secondary" id="btn-wind-aware" onclick="switchController('wind_aware')">
                     🌬️ Wind Aware
                 </button>
             </div>
@@ -127,17 +158,14 @@
         <div class="card">
             <h2>System Control</h2>
             <div class="button-grid">
-                <button class="btn btn-primary" onclick="togglePause()">
-                    ⏸️ Pause/Resume Nodes
+                <button class="btn" id="pause-toggle-btn" onclick="togglePause()">
+                    ⏸️ Pause: Unknown
                 </button>
-                <button class="btn btn-success" onclick="startRecording()">
-                    🔴 Start Recording
+                <button class="btn" id="recording-toggle-btn" onclick="toggleRecording()">
+                    🔴 Recording: Unknown
                 </button>
-                <button class="btn btn-warning" onclick="stopRecording()">
-                    ⏹️ Stop Recording
-                </button>
-                <button class="btn btn-danger" onclick="confirmStop()">
-                    🛑 Stop System
+                <button class="btn" id="system-toggle-btn" onclick="toggleSystem()">
+                    🛑 System: Unknown
                 </button>
             </div>
         </div>
@@ -173,21 +201,202 @@
     <script>
         let statusData = {};
         let pendingAction = null;
+        
+        // Connection state tracking
+        let connectionState = null; // 'connected' or 'disconnected'
+        let connectionStateChangeTime = null;
+        let connectionTimerInterval = null;
+        
+        // Critical state tracking for reactive updates
+        let lastCriticalState = {
+            human_controlled: null,
+            recording: null,
+            controller_type: null,
+            controller_paused: null
+        };
 
-        // Fetch status every 2 seconds
+        // Format elapsed time for display
+        function formatElapsedTime(seconds) {
+            if (seconds < 60) {
+                return `${Math.floor(seconds)}s`;
+            } else if (seconds < 3600) {
+                const minutes = Math.floor(seconds / 60);
+                const secs = Math.floor(seconds % 60);
+                return `${minutes}m ${secs}s`;
+            } else {
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                return `${hours}h ${minutes}m`;
+            }
+        }
+
+        // Update connection timer display
+        function updateConnectionTimer() {
+            if (connectionStateChangeTime === null) {
+                document.getElementById('connection-timer').textContent = '';
+                return;
+            }
+            
+            const elapsed = (Date.now() - connectionStateChangeTime) / 1000;
+            const timerText = formatElapsedTime(elapsed);
+            document.getElementById('connection-timer').textContent = `(${timerText})`;
+        }
+
+        // Update connection status and track state changes
+        function updateConnectionStatus(isConnected) {
+            const newState = isConnected ? 'connected' : 'disconnected';
+            const statusElement = document.getElementById('connection-status');
+            const timerElement = document.getElementById('connection-timer');
+            
+            // Check if state changed
+            if (connectionState !== newState) {
+                connectionState = newState;
+                connectionStateChangeTime = Date.now();
+                
+                // Update status badge
+                if (isConnected) {
+                    statusElement.textContent = '🟢 CONNECTED';
+                    statusElement.className = 'status-badge status-ok';
+                } else {
+                    statusElement.textContent = '🔴 DISCONNECTED';
+                    statusElement.className = 'status-badge status-error';
+                }
+                
+                // Start/restart timer interval
+                if (connectionTimerInterval) {
+                    clearInterval(connectionTimerInterval);
+                }
+                connectionTimerInterval = setInterval(updateConnectionTimer, 1000);
+                updateConnectionTimer(); // Update immediately
+            } else {
+                // State unchanged, just update timer
+                updateConnectionTimer();
+            }
+        }
+
+        // Update critical UI elements reactively (recording, human_controlled, controller)
+        function updateCriticalUI(criticalData) {
+            // Only update if state actually changed to avoid unnecessary DOM updates
+            let needsUpdate = false;
+            
+            if (criticalData.human_controlled !== lastCriticalState.human_controlled) {
+                needsUpdate = true;
+                lastCriticalState.human_controlled = criticalData.human_controlled;
+            }
+            if (criticalData.recording !== lastCriticalState.recording) {
+                needsUpdate = true;
+                lastCriticalState.recording = criticalData.recording;
+            }
+            if (criticalData.controller_type !== lastCriticalState.controller_type) {
+                needsUpdate = true;
+                lastCriticalState.controller_type = criticalData.controller_type;
+            }
+            if (criticalData.controller_paused !== lastCriticalState.controller_paused) {
+                needsUpdate = true;
+                lastCriticalState.controller_paused = criticalData.controller_paused;
+            }
+            
+            if (!needsUpdate) {
+                return; // No changes, skip UI update
+            }
+            
+            // Update critical UI elements
+            updateCriticalUIElements(criticalData);
+        }
+        
+        // Update only critical UI elements (called from both fast and regular polling)
+        function updateCriticalUIElements(data) {
+            // Controller mode
+            if (data.human_controlled === null || data.human_controlled === undefined) {
+                document.getElementById('control-mode').textContent = '❓ UNKNOWN';
+            } else {
+                document.getElementById('control-mode').textContent = 
+                    data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
+            }
+            
+            // Recording status
+            const recordingBtn = document.getElementById('recording-toggle-btn');
+            if (data.recording === true) {
+                recordingBtn.textContent = '⏹️ Stop Recording';
+                recordingBtn.className = 'btn btn-warning';
+            } else if (data.recording === false) {
+                recordingBtn.textContent = '🔴 Start Recording';
+                recordingBtn.className = 'btn btn-success';
+            } else {
+                recordingBtn.textContent = '🔴 Recording: Unknown';
+                recordingBtn.className = 'btn btn-secondary';
+            }
+            recordingBtn.disabled = false;
+            
+            // Controller type
+            if (data.controller_type !== undefined) {
+                document.getElementById('controller-type').textContent = data.controller_type;
+            }
+        }
+        
+        // Fast polling for critical states (only when page is visible)
+        let criticalStatusInterval = null;
+        let isPageVisible = true;
+        
+        function updateCriticalStatus() {
+            // Only poll if page is visible (reduces CPU when tab is hidden)
+            if (!isPageVisible) {
+                return;
+            }
+            
+            fetch('/api/status/critical')
+                .then(response => response.json())
+                .then(data => {
+                    updateCriticalUI(data);
+                    // Also update statusData for consistency
+                    if (statusData) {
+                        statusData.human_controlled = data.human_controlled;
+                        statusData.recording = data.recording;
+                        statusData.controller_type = data.controller_type;
+                        statusData.controller_paused = data.controller_paused;
+                    }
+                })
+                .catch(error => {
+                    // Silently fail - regular polling will catch it
+                    console.debug('Critical status fetch failed:', error);
+                });
+        }
+        
+        // Handle page visibility changes (pause polling when tab is hidden)
+        document.addEventListener('visibilitychange', function() {
+            isPageVisible = !document.hidden;
+            if (isPageVisible) {
+                // Page became visible - resume fast polling
+                if (!criticalStatusInterval) {
+                    updateCriticalStatus(); // Immediate update
+                    criticalStatusInterval = setInterval(updateCriticalStatus, 1000); // 1s when visible
+                }
+            } else {
+                // Page hidden - stop fast polling (regular 2s polling continues)
+                if (criticalStatusInterval) {
+                    clearInterval(criticalStatusInterval);
+                    criticalStatusInterval = null;
+                }
+            }
+        });
+        
+        // Fetch full status every 2 seconds
         function updateStatus() {
             fetch('/api/status')
                 .then(response => response.json())
                 .then(data => {
                     statusData = data;
                     updateUI(data);
-                    document.getElementById('connection-status').textContent = '🟢 CONNECTED';
-                    document.getElementById('connection-status').className = 'status-badge status-ok';
+                    updateConnectionStatus(true);
+                    // Update critical state tracking
+                    lastCriticalState.human_controlled = data.human_controlled;
+                    lastCriticalState.recording = data.recording;
+                    lastCriticalState.controller_type = data.controller_type;
+                    lastCriticalState.controller_paused = data.controller_paused;
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);
-                    document.getElementById('connection-status').textContent = '🔴 DISCONNECTED';
-                    document.getElementById('connection-status').className = 'status-badge status-error';
+                    updateConnectionStatus(false);
                 });
         }
 
@@ -195,14 +404,50 @@
             // System status
             document.getElementById('system-status').textContent = 
                 data.system_running ? '🟢 RUNNING' : '🔴 STOPPED';
+            
+            // Node counts (running/total from node manager)
             document.getElementById('nodes-status').textContent = 
                 `${data.nodes_running}/${data.nodes_total}`;
             
-            // Battery
-            if (data.battery_voltage && data.battery_pct) {
-                document.getElementById('battery-status').textContent = 
-                    `${data.battery_voltage.toFixed(1)} V (${data.battery_pct.toFixed(0)}%)`;
+            // Node health counts (healthy/total from health service, includes excluded services)
+            if (data.nodes_expected_total && data.nodes_expected_total > 0) {
+                const healthy = data.nodes_healthy || 0;
+                const total = data.nodes_expected_total;
+                document.getElementById('nodes-health').textContent = 
+                    `${healthy}/${total}`;
+            } else {
+                // Fallback to running count if health service not available
+                document.getElementById('nodes-health').textContent = 
+                    `${data.nodes_running}/${data.nodes_total}`;
             }
+            
+            // Battery - include voltage, percentage, and time estimate
+            let batteryText = '';
+            if (data.battery_voltage && data.battery_pct !== null && data.battery_pct !== undefined) {
+                batteryText = `${data.battery_voltage.toFixed(1)} V (${data.battery_pct.toFixed(0)}%)`;
+                
+                // Add time estimate
+                if (data.battery_time_to_full !== null && data.battery_time_to_full !== undefined) {
+                    if (data.battery_time_to_full < 0.1) {
+                        batteryText += ' - Full';
+                    } else if (data.battery_time_to_full < 1.0) {
+                        batteryText += ` - ${Math.round(data.battery_time_to_full * 60)}m to full`;
+                    } else {
+                        batteryText += ` - ${data.battery_time_to_full.toFixed(1)}h to full`;
+                    }
+                } else if (data.battery_time_to_empty !== null && data.battery_time_to_empty !== undefined) {
+                    if (data.battery_time_to_empty < 0.1) {
+                        batteryText += ' - <6m left';
+                    } else if (data.battery_time_to_empty < 1.0) {
+                        batteryText += ` - ${Math.round(data.battery_time_to_empty * 60)}m left`;
+                    } else {
+                        batteryText += ` - ${data.battery_time_to_empty.toFixed(1)}h left`;
+                    }
+                }
+            } else {
+                batteryText = '-.- V (--%)';
+            }
+            document.getElementById('battery-status').textContent = batteryText;
             
             document.getElementById('charging-status').textContent = 
                 data.battery_charging === true ? '🔌 YES' :
@@ -212,52 +457,126 @@
                 data.battery_usb_power === true ? '⚡ YES' :
                 data.battery_usb_power === false ? '❌ NO' : '???';
             
-            // Battery time estimates
-            let batteryTimeText = '';
-            if (data.battery_time_to_full !== null && data.battery_time_to_full !== undefined) {
-                if (data.battery_time_to_full < 0.1) {
-                    batteryTimeText = '⏱️ Fully charged (< 6 min to full)';
-                } else if (data.battery_time_to_full < 1.0) {
-                    batteryTimeText = `⏱️ Time to full: ${Math.round(data.battery_time_to_full * 60)} min`;
-                } else {
-                    batteryTimeText = `⏱️ Time to full: ${data.battery_time_to_full.toFixed(1)} hours`;
-                }
-            } else if (data.battery_time_to_empty !== null && data.battery_time_to_empty !== undefined) {
-                if (data.battery_time_to_empty < 0.1) {
-                    batteryTimeText = '⚠️ Battery nearly depleted (< 6 min)';
-                } else if (data.battery_time_to_empty < 1.0) {
-                    batteryTimeText = `⏱️ Est. runtime: ${Math.round(data.battery_time_to_empty * 60)} min`;
-                } else {
-                    batteryTimeText = `⏱️ Est. runtime: ${data.battery_time_to_empty.toFixed(1)} hours`;
+            // Node summary - show non-running or non-healthy nodes
+            let nodeSummaryText = '';
+            const nonRunningNodes = [];
+            const unhealthyNodes = [];
+            
+            // Check nodes_list for non-running nodes
+            if (data.nodes_list) {
+                for (const [node, status] of Object.entries(data.nodes_list)) {
+                    if (status.includes('STOPPED')) {
+                        nonRunningNodes.push(node);
+                    }
                 }
             }
-            document.getElementById('battery-time').textContent = batteryTimeText;
             
-            // CPU temp
+            // Get unhealthy node names from backend
+            if (data.nodes_unhealthy_list && data.nodes_unhealthy_list.length > 0) {
+                unhealthyNodes.push(...data.nodes_unhealthy_list);
+            } else if (data.nodes_unhealthy && data.nodes_unhealthy > 0) {
+                // Fallback to count if names not available
+                unhealthyNodes.push(`${data.nodes_unhealthy} unhealthy`);
+            }
+            
+            const nodeSummaryEl = document.getElementById('node-summary');
+            
+            // Check if health data has been received from service
+            // Must be explicitly true (not just truthy) to show health status
+            const healthDataReceived = data.health_data_received === true;
+            const nodesUnknown = data.nodes_unknown || 0;
+            
+            if (nonRunningNodes.length > 0 || unhealthyNodes.length > 0) {
+                const parts = [];
+                if (nonRunningNodes.length > 0) {
+                    if (nonRunningNodes.length <= 3) {
+                        parts.push(`⚠️ Stopped: ${nonRunningNodes.join(', ')}`);
+                    } else {
+                        parts.push(`⚠️ ${nonRunningNodes.length} stopped nodes`);
+                    }
+                }
+                if (unhealthyNodes.length > 0) {
+                    const maxDisplayNodes = 5;
+                    if (unhealthyNodes.length <= maxDisplayNodes) {
+                        parts.push(`❌ ${unhealthyNodes.length} unhealthy nodes: ${unhealthyNodes.join(', ')}`);
+                    } else {
+                        const displayedNodes = unhealthyNodes.slice(0, maxDisplayNodes);
+                        const remainingCount = unhealthyNodes.length - maxDisplayNodes;
+                        parts.push(`❌ ${unhealthyNodes.length} unhealthy nodes: ${displayedNodes.join(', ')} (+${remainingCount} more)`);
+                    }
+                }
+                nodeSummaryText = parts.join(' | ');
+                nodeSummaryEl.textContent = nodeSummaryText;
+                nodeSummaryEl.className = 'node-summary summary-warning';
+            } else if (!healthDataReceived || nodesUnknown > 0) {
+                // Health status is unknown/TBD - show pending status
+                if (!healthDataReceived) {
+                    nodeSummaryText = '⏳ Health status pending...';
+                } else if (nodesUnknown > 0) {
+                    nodeSummaryText = `❓ Health status unknown for ${nodesUnknown} node${nodesUnknown > 1 ? 's' : ''}`;
+                }
+                nodeSummaryEl.textContent = nodeSummaryText;
+                nodeSummaryEl.className = 'node-summary summary-warning';
+            } else {
+                // All nodes have known health status and are healthy
+                nodeSummaryText = '✅ All nodes running and healthy';
+                nodeSummaryEl.textContent = nodeSummaryText;
+                nodeSummaryEl.className = 'node-summary summary-ok';
+            }
+            
+            // Temperatures
             document.getElementById('cpu-temp').textContent = 
                 data.cpu_temp ? `${data.cpu_temp} °C` : '-- °C';
+            document.getElementById('pcb-temp').textContent = 
+                data.pcb_temp !== null && data.pcb_temp !== undefined ? `${data.pcb_temp.toFixed(1)} °C` : '-- °C';
+            document.getElementById('air-temp').textContent = 
+                data.air_temp !== null && data.air_temp !== undefined ? `${data.air_temp.toFixed(1)} °C` : '-- °C';
+            
+            // Humidity and Saltwater Sensor
+            document.getElementById('humidity-status').textContent = 
+                data.relative_humidity !== null && data.relative_humidity !== undefined ? `${data.relative_humidity.toFixed(1)} %` : '-- %';
+            document.getElementById('saltwater-status').textContent = 
+                data.saltwater_voltage !== null && data.saltwater_voltage !== undefined ? `${data.saltwater_voltage.toFixed(3)} V` : '-- V';
             
             // GPS
-            document.getElementById('gps-lock').textContent = 
-                data.gps_locked ? '🟢 LOCKED' : '🔴 NO LOCK';
+            // Show "Last fix" when GPS is not locked but we have last valid coordinates
+            if (!data.gps_locked && data.gps_last_valid_latitude !== null && data.gps_last_valid_latitude !== undefined) {
+                document.getElementById('gps-lock').textContent = '🔴 Last fix';
+            } else {
+                document.getElementById('gps-lock').textContent = 
+                    data.gps_locked ? '🟢 LOCKED' : '🔴 NO LOCK';
+            }
             
-            if (data.gps_latitude && data.gps_longitude) {
-                const latDir = data.gps_latitude >= 0 ? 'N' : 'S';
-                const lonDir = data.gps_longitude >= 0 ? 'E' : 'W';
+            // Use current coordinates if available, otherwise use last valid coordinates
+            const displayLat = data.gps_latitude !== null && data.gps_latitude !== undefined 
+                ? data.gps_latitude 
+                : (data.gps_last_valid_latitude !== null && data.gps_last_valid_latitude !== undefined 
+                    ? data.gps_last_valid_latitude 
+                    : null);
+            const displayLon = data.gps_longitude !== null && data.gps_longitude !== undefined 
+                ? data.gps_longitude 
+                : (data.gps_last_valid_longitude !== null && data.gps_last_valid_longitude !== undefined 
+                    ? data.gps_last_valid_longitude 
+                    : null);
+            
+            if (displayLat !== null && displayLon !== null) {
+                const latDir = displayLat >= 0 ? 'N' : 'S';
+                const lonDir = displayLon >= 0 ? 'E' : 'W';
                 document.getElementById('gps-position').textContent = 
-                    `${Math.abs(data.gps_latitude).toFixed(6)}° ${latDir}, ${Math.abs(data.gps_longitude).toFixed(6)}° ${lonDir}`;
+                    `${Math.abs(displayLat).toFixed(6)}° ${latDir}, ${Math.abs(displayLon).toFixed(6)}° ${lonDir}`;
             } else {
                 document.getElementById('gps-position').textContent = '--';
             }
             
+            // Speed/Course combined
+            const speed = data.gps_sog ? `${data.gps_sog.toFixed(2)} kts` : '-.-- kts';
+            const course = data.gps_cog ? `${Math.round(data.gps_cog)}°` : '---°';
+            document.getElementById('gps-speed-course').textContent = 
+                `${speed} @ ${course}`;
+            
+            // IMU Bearing (Heading)
             document.getElementById('compass-heading').textContent = 
                 data.compass_heading ? `${Math.round(data.compass_heading)}°` : '--- °';
-            
-            document.getElementById('gps-speed').textContent = 
-                data.gps_sog ? `${data.gps_sog.toFixed(2)} kts` : '-.-- kts';
-            
-            document.getElementById('gps-course').textContent = 
-                data.gps_cog ? `${Math.round(data.gps_cog)}°` : '--- °';
             
             // Wind
             if (data.wind_speed !== null && data.wind_angle !== null) {
@@ -278,10 +597,67 @@
                 document.getElementById('home-card').style.display = 'none';
             }
             
-            // Controller
-            document.getElementById('control-mode').textContent = 
-                data.human_controlled ? '👤 HUMAN' : '🤖 ROBOT';
-            document.getElementById('controller-type').textContent = data.controller_type;
+            // Controller (updated reactively via updateCriticalUIElements, but also update here for consistency)
+            updateCriticalUIElements({
+                human_controlled: data.human_controlled,
+                recording: data.recording,
+                controller_type: data.controller_type,
+                controller_paused: data.controller_paused
+            });
+            
+            // Update controller button highlighting based on current controller type
+            // Controller publishes class names like "ProportionalHeadingController", "WindAwareController", "ReturnToHomeController"
+            const controllerType = (data.controller_type || '').toLowerCase();
+            const btnReturnToHome = document.getElementById('btn-return-to-home');
+            const btnProportional = document.getElementById('btn-proportional');
+            const btnWindAware = document.getElementById('btn-wind-aware');
+            
+            // Reset all buttons to secondary
+            btnReturnToHome.className = 'btn btn-secondary';
+            btnProportional.className = 'btn btn-secondary';
+            btnWindAware.className = 'btn btn-secondary';
+            
+            // Highlight the active controller based on class name
+            // Controller class names: ProportionalHeadingController, WindAwareController, ReturnToHomeController
+            if (controllerType.includes('returntohome') || controllerType.includes('return_to_home') || 
+                controllerType.includes('return') && controllerType.includes('home')) {
+                btnReturnToHome.className = 'btn btn-warning';
+            } else if (controllerType.includes('proportionalheading') || controllerType.includes('proportional')) {
+                btnProportional.className = 'btn btn-warning';
+            } else if (controllerType.includes('windaware') || controllerType.includes('wind_aware')) {
+                btnWindAware.className = 'btn btn-warning';
+            }
+            
+            // Pause status - update toggle button
+            const pauseBtn = document.getElementById('pause-toggle-btn');
+            if (data.controller_paused === true) {
+                pauseBtn.textContent = '▶️ Resume Controller';
+                pauseBtn.className = 'btn btn-success';
+            } else if (data.controller_paused === false) {
+                pauseBtn.textContent = '⏸️ Pause Controller';
+                pauseBtn.className = 'btn btn-warning';
+            } else {
+                pauseBtn.textContent = '⏸️ Pause: Unknown';
+                pauseBtn.className = 'btn btn-secondary';
+            }
+            pauseBtn.disabled = false;
+            
+            // Recording status (updated reactively via updateCriticalUIElements, but also update here for consistency)
+            // No need to duplicate - updateCriticalUIElements handles it
+            
+            // System status - update toggle button
+            const systemBtn = document.getElementById('system-toggle-btn');
+            if (data.system_running === true) {
+                systemBtn.textContent = '🛑 Stop System';
+                systemBtn.className = 'btn btn-danger';
+            } else if (data.system_running === false) {
+                systemBtn.textContent = '▶️ Start System';
+                systemBtn.className = 'btn btn-success';
+            } else {
+                systemBtn.textContent = '🛑 System: Unknown';
+                systemBtn.className = 'btn btn-secondary';
+            }
+            systemBtn.disabled = false;
             
             // Node details
             if (data.nodes_list) {
@@ -331,13 +707,30 @@
 
         // API Actions
         function togglePause() {
+            const btn = document.getElementById('pause-toggle-btn');
+            const originalText = btn.textContent;
+            
+            // Disable button during request
+            btn.disabled = true;
+            btn.textContent = '⏳ Processing...';
+            
             fetch('/api/toggle_pause', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
-                    alert(data.success ? `✅ ${data.message}` : `❌ ${data.message}`);
-                    updateStatus();
+                    if (data.success) {
+                        alert(`✅ ${data.message}`);
+                        updateStatus();
+                    } else {
+                        alert(`❌ ${data.message}`);
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
                 })
-                .catch(error => alert(`❌ Error: ${error}`));
+                .catch(error => {
+                    alert(`❌ Error: ${error}`);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
         }
 
         function switchController(type) {
@@ -356,58 +749,115 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ type: type })
                     })
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.success ? `✅ ${data.message}` : `⚠️ ${data.message}`);
-                        updateStatus();
+                    .then(response => {
+                        if (!response.ok) {
+                            return response.json().then(data => {
+                                throw new Error(data.message || 'Service call failed');
+                            });
+                        }
+                        return response.json();
                     })
-                    .catch(error => alert(`❌ Error: ${error}`));
-                }
-            );
-        }
-
-        function startRecording() {
-            fetch('/api/recording/start', { method: 'POST' })
-                .then(response => response.json())
-                .then(data => {
-                    alert(data.success ? `✅ Recording started` : `❌ ${data.message}`);
-                    updateStatus();
-                })
-                .catch(error => alert(`❌ Error: ${error}`));
-        }
-
-        function stopRecording() {
-            fetch('/api/recording/stop', { method: 'POST' })
-                .then(response => response.json())
-                .then(data => {
-                    alert(data.success ? `✅ Recording stopped` : `❌ ${data.message}`);
-                    updateStatus();
-                })
-                .catch(error => alert(`❌ Error: ${error}`));
-        }
-
-        function confirmStop() {
-            showModal(
-                '⚠️ Stop System',
-                'This will stop all Argo nodes. Are you sure?',
-                () => {
-                    fetch('/api/lifecycle/stop', { method: 'POST' })
-                        .then(response => response.json())
-                        .then(data => {
-                            alert(data.success ? `✅ System stopped` : `❌ ${data.message}`);
+                    .then(data => {
+                        if (data.success) {
+                            alert(`✅ ${data.message}`);
                             updateStatus();
-                        })
-                        .catch(error => alert(`❌ Error: ${error}`));
+                        } else {
+                            alert(`⚠️ ${data.message}`);
+                        }
+                    })
+                    .catch(error => {
+                        alert(`❌ Error: ${error.message || error}`);
+                    });
                 }
             );
+        }
+
+        function toggleRecording() {
+            const btn = document.getElementById('recording-toggle-btn');
+            const originalText = btn.textContent;
+            
+            // Disable button during request
+            btn.disabled = true;
+            btn.textContent = '⏳ Processing...';
+            
+            fetch('/api/recording/toggle', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(`✅ ${data.message}`);
+                        updateStatus();
+                    } else {
+                        alert(`❌ ${data.message}`);
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
+                })
+                .catch(error => {
+                    alert(`❌ Error: ${error}`);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
+        }
+
+        function toggleSystem() {
+            // Get current state from status data
+            const isRunning = statusData.system_running;
+            
+            // Show confirmation modal for stop action
+            if (isRunning) {
+                showModal(
+                    '⚠️ Stop System',
+                    'This will stop all Argo nodes. Are you sure?',
+                    () => {
+                        performSystemToggle();
+                    }
+                );
+            } else {
+                // Start system - no confirmation needed
+                performSystemToggle();
+            }
+        }
+        
+        function performSystemToggle() {
+            const btn = document.getElementById('system-toggle-btn');
+            const originalText = btn.textContent;
+            
+            // Disable button during request
+            btn.disabled = true;
+            btn.textContent = '⏳ Processing...';
+            
+            fetch('/api/lifecycle/toggle', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(`✅ ${data.message}`);
+                        updateStatus();
+                    } else {
+                        alert(`❌ ${data.message}`);
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
+                })
+                .catch(error => {
+                    alert(`❌ Error: ${error}`);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
         }
 
         // Auto-update every 2 seconds
+        // Initial status update
         updateStatus();
+        
+        // Regular full status polling (every 2 seconds)
         setInterval(updateStatus, 2000);
+        
+        // Fast critical status polling (every 1 second when page is visible, stopped when hidden)
+        // This reduces CPU load when the dashboard tab is not active
+        updateCriticalStatus(); // Initial update
+        if (isPageVisible) {
+            criticalStatusInterval = setInterval(updateCriticalStatus, 1000);
+        }
     </script>
 </body>
 </html>
-
-
-

@@ -1,7 +1,7 @@
 [Unit]
 Description=Load Argo Radio Servo Kernel Module
-After=multi-user.target
-Wants=multi-user.target
+After=network.target
+Before=argo_launch_standard.service
 
 [Service]
 Type=oneshot

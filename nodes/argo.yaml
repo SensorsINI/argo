@@ -1,23 +1,20 @@
 # Enhanced parameters for argo control with modular controllers
-# Supports both single-node (control_refactored.py) and two-node (controller.py + rudder_sail_radio.py) systems
+# Two-node system: controller.py (high-level control) + rudder_sail_radio.py (low-level arbitration)
 
-# Global parameters (all nodes)
+# Global parameters (applied to all nodes)
+# The /** wildcard is ROS2 parameter syntax that applies these parameters to ALL nodes
 /**:
   ros__parameters:
     argo:
       mode: autonomous
       rudder_gain: 2
+    # Simulation parameters (shared across simulator bridge, transform publisher, and visualization)
+    # These are accessible to all nodes via the simulation.* namespace
+    simulation:
+      publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz) - 2Hz sufficient for visualization
+      simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics simulation
 
-# Single-node system (control_refactored.py)
-control_node:
-  ros__parameters:
-    controller_type: "proportional"  # Options: "proportional", "wind_aware"
-    data_collection_enabled: false
-    rudder_gain: 2.0
-    rudder_full_scale_deg: 60.0
-    param_file_path: "argo.yaml"
-
-# Two-node system: High-level controller (controller.py)
+# High-level controller (controller.py)
 controller_node:
   ros__parameters:
     controller_type: "proportional"  # Options: "proportional", "wind_aware"
@@ -26,14 +23,19 @@ controller_node:
     rudder_full_scale_deg: 60.0
     param_file_path: "argo.yaml"
 
-# Two-node system: Low-level arbitration (rudder_sail_radio.py)
+# Low-level arbitration and hardware interface (rudder_sail_radio.py)
 rudder_sail_radio_node:
   ros__parameters:
-    human_override_timeout: 2.0      # Seconds after last human activity before robot can take control
-    deadband_threshold: 0.05         # Minimum change in radio input to count as human activity
+    human_override_timeout: 5.0      # Seconds after last human activity before robot can take control
+    deadband_threshold: 0.1875          # Minimum change in radio input to count as human activity (5σ measured)
     safety_max_rudder: 1.0          # Maximum rudder command magnitude
     safety_max_sail: 1.0            # Maximum sail command magnitude
     param_file_path: "argo.yaml"
+
+# Boat visualization (argo_boat_visualization.py)
+argo_boat_visualization:
+  ros__parameters:
+    visualization_scale: 6.0        # Scale factor for boat visualization (1.0 = realistic size, 3.0 = 3x larger for better visibility)
 
 # Example configurations:
 # Wind-aware controller:
@@ -48,5 +50,5 @@ rudder_sail_radio_node:
 # rudder_sail_radio_node:
 #   ros__parameters:
 #     human_override_timeout: 5.0     # Longer timeout
-#     deadband_threshold: 0.02        # More sensitive
+#     deadband_threshold: 0.3          # Standard threshold (5σ measured)
 #     safety_max_rudder: 0.8          # Conservative limits

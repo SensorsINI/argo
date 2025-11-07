@@ -439,7 +439,7 @@ sudo rm /tmp/argo_critical_battery
 ### ROS2 Service Calls Failing
 ```bash
 # Check if Argo service is running
-sudo systemctl status argo_launch.service
+sudo systemctl status argo_launch_standard.service
 
 # Test recording services manually
 ros2 service list | grep recording

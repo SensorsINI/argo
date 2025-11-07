@@ -77,6 +77,7 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 - **`simulator/`** - Sailboat simulation submodule (sailboat-playground)
 
 ## Other READMEs
+- [**Systemd Services Architecture**](docs/README-services.md) - Service dependencies, boot sequence, and troubleshooting
 - [Simulation System Overview](simulator/README.md)  
 - [Power Control System](power_control/README.md)  
 - [Foxglove Visualization](foxglove/README.md)  
@@ -134,7 +135,6 @@ Hardware interface and control nodes:
 - **Sensor Nodes**: `gps.py`, `imu.py`, `anem.py`, `argo_battery_water.py`, `temp_monitor.py`
 - **Control Nodes**: `rudder_sail_radio.py`, `controller.py`, `record.py`
 - **`pwm_capture_module/`** - Custom kernel module for radio control and servo interfaces
-- **`RTIMULib2/`** - IMU sensor fusion library
 - **Configuration files**: `argo.yaml`, calibration data, and support utilities
 
 ### `power_control/` - Hardware Power Management
@@ -324,7 +324,23 @@ The repository includes a comprehensive Makefile system for easy management:
 - `al` - Launch Argo service with monitoring
 - `aq` - Quit/stop Argo service
 - `ars` - Restart Argo service
-- `as` - Show Argo status
+- `as` - Show Status
+Shows a comprehensive status of the Argo system, including:
+- Service status (`argo_launch_standard.service`, `argo_power_control.service`, etc.)
+- Running ROS2 nodes and their health
+- System diagnostics (CPU, memory, temperature, battery)
+
+### `al` / `aq` / `ars` - Service Control
+- `al`: Start the `argo_launch_standard.service`
+- `aq`: Stop the `argo_launch_standard.service`
+- `ars`: Restart the `argo_launch_standard.service`
+
+### `alog` - View Logs
+Tails the logs for all major Argo services with color-coding.
+
+### `asim` - Local Simulation
+Starts the Argo system in local simulation mode using `ros2 launch`.
+
 - `ar` - Start data recording (via ROS2 service)
 - `ac` - Stop data recording (via ROS2 service)
 - `am` - Monitor mode for lifecycle management

@@ -43,6 +43,7 @@ import argcomplete
 import os
 import csv
 import json
+import math
 
 # Import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
@@ -663,7 +664,8 @@ class BatteryWaterNode(ArgoBaseNode):
             self.get_logger().warning(f"Failed to load battery slopes: {e}")
     
     def _save_battery_slopes(self):
-        """Save current battery charging/discharging slopes to persistent storage"""
+        """Save current battery charging/discharging slopes to persistent storage
+        Only writes if there's an actual change in slope values or if this is the first time."""
         try:
             # Check if slopes file already exists
             file_exists = os.path.exists(self._slopes_file_path)
@@ -714,8 +716,35 @@ class BatteryWaterNode(ArgoBaseNode):
             final_charging_slope = self._charging_slope_v_per_s if valid_charging_slope else existing_charging_slope
             final_discharging_slope = self._discharging_slope_v_per_s if valid_discharging_slope else existing_discharging_slope
             
-            # Only save if we have at least one valid slope (new or existing)
-            if final_charging_slope is not None or final_discharging_slope is not None:
+            # Only proceed if we have at least one valid slope (new or existing)
+            if final_charging_slope is None and final_discharging_slope is None:
+                self.get_logger().info("No valid battery slopes to save (insufficient data or mixed charging states)")
+                return
+            
+            # Check if slopes have actually changed (using floating-point comparison with tolerance)
+            # Tolerance: 1% relative change or 1e-6 absolute change (whichever is larger)
+            SLOPE_CHANGE_TOLERANCE = 1e-6  # Absolute tolerance for very small slopes
+            SLOPE_CHANGE_RELATIVE = 0.01    # 1% relative change threshold
+            
+            def slopes_equal(new_val, old_val):
+                """Check if two slope values are effectively equal"""
+                if new_val is None and old_val is None:
+                    return True
+                if new_val is None or old_val is None:
+                    return False
+                # Use relative comparison for larger values, absolute for very small values
+                abs_diff = abs(new_val - old_val)
+                if abs(new_val) < 1e-5:
+                    return abs_diff < SLOPE_CHANGE_TOLERANCE
+                else:
+                    return abs_diff < max(SLOPE_CHANGE_TOLERANCE, abs(new_val) * SLOPE_CHANGE_RELATIVE)
+            
+            # Check if either slope has changed
+            charging_changed = not slopes_equal(final_charging_slope, existing_charging_slope)
+            discharging_changed = not slopes_equal(final_discharging_slope, existing_discharging_slope)
+            
+            # Only write file if there's an actual change OR if this is the first time (file doesn't exist)
+            if not file_exists or charging_changed or discharging_changed:
                 slopes_data = {
                     'charging_slope_v_per_s': final_charging_slope,
                     'discharging_slope_v_per_s': final_discharging_slope,
@@ -737,9 +766,17 @@ class BatteryWaterNode(ArgoBaseNode):
                 elif final_discharging_slope is not None:
                     slope_info.append(f"discharging={final_discharging_slope:.6f} V/s (preserved)")
                 
-                self.get_logger().info(f"Saved battery slopes ({len(self._voltage_samples)} samples): {', '.join(slope_info)}")
+                change_info = []
+                if charging_changed:
+                    change_info.append("charging changed")
+                if discharging_changed:
+                    change_info.append("discharging changed")
+                
+                change_str = f" ({', '.join(change_info)})" if change_info else " (first write)"
+                self.get_logger().info(f"Saved battery slopes ({len(self._voltage_samples)} samples): {', '.join(slope_info)}{change_str}")
             else:
-                self.get_logger().info("No valid battery slopes to save (insufficient data or mixed charging states)")
+                # Slopes haven't changed, skip writing to avoid unnecessary timestamp updates
+                self.get_logger().debug(f"Skipping slope save - no change in slopes (charging={final_charging_slope:.6f}, discharging={final_discharging_slope:.6f})")
         except Exception as e:
             self.get_logger().error(f"Failed to save battery slopes: {e}")
     
@@ -1518,17 +1555,21 @@ class BatteryWaterNode(ArgoBaseNode):
             except Exception:
                 pass
 
-        # Publish GPIO status on change
+        # Publish GPIO status (always publish for web dashboard, but only log on actual changes)
         if rclpy.ok():
             try:
-                if charging_status is not None and charging_status != self._prev_charging_status:
+                # Always publish charging status (web dashboard needs frequent updates)
+                if charging_status is not None:
                     self.pub_charging_status.publish(Bool(data=charging_status))
-                    if self._prev_charging_status is not None:
-                        self.get_logger().info(f"Charging status changed: {charging_status}")
-                if ac_power_present is not None and ac_power_present != self._prev_ac_power_present:
+                    # Only log when status actually changes
+                    if self._prev_charging_status is not None and charging_status != self._prev_charging_status:
+                        self.get_logger().info(f"Charging status changed: {self._prev_charging_status} -> {charging_status}")
+                # Always publish AC power status (web dashboard needs frequent updates)
+                if ac_power_present is not None:
                     self.pub_ac_power_present.publish(Bool(data=ac_power_present))
-                    if self._prev_ac_power_present is not None:
-                        self.get_logger().info(f"AC power status changed: {ac_power_present}")
+                    # Only log when status actually changes
+                    if self._prev_ac_power_present is not None and ac_power_present != self._prev_ac_power_present:
+                        self.get_logger().info(f"AC power status changed: {self._prev_ac_power_present} -> {ac_power_present}")
             except Exception:
                 pass
 

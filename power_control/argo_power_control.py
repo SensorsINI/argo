@@ -339,6 +339,9 @@ BATTERY_LOG_THRESHOLD_V = 0.05     # Only log battery voltage if it changes by m
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 
+# SOS Pattern Configuration
+SOS_PATTERN_DURATION_S = 2.0       # Total duration of one SOS pattern cycle (seconds)
+
 # WiFi Monitoring
 WIFI_MONITORING_INTERVAL_S = 10     # Check WiFi status interval (seconds)
 WIFI_CONNECTIVITY_TIMEOUT_S = 5     # Timeout for WiFi connectivity tests (seconds)
@@ -367,17 +370,28 @@ LOG_DIR = Path("/var/log.hdd/persistent")
 LOG_FILE = LOG_DIR / "argo-power-control.log"
 
 def setup_logging(debug=False):
-    """Setup logging configuration"""
-    handlers = [logging.StreamHandler()]
+    """Setup logging configuration to stream to stdout for journalctl."""
+    # Get the root logger
+    root_logger = logging.getLogger()
+
+    # Remove any existing handlers to prevent duplicate logs or logging to files
+    # This is important to override any default logging configured by rclpy.
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
 
     # Set logging level based on debug flag
     log_level = logging.DEBUG if debug else logging.INFO
+    root_logger.setLevel(log_level)
 
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=handlers
-    )
+    # Add a stream handler to log to stdout
+    # This is important for systemd services to capture logs in journalctl
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+
+    # Add the new handler to the root logger
+    root_logger.addHandler(handler)
 
 
 # setup_logging() will be called in main() after parsing arguments
@@ -428,15 +442,19 @@ class PowerController(ArgoBaseNode):
         self.green_led_state = False
         self.blue_led_state = False
 
-        # Sysfs LED control paths
+        # Sysfs LED control paths (for kernel overlay)
         self.green_led_sysfs_path = Path("/sys/class/leds/argo:green:heartbeat")
         self.green_led_brightness_path = self.green_led_sysfs_path / "brightness"
         self.green_led_trigger_path = self.green_led_sysfs_path / "trigger"
+        self.green_led_driver_unbind_path = Path("/sys/bus/platform/drivers/leds-gpio/unbind")
+        self.green_led_driver_bind_path = Path("/sys/bus/platform/drivers/leds-gpio/bind")
+        self.green_led_driver_unbound = False
         self.green_led_available = False
 
         # Heartbeat control
         self.heartbeat_frequency_hz = 1.0/3.0  # 3-second cycle
         self.heartbeat_duty_cycle = 0.1    # 10% duty cycle per slot
+        self.heartbeat_paused = False  # Flag to pause heartbeat for special patterns
         
         # LED pattern logging
         self.last_logged_pattern = None
@@ -453,6 +471,11 @@ class PowerController(ArgoBaseNode):
         self.last_lora_update = 0.0
         self.last_network_check = 0.0
         self.status_timeout = 10.0  # Consider unhealthy if no update for 10 seconds
+        
+        # Health monitor integration for comprehensive node health
+        self.health_monitor_unhealthy_count = 0
+        self.health_monitor_query_interval = 5.0  # Query every 5 seconds
+        self.last_health_monitor_query = 0.0
 
         # Desktop notification caching
         self.cached_desktop_user = None
@@ -481,10 +504,10 @@ class PowerController(ArgoBaseNode):
         # Correct GPIO Line offsets from gpio readall
         self.POWER_RELAY_LINE = 259    # PI3 (Pin 40) - !POW
         self.POWER_BUTTON_LINE = 265   # PI9 (Pin 28) - !POW_BUT
-        # GREEN_LED_LINE is now managed by the kernel overlay
-        # self.GREEN_LED_LINE = 228      # PH4 (Pin 18) - Green LED
-        # HACK: Rerouting Green LED heartbeat to BLUE LED pin (257) due to PH4/PH0 pin issues.
-        self.GREEN_LED_LINE = 257      # Was 224 (PH0), now 257 (PI1/Blue LED)
+        # GREEN_LED_LINE: GPIO 228 (PH4) - Green LED
+        # We unbind the kernel LED driver to control it directly, then rebind on shutdown
+        self.GREEN_LED_LINE = 228      # PH4 (Pin 18) - Green LED (kernel overlay)
+        # Note: GPIO 257 was a temporary hack, but GPIO 228 works when LED driver is unbound
         self.BLUE_LED_LINE = 257       # PI1 (Pin 12) - Blue LED
         self.RED_LED_LINE = 272        # PI16 (Pin 37) - Red LED
 
@@ -559,11 +582,12 @@ class PowerController(ArgoBaseNode):
         # Initialize desktop user detection and caching
         self._detect_and_cache_desktop_user()
 
-        # Initialize GPIO for button and other LEDs
-        self.init_gpio()
+        # Initialize and take control of sysfs-managed Green LED (GPIO 228) FIRST
+        # This unbinds the kernel LED driver BEFORE we request GPIO 228
+        self.init_sysfs_led()
 
-        # Initialize and take control of sysfs-managed Green LED
-        # self.init_sysfs_led() # Temporarily disabled to use direct GPIO control for PH0
+        # Initialize GPIO for button and other LEDs (after unbinding LED driver)
+        self.init_gpio()
 
         # Configure button line for interrupt-based monitoring
         if self.gpio_available:
@@ -720,18 +744,73 @@ class PowerController(ArgoBaseNode):
             self.get_logger().error(f"Error handling GPIO conflicts: {e}")
 
     def init_sysfs_led(self):
-        """Initialize and take control of the sysfs-managed green LED."""
-        # This function is temporarily disabled.
-        # We are using direct GPIO control for PH0 as a workaround for a damaged PH4 pin.
-        # The original implementation used this to control the kernel-managed LED on PH4.
-        self.green_led_available = False
-        return
+        """Initialize and take control of the green LED by unbinding kernel driver."""
+        # GPIO 228 (PH4) is managed by kernel LED driver via overlay
+        # To control it directly, we need to unbind the LED driver
+        # This allows direct GPIO control, then we rebind on shutdown for kernel heartbeat
+        # If unbind fails (permission denied or not possible), fall back to GPIO 257 hack
+        try:
+            if not self.green_led_sysfs_path.exists():
+                self.get_logger().warning("Green LED sysfs path not found - kernel overlay may not be loaded, using GPIO 257 fallback")
+                self.green_led_available = False
+                self.green_led_driver_unbound = False
+                return
+            
+            # Try to unbind the LED driver to release GPIO 228 for direct control
+            # Note: This requires root permissions, may fail if running as non-root
+            if self.green_led_driver_unbind_path.exists():
+                try:
+                    with open(self.green_led_driver_unbind_path, 'w') as f:
+                        f.write('leds')
+                    self.green_led_driver_unbound = True
+                    self.get_logger().info("Unbound kernel LED driver to enable direct GPIO 228 control")
+                    self.green_led_available = True
+                except PermissionError:
+                    self.get_logger().warning("Permission denied unbinding LED driver (need root) - will use GPIO 257 fallback")
+                    self.green_led_available = False
+                    self.green_led_driver_unbound = False
+                    return
+                except Exception as e:
+                    self.get_logger().warning(f"Failed to unbind LED driver: {e} - will use GPIO 257 fallback")
+                    self.green_led_available = False
+                    self.green_led_driver_unbound = False
+                    return
+            else:
+                self.get_logger().warning("LED driver unbind path not found - will use GPIO 257 fallback")
+                self.green_led_available = False
+                self.green_led_driver_unbound = False
+                return
+            
+            if self.green_led_available:
+                self.get_logger().info("Successfully unbound LED driver - GPIO 228 available for direct control")
+        except Exception as e:
+            self.get_logger().warning(f"Failed to initialize LED driver unbind: {e} - will use GPIO 257 fallback")
+            self.green_led_available = False
+            self.green_led_driver_unbound = False
 
     def release_sysfs_led(self):
-        """Release control of the sysfs green LED back to the kernel."""
-        # This function is temporarily disabled.
-        # We are using direct GPIO control for PH0 as a workaround for a damaged PH4 pin.
-        return
+        """Release control of the green LED by rebinding kernel driver."""
+        if not self.green_led_driver_unbound:
+            return
+        try:
+            # Rebind the LED driver so kernel heartbeat works during shutdown
+            if self.green_led_driver_bind_path.exists():
+                with open(self.green_led_driver_bind_path, 'w') as f:
+                    f.write('leds')
+                self.get_logger().info("Rebound kernel LED driver - green LED heartbeat restored")
+            else:
+                self.get_logger().warning("LED driver bind path not found")
+            
+            # Restore kernel heartbeat trigger
+            if self.green_led_trigger_path.exists():
+                with open(self.green_led_trigger_path, 'w') as f:
+                    f.write('heartbeat')
+                self.get_logger().info("Restored kernel heartbeat trigger for green LED")
+            
+            self.green_led_driver_unbound = False
+            self.green_led_available = False
+        except Exception as e:
+            self.get_logger().error(f"Failed to rebind LED driver: {e}")
 
     def init_gpio(self):
         """Initialize GPIO pins with conflict resolution"""
@@ -778,7 +857,15 @@ class PowerController(ArgoBaseNode):
             # NOTE: power_relay_line (GPIO 259) is NOT controlled by this service
             # Power relay control is handled exclusively by the shutdown hook
             self.power_button_line = self.chip.get_line(self.POWER_BUTTON_LINE)
-            self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE) # Re-enabled for temporary PH0 fix
+            # Only request GPIO 228 if LED driver was successfully unbound
+            # Otherwise, GPIO 228 is still claimed by kernel overlay and we'll skip it
+            if self.green_led_available and self.green_led_driver_unbound:
+                self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE)  # GPIO 228 (PH4)
+            else:
+                # Fall back to GPIO 257 hack if we can't use GPIO 228
+                self.get_logger().info("Using GPIO 257 fallback for green LED (GPIO 228 unavailable)")
+                self.GREEN_LED_LINE = 257  # Temporarily use GPIO 257 (blue LED pin)
+                self.green_led_line = self.chip.get_line(self.GREEN_LED_LINE)
             self.blue_led_line = self.chip.get_line(self.BLUE_LED_LINE)
             self.red_led_line = self.chip.get_line(self.RED_LED_LINE)
 
@@ -807,6 +894,9 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("GPIO pins configured successfully")
             self.gpio_available = True
         except Exception as e:
+            # Release any GPIO lines that were successfully requested before the error
+            self._release_gpio_lines_safe()
+            
             if self.test_mode:
                 self.get_logger().warning(f"GPIO not available in test mode: {e}")
                 self.get_logger().warning(
@@ -926,43 +1016,14 @@ class PowerController(ArgoBaseNode):
 
     def _check_critical_nodes_running(self) -> bool:
         """Check if critical nodes are running before allowing recording."""
-        try:
-            # Get node status from lifecycle manager
-            success, message = self._call_trigger_service(
-                '/argo/lifecycle/status', timeout_sec=3.0)
-            
-            if not success:
-                self.get_logger().warning("Could not retrieve node status for critical nodes check")
-                return False
-            
-            # Parse the status response
-            import json
-            status_data = json.loads(message)
-            nodes = status_data.get('nodes', {})
-            
-            # Check critical nodes
-            critical_nodes = ['controller.py', 'pwm.py']
-            running_critical = 0
-            
-            for node in critical_nodes:
-                if node in nodes and "RUNNING" in nodes[node]:
-                    running_critical += 1
-            
-            self.get_logger().info(f"Critical nodes status: {running_critical}/{len(critical_nodes)} running")
-            
-            # Require at least half of critical nodes to be running
-            if running_critical >= len(critical_nodes) // 2:
-                return True
-            else:
-                self.get_logger().warning(f"Not enough critical nodes running: {running_critical}/{len(critical_nodes)}")
-                return False
-                
-        except json.JSONDecodeError as e:
-            self.get_logger().warning(f"Could not parse node status JSON: {e}")
+        # Simply check if the Argo launch service is running
+        # The launch system handles critical node management
+        if not self.argo_service_running:
+            self.get_logger().warning("Argo service not running for recording")
             return False
-        except Exception as e:
-            self.get_logger().warning(f"Could not check critical nodes: {e}")
-            return False
+        
+        # Service is running, allow recording
+        return True
 
     def query_current_recording_status(self):
         """Query current recording status by calling the get_status service."""
@@ -1013,41 +1074,11 @@ class PowerController(ArgoBaseNode):
         return current_state
 
     def check_argo_service_status(self):
-        """Check if the Argo launch service is running via ROS2 service call"""
+        """Check if the Argo launch service is running via systemctl"""
         try:
-            # Use ROS2 service call instead of systemctl for better integration
-            if rclpy.ok():
-                success, message = self._call_trigger_service('/argo/lifecycle/status', timeout_sec=1.0)
-                if success:
-                    # Parse the status response to determine if system is running
-                    import json
-                    try:
-                        status_data = json.loads(message)
-                        running_count = status_data.get('running_count', 0)
-                        total_count = status_data.get('total_count', 0)
-                        # Consider system running if at least 3 nodes are active
-                        is_running = running_count >= 3
-
-                        if is_running != self.argo_service_running:
-                            self.argo_service_running = is_running
-                            self.get_logger().info(
-                                f"Argo service status changed: {'RUNNING' if is_running else 'STOPPED'} ({running_count}/{total_count} nodes)")
-                            # Update LED heartbeat when Argo service state changes
-                            self._update_led_heartbeat_for_pause_state()
-
-                            # When Argo service stops, recording service is not available
-                            if not is_running:
-                                self.recording_service_available = False
-                                self.get_logger().info("Recording service marked as unavailable")
-
-                        return is_running
-                    except (json.JSONDecodeError, KeyError):
-                        # Fallback to systemctl if ROS2 service fails
-                        pass
-
-            # Fallback to systemctl check (less frequent, shorter timeout)
+            # Check service status via systemctl
             result = subprocess.run(
-                ['sudo', 'systemctl', 'is-active', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'is-active', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=2
             )
             is_running = result.returncode == 0 and result.stdout.strip() == 'active'
@@ -1076,7 +1107,7 @@ class PowerController(ArgoBaseNode):
                 return True
             self.get_logger().info("Starting Argo launch service...")
             result = subprocess.run(
-                ['sudo', 'systemctl', 'start', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'start', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
@@ -1115,7 +1146,7 @@ class PowerController(ArgoBaseNode):
                 return True
 
             result = subprocess.run(
-                ['sudo', 'systemctl', 'stop', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'stop', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
@@ -1189,6 +1220,8 @@ class PowerController(ArgoBaseNode):
                     "critical"
                 )
         except Exception as e:
+            # Always stop service wait pattern on exception
+            self.service_wait_active = False
             self.get_logger().error(f"Error toggling controller pause: {e}")
             self.send_desktop_notification(
                 "Controller Pause Error",
@@ -1265,7 +1298,7 @@ class PowerController(ArgoBaseNode):
 
             # Stop service first
             result = subprocess.run(
-                ['sudo', 'systemctl', 'stop', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'stop', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode != 0:
@@ -1284,7 +1317,7 @@ class PowerController(ArgoBaseNode):
 
             # Start service
             result = subprocess.run(
-                ['sudo', 'systemctl', 'start', 'argo_launch.service'],
+                ['sudo', 'systemctl', 'start', 'argo_launch_standard.service'],
                 capture_output=True, text=True, timeout=15
             )
 
@@ -1312,6 +1345,8 @@ class PowerController(ArgoBaseNode):
                 )
                 return False
         except Exception as e:
+            # Always stop service wait pattern on exception
+            self.service_wait_active = False
             self.get_logger().error(f"Error restarting Argo service: {e}")
             self.send_desktop_notification(
                 "Argo Service Error",
@@ -1494,8 +1529,7 @@ class PowerController(ArgoBaseNode):
 
     def set_green_led(self, state):
         """Control green LED (system running indicator) via direct GPIO."""
-        # Temporary fix: Using direct GPIO for PH0 due to damaged PH4.
-        # Original implementation used sysfs for kernel-managed PH4.
+        # GPIO 228 is controlled directly after unbinding kernel LED driver
         if not self.gpio_available:
             self.green_led_state = state
             return
@@ -1505,7 +1539,7 @@ class PowerController(ArgoBaseNode):
             self.green_led_line.set_value(value)
             self.green_led_state = state
         except Exception as e:
-            self.get_logger().error(f"Error controlling green LED (GPIO): {e}")
+            self.get_logger().error(f"Error controlling green LED (GPIO 228): {e}")
 
     # def set_blue_led(self, state):
     #     """Control blue LED (charging indicator)"""
@@ -1597,6 +1631,11 @@ class PowerController(ArgoBaseNode):
             # Check network status periodically (only one that needs active checking)
             self._check_network_status()
 
+            # Skip heartbeat if paused (for SOS, service wait, or other special patterns)
+            if self.heartbeat_paused:
+                time.sleep(0.1)
+                continue
+
             # Generate LED pattern for this cycle
             pattern = self._generate_led_pattern()
             
@@ -1677,20 +1716,25 @@ class PowerController(ArgoBaseNode):
         # Explain red failure flashes
         if red_count > 0:
             failure_count = self.get_failure_count()
-            unhealthy_components = []
-            if not self.anemometer_healthy:
-                unhealthy_components.append("anem")
-            if not self.network_healthy:
-                unhealthy_components.append("network")
-            if not self.gps_healthy:
-                unhealthy_components.append("gps")
-            if not self.lora_healthy:
-                unhealthy_components.append("lora")
-            
-            if unhealthy_components:
-                parts.append(f"{failure_count} unhealthy: {', '.join(unhealthy_components)}")
+            # Use health monitor count if available, otherwise show local checks
+            if self.health_monitor_unhealthy_count > 0:
+                parts.append(f"{failure_count} unhealthy nodes")
             else:
-                parts.append(f"{failure_count} unverified")
+                # Fallback to local component checks
+                unhealthy_components = []
+                if not self.anemometer_healthy:
+                    unhealthy_components.append("anem")
+                if not self.network_healthy:
+                    unhealthy_components.append("network")
+                if not self.gps_healthy:
+                    unhealthy_components.append("gps")
+                if not self.lora_healthy:
+                    unhealthy_components.append("lora")
+                
+                if unhealthy_components:
+                    parts.append(f"{failure_count} unhealthy: {', '.join(unhealthy_components)}")
+                else:
+                    parts.append(f"{failure_count} unverified")
         
         # Explain blue status
         if blue_count > 0:
@@ -1767,31 +1811,35 @@ class PowerController(ArgoBaseNode):
         self.sos_led_active = True
 
         # SOS in Morse code: ... --- ... (short-short-short, long-long-long, short-short-short)
-        # Timing: short = 0.2s, long = 0.6s, pause between letters = 0.6s, pause between SOS = 1.8s
+        # Base timing: short = 0.2s, long = 0.6s, pause between letters = 0.6s, pause between SOS = 1.8s
+        # Total base duration: 3.6s (scaled to SOS_PATTERN_DURATION_S to maintain duty cycle)
+        base_duration = 3.6
+        scale_factor = SOS_PATTERN_DURATION_S / base_duration
+        
         sos_pattern = [
             # S: ... (short-short-short)
-            (0.2, True),   # Short on
-            (0.2, False),  # Short off
-            (0.2, True),   # Short on
-            (0.2, False),  # Short off
-            (0.2, True),   # Short on
-            (0.6, False),  # Long pause between letters
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.6 * scale_factor, False),  # Long pause between letters
 
             # O: --- (long-long-long)
-            (0.6, True),   # Long on
-            (0.2, False),  # Short off
-            (0.6, True),   # Long on
-            (0.2, False),  # Short off
-            (0.6, True),   # Long on
-            (0.6, False),  # Long pause between letters
+            (0.6 * scale_factor, True),   # Long on
+            (0.2 * scale_factor, False),  # Short off
+            (0.6 * scale_factor, True),   # Long on
+            (0.2 * scale_factor, False),  # Short off
+            (0.6 * scale_factor, True),   # Long on
+            (0.6 * scale_factor, False),  # Long pause between letters
 
             # S: ... (short-short-short)
-            (0.2, True),   # Short on
-            (0.2, False),  # Short off
-            (0.2, True),   # Short on
-            (0.2, False),  # Short off
-            (0.2, True),   # Short on
-            (1.8, False),  # Long pause between SOS cycles
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (1.8 * scale_factor, False),  # Long pause between SOS cycles
         ]
 
         while self.running and self.sos_led_active and self.low_battery_detected and not self.critical_battery_detected:
@@ -2614,6 +2662,10 @@ class PowerController(ArgoBaseNode):
             # LoRa signal strength monitoring
             self.lora_signal_sub = self.create_subscription(
                 Int32, '/lora_signal_strength', self._lora_signal_callback, 10)
+            
+            # Health monitor service client for comprehensive health status
+            self.health_monitor_client = self.create_client(
+                Trigger, '/argo/health/status')
 
             self.power_services_created = True
             self.get_logger().info("Power control ROS2 services created:")
@@ -3188,8 +3240,64 @@ class PowerController(ArgoBaseNode):
         if current_time - self.last_lora_update > self.status_timeout:
             self.lora_healthy = False
 
+    def _query_health_monitor(self):
+        """Query health monitor service for comprehensive node health status"""
+        import time
+        import json
+        current_time = time.time()
+        
+        # Throttle queries to avoid excessive service calls
+        if current_time - self.last_health_monitor_query < self.health_monitor_query_interval:
+            return
+        
+        # Only query if ROS2 is available and health monitor client exists
+        if not rclpy.ok() or not hasattr(self, 'health_monitor_client') or not self.health_monitor_client:
+            return
+        
+        try:
+            # Check if service is available
+            if not self.health_monitor_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().debug("Health monitor service not available")
+                return
+            
+            # Make service call
+            request = Trigger.Request()
+            future = self.health_monitor_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    try:
+                        health_data = json.loads(response.message)
+                        nodes_data = health_data.get('nodes', {})
+                        
+                        # Count unhealthy nodes
+                        unhealthy_count = 0
+                        for node_name, node_info in nodes_data.items():
+                            health_status = node_info.get('healthy')
+                            if health_status is False:
+                                unhealthy_count += 1
+                        
+                        self.health_monitor_unhealthy_count = unhealthy_count
+                        self.last_health_monitor_query = current_time
+                        self.get_logger().debug(f"Health monitor query: {unhealthy_count} unhealthy nodes")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        self.get_logger().debug(f"Error parsing health monitor response: {e}")
+        except Exception as e:
+            self.get_logger().debug(f"Error querying health monitor: {e}")
+    
     def get_failure_count(self) -> int:
         """Get the number of system failures for LED indication"""
+        # Query health monitor for comprehensive health status
+        self._query_health_monitor()
+        
+        # Use health monitor count if we've successfully queried it (even if count is 0)
+        # This ensures we use comprehensive health status when available
+        if self.last_health_monitor_query > 0:
+            return self.health_monitor_unhealthy_count
+        
+        # Fallback to local health checks (for backward compatibility when health monitor unavailable)
         # Check for timeouts first
         self._check_status_timeouts()
         
@@ -3545,6 +3653,9 @@ If you take no action within 30 seconds, the system will automatically
             # Stop SOS LED pattern if active
             self.sos_led_active = False
 
+            # Stop service wait pattern if active
+            self.service_wait_active = False
+
 
             # Clear critical battery flag if set
             if self.critical_battery_detected:
@@ -3560,9 +3671,18 @@ If you take no action within 30 seconds, the system will automatically
             self.set_blue_led(False)
             self.set_red_led(False)
 
+            # Release GPIO lines before closing chip
+            self._release_gpio_lines_safe()
+
+            # Release sysfs LED control back to kernel
+            self.release_sysfs_led()
+
             # Close GPIO chip if available
             if hasattr(self, 'chip') and self.chip is not None:
-                self.chip.close()
+                try:
+                    self.chip.close()
+                except Exception as e:
+                    self.get_logger().warning(f"Error closing GPIO chip: {e}")
 
             # ROS2 cleanup
             self._cleanup_ros2()
@@ -3572,6 +3692,39 @@ If you take no action within 30 seconds, the system will automatically
 
         self.get_logger().info("Power controller cleanup complete")
 
+    def _release_gpio_lines_safe(self):
+        """Safely release all GPIO lines without raising exceptions"""
+        try:
+            if hasattr(self, 'power_button_line') and self.power_button_line is not None:
+                self.power_button_line.release()
+                self.power_button_line = None
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().warning(f"Error releasing power_button_line: {e}")
+        
+        try:
+            if hasattr(self, 'green_led_line') and self.green_led_line is not None:
+                self.green_led_line.release()
+                self.green_led_line = None
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().warning(f"Error releasing green_led_line: {e}")
+        
+        try:
+            if hasattr(self, 'red_led_line') and self.red_led_line is not None:
+                self.red_led_line.release()
+                self.red_led_line = None
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().warning(f"Error releasing red_led_line: {e}")
+        
+        try:
+            if hasattr(self, 'blue_led_line') and self.blue_led_line is not None:
+                self.blue_led_line.release()
+                self.blue_led_line = None
+        except Exception as e:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().warning(f"Error releasing blue_led_line: {e}")
 
     def set_heartbeat_frequency(self, frequency_hz):
         """Set the heartbeat frequency"""
@@ -3580,6 +3733,16 @@ If you take no action within 30 seconds, the system will automatically
             self.heartbeat_frequency_hz = frequency_hz
         else:
             self.get_logger().warning(f"Invalid heartbeat frequency: {frequency_hz}")
+
+    def pause_heartbeat(self):
+        """Pause the heartbeat to allow special LED patterns to be visible"""
+        self.heartbeat_paused = True
+        self.get_logger().debug("Heartbeat paused for special LED pattern")
+
+    def resume_heartbeat(self):
+        """Resume the heartbeat after special LED patterns are done"""
+        self.heartbeat_paused = False
+        self.get_logger().debug("Heartbeat resumed")
 
     def _update_led_heartbeat_for_pause_state(self):
         """Update LED heartbeat frequency based on controller pause state and Argo service state"""
@@ -3845,6 +4008,9 @@ def main():
     argcomplete.autocomplete(parser)
     # Use the filtered arguments for argparse
     args = parser.parse_args(rclpy.utilities.remove_ros_args(args=sys.argv)[1:])
+
+    # Setup logging to stdout for journalctl compatibility
+    setup_logging(debug=args.debug)
 
     # Create a temporary logger for the main function before the node is fully initialized
     temp_logger = rclpy.logging.get_logger('argo_power_control_main')

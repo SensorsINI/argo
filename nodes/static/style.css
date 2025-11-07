@@ -33,6 +33,7 @@ body {
     justify-content: space-between;
     align-items: center;
     flex-wrap: wrap;
+    gap: 10px;
 }
 
 .header h1 {
@@ -57,6 +58,14 @@ body {
 .status-badge.status-error {
     background: #f8d7da;
     color: #721c24;
+}
+
+.status-timer {
+    font-size: 12px;
+    color: #6c757d;
+    font-weight: normal;
+    white-space: nowrap;
+    margin-left: 5px;
 }
 
 /* Cards */
@@ -102,13 +111,23 @@ body {
     color: #212529;
 }
 
-.battery-time {
+.node-summary {
     margin-top: 12px;
     padding: 10px;
-    background: #fff3cd;
     border-radius: 8px;
-    border-left: 4px solid #ffc107;
     font-weight: 600;
+    font-size: 14px;
+}
+
+.node-summary.summary-ok {
+    background: #d4edda;
+    border-left: 4px solid #28a745;
+    color: #155724;
+}
+
+.node-summary.summary-warning {
+    background: #fff3cd;
+    border-left: 4px solid #ffc107;
     color: #856404;
 }
 
@@ -339,6 +358,3 @@ body {
         font-size: 16px; /* Prevent zoom on iOS */
     }
 }
-
-
-

@@ -282,7 +282,7 @@ argo_orangepizero2w_20240115_143022.img.gz
 df -h
 
 # Verify services
-systemctl status argo_launch.service
+systemctl status argo_launch_standard.service
 
 # Test ROS2 nodes
 ros2 node list

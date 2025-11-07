@@ -25,6 +25,7 @@ import threading
 import argparse
 import logging
 import signal
+import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -32,14 +33,19 @@ from typing import Dict, Any, Optional
 # ROS2 imports
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, Float64, Float32, String, Int32, UInt8
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
 from std_srvs.srv import Trigger, SetBool
+from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue, ParameterType
 
 # Flask web server
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
+from werkzeug.serving import ThreadedWSGIServer
 
 # Add launch directory to path for ArgoNodeManager
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'launch'))
@@ -58,11 +64,15 @@ class ArgoWebDashboard(ArgoBaseNode):
         super().__init__('argo_web_dashboard', enable_health_service=True, enable_health_publisher=True)
         self.debug_mode = debug_mode
         
+        # Enable DEBUG logging if requested
+        if self.debug_mode:
+            self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
+        
         # Check for running web dashboard processes before starting
         self._check_for_running_dashboard()
         
         self.get_logger().info('Starting Argo Web Dashboard...')
-        self.get_logger().debug('debug test')
+        self.get_logger().debug('🔍 DEBUG mode enabled - verbose logging active')
  
         
         # Health monitoring - track data reception
@@ -75,6 +85,13 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Service callback threading fix - use flag-based approach
         self.health_service_requested = False
         self.health_service_response = None
+        
+        # Add flags to trigger service calls from the main spin loop
+        self._trigger_health_query = False
+        self._trigger_battery_query = False
+        
+        # Track previous human_controlled state for change detection
+        self._prev_human_controlled_state = None
         
         # Initialize state storage (thread-safe with lock)
         self.state_lock = threading.Lock()
@@ -96,6 +113,20 @@ class ArgoWebDashboard(ArgoBaseNode):
             
             # Temperature
             'cpu_temp': None,
+            'pcb_temp': None,
+            'air_temp': None,
+            
+            # Humidity and saltwater sensor
+            'relative_humidity': None,
+            'saltwater_voltage': None,
+            
+            # Node health (from health service)
+            'nodes_healthy': 0,
+            'nodes_unhealthy': 0,
+            'nodes_unknown': 0,  # Nodes with unknown/TBD health status
+            'nodes_unhealthy_list': [],  # List of unhealthy node names
+            'health_data_received': False,  # Track if health data has been received from service
+            'nodes_expected_total': 0,  # Total from argo_nodes.yaml (includes excluded services)
             
             # GPS
             'gps_locked': False,
@@ -104,6 +135,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             'gps_longitude': None,
             'gps_cog': None,
             'gps_sog': None,
+            'gps_last_valid_latitude': None,  # Last valid GPS coordinates (preserved when fix is lost)
+            'gps_last_valid_longitude': None,  # Last valid GPS coordinates (preserved when fix is lost)
             
             # Navigation
             'compass_heading': None,
@@ -114,7 +147,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             'wind_temp': None,
             
             # Controller
-            'human_controlled': True,
+            'human_controlled': None,  # None = unknown until first message received
+            'last_human_controlled_update': None,  # Timestamp of last /human_controlled message
             'controller_type': 'Unknown',
             
             # Recording
@@ -140,11 +174,33 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Viewer activity tracking for CPU optimization
         self.last_viewer_request_time = time.time()  # Track last HTTP request
         self.viewer_timeout = 30.0  # Enter low-power mode after 30s of no requests
-        self.low_power_mode = True  # Start in low-power mode (lazy subscriptions)
+        self.low_power_mode = False  # Start in high power mode, but if no queries for some time, we unsubscribe aagin
+        
+        # QoS profile for subscriptions that should not receive stale data from transient_local publishers
+        self.volatile_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=10
+        )
+        
+        # QoS profile for subscriptions that should receive the last published value (transient_local)
+        # Used for recording status so dashboard gets current state immediately when subscribing
+        self.transient_local_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=10
+        )
+        
         self.status_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
         self.status_timer_period_idle = 30.0  # 30 seconds when idle (low-power)
         self.health_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
         self.health_timer_period_idle = 60.0  # 60 seconds when idle (low-power)
+        
+        # Battery service query rate: 1/10 Hz (10 seconds) - only for local fallback when topics don't have data
+        self.battery_service_query_period = 10.0  # 10 seconds (1/10 Hz)
+        
+        # Health service query rate: 1/5 Hz (5 seconds) - for node health counts (includes excluded services)
+        self.health_service_query_period = 5.0  # 5 seconds (1/5 Hz)
         
         # Timestamps for each data type
         self.last_wifi_update = {}
@@ -158,24 +214,53 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
         self.recording_start_client = self.create_client(Trigger, '/argo/recording/start')
         self.recording_stop_client = self.create_client(Trigger, '/argo/recording/stop')
+        self.recording_get_status_client = self.create_client(Trigger, '/argo/recording/get_status')
         self.controller_switch_client = self.create_client(Trigger, '/controller_node/switch_controller')
+        self.battery_status_client = self.create_client(Trigger, '/battery_status')
+        self.health_status_client = self.create_client(Trigger, '/argo/health/status')
+        
+        # Parameter service client for setting controller type parameter
+        # ROS2 nodes expose parameter services when start_parameter_services=True (default)
+        self.controller_param_client = self.create_client(SetParameters, '/controller_node/set_parameters')
+        
+        # Load node configuration from argo_nodes.yaml to know expected total count
+        (self.physical_robot_nodes, 
+         self.physical_robot_special_nodes, 
+         self.all_nodes_including_excluded) = self._load_node_lists_from_yaml()
+        self.state['nodes_total'] = len(self.physical_robot_nodes) + len(self.physical_robot_special_nodes)
+        self.state['nodes_expected_total'] = len(self.all_nodes_including_excluded)
         
         # Store subscription references for mass unsubscribe/resubscribe
         # Use _topic_subscriptions to avoid conflict with ROS2 Node's subscriptions property
         # Start with empty list - subscriptions created lazily on first viewer access
         self._topic_subscriptions = []
+
+        if not self.low_power_mode: # only create initial subscriptions if not in low-power mode, now default
+            self._create_all_subscriptions()
+            # Query initial recording status after subscriptions are created
+            # This ensures we get the current state even if the topic hasn't published yet
+            self._query_recording_status()
         
         # Lazy subscriptions: Don't subscribe to topics until a viewer accesses the dashboard
         # This minimizes startup CPU usage when dashboard is not being used
         
         # Timer for periodic status updates (start with idle frequency since we're in low-power mode)
-        self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
+        # self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
+        self.get_logger().debug("Created status timer")
         
         # Timer for periodic health status checks (start with idle frequency since we're in low-power mode)
-        self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
+        # self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
         
-        # Timer to check viewer activity and adjust power mode
-        self.viewer_activity_timer = self.create_timer(5.0, self._check_viewer_activity)
+        # Timer for battery service queries (low rate: 1/10 Hz) - only for local fallback when topics don't have data
+        # This runs independently of HTTP requests and at a low rate to minimize network traffic
+        # self.battery_service_timer = self.create_timer(self.battery_service_query_period, self._trigger_battery_query_flag)
+        
+        # Timer for health service queries (low rate: 1/5 Hz) - for node health counts
+        # This runs independently of HTTP requests and at a low rate to minimize network traffic
+        # self.health_service_timer = self.create_timer(self.health_service_query_period, self._trigger_health_query_flag)
+        
+        # Timer to check viewer activity and adjust power mode - REMOVED, handled in main loop
+        # self.viewer_activity_timer = self.create_timer(5.0, self._check_viewer_activity)
         
         # Flask app setup
         self.app = Flask(__name__, 
@@ -199,6 +284,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Flask shutdown control
         self.flask_shutdown_requested = False
         self.signal_received = False  # Prevent recursive signal handling
+        self.wsgi_server = ThreadedWSGIServer(host='0.0.0.0', port=8081, app=self.app)
         
         # Start Flask in separate thread (daemon so it exits when main thread exits)
         self.flask_thread = threading.Thread(target=self.run_flask, daemon=True)
@@ -211,32 +297,56 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.get_logger().info('🌐 Web dashboard started on http://0.0.0.0:8081')
         self.get_logger().info('   Access from phone: http://ORANGEPI_IP:8081')
     
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully (only once)"""
-        # Prevent recursive signal handling
+    def shutdown(self):
+        """Custom shutdown logic for graceful termination."""
         if self.signal_received:
+            self.get_logger().debug("Shutdown already requested - skipping")
             return
         self.signal_received = True
-        
-        self.get_logger().info(f"Received signal {signum}, initiating shutdown...")
+        self.get_logger().info("Initiating graceful shutdown of web dashboard...")
         self.set_unhealthy("Node shutting down")
+
+        # Stop Flask server directly
+        if hasattr(self, 'wsgi_server') and self.wsgi_server:
+            try:
+                self.get_logger().info("Shutting down Werkzeug WSGI server...")
+                self.wsgi_server.shutdown()
+            except Exception as e:
+                self.get_logger().error(f"Error shutting down Werkzeug server: {e}")
+        else:
+            self.get_logger().warn("Could not shut down Flask server: wsgi_server not found.")
         
-        # Mark Flask as needing shutdown
-        self.flask_shutdown_requested = True
+        # Wait for Flask thread to finish (with timeout)
+        if hasattr(self, 'flask_thread') and self.flask_thread.is_alive():
+            self.get_logger().info("Waiting for Flask thread to finish...")
+            self.flask_thread.join(timeout=2.0)
+            if self.flask_thread.is_alive():
+                self.get_logger().warn("Flask thread did not finish within timeout")
         
-        # Cancel timers to stop health check spam
+        # Cancel all timers (if any were created)
+        for timer_name in ['status_timer', 'health_timer', 'battery_service_timer', 'health_service_timer', 'viewer_activity_timer']:
+            if hasattr(self, timer_name):
+                try:
+                    getattr(self, timer_name).cancel()
+                except Exception:
+                    pass
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully (only once)"""
+        if self.signal_received:
+            self.get_logger().debug("Signal handler called but shutdown already in progress.")
+            return
+
+        self.get_logger().info(f"Received signal {signum}, requesting shutdown...")
+        # Setting this flag prevents re-entry and allows main loop to break
+        self.signal_received = True
+        
+        # Shutdown ROS2 context immediately to break any blocking operations
+        # This will cause rclpy.ok() to return False, breaking the main loop
         try:
-            if hasattr(self, 'status_timer'):
-                self.status_timer.cancel()
-            if hasattr(self, 'health_timer'):
-                self.health_timer.cancel()
-            if hasattr(self, 'viewer_activity_timer'):
-                self.viewer_activity_timer.cancel()
-        except Exception:
-            pass
-        
-        # Trigger ROS2 shutdown to stop executor
-        raise KeyboardInterrupt()
+            rclpy.shutdown()
+        except Exception as e:
+            self.get_logger().warn(f"Error shutting down ROS2 context: {e}")
     
     def _check_for_running_dashboard(self):
         """Check for running web dashboard processes and refuse to start if found."""
@@ -304,11 +414,12 @@ class ArgoWebDashboard(ArgoBaseNode):
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/human_controlled', lambda msg: self.human_control_cb(msg, 'wifi'), 10)
         )
+        self.get_logger().info('📡 Subscribed to /human_controlled topic (from rudder_sail_radio_node)')
         self._topic_subscriptions.append(
-            self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), 10)
+            self.create_subscription(Float32, '/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), 10)
+            self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/charging_status', self.charging_status_cb, 10)
@@ -317,28 +428,43 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Bool, '/ac_power_present', self.ac_power_cb, 10)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), 10)
+            self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), 10)
+            self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), 10)
+            self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, '/gps_sog', lambda msg: self.gps_sog_cb(msg, 'wifi'), 10)
+            self.create_subscription(Float64, '/gps_sog', lambda msg: self.gps_sog_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), 10)
+            self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), 10)
+            self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), 10)
+            self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/temperature_pcb', self.pcb_temp_cb, self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/temperature_air', self.air_temp_cb, self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/relative_humidity', self.humidity_cb, self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/saltwater_voltage', self.saltwater_voltage_cb, self.volatile_qos)
         )
         self._topic_subscriptions.append(
             self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/argo/recording/status', self.recording_status_cb, self.transient_local_qos)
         )
         
         # LoRa sources (fallback when WiFi unavailable)
@@ -346,22 +472,22 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Bool, 'lora/human_controlled', lambda msg: self.human_control_cb(msg, 'lora'), 10)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), 10)
+            self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), 10)
+            self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), 10)
+            self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), 10)
+            self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), 10)
+            self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), 10)
+            self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), self.volatile_qos)
         )
         
         # LoRa-specific monitoring
@@ -392,20 +518,57 @@ class ArgoWebDashboard(ArgoBaseNode):
         now = time.time()
         
         with self.state_lock:
+            # Track previous state for change detection
+            prev_state = self.state.get('human_controlled')
+            new_state = msg.data
+            
             # Always update if this is newer data or first data
             if source == 'wifi':
                 self.last_wifi_update['human_controlled'] = now
-                self.state['human_controlled'] = msg.data
+                self.state['human_controlled'] = new_state
+                self.state['last_human_controlled_update'] = now
                 self.state['data_source'] = 'WiFi'
             elif source == 'lora':
                 self.last_lora_update['human_controlled'] = now
                 # Only use LoRa data if WiFi is stale (>2 seconds old)
                 wifi_age = now - self.last_wifi_update.get('human_controlled', 0)
                 if wifi_age > 2.0:
-                    self.state['human_controlled'] = msg.data
+                    self.state['human_controlled'] = new_state
+                    self.state['last_human_controlled_update'] = now
                     self.state['data_source'] = 'LoRa'
+                else:
+                    # Using WiFi data, don't update state
+                    return
+            
+            # Log state changes with INFO level
+            state_changed = prev_state is not None and prev_state != new_state
+            if state_changed:
+                mode_str = '👤 HUMAN' if new_state else '🤖 ROBOT'
+                prev_mode_str = '👤 HUMAN' if prev_state else '🤖 ROBOT'
+                self.get_logger().info(
+                    f"Control mode changed: {prev_mode_str} → {mode_str} "
+                    f"(source: {source.upper()}, topic: /human_controlled)"
+                )
+            elif prev_state is None:
+                # First message received
+                mode_str = '👤 HUMAN' if new_state else '🤖 ROBOT'
+                self.get_logger().info(
+                    f"Control mode initialized: {mode_str} "
+                    f"(source: {source.upper()}, topic: /human_controlled)"
+                )
+            else:
+                # State unchanged, log at debug level
+                mode_str = '👤 HUMAN' if new_state else '🤖 ROBOT'
+                self.get_logger().debug(
+                    f"Control mode unchanged: {mode_str} "
+                    f"(source: {source.upper()}, topic: /human_controlled)"
+                )
             
             self._update_data_age_indicators()
+        
+        # Trigger immediate UI update for critical state change (no race condition - state already updated)
+        if state_changed:
+            self._trigger_critical_state_update()
     
     def battery_voltage_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -431,6 +594,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Update health status - battery voltage is boat data
         self._update_boat_data_received(f"battery_voltage_{source}")
+        self.get_logger().debug(f"Battery voltage: {msg.data}")
     
     def battery_pct_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -459,6 +623,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         with self.state_lock:
             self.state['battery_charging'] = msg.data
+            self.get_logger().debug(f"Battery charging status: {msg.data}")
     
     def ac_power_cb(self, msg):
         """Callback for AC/USB power present."""
@@ -468,6 +633,38 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         with self.state_lock:
             self.state['battery_usb_power'] = msg.data
+    
+    def pcb_temp_cb(self, msg):
+        """Callback for PCB temperature."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['pcb_temp'] = msg.data
+    
+    def air_temp_cb(self, msg):
+        """Callback for air temperature."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['air_temp'] = msg.data
+    
+    def humidity_cb(self, msg):
+        """Callback for relative humidity."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['relative_humidity'] = msg.data
+    
+    def saltwater_voltage_cb(self, msg):
+        """Callback for saltwater sensor voltage."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            self.state['saltwater_voltage'] = msg.data
     
     def compass_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -499,7 +696,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Skip processing in low-power mode (no viewers)
         if self.low_power_mode:
             return
-        
+
         now = time.time()
         
         with self.state_lock:
@@ -578,6 +775,14 @@ class ArgoWebDashboard(ArgoBaseNode):
                 self.state['wind_angle'] = msg.y
                 self.state['wind_temp'] = msg.z
                 self.state['data_source'] = 'WiFi'
+            elif source == 'lora':
+                self.last_lora_update['wind'] = now
+                wifi_age = now - self.last_wifi_update.get('wind', 0)
+                if wifi_age > 2.0:
+                    self.state['wind_speed'] = msg.x
+                    self.state['wind_angle'] = msg.y
+                    self.state['wind_temp'] = msg.z
+                    self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()
         
@@ -593,24 +798,45 @@ class ArgoWebDashboard(ArgoBaseNode):
         with self.state_lock:
             if source == 'wifi':
                 self.last_wifi_update['gps_fix'] = now
-                self.state['gps_locked'] = (msg.status.status >= 0)
-                self.state['gps_latitude'] = msg.latitude if msg.latitude != 0.0 else None
-                self.state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
+                is_locked = (msg.status.status >= 0)
+                self.state['gps_locked'] = is_locked
+                
+                # Only update coordinates if we have a valid fix
+                if is_locked and msg.latitude != 0.0 and msg.longitude != 0.0:
+                    self.state['gps_latitude'] = msg.latitude
+                    self.state['gps_longitude'] = msg.longitude
+                    # Store last valid coordinates for display when fix is lost
+                    self.state['gps_last_valid_latitude'] = msg.latitude
+                    self.state['gps_last_valid_longitude'] = msg.longitude
+                # Don't clear coordinates when fix is lost - keep showing last valid position
+                
                 self.state['data_source'] = 'WiFi'
             elif source == 'lora':
                 self.last_lora_update['gps_fix'] = now
                 wifi_age = now - self.last_wifi_update.get('gps_fix', 0)
                 if wifi_age > 2.0:
-                    self.state['gps_locked'] = (msg.status.status >= 0)
-                    self.state['gps_latitude'] = msg.latitude if msg.latitude != 0.0 else None
-                    self.state['gps_longitude'] = msg.longitude if msg.longitude != 0.0 else None
+                    is_locked = (msg.status.status >= 0)
+                    self.state['gps_locked'] = is_locked
+                    
+                    # Only update coordinates if we have a valid fix
+                    if is_locked and msg.latitude != 0.0 and msg.longitude != 0.0:
+                        self.state['gps_latitude'] = msg.latitude
+                        self.state['gps_longitude'] = msg.longitude
+                        # Store last valid coordinates for display when fix is lost
+                        self.state['gps_last_valid_latitude'] = msg.latitude
+                        self.state['gps_last_valid_longitude'] = msg.longitude
+                    # Don't clear coordinates when fix is lost - keep showing last valid position
+                    
                     self.state['data_source'] = 'LoRa'
             
             # Set home position on first valid fix (always do this, even in low-power mode)
+            # Use last valid coordinates if current coordinates are None
+            current_lat_for_home = self.state['gps_latitude'] if self.state['gps_latitude'] is not None else self.state['gps_last_valid_latitude']
+            current_lon_for_home = self.state['gps_longitude'] if self.state['gps_longitude'] is not None else self.state['gps_last_valid_longitude']
             if (self.state['home_latitude'] is None and 
-                self.state['gps_latitude'] is not None):
-                self.state['home_latitude'] = self.state['gps_latitude']
-                self.state['home_longitude'] = self.state['gps_longitude']
+                current_lat_for_home is not None):
+                self.state['home_latitude'] = current_lat_for_home
+                self.state['home_longitude'] = current_lon_for_home
                 self.get_logger().info(
                     f"🏠 Home position set: {self.state['home_latitude']:.6f}°, "
                     f"{self.state['home_longitude']:.6f}°")
@@ -621,13 +847,16 @@ class ArgoWebDashboard(ArgoBaseNode):
                 return
             
             # Calculate distance and bearing to home (skip expensive calculations in low-power mode)
+            # Use current GPS coordinates if available, otherwise use last valid coordinates
+            current_lat = self.state['gps_latitude'] if self.state['gps_latitude'] is not None else self.state['gps_last_valid_latitude']
+            current_lon = self.state['gps_longitude'] if self.state['gps_longitude'] is not None else self.state['gps_last_valid_longitude']
             if (self.state['home_latitude'] is not None and 
-                self.state['gps_latitude'] is not None):
+                current_lat is not None):
                 self.state['distance_to_home'] = self._calculate_distance(
-                    self.state['gps_latitude'], self.state['gps_longitude'],
+                    current_lat, current_lon,
                     self.state['home_latitude'], self.state['home_longitude'])
                 self.state['bearing_to_home'] = self._calculate_bearing(
-                    self.state['gps_latitude'], self.state['gps_longitude'],
+                    current_lat, current_lon,
                     self.state['home_latitude'], self.state['home_longitude'])
             
             self._update_data_age_indicators()
@@ -712,6 +941,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         else:
             self.state['data_source'] = 'Offline'
     
+    def _trigger_critical_state_update(self):
+        """Trigger immediate UI update for critical state changes.
+        
+        This is a no-op on the backend - the frontend polls /api/status/critical
+        frequently to get reactive updates. We just log that state changed.
+        """
+        # State is already updated in the callback with proper locking
+        # Frontend will pick it up via fast polling of /api/status/critical
+        # No race condition because state update happened before this call
+        pass
+    
     def _update_boat_data_received(self, data_type: str):
         """Update timestamp when boat data is received (not just human_controlled)"""
         now = time.time()
@@ -722,7 +962,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             self._check_health_status()
         
         if self.debug_mode:
-            self.get_logger().debug(f"Boat data received: {data_type} at {now}")
+            self.get_logger().debug(f"Boat data received: {data_type} at {now} (age {now - self.last_boat_data_received:.2f}s)")
     
     def _check_viewer_activity(self):
         """Check viewer activity and adjust power mode accordingly."""
@@ -752,13 +992,13 @@ class ArgoWebDashboard(ArgoBaseNode):
             self._destroy_all_subscriptions()
         # If no subscriptions exist yet, we're already in the optimal state (lazy initialization)
         
-        # Adjust status timer to run less frequently
-        self.status_timer.cancel()
-        self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
+        # Adjust status timer to run less frequently - REMOVED, handled in main loop
+        # self.status_timer.cancel()
+        # self.status_timer = self.create_timer(self.status_timer_period_idle, self.update_system_status)
         
-        # Adjust health timer to run less frequently
-        self.health_timer.cancel()
-        self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
+        # Adjust health timer to run less frequently - REMOVED, handled in main loop
+        # self.health_timer.cancel()
+        # self.health_timer = self.create_timer(self.health_timer_period_idle, self._check_health_status)
     
     def _exit_low_power_mode(self, source_ip=None):
         """Exit low-power mode: subscribe/resubscribe to all topics and restore normal timer frequencies."""
@@ -779,17 +1019,17 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.get_logger().info("Resubscribing to all topics")
             self._create_all_subscriptions()
         
-        # Restore status timer to normal frequency
-        self.status_timer.cancel()
-        self.status_timer = self.create_timer(self.status_timer_period_active, self.update_system_status)
+        # Restore status timer to normal frequency - REMOVED, handled in main loop
+        # self.status_timer.cancel()
+        # self.status_timer = self.create_timer(self.status_timer_period_active, self.update_system_status)
         
-        # Restore health timer to normal frequency
-        self.health_timer.cancel()
-        self.health_timer = self.create_timer(self.health_timer_period_active, self._check_health_status)
+        # Restore health timer to normal frequency - REMOVED, handled in main loop
+        # self.health_timer.cancel()
+        # self.health_timer = self.create_timer(self.health_timer_period_active, self._check_health_status)
         
-        # Immediately update status when exiting low-power mode
+        # Immediately update status and health when exiting low-power mode
         self.update_system_status()
-        self._check_health_status()
+        self._update_node_health_from_service()  # Trigger immediate health check
     
     def _record_viewer_activity(self, source_ip=None):
         """Record that a viewer made an HTTP request."""
@@ -846,11 +1086,75 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def controller_state_cb(self, msg):
         with self.state_lock:
+            prev_controller = self.state.get('controller_type')
             self.state['controller_type'] = msg.data
+            controller_changed = prev_controller != msg.data
+        
+        # Trigger immediate UI update for critical state change (no race condition - state already updated)
+        if controller_changed:
+            self._trigger_critical_state_update()
     
     def controller_pause_state_cb(self, msg):
         with self.state_lock:
+            prev_paused = self.state.get('controller_paused')
             self.state['controller_paused'] = msg.data
+            paused_changed = prev_paused != msg.data
+        
+        # Trigger immediate UI update for critical state change (no race condition - state already updated)
+        if paused_changed:
+            self._trigger_critical_state_update()
+    
+    def recording_status_cb(self, msg):
+        """Callback for recording status updates."""
+        if self.low_power_mode:
+            return
+        
+        with self.state_lock:
+            prev_recording = self.state.get('recording')
+            self.state['recording'] = msg.data
+            recording_changed = prev_recording != msg.data
+        
+        # Trigger immediate UI update for critical state change (no race condition - state already updated)
+        if recording_changed:
+            self._trigger_critical_state_update()
+    
+    def _query_recording_status(self):
+        """Query the current recording status from the service to get initial state."""
+        try:
+            if not self.recording_get_status_client.wait_for_service(timeout_sec=2.0):
+                self.get_logger().debug("Recording status service not available, will wait for topic message")
+                return
+            
+            request = Trigger.Request()
+            future = self.recording_get_status_client.call_async(request)
+            
+            # Wait for response with timeout
+            timeout = 3.0
+            start_time = time.time()
+            while not future.done() and (time.time() - start_time) < timeout:
+                if self.signal_received or not rclpy.ok():
+                    break
+                try:
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                except Exception:
+                    if self.signal_received or not rclpy.ok():
+                        break
+            
+            if future.done():
+                try:
+                    response = future.result()
+                    with self.state_lock:
+                        prev_recording = self.state.get('recording')
+                        self.state['recording'] = response.success
+                        if prev_recording != response.success:
+                            self.get_logger().info(
+                                f"📹 Initial recording status queried: {'ACTIVE' if response.success else 'INACTIVE'}"
+                            )
+                except Exception as e:
+                    self.get_logger().debug(f"Error getting recording status response: {e}")
+        except Exception as e:
+            # Silently fail - topic subscription will provide the status
+            self.get_logger().debug(f"Could not query recording status service: {e}")
     
     def _handle_health_request(self, request, response):
         """Override ArgoBaseNode health service callback with flag-based approach"""
@@ -907,31 +1211,72 @@ class ArgoWebDashboard(ArgoBaseNode):
     
     def update_system_status(self):
         """Periodically update system status (nodes, battery, CPU temp)."""
+        self.get_logger().debug("Updating system status")
         try:
             # In low-power mode, skip expensive operations
             if self.low_power_mode:
                 # Only update timestamp, skip node queries and CPU temp
                 with self.state_lock:
                     self.state['last_update'] = time.time()
+                self.get_logger().debug("Skipping system status update in low-power mode")
                 return
             
-            # Update node status (expensive operation - skip in low-power mode)
-            node_status = self.node_manager.get_node_status()
-            running_nodes = [node for node, info in node_status.items() if info.get('running', False)]
-            
+            # Check for stale human_controlled messages
+            # If we haven't received a message in 5 seconds (2s timeout + 3s buffer), assume robot control
+            now = time.time()
             with self.state_lock:
-                self.state['nodes_running'] = len(running_nodes)
-                self.state['nodes_total'] = len(node_status)
-                self.state['nodes_list'] = {
-                    node: '🟢 RUNNING' if info.get('running', False) else '🔴 STOPPED'
-                    for node, info in node_status.items()
-                }
-                self.state['system_running'] = len(running_nodes) > 0
+                last_update = self.state.get('last_human_controlled_update')
+                prev_state = self.state.get('human_controlled')
+                if last_update is not None:
+                    age = now - last_update
+                    if age > 5.0:  # 5 seconds (2s timeout + 3s buffer)
+                        if self.state['human_controlled']:
+                            self.get_logger().info(
+                                f"⚠️ Human control message stale ({age:.1f}s old), updating to ROBOT mode "
+                                f"(last message from /human_controlled topic)"
+                            )
+                            self.state['human_controlled'] = False
+                elif self.state['human_controlled']:
+                    # If we've never received a message but state is True, check if topic is publishing
+                    # If no message received for 5 seconds, assume robot control
+                    self.get_logger().warn(
+                        "⚠️ No human_controlled message received yet from /human_controlled topic, "
+                        "checking if rudder_sail_radio_node is publishing"
+                    )
             
             # Get CPU temperature (file I/O - skip in low-power mode)
             self._update_cpu_temp()
+
+            # Update node status (expensive operation - skip in low-power mode)
+            node_status = self.node_manager.get_node_status()
+            
+            # Normalize node lists: strip .py extension from physical_robot_nodes for comparison
+            # node_manager returns keys without .py (e.g., "gps"), but physical_robot_nodes has .py (e.g., "gps.py")
+            normalized_physical_robot_nodes = {
+                node.rstrip('.py') if node.endswith('.py') else node 
+                for node in self.physical_robot_nodes
+            }
+            
+            # --- REFACTORED: Filter status to only include nodes from the physical_robot group ---
+            filtered_status = {
+                node: info for node, info in node_status.items()
+                if node in normalized_physical_robot_nodes or node in self.physical_robot_special_nodes
+            }
+
+            running_nodes = [node for node, info in filtered_status.items() if info.get('running', False)]
             
             with self.state_lock:
+                self.state['nodes_running'] = len(running_nodes)
+                self.state['nodes_total'] = len(self.physical_robot_nodes) + len(self.physical_robot_special_nodes)
+                self.state['nodes_list'] = {
+                    node: '🟢 RUNNING' if info.get('running', False) else '🔴 STOPPED'
+                    for node, info in filtered_status.items()
+                }
+                self.state['system_running'] = len(running_nodes) > 0
+            
+            
+            with self.state_lock:
+                self.state['nodes_expected_total'] = len(self.all_nodes_including_excluded)
                 self.state['last_update'] = time.time()
                 
         except Exception as e:
@@ -942,9 +1287,229 @@ class ArgoWebDashboard(ArgoBaseNode):
         try:
             with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
                 temp_millicelsius = int(f.read().strip())
+                self.get_logger().debug(f"CPU temperature: {temp_millicelsius} millicelsius")   # DEBUG
                 with self.state_lock:
                     self.state['cpu_temp'] = temp_millicelsius // 1000
-        except Exception:
+        except Exception as e:
+            self.get_logger().error(f"Error reading CPU temperature: {e}")
+    
+    def _load_node_lists_from_yaml(self) -> (list, list, list):
+        """Load the list of nodes for the physical robot from argo_nodes.yaml.
+
+        Returns:
+            A tuple containing:
+            - A list of regular nodes that are launched by the lifecycle manager.
+            - A list of special nodes (e.g., foxglove_bridge) launched by the manager.
+            - A list of all nodes, including those that run as excluded services.
+        """
+        try:
+            config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+
+            all_node_configs = {node['name']: node for node in config.get('nodes', [])}
+            groups = config.get('groups', {})
+            physical_robot_group_names = groups.get('physical_robot', [])
+
+            launched_nodes = []
+            special_nodes = []
+
+            for name in physical_robot_group_names:
+                if name in all_node_configs:
+                    node_cfg = all_node_configs[name]
+                    if node_cfg.get('special'):
+                        special_nodes.append(name)
+                    else:
+                        script_name = os.path.basename(node_cfg.get('executable', ''))
+                        launched_nodes.append(script_name)
+
+            # Get the list of all nodes defined in the YAML, including excluded ones, for health checks
+            all_defined_nodes = list(all_node_configs.keys())
+            
+            # Also include services from the services section (they're ROS2 nodes too)
+            services_config = config.get('services', [])
+            for service in services_config:
+                service_name = service.get('name')
+                if service_name and service_name not in all_defined_nodes:
+                    # Add service to total count if not already in nodes section
+                    all_defined_nodes.append(service_name)
+            
+            return launched_nodes, special_nodes, all_defined_nodes
+        except Exception as e:
+            self.get_logger().error(f"Could not load node lists from YAML: {e}")
+            return [], [], []
+
+    def _trigger_health_query_flag(self):
+        """Timer callback to set the flag for a health query."""
+        self._trigger_health_query = True
+
+    def _trigger_battery_query_flag(self):
+        """Timer callback to set the flag for a battery query."""
+        self._trigger_battery_query = True
+
+    def _load_expected_nodes_count(self) -> int:
+        """DEPRECATED: This method is replaced by _load_node_lists_from_yaml."""
+        return len(self.all_nodes_including_excluded)
+    
+    def _update_node_health_from_service(self):
+        """Query health service to get healthy/unhealthy node counts.
+        
+        Uses /argo/health/status service which includes all nodes from argo_nodes.yaml,
+        including excluded services (argo_power_control, argo_battery_water, bno085).
+        Runs at low rate (1/5 Hz) independently of HTTP requests to minimize network traffic.
+        """
+        try:
+            if not self.health_status_client.wait_for_service(timeout_sec=0.5):
+                self.get_logger().debug("Health status service not available")
+                return  # Service not available, skip
+            
+            request = Trigger.Request()
+            future = self.health_status_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    try:
+                        health_data = json.loads(response.message)
+                        nodes_data = health_data.get('nodes', {})
+                        
+                        # Count healthy and unhealthy nodes, and collect unhealthy node names
+                        # Note: Nodes with health_status=None are not counted (status unknown)
+                        healthy_count = 0
+                        unhealthy_count = 0
+                        unknown_count = 0  # Track nodes with unknown health status
+                        unhealthy_nodes = []
+                        total_nodes_with_status = 0  # Total nodes with known status (healthy + unhealthy)
+                        
+                        for node_name, node_info in nodes_data.items():
+                            health_status = node_info.get('healthy')
+                            if health_status is True:
+                                healthy_count += 1
+                                total_nodes_with_status += 1
+                            elif health_status is False:
+                                unhealthy_count += 1
+                                total_nodes_with_status += 1
+                                # Store node name (remove .py extension for display)
+                                display_name = node_name.rstrip('.py') if node_name.endswith('.py') else node_name
+                                unhealthy_nodes.append(display_name)
+                            else:
+                                # health_status is None - status unknown/TBD
+                                unknown_count += 1
+                        
+                        # Total expected nodes = nodes with known status + nodes with unknown status
+                        # This matches what health monitor actually returns
+                        total_expected = len(nodes_data)  # Total nodes returned by health monitor
+                        
+                        with self.state_lock:
+                            self.state['nodes_healthy'] = healthy_count
+                            self.state['nodes_unhealthy'] = unhealthy_count
+                            self.state['nodes_unhealthy_list'] = unhealthy_nodes
+                            self.state['nodes_unknown'] = unknown_count  # Track unknown health status
+                            self.state['nodes_expected_total'] = total_expected  # Update from actual health service response
+                            self.state['health_data_received'] = True  # Mark that we've received health data
+                            self.get_logger().debug(f"Updated health counts: {healthy_count} healthy, {unhealthy_count} unhealthy, {unknown_count} unknown, {total_expected} total: {unhealthy_nodes}")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        self.get_logger().warn(f"Error parsing health service response: {e}")
+                else:
+                    self.get_logger().debug(f"Health service returned success=False: {response.message}")
+            else:
+                self.get_logger().debug("Health service call timed out")
+        except Exception as e:
+            self.get_logger().warn(f"Error querying health service: {e}")
+    
+    def _update_battery_status_from_service(self):
+        """Query battery status service at low rate (1/10 Hz) to get charging/USB power status.
+        
+        This runs as a fallback when topics don't have data. Only updates state if topic data is None.
+        Runs independently of HTTP requests to minimize remote network traffic.
+        """
+        try:
+            # Skip if in low-power mode (no viewers) - battery status not needed when dashboard not in use
+            if self.low_power_mode:
+                self.get_logger().debug("Skipping battery status update in low-power mode")
+                return
+            
+            # Check if topic data or time estimates are missing
+            # Time estimates are ONLY available from service, not topics
+            with self.state_lock:
+                charging_from_topic = self.state.get('battery_charging')
+                usb_from_topic = self.state.get('battery_usb_power')
+                voltage_from_topic = self.state.get('battery_voltage')
+                pct_from_topic = self.state.get('battery_pct')
+                pcb_temp_from_topic = self.state.get('pcb_temp')
+                time_to_full = self.state.get('battery_time_to_full')
+                time_to_empty = self.state.get('battery_time_to_empty')
+            
+            # Always query service if time estimates are missing (topics don't provide these)
+            # Also query if any other topic data is missing
+            needs_time_estimates = (time_to_full is None and time_to_empty is None)
+            needs_other_data = (charging_from_topic is None or usb_from_topic is None or 
+                               voltage_from_topic is None or pct_from_topic is None or 
+                               pcb_temp_from_topic is None)
+            
+            if not needs_time_estimates and not needs_other_data:
+                self.get_logger().debug("Topics have all data and time estimates available, skipping service query")
+                return  # All data available, no need to query service
+            
+            if not self.battery_status_client.wait_for_service(timeout_sec=5.0):
+                self.get_logger().debug("Battery status service not available after 5 seconds")
+                return  # Service not available, skip
+            
+            request = Trigger.Request()
+            future = self.battery_status_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            
+            if future.done():
+                response = future.result()
+                if response.success:
+                    try:
+                        battery_data = json.loads(response.message)
+                        raw_data = battery_data.get('raw_data', {})
+                        charging_status = raw_data.get('charging_status')
+                        usb_power_status = raw_data.get('ac_power_present')
+                        battery_voltage = raw_data.get('battery_voltage')
+                        battery_pct = raw_data.get('battery_remaining_pct')
+                        pcb_temperature = raw_data.get('pcb_temperature')
+                        relative_humidity = raw_data.get('relative_humidity')
+                        saltwater_voltage = raw_data.get('saltwater_voltage')
+                        time_to_full = raw_data.get('time_to_full_hours')
+                        time_to_empty = raw_data.get('time_to_empty_hours')
+                        
+                        # Only update if we got valid data and topic data is still missing
+                        # This prevents overriding topic data if it arrived between check and response
+                        with self.state_lock:
+                            self.get_logger().debug(f"Battery status response: {battery_data}")
+                            if self.state.get('battery_charging') is None and charging_status is not None:
+                                self.get_logger().debug(f"Updating battery charging status: {charging_status}")
+                                self.state['battery_charging'] = charging_status
+                            if self.state.get('battery_usb_power') is None and usb_power_status is not None:
+                                self.state['battery_usb_power'] = usb_power_status
+                            # Also update voltage and percentage if missing from topics
+                            if self.state.get('battery_voltage') is None and battery_voltage is not None:
+                                self.state['battery_voltage'] = battery_voltage
+                            if self.state.get('battery_pct') is None and battery_pct is not None:
+                                self.state['battery_pct'] = battery_pct
+                            # Update PCB temperature if missing from topic
+                            if self.state.get('pcb_temp') is None and pcb_temperature is not None:
+                                self.state['pcb_temp'] = pcb_temperature
+                            # Update humidity if missing from topic
+                            if self.state.get('relative_humidity') is None and relative_humidity is not None:
+                                self.state['relative_humidity'] = relative_humidity
+                            # Update saltwater voltage if missing from topic
+                            if self.state.get('saltwater_voltage') is None and saltwater_voltage is not None:
+                                self.state['saltwater_voltage'] = saltwater_voltage
+                            # Always update time estimates from service (topics don't provide this)
+                            if time_to_full is not None:
+                                self.state['battery_time_to_full'] = time_to_full
+                                self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
+                            if time_to_empty is not None:
+                                self.state['battery_time_to_empty'] = time_to_empty
+                                self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        self.get_logger().debug(f"Error parsing battery status response: {e}")
+        except Exception as e:
+            # Silently fail - this is just a fallback, topics are primary source
             pass
     
     # ==================== Flask Routes ====================
@@ -973,6 +1538,17 @@ class ArgoWebDashboard(ArgoBaseNode):
             """Get current system status as JSON."""
             with self.state_lock:
                 return jsonify(self.state.copy())
+        
+        @self.app.route('/api/status/critical')
+        def get_critical_status():
+            """Get only critical status fields (human_controlled, recording, controller_type) for fast polling."""
+            with self.state_lock:
+                return jsonify({
+                    'human_controlled': self.state.get('human_controlled'),
+                    'recording': self.state.get('recording'),
+                    'controller_type': self.state.get('controller_type'),
+                    'controller_paused': self.state.get('controller_paused')
+                })
         
         @self.app.route('/api/toggle_pause', methods=['POST'])
         def toggle_pause():
@@ -1008,42 +1584,122 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         @self.app.route('/api/controller/switch', methods=['POST'])
         def switch_controller():
-            """Switch controller type."""
+            """Switch controller type using ROS2 parameters."""
             data = request.get_json()
             controller_type = data.get('type', '')
             
             if controller_type not in ['proportional', 'wind_aware', 'return_to_home']:
                 return jsonify({'success': False, 'message': 'Invalid controller type'}), 400
             
-            # Create request with controller type in data field (non-standard Trigger usage)
-            # Note: Trigger service doesn't have data field, so we need custom service type
-            # For now, use topic publishing as fallback
             try:
-                # Direct service call - controller.py needs to parse this
-                if not self.controller_switch_client.wait_for_service(timeout_sec=1.0):
-                    return jsonify({'success': False, 'message': 'Service unavailable'}), 503
+                # Check if parameter service is available
+                if not self.controller_param_client.wait_for_service(timeout_sec=2.0):
+                    return jsonify({'success': False, 'message': 'Controller parameter service unavailable'}), 503
                 
-                # Use Trigger service - pass type via separate parameter topic
-                # Workaround: publish controller type to a topic, then call service
-                # Better solution: define custom service type with string parameter
+                # Set the controller_type parameter using parameter service
+                # The parameter change callback will automatically switch the controller
+                param_msg = ParameterMsg()
+                param_msg.name = 'controller_type'
+                param_msg.value = ParameterValue()
+                param_msg.value.type = ParameterType.PARAMETER_STRING
+                param_msg.value.string_value = controller_type
                 
-                # For now, use subprocess to call with ros2 cli
-                cmd = [
-                    'bash', '-c',
-                    f'source /opt/ros/humble/setup.bash && '
-                    f'ros2 service call /controller_node/switch_controller std_srvs/srv/Trigger'
-                ]
+                set_param_request = SetParameters.Request()
+                set_param_request.parameters = [param_msg]
                 
-                # TODO: This needs proper implementation with custom service type
-                # For now, return not implemented
-                return jsonify({
-                    'success': False, 
-                    'message': f'Controller switching to {controller_type} - needs implementation'
-                }), 501
+                set_future = self.controller_param_client.call_async(set_param_request)
+                rclpy.spin_until_future_complete(self, set_future, timeout_sec=2.0)
                 
+                if not set_future.done():
+                    return jsonify({
+                        'success': False,
+                        'message': 'Parameter set operation timed out'
+                    }), 504
+                
+                set_result = set_future.result()
+                if not set_result.results or not set_result.results[0].successful:
+                    reason = set_result.results[0].reason if set_result.results else "Unknown error"
+                    return jsonify({
+                        'success': False,
+                        'message': f'Failed to set parameter: {reason}'
+                    }), 500
+                
+                # Parameter change callback will automatically switch the controller
+                # No need to call the service - the parameter change triggers the switch
+                # The parameter service result already indicates if the switch was successful
+                if set_result.results[0].successful:
+                    return jsonify({
+                        'success': True,
+                        'message': f'Controller switched to {controller_type} (parameter change callback handled the switch)'
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': f'Failed to switch controller: {set_result.results[0].reason}'
+                    }), 500
+                    
             except Exception as e:
+                self.get_logger().error(f"Error switching controller: {e}")
                 return jsonify({'success': False, 'message': str(e)}), 500
         
+        @self.app.route('/api/recording/toggle', methods=['POST'])
+        def toggle_recording():
+            """Toggle recording state (start if stopped, stop if started)."""
+            try:
+                # First, query the actual recording status to avoid race conditions
+                # This ensures we have the most up-to-date state before toggling
+                if self.recording_get_status_client.wait_for_service(timeout_sec=2.0):
+                    request = Trigger.Request()
+                    future = self.recording_get_status_client.call_async(request)
+                    
+                    # Wait for response with short timeout
+                    timeout = 2.0
+                    start_time = time.time()
+                    while not future.done() and (time.time() - start_time) < timeout:
+                        if not rclpy.ok():
+                            break
+                        try:
+                            rclpy.spin_once(self, timeout_sec=0.1)
+                        except Exception:
+                            if not rclpy.ok():
+                                break
+                    
+                    if future.done():
+                        try:
+                            response = future.result()
+                            is_recording = response.success
+                            # Update state with actual status
+                            with self.state_lock:
+                                self.state['recording'] = is_recording
+                        except Exception:
+                            # Fall back to state dictionary if service call fails
+                            with self.state_lock:
+                                is_recording = self.state.get('recording', False)
+                    else:
+                        # Fall back to state dictionary if service call times out
+                        with self.state_lock:
+                            is_recording = self.state.get('recording', False)
+                else:
+                    # Fall back to state dictionary if service is not available
+                    with self.state_lock:
+                        is_recording = self.state.get('recording', False)
+                
+                # Choose appropriate client and service name based on current state
+                if is_recording:
+                    client = self.recording_stop_client
+                    service_name = '/argo/recording/stop'
+                else:
+                    client = self.recording_start_client
+                    service_name = '/argo/recording/start'
+                
+                return self._call_service(client, service_name)
+            except Exception as e:
+                return jsonify({
+                    'success': False, 
+                    'message': f'Error toggling recording: {str(e)}'
+                }), 500
+        
+        # Keep old endpoints for backwards compatibility
         @self.app.route('/api/recording/start', methods=['POST'])
         def start_recording():
             """Start data recording."""
@@ -1073,6 +1729,46 @@ class ArgoWebDashboard(ArgoBaseNode):
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e)}), 500
         
+        @self.app.route('/api/lifecycle/toggle', methods=['POST'])
+        def toggle_lifecycle():
+            """Toggle Argo system lifecycle (start if stopped, stop if started)."""
+            try:
+                # Get current system state
+                with self.state_lock:
+                    is_running = self.state.get('system_running', False)
+                
+                # Choose appropriate command based on current state
+                if is_running:
+                    command = 'stop'
+                    action = 'stopping'
+                else:
+                    command = 'run'
+                    action = 'starting'
+                
+                result = subprocess.run([
+                    'python3',
+                    os.path.join(self.argo_dir, 'launch', 'argo_lifecycle_manager.py'),
+                    command
+                ], capture_output=True, text=True, timeout=10)
+                
+                if result.returncode == 0:
+                    return jsonify({
+                        'success': True, 
+                        'message': f'System {action}...'
+                    })
+                else:
+                    error_msg = result.stderr.strip() if result.stderr else 'Unknown error'
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Failed to {action} system: {error_msg}'
+                    }), 500
+                    
+            except Exception as e:
+                return jsonify({
+                    'success': False, 
+                    'message': f'Error toggling system: {str(e)}'
+                }), 500
+        
         @self.app.route('/api/lifecycle/stop', methods=['POST'])
         def lifecycle_stop():
             """Stop Argo system via lifecycle manager."""
@@ -1090,29 +1786,84 @@ class ArgoWebDashboard(ArgoBaseNode):
                     
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e)}), 500
+                
+        @self.app.route('/api/shutdown', methods=['POST'])
+        def shutdown():
+            """Internal endpoint to shut down the Flask server."""
+            self.get_logger().info("Flask shutdown route called.")
+            if hasattr(self, 'wsgi_server'):
+                # Shutdown must be in a thread, as it blocks until the server is fully down
+                shutdown_thread = threading.Thread(target=self.wsgi_server.shutdown)
+                shutdown_thread.start()
+                return jsonify({'success': True, 'message': 'Server shutting down...'})
+            else:
+                self.get_logger().error('Not running with a managed Werkzeug Server, cannot shutdown!')
+                return jsonify({'success': False, 'message': 'Not running with managed Werkzeug server.'})
     
     def _call_service(self, client, service_name):
-        """Generic service call wrapper."""
+        """Generic service call wrapper with improved timeout and error handling."""
         try:
-            if not client.wait_for_service(timeout_sec=1.0):
-                return jsonify({'success': False, 'message': 'Service unavailable'}), 503
+            if not client.wait_for_service(timeout_sec=5.0):
+                return jsonify({
+                    'success': False, 
+                    'message': f'Service {service_name} unavailable (timeout waiting for service)'
+                }), 503
             
             request = Trigger.Request()
             future = client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            
+            # Use loop with shutdown check instead of blocking spin_until_future_complete
+            # This allows shutdown signals to interrupt long-running service calls
+            timeout = 10.0
+            start_time = time.time()
+            while not future.done() and (time.time() - start_time) < timeout:
+                if self.signal_received or not rclpy.ok():
+                    self.get_logger().debug("Shutdown requested during service call, cancelling")
+                    break
+                # Use short timeout to allow checking shutdown flag frequently
+                try:
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                except Exception:
+                    # Context may be shutting down
+                    if self.signal_received or not rclpy.ok():
+                        break
             
             if future.done():
-                response = future.result()
-                return jsonify({'success': response.success, 'message': response.message})
+                try:
+                    response = future.result()
+                    # Always include the service response message for detailed information
+                    return jsonify({
+                        'success': response.success, 
+                        'message': response.message if response.message else 'Service call completed'
+                    })
+                except Exception as e:
+                    # Handle case where future.result() raises exception
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Error getting service response: {str(e)}'
+                    }), 500
             else:
-                return jsonify({'success': False, 'message': 'Service call timeout'}), 504
+                return jsonify({
+                    'success': False, 
+                    'message': f'Service call to {service_name} timed out after 10 seconds'
+                }), 504
                 
         except Exception as e:
-            return jsonify({'success': False, 'message': str(e)}), 500
+            return jsonify({
+                'success': False, 
+                'message': f'Service call error: {str(e)}'
+            }), 500
     
     def run_flask(self):
         """Run Flask server in separate thread."""
-        self.app.run(host='0.0.0.0', port=8081, debug=self.debug_mode, threaded=True, use_reloader=False)
+        self.get_logger().info("Starting Werkzeug WSGI server...")
+        try:
+            self.wsgi_server.serve_forever()
+        except Exception as e:
+            if not self.signal_received:
+                self.get_logger().error(f"Flask server error: {e}")
+        finally:
+            self.get_logger().info("Werkzeug WSGI server has shut down.")
 
 
 def main(args=None):
@@ -1184,25 +1935,79 @@ Troubleshooting:
     executor.add_node(node)
     
     try:
-        executor.spin()
+        # executor.spin()
+        # Custom spin loop to handle service calls on the main thread
+        # and manually trigger periodic tasks, as ROS2 timers are not reliable
+        # with this custom executor model.
+        
+        last_status_update = time.time()
+        last_health_check = time.time()
+        last_viewer_check = time.time()
+        last_health_service_query = time.time()
+        last_battery_service_query = time.time()
+        
+        while rclpy.ok() and not node.signal_received:
+            # Spin once with a short timeout to handle ROS callbacks
+            executor.spin_once(timeout_sec=0.1)
+            
+            # Check shutdown flag immediately after spin
+            if node.signal_received:
+                break
+            
+            now = time.time()
+            
+            # Determine current update intervals based on power mode
+            status_interval = node.status_timer_period_idle if node.low_power_mode else node.status_timer_period_active
+            health_interval = node.health_timer_period_idle if node.low_power_mode else node.health_timer_period_active
+            viewer_check_interval = 5.0 # Constant 5s check
+            
+            # --- Manually trigger periodic tasks ---
+            if now - last_status_update > status_interval:
+                node.update_system_status()
+                last_status_update = now
+                
+            if now - last_health_check > health_interval:
+                node._check_health_status()
+                last_health_check = now
+            
+            if now - last_viewer_check > viewer_check_interval:
+                node._check_viewer_activity()
+                last_viewer_check = now
+            
+            # --- Query health service for node counts (1/5 Hz = 5 seconds) ---
+            if now - last_health_service_query > node.health_service_query_period:
+                node._update_node_health_from_service()
+                last_health_service_query = now
+            
+            # --- Query battery service as fallback (1/10 Hz = 10 seconds) ---
+            if now - last_battery_service_query > node.battery_service_query_period:
+                node._update_battery_status_from_service()
+                last_battery_service_query = now
+            
     except KeyboardInterrupt:
         print("\n🛑 Shutting down web dashboard...")
+        if node:
+            node.signal_received = True  # Set flag to ensure clean shutdown
     except Exception as e:
         print(f"\n❌ Error: {e}")
     finally:
         # Ensure proper cleanup
-        try:
-            node.destroy_node()
-        except Exception:
-            pass
+        if node:
+            node.shutdown()
+            try:
+                node.destroy_node()
+            except Exception as e:
+                print(f"Error destroying node: {e}")
             
+        # Only shutdown if context is still valid (may already be shut down by signal handler)
         try:
             if rclpy.ok():
                 rclpy.shutdown()
-        except Exception:
+        except Exception as e:
+            # Context may already be shutdown - this is expected
             pass
+        print("🛑 Web dashboard shutdown complete.")
 
 
 if __name__ == '__main__':
     main()
-

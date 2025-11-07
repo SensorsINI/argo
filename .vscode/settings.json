@@ -8,5 +8,14 @@
     "python.formatting.provider": "none",
     "isort.sortImportsOnSave": false,
     "ruff.fixOnSave": false,
-    "makefile.configureOnOpen": false
+    "makefile.configureOnOpen": false,
+    "git.autofetch": true,
+    "git.autofetchPeriod": 180,
+    "files.trimTrailingWhitespace": false,
+    "files.exclude": {
+      "**/simulator/sailboat-playground/**": false
+    },
+    "files.watcherExclude": {
+      "**/simulator/sailboat-playground/.git/**": true
+    }
   }

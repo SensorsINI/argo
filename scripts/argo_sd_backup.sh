@@ -11,10 +11,21 @@
 set -e
 
 # Configuration
-SD_DEVICE="/dev/mmcblk0"
 BACKUP_DIR="$HOME/sd_backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 HOSTNAME=$(hostname)
+
+# Auto-detect SD card device (device mounted at root)
+# Get the root filesystem device, then find its parent device (the whole SD card)
+ROOT_DEVICE=$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//' | head -1)
+if [ -z "$ROOT_DEVICE" ] || [ ! -b "$ROOT_DEVICE" ]; then
+    echo "❌ Error: Could not auto-detect SD card device"
+    echo "   Root filesystem device: $ROOT_DEVICE"
+    echo "   Please check your system configuration."
+    exit 1
+fi
+SD_DEVICE="$ROOT_DEVICE"
+
 # Get device size for filename tag
 SIZE_BYTES=$(lsblk -b -d -n -o SIZE "$SD_DEVICE")
 # Round up to nearest GB for a user-friendly tag
@@ -92,20 +103,19 @@ Options:
     -l, --local     Save backup locally only (no remote transfer)
     -d, --destination PATH    Local backup directory (default: ~/sd_backups)
     -y, --yes       Non-interactive mode (no prompts, requires destination)
-    --rm-local      Remove local backup after successful remote transfer (for non-interactive mode)
     --no-space-check Skip the local disk space check
 
 Examples:
     # Interactive mode (prompts for remote destination)
     ./argo_sd_backup.sh
 
-    # Explicit remote destination
+    # Explicit remote destination (streams directly, no local copy)
     ./argo_sd_backup.sh tobi@sensors-tobidh87.lan.ini.uzh.ch
 
     # Local backup only
     ./argo_sd_backup.sh --local
 
-    # Unattended remote backup (immune to SSH hangups)
+    # Unattended remote backup (streams directly via SSH)
     nohup ./argo_sd_backup.sh tobi@sensors-tobidh87.lan.ini.uzh.ch -y &
 
 The backup file will be named: argo_${HOSTNAME}_${SIZE_TAG}_YYYYMMDD_HHMMSS.img.7z
@@ -135,7 +145,7 @@ check_disk_space() {
 
     if (( $(echo "$AVAILABLE_SPACE_GB < $REQUIRED_SPACE_GB" | bc -l) )); then
         echo -e "${RED}❌ Error: Not enough disk space in $LOCAL_DIR${NC}"
-        echo "   You need at least ${REQUIRED_SPACE_GB}GB of free space to create the local backup file before transfer."
+        echo "   You need at least ${REQUIRED_SPACE_GB}GB of free space to create the local backup file."
         echo "   Clean up files or use a different backup directory with the -d flag."
         exit 1
     else
@@ -148,7 +158,6 @@ DESTINATION=""
 LOCAL_ONLY=false
 LOCAL_DIR="$BACKUP_DIR"
 NON_INTERACTIVE=false
-REMOVE_LOCAL_AFTER_TRANSFER=false
 SKIP_SPACE_CHECK=false
 
 while [[ $# -gt 0 ]]; do
@@ -167,10 +176,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         -y|--yes)
             NON_INTERACTIVE=true
-            shift
-            ;;
-        --rm-local)
-            REMOVE_LOCAL_AFTER_TRANSFER=true
             shift
             ;;
         --no-space-check)
@@ -270,17 +275,19 @@ if [ "$LOCAL_ONLY" = true ]; then
     ls -lh "$LOCAL_DIR/$BACKUP_NAME"
 else
     # Remote backup streamed over SSH
-    echo "Streaming backup directly to: $DESTINATION:~/$BACKUP_NAME"
+    # Note: Using gzip instead of 7z because p7zip doesn't support -so (stdout) on this system
+    BACKUP_NAME_GZ="${BACKUP_NAME%.7z}.img.gz"
+    echo "Streaming backup directly to: $DESTINATION:~/$BACKUP_NAME_GZ"
     echo "This process will not use significant local disk space."
-    echo "Compression with 7z (ultra) will be slow but space-efficient."
+    echo "Compression with gzip will be fast and space-efficient."
     echo ""
     
-    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | 7z a -t7z -mx=9 -si -so | ssh "$DESTINATION" "cat > ~/$BACKUP_NAME"
+    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | gzip -9 | ssh "$DESTINATION" "cat > ~/$BACKUP_NAME_GZ"
 
     if [ $? -eq 0 ]; then
         echo ""
         echo -e "${GREEN}✅ Remote backup streamed successfully!${NC}"
-        echo "Remote location: $DESTINATION:~/$BACKUP_NAME"
+        echo "Remote location: $DESTINATION:~/$BACKUP_NAME_GZ"
     else
         echo -e "${RED}❌ Remote backup failed.${NC}"
         echo "   You may need to manually remove the partial file on the remote host."

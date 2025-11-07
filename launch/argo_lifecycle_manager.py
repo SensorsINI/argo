@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
 """
-Argo ROS2 Lifecycle Manager
-===========================
+Argo Status and Simulation Manager
+==================================
 
-A comprehensive lifecycle manager for Argo ROS2 nodes that provides:
-- Continuous health monitoring and fault detection
-- Graceful shutdown handling
-- Detailed status reporting with system diagnostics
-- Simulation mode support (local and remote)
-- Node pause/unpause control
-- Battery and power monitoring integration
-- ROS2 service interface for runtime control
+A tool for checking system status and managing simulations for the Argo sailboat.
+This script provides detailed diagnostics and is the backend for the 'as' and 'asq' aliases.
+
+It uses argo_nodes.yaml as the single source of truth for node configuration.
+
+Node lifecycle (start/stop/restart) is now managed by the systemd service
+'argo_launch_standard.service' and the aliases 'al', 'aq', 'ars'.
 
 Commands:
-    help             Show detailed help message (-h, --help also available)
-    run              Start all nodes and keep running (for systemd service)
-    stop             Stop all nodes and clean up processes
-    restart          Restart all nodes (stop + start)
-    status           Show comprehensive system status with diagnostics
-    quick_status     Show condensed one-line status (fast check)
-    simulate_local   Start local simulation mode
-    simulate_remote  Start remote simulation mode
+    status           (Default) Show comprehensive system status with diagnostics.
+    quick_status     Show condensed one-line status (fast check).
+    simulate_local   Start local simulation mode.
+    simulate_remote  Start remote simulation mode.
+    help             Show this help message.
 
 Options:
-    --toggle_pause   Toggle controller pause state (pauses autonomous navigation)
-    --debug          Enable debug output for troubleshooting
-    --quiet          Suppress initialization messages
+    --toggle_pause   Toggle controller pause state (pauses autonomous navigation).
+    --debug          Enable debug output for troubleshooting.
+    --quiet          Suppress initialization messages.
 
 Examples:
-    python3 argo_lifecycle_manager.py help
-    python3 argo_lifecycle_manager.py run
-    python3 argo_lifecycle_manager.py status
-    python3 argo_lifecycle_manager.py simulate_local
-    python3 argo_lifecycle_manager.py --toggle_pause
+    # Show detailed status (default command)
+    python3 argo_lifecycle_manager.py
+    argo_lifecycle_manager.py status
+
+    # Show quick, one-line status
+    argo_lifecycle_manager.py quick_status
+
+    # Start local simulation
+    argo_lifecycle_manager.py simulate_local
 """
 
 import os
@@ -45,13 +45,23 @@ import threading
 import argparse
 import argcomplete
 import json
+import shlex
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import select
+import yaml  # Add YAML import
 
 # Import centralized node utilities
 from argo_node_utils import ArgoNodeManager
 import psutil
+
+# Color codes for terminal output
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DARK_GREEN = '\033[32m'  # Dark green for healthy nodes
+    RED = '\033[31m'         # Red for unhealthy nodes
+    DIM = '\033[2m'          # Dim/Gray for stopped nodes
 
 # ROS2 imports for service client
 try:
@@ -108,34 +118,53 @@ class ArgoLifecycleManager:
         self.node_health_status = {}  # Track health status for each node
         self.health_subscribers = {}  # ROS2 subscribers for health topics
         
-        if ROS2_AVAILABLE:
-            try:
-                if not rclpy.ok():
-                    rclpy.init()
-                self.ros2_node = Node('argo_lifecycle_manager')
-                self.battery_service_client = self.ros2_node.create_client(
-                    Trigger, '/battery_status')
-
-                # Create controller pause service client
-                self.controller_pause_client = self.ros2_node.create_client(
-                    SetBool, '/controller_node/pause')
-                
-                # Subscribe to controller pause state
-                self.controller_pause_sub = self.ros2_node.create_subscription(
-                    Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
-                
-                # Initialize health status monitoring
-                self._setup_health_monitoring()
-            except Exception as e:
-                if not quiet:
-                    print(
-                        f"Warning: Could not initialize ROS2 service client: {e}")
-                self.ros2_node = None
-                self.battery_service_client = None
-                self.controller_pause_client = None
+        # --- NEW: Load all node configuration from argo_nodes.yaml ---
+        self._load_nodes_from_yaml()
         
-        # Initialize node manager for discovery
+        # ROS2 node will be created lazily when needed
+        # This prevents creating a node for simple commands that don't need ROS2
+        
+        # Initialize node manager, but only for process management, not discovery
         self.node_manager = ArgoNodeManager(self.argo_dir)
+        
+        # ROS2 node initialization deferred until actually needed
+    
+    def _ensure_ros2_node(self):
+        """Lazily create ROS2 node and clients if not already created"""
+        if self.ros2_node is not None:
+            return  # Already initialized
+        
+        if not ROS2_AVAILABLE:
+            return
+        
+        try:
+            if not rclpy.ok():
+                rclpy.init()
+            self.ros2_node = Node('argo_lifecycle_manager')
+            
+            # Declare a dummy parameter to prevent foxglove_bridge errors when querying parameters
+            # (foxglove_bridge tries to discover parameters from all nodes)
+            self.ros2_node.declare_parameter('node_type', 'lifecycle_manager')
+            
+            self.battery_service_client = self.ros2_node.create_client(
+                Trigger, '/battery_status')
+
+            # Create controller pause service client
+            self.controller_pause_client = self.ros2_node.create_client(
+                SetBool, '/controller_node/pause')
+            
+            # Subscribe to controller pause state
+            self.controller_pause_sub = self.ros2_node.create_subscription(
+                Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
+            
+            # Initialize health status monitoring (uses self.all_expected_nodes from YAML)
+            self._setup_health_monitoring()
+        except Exception as e:
+            if not self.quiet:
+                print(f"Warning: Could not initialize ROS2 service client: {e}")
+            self.ros2_node = None
+            self.battery_service_client = None
+            self.controller_pause_client = None
         
         # Query initial controller pause state after a brief delay to allow ROS2 to initialize
         if self.controller_pause_client:
@@ -145,55 +174,130 @@ class ArgoLifecycleManager:
                 self._query_controller_pause_state()
             threading.Thread(target=query_initial_pause_state, daemon=True).start()
         
-        # Discover expected nodes dynamically (exclude simulation-only nodes for normal operation)
-        discovered_nodes = self.node_manager.discover_nodes(exclude_simulation_only=True)
-
-        # Nodes to exclude (running as independent services)
-        # - argo_battery_water: Runs as independent service for critical battery monitoring
-        # - bno085: Runs as independent service when argo_bno085.service is active
-        self.excluded_nodes = ['argo_battery_water']
-        
-        # Check if BNO085 service is running and exclude bno085 node to avoid conflicts
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_bno085.service'],
-                                    capture_output=True, text=True, timeout=2)
-            if result.returncode == 0 and result.stdout.strip() == 'active':
-                self.excluded_nodes.append('bno085')
-        except Exception:
-            pass  # If we can't check service status, don't exclude
-        
-        # Convert to .py format for process matching and handle special nodes
-        self.expected_nodes = []
-        self.special_nodes = []
-        
-        for node in discovered_nodes:
-            if node in self.excluded_nodes:
-                if node == 'bno085':
-                    # BNO085 is excluded from launch but should be monitored for health
-                    self.special_nodes.append(node)
-                continue  # Skip other excluded nodes
-            elif node == 'foxglove_bridge':
-                self.special_nodes.append(node)  # Special handling needed
-            else:
-                self.expected_nodes.append(
-                    f"{node}.py")  # Regular Python nodes
-
-        # Log excluded nodes for visibility (only if not in quiet mode)
-        if self.excluded_nodes and not quiet:
-            print(
-                f"ℹ️  Excluded nodes (critical services or hardware not ready): {', '.join(self.excluded_nodes)}")
-        
-        # Combine all expected nodes for monitoring
-        self.all_expected_nodes = self.expected_nodes + self.special_nodes
-        
-        # Define critical nodes (essential for boat operation)
-        self.critical_nodes = ['pwm.py', 'controller.py']
-
-        # Remove old pause node definitions - only controller supports pausing now
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _load_nodes_from_yaml(self):
+        """Load and parse node definitions from argo_nodes.yaml."""
+        # print("ℹ️  Loading node configuration from argo_nodes.yaml...")
+        config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+        except (IOError, yaml.YAMLError) as e:
+            print(f"❌ CRITICAL: Could not load or parse argo_nodes.yaml: {e}")
+            # Exit if the config is essential and cannot be loaded
+            sys.exit(1)
+
+        self.expected_nodes = []
+        self.special_nodes = []
+        self.excluded_nodes = []
+        self.critical_nodes = []
+        self.all_expected_nodes = []
+        
+        # Simulation node configuration (loaded but not used until simulation mode)
+        self.simulation_expected_nodes = []
+        self.simulation_special_nodes = []
+        self.simulation_critical_nodes = []
+        self.simulation_node_args = {}  # Map of script_name -> args list
+        self.simulation_map_name = None  # Map name for simulation start location
+
+        # --- NEW: Physical Robot node configuration ---
+        self.physical_robot_nodes = []
+        self.physical_robot_special_nodes = []
+        self.physical_robot_node_args = {}
+
+        all_node_configs = config.get('nodes', [])
+        
+        # Create a lookup map for node configs by name for easy reference
+        node_config_map = {node['name']: node for node in all_node_configs if 'name' in node}
+
+        # --- Process node groups ---
+        groups = config.get('groups', {})
+        physical_robot_group = groups.get('physical_robot', [])
+
+        for node_name in physical_robot_group:
+            if node_name not in node_config_map:
+                print(f"⚠️  Warning: Node '{node_name}' from 'physical_robot' group not found in main node list.")
+                continue
+
+            node_cfg = node_config_map[node_name]
+            script_name = os.path.basename(node_cfg.get('executable', ''))
+
+            if node_cfg.get('special', False):
+                # For special nodes, the "script_name" is just the node name
+                self.physical_robot_special_nodes.append(node_name)
+            else:
+                self.physical_robot_nodes.append(script_name)
+
+            if node_cfg.get('args'):
+                self.physical_robot_node_args[script_name] = node_cfg.get('args', [])
+
+        for node_cfg in all_node_configs:
+            name = node_cfg.get('name')
+            if not name:
+                continue
+
+            # Convert to the script name format used by the manager (e.g., 'anem.py' or 'foxglove_bridge')
+            script_name = name
+            if not node_cfg.get('special', False):
+                 # Assuming non-special nodes follow the pattern 'node_name.py'
+                 # We need to find the executable to get the script name
+                 executable = node_cfg.get('executable', '')
+                 script_name = os.path.basename(executable) if executable else f"{name}.py"
+
+            if node_cfg.get('excluded', False):
+                self.excluded_nodes.append(script_name)
+            elif node_cfg.get('special', False):
+                self.special_nodes.append(script_name)
+            else:
+                self.expected_nodes.append(script_name)
+            
+            if node_cfg.get('critical', False):
+                self.critical_nodes.append(script_name)
+
+        # all_expected_nodes for monitoring should include all non-excluded nodes
+        self.all_expected_nodes = self.expected_nodes + self.special_nodes
+        
+        # Load simulation configuration (map name, etc.)
+        simulation_config = config.get('simulation_config', {})
+        self.simulation_map_name = simulation_config.get('map_name')
+        
+        # Load simulation nodes from 'simulation' group (same pattern as physical_robot)
+        simulation_group = groups.get('simulation', [])
+        
+        for node_name in simulation_group:
+            if node_name not in node_config_map:
+                # Also check simulation_nodes list for nodes that might not be in main nodes list
+                # (like argo_unified_simulator_bridge which is simulation-only)
+                simulation_node_configs = config.get('simulation_nodes', [])
+                node_cfg = None
+                for sim_cfg in simulation_node_configs:
+                    if sim_cfg.get('name') == node_name:
+                        node_cfg = sim_cfg
+                        break
+                
+                if not node_cfg:
+                    print(f"⚠️  Warning: Node '{node_name}' from 'simulation' group not found in node lists.")
+                    continue
+            else:
+                node_cfg = node_config_map[node_name]
+            
+            script_name = os.path.basename(node_cfg.get('executable', ''))
+            
+            if node_cfg.get('special', False):
+                # For special nodes, the "script_name" is just the node name
+                self.simulation_special_nodes.append(node_name)
+            else:
+                self.simulation_expected_nodes.append(script_name)
+            
+            if node_cfg.get('args'):
+                self.simulation_node_args[script_name] = node_cfg.get('args', [])
+            
+            if node_cfg.get('critical', False):
+                self.simulation_critical_nodes.append(script_name)
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
@@ -232,6 +336,7 @@ class ArgoLifecycleManager:
 
     def _setup_health_monitoring(self):
         """Setup health status monitoring for nodes that publish health topics"""
+        self._ensure_ros2_node()
         if not self.ros2_node:
             return
             
@@ -281,13 +386,80 @@ class ArgoLifecycleManager:
                     print(f"Warning: Could not subscribe to health topic {health_topic}: {e}")
 
     def _query_node_health_services(self) -> Dict[str, Dict]:
-        """Query health status from all nodes via services"""
+        """Query health status from all nodes via services
+        
+        Fast path: Try aggregated health monitor service first (1 service call)
+        Fallback: Query individual node health services (10+ service calls)
+        """
+        self._ensure_ros2_node()
         health_data = {}
         
         # Check if ROS2 node is available
         if not self.ros2_node:
             return health_data
         
+        # FAST PATH: Try to use health monitor aggregated service
+        try:
+            health_monitor_client = self.ros2_node.create_client(Trigger, '/argo/health/status')
+            if health_monitor_client.wait_for_service(timeout_sec=2.0):
+                request = Trigger.Request()
+                future = health_monitor_client.call_async(request)
+                rclpy.spin_until_future_complete(
+                    self.ros2_node, future, timeout_sec=2.0)
+                
+                if future.done():
+                    response = future.result()
+                    if response.success:
+                        try:
+                            monitor_data = json.loads(response.message)
+                            # Convert health monitor format to lifecycle manager format
+                            # Health monitor uses YAML node names (which are .py filenames for regular nodes)
+                            # or node names for special nodes (e.g., 'foxglove_bridge')
+                            if 'nodes' in monitor_data:
+                                for node_name, node_info in monitor_data['nodes'].items():
+                                    # Handle both old format (executable string for special nodes) and new format (node name)
+                                    # Old format: 'ros2 run foxglove_bridge foxglove_bridge'
+                                    # New format: 'foxglove_bridge'
+                                    lookup_key = node_name
+                                    
+                                    # If this looks like an old format special node key (contains 'ros2 run'), try to extract node name
+                                    if 'ros2 run' in node_name:
+                                        # Load YAML config to find the matching node
+                                        try:
+                                            config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
+                                            with open(config_path, 'r') as f:
+                                                config = yaml.safe_load(f)
+                                            
+                                            # Check both regular and simulation nodes
+                                            for cfg in (config.get('nodes', []) + config.get('simulation_nodes', [])):
+                                                if cfg.get('executable', '') == node_name and cfg.get('special', False):
+                                                    lookup_key = cfg.get('name', node_name)
+                                                    break
+                                        except Exception:
+                                            # If we can't load config, keep original key
+                                            pass
+                                    
+                                    health_data[lookup_key] = {
+                                        'healthy': node_info.get('healthy'),
+                                        'last_seen': node_info.get('last_seen', 0.0)
+                                    }
+                                    
+                                    # Also keep the original key for backward compatibility during transition
+                                    if lookup_key != node_name:
+                                        health_data[node_name] = health_data[lookup_key]
+                            # If we got data from health monitor, return it (fast path succeeded)
+                            if health_data:
+                                return health_data
+                        except json.JSONDecodeError:
+                            # JSON parse error, fall through to individual calls
+                            pass
+        except Exception as e:
+            print(f"🔍 Error in health monitor service call: {e}")
+            # Health monitor unavailable or error, fall through to individual calls
+            print(f"Falling through to individual calls: {e}")
+            pass
+        
+        # SLOW PATH: Query individual node health services (fallback)        
         # Define health services for each node
         health_services = {
             'gps.py': '/gps_node/health',
@@ -296,8 +468,10 @@ class ArgoLifecycleManager:
             'argo_battery_water.py': '/battery_water_node/health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node/health',
             'temp_monitor.py': '/temp_monitor_node/health',
+            'controller.py': '/controller_node/health',
             'argo_transform_publisher.py': '/argo_transform_publisher/health',
             'argo_boat_visualization.py': '/argo_boat_visualization/health',
+            'record.py': '/record/health',
             'bno085.py': '/bno085_bridge/health'  # Monitor BNO085 health even when excluded from launch
         }
         
@@ -372,6 +546,7 @@ class ArgoLifecycleManager:
 
     def _query_controller_pause_state(self):
         """Query the current controller pause state via service call."""
+        self._ensure_ros2_node()
         try:
             if not self.controller_pause_client:
                 return
@@ -504,12 +679,9 @@ class ArgoLifecycleManager:
             node_scripts = self.expected_nodes
             print(f"Launching specific nodes: {', '.join(node_scripts)}")
         else:
-            # Discover available nodes, excluding simulation-only nodes for normal launches
-            discovered_nodes = self.node_manager.discover_nodes(
-                exclude_simulation_only=True)
-            node_scripts = [
-                f"{node}.py" for node in discovered_nodes
-                if node != 'foxglove_bridge' and node not in self.excluded_nodes]
+            # --- REFACTORED: Use physical_robot group from YAML ---
+            node_scripts = self.physical_robot_nodes
+            print(f"✅ Launching physical robot nodes from YAML: {', '.join(node_scripts)}")
         
         # Launch each node in a separate process
         # Store as list of dicts: {'proc': process, 'name': script_name}
@@ -523,9 +695,21 @@ class ArgoLifecycleManager:
                 print(f"✅ Launching {script}...")
                 # Launch each node with proper ROS2 environment
                 # Use None for stdout/stderr so output goes directly to systemd journal
+                argo_yaml_path = os.path.join(self.argo_dir, 'nodes', 'argo.yaml')
                 cmd_str = f'source /opt/ros/humble/setup.bash && python3 {script_path}'
-                if script == 'argo_unified_simulator_bridge.py' and hasattr(self, 'simulation_mode'):
-                    cmd_str += f' --mode {self.simulation_mode}'
+                
+                # Add args from YAML configuration if available (for simulation nodes)
+                if hasattr(self, 'simulation_node_args') and script in self.simulation_node_args:
+                    args = self.simulation_node_args[script]
+                    if args:
+                        # Properly quote arguments to handle spaces in values (e.g., map names)
+                        # Use shlex.quote to safely escape arguments for shell use
+                        quoted_args = [shlex.quote(arg) for arg in args]
+                        cmd_str += ' ' + ' '.join(quoted_args)
+                
+                # Add parameter file so nodes can load argo.yaml parameters
+                cmd_str += f' --ros-args --params-file {shlex.quote(argo_yaml_path)}'
+                
                 cmd = ['bash', '-c', cmd_str]
                 proc = subprocess.Popen(
                     cmd,
@@ -548,12 +732,9 @@ class ArgoLifecycleManager:
             # Simulation mode: use explicitly defined special nodes
             special_nodes_to_launch = self.special_nodes
         elif not (hasattr(self, 'expected_nodes') and self.expected_nodes):
-            # Normal mode: discover all special nodes (excluding hardware not ready)
-            discovered_nodes = self.node_manager.discover_nodes()
-            special_nodes_to_launch = [
-                node for node in discovered_nodes
-                if (node == 'foxglove_bridge' and node not in self.excluded_nodes) or 
-                   (node == 'bno085' and node in self.excluded_nodes)]  # BNO085: monitor but don't launch
+            # --- REFACTORED: Use physical_robot_special_nodes from YAML ---
+            special_nodes_to_launch = self.physical_robot_special_nodes
+            print(f"✅ Launching physical robot special nodes from YAML: {', '.join(special_nodes_to_launch)}")
 
         for special_node in special_nodes_to_launch:
             if special_node == 'foxglove_bridge':
@@ -561,16 +742,96 @@ class ArgoLifecycleManager:
                 # Launch foxglove_bridge as a ROS2 package
                 cmd = [
                     'bash', '-c', f'source /opt/ros/humble/setup.bash && ros2 run foxglove_bridge foxglove_bridge']
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=self.argo_dir,
-                    stdout=None,  # Let output go to systemd journal
-                    stderr=None,  # Let errors go to systemd journal
-                    universal_newlines=True
-                )
-                # Store process with node name for easier debugging
-                self.node_processes.append({'proc': proc, 'name': special_node})
-                print(f"✅ Launched {special_node} (PID: {proc.pid})")
+                try:
+                    # First, verify the package exists by trying to get package info
+                    import shutil
+                    check_cmd = ['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 pkg executables foxglove_bridge']
+                    check_proc = subprocess.run(
+                        check_cmd,
+                        cwd=self.argo_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    
+                    if check_proc.returncode != 0:
+                        print(f"❌ FAILED to start {special_node}!")
+                        print("")
+                        print("   ERROR: foxglove-bridge package not found!")
+                        print("")
+                        if "package" in check_proc.stderr.lower() or "not found" in check_proc.stderr.lower():
+                            print("   The foxglove-bridge package is not installed.")
+                            print("")
+                            print("   To fix this, run:")
+                            print("     make install-foxglove-bridge")
+                            print("")
+                            print("   Or install all dependencies:")
+                            print("     make install-deps")
+                            print("")
+                        else:
+                            print(f"   Error: {check_proc.stderr[:200]}")
+                        raise RuntimeError(f"foxglove-bridge package not found: {check_proc.stderr}")
+                    
+                    # Package exists, now launch it
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=self.argo_dir,
+                        stdout=None,  # Let output go to systemd journal
+                        stderr=None,  # Let errors go to systemd journal
+                        universal_newlines=True
+                    )
+                    # Wait a moment to see if it fails immediately
+                    import time
+                    time.sleep(2)
+                    
+                    # Check if process is still running
+                    if proc.poll() is not None:
+                        # Process exited immediately - likely an error
+                        print(f"❌ FAILED to start {special_node}!")
+                        print(f"   Exit code: {proc.returncode}")
+                        print("")
+                        print("   ERROR: foxglove-bridge started but exited immediately!")
+                        print("")
+                        print("   This usually means:")
+                        print("   - The package is installed but there's a runtime error")
+                        print("   - Check system logs for details: journalctl -u argo_launch_standard.service -n 50")
+                        print("")
+                        print("   Or try running manually to see the error:")
+                        print("     ros2 run foxglove_bridge foxglove_bridge")
+                        print("")
+                        raise RuntimeError(f"foxglove_bridge exited with code {proc.returncode}")
+                    
+                    # Store process with node name for easier debugging
+                    self.node_processes.append({'proc': proc, 'name': special_node})
+                    print(f"✅ Launched {special_node} (PID: {proc.pid})")
+                    
+                    # Verify it's actually running by checking for the process
+                    import psutil
+                    foxglove_running = False
+                    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+                        try:
+                            cmdline = ' '.join(p.info['cmdline'] or [])
+                            if 'foxglove_bridge' in cmdline and 'ros2 run' in cmdline:
+                                foxglove_running = True
+                                break
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                    
+                    if not foxglove_running:
+                        print(f"❌ CRITICAL ERROR: {special_node} process not found after launch!")
+                        print("   The launch may have failed silently.")
+                        print("   Simulation requires foxglove_bridge for visualization.")
+                        print("")
+                        print("   Check for errors above or run manually to diagnose:")
+                        print("     ros2 run foxglove_bridge foxglove_bridge")
+                        raise RuntimeError(f"foxglove_bridge failed to start - process not found after launch")
+                    
+                except subprocess.SubprocessError as e:
+                    print(f"❌ ERROR launching {special_node}: {e}")
+                    print("")
+                    print("   foxglove-bridge may not be installed.")
+                    print("   Run: make install-foxglove-bridge")
+                    raise
             elif special_node == 'bno085':
                 # BNO085 is excluded from launch but should be monitored for health
                 print(f"ℹ️  Monitoring {special_node} (running as independent service)")
@@ -1041,15 +1302,22 @@ class ArgoLifecycleManager:
     
     def stop(self) -> bool:
         """Stop the Argo launch process and all related nodes"""
+        # Set shutdown flag immediately to prevent loops
+        self.shutdown_requested = True
+        
         print("🛑 Stopping Argo ROS2 nodes...")
         
         # New: Terminate the entire process group
         try:
-            print(f"DEBUG: Terminating process group {self.pgid}...")
             os.killpg(self.pgid, signal.SIGTERM)
             # Wait a moment for processes to terminate
             time.sleep(2)
             print("✅ Process group terminated.")
+            
+            # Also explicitly kill foxglove_bridge processes (they may not be in the same process group)
+            subprocess.run(['pkill', '-9', '-f', 'foxglove_bridge'], 
+                         capture_output=True, timeout=2)
+            
             self.node_processes.clear()
             self._cleanup_ros2()
             return True
@@ -1059,7 +1327,8 @@ class ArgoLifecycleManager:
             self._cleanup_ros2()
             return True
         except Exception as e:
-            print(f"⚠️  Error killing process group: {e}")
+            error_msg = str(e) if e else "Unknown error"
+            print(f"⚠️  Error killing process group: {error_msg}")
             # Fallback to old method if killpg fails
             return self._stop_fallback()
 
@@ -1137,8 +1406,12 @@ class ArgoLifecycleManager:
         if hasattr(self, 'special_nodes') and self.special_nodes:
             for special_node in self.special_nodes:
                 if special_node == 'foxglove_bridge':
-                    print(f"  DEBUG: pkill -f foxglove_bridge")
-                    subprocess.run(['pkill', '-f', 'foxglove_bridge'],
+                    print(f"  DEBUG: pkill -9 -f foxglove_bridge")
+                    # Use -9 (SIGKILL) to force kill both parent and child processes
+                    subprocess.run(['pkill', '-9', '-f', 'foxglove_bridge'],
+                         capture_output=True, timeout=2)
+                    # Also try killing by process name directly
+                    subprocess.run(['pkill', '-9', 'foxglove_bridge'],
                          capture_output=True, timeout=2)
         
         print("✅ Argo processes terminated")
@@ -1263,9 +1536,14 @@ class ArgoLifecycleManager:
                 
         return True
 
-    def simulate_local(self) -> bool:
-        """Launch Argo in local simulation mode."""
-        return self._simulate(mode='local')
+    def simulate_local(self, force_mock: bool = False, debug: bool = False) -> bool:
+        """Launch Argo in local simulation mode.
+        
+        Args:
+            force_mock: If True, force use of mock simulator even if real simulator is available
+            debug: If True, enable debug tracing in the simulator bridge
+        """
+        return self._simulate(mode='local', force_mock=force_mock, debug=debug)
 
     def simulate_remote(self) -> bool:
         """Launch Argo in remote simulation mode."""
@@ -1279,7 +1557,7 @@ class ArgoLifecycleManager:
             return False
         return self._simulate(mode='remote')
 
-    def _simulate(self, mode: str) -> bool:
+    def _simulate(self, mode: str, force_mock: bool = False, debug: bool = False) -> bool:
         """
         Launch Argo in simulation mode.
 
@@ -1314,29 +1592,76 @@ class ArgoLifecycleManager:
         print("  - anem.py (wind data provided by simulator)")
         print("  - rudder_sail_radio.py (control handled by simulator)")
         print("Simulation mode includes visualization:")
-        print("  - foxglove_bridge (Foxglove Studio at ws://localhost:9090)")
+        print("  - foxglove_bridge (Foxglove Studio at ws://localhost:8765)")
 
-        # Check if simulator bridge exists
+        # Use simulation nodes from YAML configuration
+        if not self.simulation_expected_nodes and not self.simulation_special_nodes:
+            print("❌ No simulation nodes configured in argo_nodes.yaml")
+            print("   Please add a 'simulation_nodes' section to the YAML file")
+            return False
+
+        # Check if simulator bridge exists (it should be in simulation nodes)
         simulator_bridge_path = os.path.join(
             self.argo_dir, "nodes", "argo_unified_simulator_bridge.py")
         if not os.path.exists(simulator_bridge_path):
             print(f"❌ Simulator bridge not found: {simulator_bridge_path}")
             return False
 
-        # Define simulation mode node scripts (exclude conflicting hardware nodes)
-        # Note: argo_battery_water.py and temp_monitor.py run as independent systemd services
-        self.expected_nodes = [
-            # Provides simulated sensor data + keyboard control
-            "argo_unified_simulator_bridge.py",
-            "controller.py",                     # Autonomous navigation
-            "sailing_area_publisher.py",         # Sailing area visualization
-        ]
+        # Use simulation nodes from YAML configuration
+        self.expected_nodes = self.simulation_expected_nodes.copy()
+        self.special_nodes = self.simulation_special_nodes.copy()
+        self.critical_nodes = self.simulation_critical_nodes.copy()
+        # Update all_expected_nodes for simulation mode monitoring
+        self.all_expected_nodes = self.expected_nodes + self.special_nodes
 
-        # Add foxglove_bridge to special nodes for simulation mode
-        self.special_nodes = ["foxglove_bridge"]
-
-        # Critical nodes for simulation (simulator bridge is critical)
-        self.critical_nodes = ["argo_unified_simulator_bridge.py"]
+        # Update simulator bridge args to use the correct mode and add --no-curses
+        if 'argo_unified_simulator_bridge.py' in self.simulation_node_args:
+            # Replace --mode local/remote with the actual mode
+            args = self.simulation_node_args['argo_unified_simulator_bridge.py'].copy()
+            # Replace any --mode argument with the current mode
+            mode_found = False
+            for i, arg in enumerate(args):
+                if arg == '--mode' and i + 1 < len(args):
+                    args[i + 1] = mode
+                    mode_found = True
+                    break
+            # If --mode wasn't found in args, add it
+            if not mode_found:
+                args.extend(['--mode', mode])
+            # Ensure --no-curses is present (required for non-interactive launch)
+            if '--no-curses' not in args:
+                args.append('--no-curses')
+            # Add --force-mock if requested
+            if force_mock and '--force-mock' not in args:
+                args.append('--force-mock')
+            # Add --debug if requested
+            if debug and '--debug' not in args:
+                args.append('--debug')
+            # Note: Map name is now automatically loaded from argo_nodes.yaml by the simulator bridge
+            # --map can still be passed to override if needed
+            self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
+        else:
+            # If simulator bridge doesn't have args configured, add --mode and --no-curses
+            args = ['--mode', mode, '--no-curses']
+            # Add --force-mock if requested
+            if force_mock:
+                args.append('--force-mock')
+            # Add --debug if requested
+            if debug:
+                args.append('--debug')
+            # Note: Map name is now automatically loaded from argo_nodes.yaml by the simulator bridge
+            self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
+        
+        # Also pass map name to sailing_area_publisher so it uses the same coordinate origin
+        # Note: sailing_area_publisher now auto-loads from YAML, but we pass it explicitly to ensure consistency
+        if self.simulation_map_name:
+            if 'sailing_area_publisher.py' not in self.simulation_node_args:
+                self.simulation_node_args['sailing_area_publisher.py'] = []
+            args = self.simulation_node_args['sailing_area_publisher.py'].copy()
+            # Add --map if not already present (explicit passing overrides auto-load if needed)
+            if '--map' not in args:
+                args.extend(['--map', self.simulation_map_name])
+                self.simulation_node_args['sailing_area_publisher.py'] = args
 
         print(f"Expected simulation nodes: {', '.join(self.expected_nodes)}")
         print(f"Special simulation nodes: {', '.join(self.special_nodes)}")
@@ -1407,9 +1732,22 @@ class ArgoLifecycleManager:
         final_running_nodes = [
             node for node, status in final_node_status.items() if "RUNNING" in status]
 
-        # Determine success based on critical nodes and minimum thresholds
+        # Check for critical nodes - foxglove_bridge is required for simulation
         critical_running = [
             node for node in self.critical_nodes if node in final_running_nodes]
+        
+        # Also check special nodes (like foxglove_bridge) - these are required for simulation
+        special_running = [
+            node for node in self.special_nodes if node in final_running_nodes]
+        
+        # Simulation requires foxglove_bridge to be running
+        if 'foxglove_bridge' in self.special_nodes and 'foxglove_bridge' not in final_running_nodes:
+            print("❌ CRITICAL: foxglove_bridge is not running!")
+            print("   Simulation requires foxglove_bridge for visualization.")
+            print("   Please check the error messages above.")
+            print("   Try running manually: ros2 run foxglove_bridge foxglove_bridge")
+            return False
+        
         if len(critical_running) == len(self.critical_nodes):
             print("✅ All critical simulation nodes running")
             success = True
@@ -1432,55 +1770,75 @@ class ArgoLifecycleManager:
             print("Control commands sent to simulator via /rudder_sail_servo")
             print(
                 "Keyboard control: Use arrow keys in curses display to control rudder and sail")
-            print("Visualization available via Foxglove Studio at ws://localhost:9090")
+            print("Visualization available via Foxglove Studio at ws://localhost:8765")
             print("\n🔄 Simulation running... Press Ctrl+C to stop and clean up all nodes")
 
             # Start continuous monitoring with proper cleanup
             try:
-                while True:
-                    time.sleep(30)  # Check every 30 seconds
+                last_status_check = time.time()
+                status_check_interval = 30.0  # Check status every 30 seconds
+                
+                while not self.shutdown_requested:
+                    # Check for shutdown request frequently
+                    current_time = time.time()
+                    time_since_check = current_time - last_status_check
+                    
+                    # Sleep in small increments to check shutdown frequently
+                    sleep_interval = min(1.0, status_check_interval - time_since_check)
+                    if sleep_interval > 0:
+                        time.sleep(sleep_interval)
+                    
+                    # Check if it's time for status check
+                    if current_time - last_status_check >= status_check_interval:
+                        last_status_check = current_time
+                        
+                        # Check node status
+                        node_status = self._get_node_status()
+                        running_nodes = [
+                            node for node, status in node_status.items() if "RUNNING" in status]
+                        stopped_nodes = [
+                            node for node, status in node_status.items() if "STOPPED" in status]
 
-                    # Check node status
-                    node_status = self._get_node_status()
-                    running_nodes = [
-                        node for node, status in node_status.items() if "RUNNING" in status]
-                    stopped_nodes = [
-                        node for node, status in node_status.items() if "STOPPED" in status]
+                        if stopped_nodes:
+                            print(
+                                f"⚠️  {len(stopped_nodes)} simulation nodes stopped: {', '.join(stopped_nodes)}")
 
-                    if stopped_nodes:
-                        print(
-                            f"⚠️  {len(stopped_nodes)} simulation nodes stopped: {', '.join(stopped_nodes)}")
+                            # Check if critical nodes are still running
+                            critical_running = [
+                                n for n in self.critical_nodes if n in running_nodes]
+                            critical_stopped = [
+                                n for n in self.critical_nodes if n in stopped_nodes]
 
-                        # Check if critical nodes are still running
-                        critical_running = [
-                            n for n in self.critical_nodes if n in running_nodes]
-                        critical_stopped = [
-                            n for n in self.critical_nodes if n in stopped_nodes]
+                            if critical_stopped:
+                                print(
+                                    f"❌ CRITICAL SIMULATION NODES STOPPED: {', '.join(critical_stopped)}")
+                                print(
+                                    f"   Simulation will continue with remaining nodes")
+                            else:
+                                print(
+                                    f"✅ Critical simulation nodes operational: {', '.join(critical_running)}")
 
-                        if critical_stopped:
-                            print(
-                                f"❌ CRITICAL SIMULATION NODES STOPPED: {', '.join(critical_stopped)}")
-                            print(
-                                f"   Simulation will continue with remaining nodes")
-                        else:
-                            print(
-                                f"✅ Critical simulation nodes operational: {', '.join(critical_running)}")
-
-                        # Show system status
-                        if len(running_nodes) >= 2:
-                            print(
-                                f"✅ Simulation operational with {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes")
-                        else:
-                            print(
-                                f"⚠️  Low node count: {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes running")
+                            # Show system status
+                            if len(running_nodes) >= 2:
+                                print(
+                                    f"✅ Simulation operational with {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes")
+                            else:
+                                print(
+                                    f"⚠️  Low node count: {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes running")
 
             except KeyboardInterrupt:
                 print("\n🛑 Stopping simulation and cleaning up all nodes...")
+                self.shutdown_requested = True
                 self.stop()
                 print("✅ All simulation nodes terminated")
                 return True
             except Exception as e:
-                print(f"❌ Error in simulation mode: {e}")
+                import traceback
+                error_msg = str(e) if e else "Unknown error"
+                print(f"❌ Error in simulation mode: {error_msg}")
+                # Print full traceback to help with debugging
+                traceback.print_exc()
+                self.shutdown_requested = True
                 self.stop()
                 return False
         else:
@@ -1499,61 +1857,31 @@ class ArgoLifecycleManager:
             f"🚢 ARGO STATUS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)
         
-        # Check if argo_power_control.service is running
-        power_control_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_power_control.service'],
-                                    capture_output=True, text=True, timeout=2)
-            power_control_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            power_control_running = False
-
-        if power_control_running:
-            print("⚡ POWER CONTROL: 🟢 RUNNING")
-        else:
-            print("⚡ POWER CONTROL: 🔴 STOPPED")
-
-        # Check if argo_battery_water.service is running (independent service)
-        battery_service_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
-                                    capture_output=True, text=True, timeout=2)
-            battery_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            battery_service_running = False
-
-        if battery_service_running:
-            print("🔋 BATTERY MONITOR: 🟢 RUNNING")
-        else:
-            print("🔋 BATTERY MONITOR: 🔴 STOPPED")
+        # Check all systemd services status (compact one-line format)
+        def check_service_status(service_name):
+            """Helper to check if a systemd service is active"""
+            try:
+                result = subprocess.run(['systemctl', 'is-active', service_name],
+                                        capture_output=True, text=True, timeout=2)
+                return result.returncode == 0 and result.stdout.strip() == 'active'
+            except Exception:
+                return False
         
-        # Check if argo_bno085.service is running (BNO085 IMU driver)
-        bno085_service_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_bno085.service'],
-                                    capture_output=True, text=True, timeout=2)
-            bno085_service_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            bno085_service_running = False
-
-        if bno085_service_running:
-            print("🧭 BNO085 IMU: 🟢 RUNNING")
-        else:
-            print("🧭 BNO085 IMU: 🔴 STOPPED")
+        power_control_running = check_service_status('argo_power_control.service')
+        battery_service_running = check_service_status('argo_battery_water.service')
+        bno085_service_running = check_service_status('argo_bno085.service')
+        health_monitor_running = check_service_status('argo_health_monitor.service')
+        service_running = check_service_status('argo_launch_standard.service')
         
-        # Check if argo_launch.service is running
-        service_running = False
-        try:
-            result = subprocess.run(['systemctl', 'is-active', 'argo_launch.service'], 
-                                  capture_output=True, text=True, timeout=2)
-            service_running = result.returncode == 0 and result.stdout.strip() == 'active'
-        except Exception:
-            service_running = False
+        # Display all services on one compact line
+        services_status = []
+        services_status.append(f"⚡ Power: {'🟢' if power_control_running else '🔴'}")
+        services_status.append(f"🔋 Battery: {'🟢' if battery_service_running else '🔴'}")
+        services_status.append(f"🧭 BNO085: {'🟢' if bno085_service_running else '🔴'}")
+        services_status.append(f"🏥 Health: {'🟢' if health_monitor_running else '🔴'}")
+        services_status.append(f"📋 Launch: {'🟢' if service_running else '🔴'}")
         
-        if service_running:
-            print("📋 LAUNCH SERVICE: 🟢 RUNNING")
-        else:
-            print("📋 LAUNCH SERVICE: 🔴 STOPPED")
+        print(" | ".join(services_status))
         
         # Get FATAL messages for stopped nodes if service is running
         node_fatal_messages = {}
@@ -1567,51 +1895,65 @@ class ArgoLifecycleManager:
         total_count = len(node_status)
         print(f"🤖 ROS NODES: [{running_count}/{total_count}]")
         
-        # Show controller pause state
-        if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
-            # Query current pause state to ensure we have the latest
-            self._query_controller_pause_state()
-            pause_status = "⏸️ PAUSED" if self.controller_pause_state else "▶️ RUNNING"
-            print(f"🎮 CONTROLLER: {pause_status}")
-        else:
-            print(f"🎮 CONTROLLER: 🔴 STOPPED")
+        # # Show controller pause state
+        # if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
+        #     # Query current pause state to ensure we have the latest
+        #     self._query_controller_pause_state()
+        #     pause_status = "⏸️ PAUSED" if self.controller_pause_state else "▶️ RUNNING"
+        #     print(f"🎮 CONTROLLER: {pause_status}")
+        # else:
+        #     print(f"🎮 CONTROLLER: 🔴 STOPPED")
         
-        print('Querying health status from all nodes via services...',end='',flush=True)
-        # Query health status from all nodes via services
-        health_data = self._query_node_health_services()
-        # Erase 'Querying health status...' and replace with dynamic query output
-        import sys
-        sys.stdout.write('\r' + ' ' * 60 + '\r')  # Clear the current line
-        print(f"Health Services Queried: {len(health_data)} node{'s' if len(health_data)!=1 else ''} responded")
+        # Only query health status if nodes are running
+        health_data = {}
+        if running_count > 0:
+            print('Querying health status from all nodes via services...',end='',flush=True)
+            # Query health status from all nodes via services
+            health_data = self._query_node_health_services()
+            # Erase 'Querying health status...' and replace with dynamic query output
+            sys.stdout.write('\r' + ' ' * 60 + '\r')  # Clear the current line
+            print(f"Health Services Queried: {len(health_data)} node{'s' if len(health_data)!=1 else ''} responded")
+        else:
+            # No nodes running - skip health query
+            print("No nodes running - skipping health status query")
         # Display nodes in tabular format
         # print("📋 NODE STATUS TABLE:")
-        print("┌" + "─" * 25 + "┬" + "─" * 12 + "┬" + "─" * 12 + "┐")
-        print("│ " + "NODE NAME".ljust(23) + " │ " + "RUNNING".ljust(10) + " │ " + "HEALTH".ljust(10) + " │")
-        print("├" + "─" * 25 + "┼" + "─" * 12 + "┼" + "─" * 12 + "┤")
+        print("┌" + "─" * 30 + "┬" + "─" * 12 + "┐")
+        print("│ " + "NODE NAME".ljust(28) + " │ " + "HEALTH".ljust(10) + " │")
+        print("├" + "─" * 30 + "┼" + "─" * 12 + "┤")
         
         stopped_nodes = []
         for node, status in node_status.items():
             # Get health status for this node (prefer service data)
             health_status = self._get_node_health_status(node, health_data)
             
-            # Format running status
-            if "RUNNING" in status:
-                running_display = "🟢 RUNNING"
-            else:
-                running_display = "🔴 STOPPED"
+            # Track stopped nodes for error reporting
+            if "STOPPED" in status:
                 stopped_nodes.append(node)
             
             # Format node name (remove .py extension for display)
             display_name = node.replace('.py', '')
             
-            # Add error message if available
-            error_suffix = ""
-            if "STOPPED" in status and node in node_fatal_messages:
-                error_suffix = f" - {node_fatal_messages[node]}"
+            # Pad the display name first, then wrap with color codes for proper table alignment
+            padded_display_name = display_name.ljust(28)
             
-            print(f"│ {display_name.ljust(23)} │ {running_display.ljust(10)} │ {health_status.ljust(10)} │")
+            # Color node name based on health and running status
+            if "STOPPED" in status:
+                # Node is not running - gray/dim
+                colored_name = f"{Colors.DIM}{padded_display_name}{Colors.RESET}"
+            elif health_status == "🟢":
+                # Node is running and healthy - dark green
+                colored_name = f"{Colors.DARK_GREEN}{padded_display_name}{Colors.RESET}"
+            elif health_status == "🔴":
+                # Node is running but unhealthy - red
+                colored_name = f"{Colors.RED}{padded_display_name}{Colors.RESET}"
+            else:
+                # Health status unknown - no color
+                colored_name = padded_display_name
+            
+            print(f"│ {colored_name} │ {health_status.ljust(10)} │")
         
-        print("└" + "─" * 25 + "┴" + "─" * 12 + "┴" + "─" * 12 + "┘")
+        print("└" + "─" * 30 + "┴" + "─" * 12 + "┘")
         
         # Show key error messages for stopped nodes
         if stopped_nodes:
@@ -1620,7 +1962,7 @@ class ArgoLifecycleManager:
             try:
                 # Get recent error messages from systemd journal
                 result = subprocess.run([
-                    'journalctl', '-u', 'argo_launch.service', '--since', '5 minutes ago',
+                    'journalctl', '-u', 'argo_launch_standard.service', '--since', '5 minutes ago',
                     '--grep', '(FATAL|ERROR|CRITICAL)', '--no-pager'
                 ], capture_output=True, text=True, timeout=5)
                 
@@ -2170,7 +2512,7 @@ class ArgoLifecycleManager:
             # Get recent FATAL messages from systemd journal for argo_launch.service
             # Look back further to catch initial startup failures
             result = subprocess.run([
-                'journalctl', '-u', 'argo_launch.service', '--since', self.journal_since,
+                'journalctl', '-u', 'argo_launch_standard.service', '--since', self.journal_since,
                 '--grep', 'FATAL', '--no-pager', '-o', 'short-precise'
             ], capture_output=True, text=True, timeout=5)
             
@@ -2302,6 +2644,7 @@ class ArgoLifecycleManager:
 
     def toggle_pause_nodes(self, debug: bool = False) -> bool:
         """Toggle pause state of controller node via ROS2 service call."""
+        self._ensure_ros2_node()
         print("🔄 Toggling controller pause state...")
 
         # Toggle controller pause state
@@ -2318,6 +2661,9 @@ class ArgoLifecycleManager:
     def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool], Optional[float], Optional[float]]:
         """Get battery info, alerts, charging status, USB power status, and lifetime estimates using the battery Trigger service client"""
         try:
+            # Ensure ROS2 node is initialized (required for service calls)
+            self._ensure_ros2_node()
+            
             # Use ROS2 service client if available, otherwise fallback to subprocess
             if self.battery_service_client and ROS2_AVAILABLE:
                 battery_data = self._call_battery_service_client()
@@ -2360,8 +2706,11 @@ class ArgoLifecycleManager:
             return None
 
     def _call_battery_service_subprocess(self) -> Optional[Dict[str, Any]]:
-        """Fallback: Call battery service using inline ROS2 client"""
+        """Fallback: Call battery service using subprocess ros2 service call"""
         try:
+            # Ensure ROS2 node is initialized (may have been called without it)
+            self._ensure_ros2_node()
+            
             # Use centralized Trigger service call with longer timeout
             # Battery service may be slow to respond during sensor re-initialization
             success, message = self._call_trigger_service(
@@ -2418,139 +2767,388 @@ class ArgoLifecycleManager:
                 print(
                     f"  {sensor}: 🔴 not present (expected {', '.join([f'0x{x:02x}' for x in addrs])})")
 
+    def start(self, debug=False) -> bool:
+        """Start the Argo launch process"""
+        if self._is_launch_running():
+            print("🚢 Argo is already running.")
+            # If nodes are running but service is not, start monitoring
+            if not self._is_service_active():
+                 print("   Monitoring existing nodes...")
+                 self.continuous(debug=debug, monitor_only=True)
+            return True
+            
+        # --- REFACTORED: Set node lists for physical robot mode ---
+        # This ensures that status checks and health monitoring use the correct
+        # node list defined in the 'physical_robot' group in argo_nodes.yaml
+        self.expected_nodes = self.physical_robot_nodes
+        self.special_nodes = self.physical_robot_special_nodes
+        self.all_expected_nodes = self.expected_nodes + self.special_nodes
+
+        # Check if the service is running - if so, delegate to service
+        if self._is_service_active():
+            print("🚀 Launch service is running - it will manage the nodes.")
+            return True
+        
+        print("🚀 Starting Argo ROS2 nodes...")
+        
+        if self.shutdown_requested:
+            print("⚠️  Shutdown requested before node launch - aborting")
+            return False
+        
+        try:
+            # Start the nodes directly
+            self._launch_nodes_directly()
+            
+            # Check again after launch
+            if self.shutdown_requested:
+                print("⚠️  Shutdown requested during launch - stopping nodes")
+                self.stop()
+                return False
+            
+            # Wait and check for actual node startup with continuous feedback
+            print("⏳ Waiting for nodes to start...")
+            
+            timeout = 30  # 30 second timeout
+            check_interval = .3  # Check every .3 second
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout:
+                # Check for shutdown request during launch
+                if self.shutdown_requested:
+                    print("⚠️  Shutdown requested during node startup - stopping nodes")
+                    self.stop()
+                    return False
+                
+                if not self._is_launch_running():
+                    print("❌ Launch process died during startup")
+                    
+                    # Log that process died (output is now in systemd journal)
+                    if self.process and self.process.poll() is not None:
+                        print(
+                            "💀 Process died - check systemd journal for detailed output")
+                    
+                    return False
+                
+                # Check which nodes are running
+                node_status = self._get_node_status()
+                running_nodes = [
+                    node for node, status in node_status.items() if "RUNNING" in status]
+                stopped_nodes = [
+                    node for node, status in node_status.items() if "STOPPED" in status]
+                
+                # Show progress periodically (journal-friendly)
+                elapsed = time.time() - start_time
+                if elapsed > 0 and int(elapsed * 10) % 10 == 0:  # Print every second
+                    if running_nodes and stopped_nodes:
+                        print(
+                            f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.all_expected_nodes)} running: {', '.join(running_nodes)}")
+                        print(f"   Not started: {', '.join(stopped_nodes)}")
+                    elif running_nodes:
+                        print(
+                            f"⏳ Waiting for nodes to start... {len(running_nodes)}/{len(self.all_expected_nodes)} running: {', '.join(running_nodes)}")
+                    else:
+                        print(
+                            f"⏳ Waiting for nodes to start... (no nodes detected yet)")
+                
+                # If all expected nodes are running, wait for stabilization with monitoring
+                if len(running_nodes) == len(self.all_expected_nodes):
+                    print(
+                        f"\n✅ All {len(running_nodes)} nodes detected: {', '.join(running_nodes)}")
+                    print(
+                        f"⏳ Monitoring nodes during {self.stabilization_wait}s stabilization period...")
+                    
+                    # Monitor nodes during stabilization period
+                    stabilization_start = time.time()
+                    stabilization_check_interval = 1.0  # Check every second during stabilization
+                    
+                    while time.time() - stabilization_start < self.stabilization_wait:
+                        # Check for shutdown request during stabilization
+                        if self.shutdown_requested:
+                            print("⚠️  Shutdown requested during stabilization - stopping nodes")
+                            self.stop()
+                            return False
+                        
+                        # Check for node failures during stabilization
+                        current_status = self._get_node_status()
+                        current_running = [
+                            node for node, status in current_status.items() if "RUNNING" in status]
+                        current_stopped = [
+                            node for node, status in current_status.items() if "STOPPED" in status]
+                        
+                        if current_stopped:
+                            # Node(s) failed during stabilization
+                            print(
+                                f"\n⚠️  Node failure detected during stabilization: {', '.join(current_stopped)}")
+                            
+                            # Get error messages for failed nodes
+                            fatal_messages = self._get_fatal_messages_for_nodes()
+                            for failed_node in current_stopped:
+                                if failed_node in fatal_messages:
+                                    print(
+                                        f"   {failed_node}: {fatal_messages[failed_node]}")
+                            
+                            # Break out of stabilization to handle the failure
+                            break
+                        
+                        # Show progress during stabilization (journal-friendly)
+                        remaining_time = self.stabilization_wait - \
+                            (time.time() - stabilization_start)
+                        # Only print every 2 seconds
+                        if remaining_time > 0 and int(remaining_time) % 2 == 0:
+                            print(
+                                f"⏳ Stabilizing... {remaining_time:.1f}s remaining ({len(current_running)}/{len(self.all_expected_nodes)} nodes)")
+                        
+                        time.sleep(stabilization_check_interval)
+                    
+                    # Final check after stabilization period
+                    final_node_status = self._get_node_status()
+                    final_running_nodes = [
+                        node for node, status in final_node_status.items() if "RUNNING" in status]
+                    
+                    if len(final_running_nodes) == len(self.all_expected_nodes):
+                        print(f"✅ Argo launch process started successfully")
+                        print(
+                            f"✅ All {len(final_running_nodes)} nodes running and stable: {', '.join(final_running_nodes)}")
+                        break  # Continue to monitoring phase
+                    else:
+                        failed_nodes = [
+                            node for node in self.all_expected_nodes if node not in final_running_nodes]
+                        print(f"⚠️  Some nodes failed during stabilization period")
+                        print(
+                            f"   Still running: {', '.join(final_running_nodes)}")
+                        print(f"   Failed nodes: {', '.join(failed_nodes)}")
+                        
+                        # Check if we have critical nodes running
+                        critical_running = [
+                            node for node in self.critical_nodes if node in final_running_nodes]
+                        
+                        if len(critical_running) == len(self.critical_nodes):
+                            print(
+                                f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                            print(
+                                f"✅ Argo will continue operating with {len(final_running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                            break  # Continue to monitoring phase
+                        elif len(final_running_nodes) >= 3:  # At least 3 nodes running
+                            print(
+                                f"✅ Sufficient nodes running ({len(final_running_nodes)}/{len(self.all_expected_nodes)})")
+                            print(
+                                f"✅ Argo will continue operating with available sensors")
+                            break  # Continue to monitoring phase
+                        else:
+                            print(
+                                f"❌ Insufficient nodes running ({len(final_running_nodes)}/{len(self.all_expected_nodes)})")
+                            print(
+                                f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in final_running_nodes])}")
+                            return False
+                
+                time.sleep(check_interval)
+            
+            # Check if we timed out
+            if time.time() - start_time >= timeout:
+                print(f"\n⚠️  Timeout reached after {timeout}s")
+                node_status = self._get_node_status()
+                running_nodes = [
+                    node for node, status in node_status.items() if "RUNNING" in status]
+                stopped_nodes = [
+                    node for node, status in node_status.items() if "STOPPED" in status]
+                
+                if running_nodes:
+                    failed_nodes = [
+                        node for node in self.all_expected_nodes if node not in running_nodes]
+                    print(
+                        f"✅ {len(running_nodes)} nodes running: {', '.join(running_nodes)}")
+                    if failed_nodes:
+                        print(
+                            f"⚠️  {len(failed_nodes)} nodes not started: {', '.join(failed_nodes)}")
+                    
+                    # Check if we have critical nodes running
+                    critical_running = [
+                        node for node in self.critical_nodes if node in running_nodes]
+                    
+                    if len(critical_running) == len(self.critical_nodes):
+                        print(
+                            f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                        print(
+                            f"✅ Argo will continue operating with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                    elif len(running_nodes) >= 3:  # At least 3 nodes running
+                        print(
+                            f"✅ Sufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
+                        print(
+                            f"✅ Argo will continue operating with available sensors")
+                    else:
+                        print(
+                            f"❌ Insufficient nodes running ({len(running_nodes)}/{len(self.all_expected_nodes)})")
+                        print(
+                            f"❌ Critical nodes missing: {', '.join([n for n in self.critical_nodes if n not in running_nodes])}")
+                        return False
+                else:
+                    print(f"❌ No nodes running after timeout")
+                    return False
+                
+        except Exception as e:
+            print(f"❌ Error starting Argo: {e}")
+            return False
+        
+        # Create ROS2 services for lifecycle management
+        self._create_lifecycle_services()
+        
+        print("🔄 Starting continuous monitoring with ROS2 integration...")
+        print("   Press Ctrl+C to stop")
+        print("   NOTE: Node failures will be logged but NOT restarted for debugging")
+        print("   ROS2 services available for remote control")
+        
+        # Publish initial status
+        self._publish_status_update("Argo lifecycle manager running")
+        
+        try:
+            last_check_time = time.time()
+            check_interval = 300  # Check every 5 minutes (much less frequent)
+            
+            while not self.shutdown_requested and (rclpy.ok() if self.ros2_node else True):
+                # Check shutdown flag FIRST before any operations
+                if self.shutdown_requested:
+                    break
+                
+                # Spin ROS2 node to process service requests (if available)
+                if self.ros2_node:
+                    try:
+                        rclpy.spin_once(self.ros2_node, timeout_sec=0.1)
+                    except Exception:
+                        # Context may be shutting down
+                        if self.shutdown_requested:
+                            break
+                else:
+                    time.sleep(0.1)
+                
+                # Periodic status check
+                current_time = time.time()
+                if current_time - last_check_time >= check_interval:
+                    last_check_time = current_time
+                    
+                    # Check node status
+                    node_status = self._get_node_status()
+                    running_nodes = [
+                        node for node, status in node_status.items() if "RUNNING" in status]
+                    stopped_nodes = [
+                        node for node, status in node_status.items() if "STOPPED" in status]
+                    
+                    # Publish status update
+                    status_msg = f"Running: {len(running_nodes)}/{len(self.all_expected_nodes)}"
+                    self._publish_status_update(status_msg)
+                    
+                    if stopped_nodes:
+                        # Log stopped nodes but do NOT restart them
+                        print(
+                            f"⚠️  {len(stopped_nodes)} nodes stopped: {', '.join(stopped_nodes)}")
+                        
+                        # Check if critical nodes are still running
+                        critical_running = [
+                            n for n in self.critical_nodes if n in running_nodes]
+                        critical_stopped = [
+                            n for n in self.critical_nodes if n in stopped_nodes]
+                        
+                        if critical_stopped:
+                            print(
+                                f"❌ CRITICAL NODES STOPPED: {', '.join(critical_stopped)}")
+                            print(
+                                f"   System will continue with remaining nodes for debugging")
+                            print(f"   Check systemd journal for error details")
+                            self._publish_status_update(f"CRITICAL: {', '.join(critical_stopped)} stopped")
+                        else:
+                            print(
+                                f"✅ Critical nodes operational: {', '.join(critical_running)}")
+                        
+                        # Show system status
+                        if len(running_nodes) >= 3:
+                            print(
+                                f"✅ System operational with {len(running_nodes)}/{len(self.all_expected_nodes)} nodes")
+                        else:
+                            print(
+                                f"⚠️  Low node count: {len(running_nodes)}/{len(self.all_expected_nodes)} nodes running")
+                
+        except KeyboardInterrupt:
+            print("\n🛑 Stopping continuous monitoring...")
+            self.shutdown_requested = True
+        except Exception as e:
+            print(f"❌ Error in continuous mode: {e}")
+            self._publish_status_update(f"Error: {e}")
+            self.shutdown_requested = True
+        finally:
+            # Publish final status before cleanup
+            self._publish_status_update("Argo lifecycle manager stopping")
+            
+            # Stop all nodes first only if they are actually running
+            if self._is_launch_running():
+                self.stop()
+            
+            # Clean up ROS2 last
+            self._cleanup_ros2()
+            
+            # Ensure we don't relaunch after shutdown
+            self.shutdown_requested = True
+            
+            # Explicitly exit if shutdown was requested
+            if self.shutdown_requested:
+                print("✅ Lifecycle manager shutdown complete - exiting")
+                sys.exit(0)
+        
+        return True  # Always return True for clean exit
+    
+    def _is_service_active(self) -> bool:
+        """Check if the service is running"""
+        try:
+            result = subprocess.run(['systemctl', 'is-active', 'argo_launch_standard.service'],
+                                    capture_output=True, text=True, timeout=2)
+            return result.returncode == 0 and result.stdout.strip() == 'active'
+        except Exception:
+            return False
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Argo ROS2 Lifecycle Manager - Comprehensive node management for Argo sailboat control system',
+        description='Argo Status and Simulation Manager - Check status and manage simulations for the Argo sailboat.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 COMMANDS:
-  help             Show this help message and exit
-                   - Also available with -h or --help flags
-                   - Displays complete command reference and examples
+  status           Show comprehensive status of Argo system. This is the default command.
+                   - Displays service status, node health, and system diagnostics.
+                   - Extracts and displays recent error messages from systemd journal.
 
-  run              Start all Argo ROS2 nodes and keep running (for systemd service)
-                   - Launches all discovered nodes except excluded ones
-                   - Monitors node health continuously
-                   - Provides fault tolerance and status reporting
-                   - Use this for production operation
+  quick_status     Show condensed one-line status, optimized for quick checks.
+                   - Ideal for shell prompts and frequent checks.
 
-  stop             Stop all Argo ROS2 nodes and related processes
-                   - Terminates all node processes gracefully
-                   - Cleans up remote simulation processes if running
-                   - Stops both regular and special nodes (foxglove_bridge)
+  simulate_local   Start Argo in local simulation mode.
+                   - Runs sailboat simulator directly on the Orange Pi.
+                   - Excludes conflicting hardware nodes.
 
-  restart          Restart all Argo ROS2 nodes
-                   - Performs stop followed by start
-                   - Useful for applying configuration changes
+  simulate_remote  Start Argo in remote simulation mode.
+                   - Connects to a simulator running on a remote machine.
 
-  status           Show comprehensive status of Argo system
-                   - Displays service status (power control, battery monitor, launch service)
-                   - Shows individual node status with error details
-                   - Provides system health info (CPU, memory, temperature, battery)
-                   - Shows I2C bus health when nodes are not running
-                   - Extracts and displays recent error messages from systemd journal
+  help             Show this help message and exit.
 
-  quick_status     Show condensed one-line status (optimized for quick checks)
-                   - Fast status check with minimal overhead
-                   - Shows node count and battery summary only
-                   - Skips expensive CPU/memory/disk checks
-                   - Ideal for shell prompts and frequent checks
-
-  simulate_local   Start Argo in local simulation mode
-                   - Runs sailboat simulator directly on Orange Pi
-                   - Excludes conflicting hardware nodes (gps.py, bno085.py, anem.py, rudder_sail_radio.py)
-                   - Includes simulator bridge, controller, and monitoring nodes
-                   - Provides keyboard control via curses interface
-                   - Enables Foxglove visualization at ws://localhost:9090
-
-  simulate_remote  Start Argo in remote simulation mode
-                   - Connects to simulator running on remote machine via SSH
-                   - Requires manual setup of remote simulator and SSH tunnel
-                   - Better performance for resource-constrained hardware
-                   - Same node exclusions as local simulation
-
-CONTROLLER PAUSE:
-  The autonomous controller (controller.py) supports pause/resume functionality.
-  When paused, the controller stops publishing autonomous commands, allowing manual control.
-  
-  Command Line Options:
-    # Via lifecycle manager
-    python3 argo_lifecycle_manager.py --toggle_pause
-    
-    # Via shell alias (bash_aliases)
-    ap    # Toggle controller pause state
-    
-  ROS2 Service (Direct):
-    Service: /controller_node/pause (std_srvs/srv/SetBool)
-    Usage: ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: true}"   # Pause
-           ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: false}"  # Resume
-    
-  Status Monitoring:
-    Topic: /controller_pause_state (std_msgs/msg/Bool)
-    - Published by controller.py
-    - Subscribed by lifecycle manager for status display
-    
-  Behavior:
-    - When paused: Controller stops autonomous navigation, human takes control
-    - When resumed: Controller resumes autonomous navigation
-    - Pause state persists across service restarts
-    - Only controller.py supports pause functionality
-
-NODE MANAGEMENT:
-  Excluded Nodes:
-    - argo_battery_water and argo_power_control: Run as independent systemd services for critical monitoring
-  
-  Critical Nodes (Essential for Operation):
-    - pwm.py: Servo control for rudder and sail
-    - controller.py: Autonomous navigation logic
-  
-  Special Nodes:
-    - foxglove_bridge: ROS2 package launched via 'ros2 run'
-
-MONITORING:
-  - Continuous health monitoring during operation
-  - Automatic failure detection and reporting
-  - Systemd journal integration for error tracking
-  - I2C bus health diagnostics
-  - Battery and power status monitoring
-  - CPU, memory, and temperature monitoring
+LIFECYCLE MANAGEMENT:
+  The lifecycle of Argo nodes is now managed by the 'argo_launch_standard.service' 
+  and controlled via the following aliases:
+    al - Start Argo nodes
+    aq - Stop Argo nodes
+    ars - Restart Argo nodes
 
 EXAMPLES:
-  # Show help
-  python3 argo_lifecycle_manager.py help
-  python3 argo_lifecycle_manager.py -h
-  python3 argo_lifecycle_manager.py --help
-  
-  # Start Argo system
-  python3 argo_lifecycle_manager.py run
-  
-  # Check system status (detailed)
+  # Show detailed system status
   python3 argo_lifecycle_manager.py status
-  
-  # Check system status (quick one-line)
+  argo_lifecycle_manager.py
+
+  # Show quick one-line status
   python3 argo_lifecycle_manager.py quick_status
-  
+
   # Start local simulation
   python3 argo_lifecycle_manager.py simulate_local
-  
-  # Toggle controller pause (command line)
-  python3 argo_lifecycle_manager.py --toggle_pause
-  
-  # Toggle controller pause (shell alias)
-  ap
-  
-  # Pause controller directly (ROS2 service)
-  ros2 service call /controller_node/pause std_srvs/srv/SetBool "{data: true}"
-  
-  # Stop all nodes
-  python3 argo_lifecycle_manager.py stop
         """)
 
     parser.add_argument('command',
-                        choices=['run', 'stop', 'restart', 'status', 'quick_status',
-                                 'simulate_local', 'simulate_remote', 'help'],
+                        choices=['status', 'quick_status', 'simulate_local', 'simulate_remote', 'help'],
                         nargs='?',  # Make command optional
+                        default='status', # Default to 'status'
                         help='Command to execute (see detailed descriptions below)')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug output for troubleshooting')
@@ -2558,6 +3156,8 @@ EXAMPLES:
                         help='Suppress initialization messages (useful for quick_status)')
     parser.add_argument('--toggle_pause', action='store_true',
                         help='Toggle controller pause state (pauses autonomous navigation)')
+    parser.add_argument('--force-mock', action='store_true',
+                        help='Force use of mock simulator even if real simulator (sailboat-playground) is available (only for simulate_local)')
     
     # Enable bash completion for command-line arguments
     argcomplete.autocomplete(parser)
@@ -2570,8 +3170,8 @@ EXAMPLES:
     
     # Validate that either a command or --toggle_pause is provided
     if not args.command and not args.toggle_pause:
-        parser.error(
-            "Either a command or --toggle_pause option must be provided")
+        # Default to status if no command is given
+        args.command = 'status'
     
     manager = ArgoLifecycleManager(quiet=args.quiet)
     if args.debug:
@@ -2579,27 +3179,14 @@ EXAMPLES:
     
     try:
         # Execute the command first (if provided)
-        if args.command == 'run':
-            # continuous() handles its own cleanup
-            success = manager.continuous()
-            sys.exit(0 if success else 1)
-        elif args.command == 'stop':
-            success = manager.stop()
-            # Clean up ROS2 for non-continuous commands
-            manager._cleanup_ros2()
-            sys.exit(0 if success else 1)
-        elif args.command == 'restart':
-            success = manager.restart()
-            manager._cleanup_ros2()
-            sys.exit(0 if success else 1)
-        elif args.command == 'status':
+        if args.command == 'status':
             manager.status()
             manager._cleanup_ros2()
         elif args.command == 'quick_status':
             manager.quick_status()
             manager._cleanup_ros2()
         elif args.command == 'simulate_local':
-            success = manager.simulate_local()
+            success = manager.simulate_local(force_mock=args.force_mock, debug=args.debug)
             # simulate handles its own cleanup
             sys.exit(0 if success else 1)
         elif args.command == 'simulate_remote':

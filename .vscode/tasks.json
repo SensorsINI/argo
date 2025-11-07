@@ -1,0 +1,94 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Forward WSL Port 8765 (Foxglove)",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-NoProfile",
+                "-Command",
+                "Write-Host 'Requesting Administrator privileges...' -ForegroundColor Yellow; $scriptBlock = 'Write-Host \"Setting up WSL port forwarding for Foxglove Bridge (port 8765)...\" -ForegroundColor Cyan; $wslIP = wsl hostname -I | ForEach-Object { $_.Trim() -split \"\\s+\" | Select-Object -First 1 }; Write-Host \"WSL IP Address: $wslIP\" -ForegroundColor Green; netsh interface portproxy delete v4tov4 listenport=8765 listenaddress=0.0.0.0 2>$null; Write-Host \"Cleaned up existing port proxy rules\" -ForegroundColor Yellow; netsh interface portproxy add v4tov4 listenport=8765 listenaddress=0.0.0.0 connectport=8765 connectaddress=$wslIP; Write-Host \"Added port proxy: 0.0.0.0:8765 -> $wslIP:8765\" -ForegroundColor Green; $firewallRule = Get-NetFirewallRule -DisplayName \"WSL Foxglove Bridge 8765\" -ErrorAction SilentlyContinue; if (-not $firewallRule) { New-NetFirewallRule -DisplayName \"WSL Foxglove Bridge 8765\" -Direction Inbound -LocalPort 8765 -Protocol TCP -Action Allow | Out-Null; Write-Host \"Added Windows Firewall rule for port 8765\" -ForegroundColor Green } else { Write-Host \"Windows Firewall rule already exists\" -ForegroundColor Yellow }; Write-Host \"\"; Write-Host \"Port forwarding configured successfully!\" -ForegroundColor Green; Write-Host \"\"; Write-Host \"Connect Foxglove Studio to:\" -ForegroundColor Cyan; Write-Host \"  ws://localhost:8765\" -ForegroundColor White; Write-Host \"  or\" -ForegroundColor Gray; Write-Host \"  ws://$wslIP:8765\" -ForegroundColor White; Write-Host \"\"; Write-Host \"Press any key to close...\"; $null = $Host.UI.RawUI.ReadKey(\"NoEcho,IncludeKeyDown\")'; $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($scriptBlock)); Start-Process powershell.exe -ArgumentList \"-ExecutionPolicy Bypass -NoProfile -EncodedCommand $encoded\" -Verb RunAs"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": false,
+                "echo": true,
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "runOptions": {
+                "runOn": "default"
+            }
+        },
+        {
+            "label": "Check WSL Port Forwarding",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-Command",
+                "netsh interface portproxy show all; Write-Host ''; Test-NetConnection -ComputerName localhost -Port 8765 -InformationLevel Quiet"
+            ],
+            "windows": {
+                "options": {
+                    "shell": {
+                        "executable": "powershell.exe",
+                        "args": ["-NoProfile"]
+                    }
+                }
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": false
+            }
+        },
+        {
+            "label": "Remove WSL Port Forwarding",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-Command",
+                "netsh interface portproxy delete v4tov4 listenport=8765 listenaddress=0.0.0.0; Write-Host 'Port forwarding removed' -ForegroundColor Green"
+            ],
+            "windows": {
+                "options": {
+                    "shell": {
+                        "executable": "powershell.exe",
+                        "args": ["-NoProfile"]
+                    }
+                }
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": false
+            }
+        },
+        {
+            "label": "Git Pull",
+            "type": "shell",
+            "command": "${workspaceFolder}/scripts/git_auto_pull.sh",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false,
+                "clear": false
+            },
+            "runOptions": {
+                "runOn": "default"
+            }
+        }
+    ]
+}
+

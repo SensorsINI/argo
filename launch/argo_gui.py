@@ -78,7 +78,7 @@ class ArgoGUI:
     def __init__(self):
         self.running = True
         self.argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.launch_service = "argo_launch.service"
+        self.launch_service = "argo_launch_standard.service"
         # Note: Recording is now handled via ROS2 service, not systemd service
         self.refresh_interval = 10.0  # seconds
         self.last_update = 0
@@ -218,7 +218,7 @@ class ArgoGUI:
         """Fallback simple status check when main script times out"""
         try:
             # Check systemd services
-            launch_result = subprocess.run(['systemctl', '--no-pager', 'is-active', 'argo_launch.service'], 
+            launch_result = subprocess.run(['systemctl', '--no-pager', 'is-active', 'argo_launch_standard.service'], 
                                          capture_output=True, text=True, timeout=5)
             # Recording is now handled via ROS2 service
             record_result = subprocess.run(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 service list'], 
@@ -601,13 +601,13 @@ class ArgoGUI:
         """Execute a command with progress feedback and return (success_status, message)"""
         try:
             if cmd == 'l':  # Launch service
-                result = self._execute_with_progress(['sudo', 'systemctl', 'start', 'argo_launch.service'], 
+                result = self._execute_with_progress(['sudo', 'systemctl', 'start', 'argo_launch_standard.service'], 
                                                    "Launching argo ros nodes", 30)
                 # Force status update after command execution
                 self.force_status_update()
                 return result
             elif cmd == 'h':  # Halt service
-                result = self._execute_with_progress(['sudo', 'systemctl', 'stop', 'argo_launch.service'], 
+                result = self._execute_with_progress(['sudo', 'systemctl', 'stop', 'argo_launch_standard.service'], 
                                                    "Halting service", 10)
                 # Force status update after command execution
                 self.force_status_update()
@@ -625,7 +625,7 @@ class ArgoGUI:
                 self.force_status_update()
                 return result
             elif cmd == 'R':  # Restart service
-                result = self._execute_with_progress(['sudo', 'systemctl', 'restart', 'argo_launch.service'], 
+                result = self._execute_with_progress(['sudo', 'systemctl', 'restart', 'argo_launch_standard.service'], 
                                                    "Relaunching argo nodes", 30)
                 # Force status update after command execution
                 self.force_status_update()

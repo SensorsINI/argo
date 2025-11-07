@@ -140,7 +140,7 @@ human_control = time_since_human_activity < self.human_override_timeout
 
 ### Basic Setup
 ```yaml
-# argo_two_node.yaml
+# argo.yaml
 controller_node:
   ros__parameters:
     controller_type: "proportional"
@@ -150,7 +150,7 @@ controller_node:
 rudder_sail_radio_node:
   ros__parameters:
     human_override_timeout: 2.0
-    deadband_threshold: 0.05
+    deadband_threshold: 0.3
     safety_max_rudder: 1.0
     safety_max_sail: 1.0
 ```
@@ -169,10 +169,10 @@ rudder_sail_radio_node:
 ### Start Both Nodes
 ```bash
 # Terminal 1: Low-level control
-python3 nodes/rudder_sail_radio.py --ros-args --params-file nodes/argo_two_node.yaml
+python3 nodes/rudder_sail_radio.py --ros-args --params-file nodes/argo.yaml
 
 # Terminal 2: High-level control  
-python3 nodes/controller.py --ros-args --params-file nodes/argo_two_node.yaml
+python3 nodes/controller.py --ros-args --params-file nodes/argo.yaml
 ```
 
 ### Monitor Control Status
@@ -208,6 +208,3 @@ The two-node system maintains the same sensor inputs and control logic as the or
 - **Detailed control status** for monitoring and debugging
 
 This architecture ensures that human control always takes priority while maintaining the sophisticated autonomous control capabilities of the original system.
-
-
-

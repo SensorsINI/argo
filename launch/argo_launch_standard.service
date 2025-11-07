@@ -1,0 +1,24 @@
+[Unit]
+Description=Argo Robot ROS2 Launch Service (Standard ROS2 Launch)
+After=network.target argo_bno085.service argo_radio_servo_module.service argo_health_monitor.service
+Wants=argo_bno085.service argo_radio_servo_module.service argo_health_monitor.service
+
+[Service]
+Type=simple
+User=orangepi
+Group=orangepi
+WorkingDirectory=/home/orangepi/argo
+# Use standard ROS2 launch system (health monitor is launched by the launch file)
+ExecStart=/bin/bash -c 'set -m && source /opt/ros/humble/setup.bash && source launch/argo.env && ros2 launch launch/argo_launch.py'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+KillSignal=SIGINT
+# Note: Signals don't propagate well through ros2 launch process tree
+# Nodes have signal handlers but systemd typically needs to force-kill
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

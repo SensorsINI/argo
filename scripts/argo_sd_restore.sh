@@ -36,11 +36,14 @@ Options:
     --device DEV    Specify SD card device (default: interactive detection)
 
 Examples:
-    # Restore from local file
+    # Restore from local file (supports .gz and .7z)
     ./argo_sd_restore.sh ~/sd_backups/argo_img.gz
 
-    # Restore from remote
-    ./argo_sd_restore.sh user@host:~/backup.img.gz
+    # Restore from remote (typically .gz format from streaming backup)
+    ./argo_sd_restore.sh user@host:~/argo_hostname_30GB_20251103_191209.img.gz
+
+    # Restore local .7z backup (from local-only backup mode)
+    ./argo_sd_restore.sh ~/sd_backups/argo_hostname_30GB_20251103_191209.img.7z
 
     # Custom device
     ./argo_sd_restore.sh --device /dev/sda backup.img.gz
@@ -193,7 +196,7 @@ DEVICE_VENDOR=$(echo "$DEVICE_DETAILS" | awk '{print $2}')
 DEVICE_MODEL=$(echo "$DEVICE_DETAILS" | awk '{print $3}')
 PARTITION_INFO=$(lsblk -n -o NAME,SIZE,FSTYPE,MOUNTPOINT "$DEVICE" | tail -n +2 | sed 's/^/    /')
 
-# Attempt to parse required size from backup filename (e.g., argo_..._32GB_....img.7z)
+# Attempt to parse required size from backup filename (e.g., argo_..._32GB_....img.gz or .img.7z)
 BACKUP_SIZE_TAG=$(echo "$BACKUP_FILE" | grep -oP '_\K[0-9]+GB(?=_)')
 if [ -n "$BACKUP_SIZE_TAG" ]; then
     REQUIRED_SIZE_GB=${BACKUP_SIZE_TAG%GB}
@@ -266,11 +269,13 @@ if [[ "$BACKUP_FILE" == *":"* ]]; then
     echo "Downloading backup from remote location..."
     REMOTE_FILE="$BACKUP_FILE"
     
-    # Determine extension for temp file
-    if [[ "$REMOTE_FILE" == *.7z ]]; then
+    # Determine extension for temp file (remote backups now use .gz, local may use .7z)
+    if [[ "$REMOTE_FILE" == *.gz ]]; then
+        TMP_FILE="/tmp/argo_restore_temp_$(date +%s).img.gz"
+    elif [[ "$REMOTE_FILE" == *.7z ]]; then
         TMP_FILE="/tmp/argo_restore_temp_$(date +%s).img.7z"
     else
-        # Default to .gz for backward compatibility
+        # Default to .gz (primary format for remote backups)
         TMP_FILE="/tmp/argo_restore_temp_$(date +%s).img.gz"
     fi
     
@@ -319,27 +324,28 @@ DD_ERROR_LOG=$(mktemp)
 # Enable pipefail to catch errors in any part of the pipe
 set -o pipefail
 
-# Unzip and write to device with progress
+# Decompress and write to device with progress
+# Note: Remote backups use .gz (streaming), local backups may use .7z (better compression)
 RESTORE_SUCCESS=true
-if [[ "$BACKUP_FILE" == *.7z ]]; then
+if [[ "$BACKUP_FILE" == *.gz ]]; then
+    echo "Decompressing gzip file..."
+    if ! ( gunzip -c "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M conv=fsync ) 2> "$DD_ERROR_LOG"; then
+        RESTORE_SUCCESS=false
+    fi
+elif [[ "$BACKUP_FILE" == *.7z ]]; then
     if ! command -v 7z &> /dev/null; then
         echo -e "${RED}❌ Error: '7z' command not found.${NC}"
         echo "   Please install p7zip-full to restore .7z archives."
-        echo "   Run: sudo apt update && sudo apt install p7-zip-full"
+        echo "   Run: sudo apt update && sudo apt install p7zip-full"
         exit 1
     fi
     echo "Decompressing 7z file..."
     if ! ( 7z x -so "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M conv=fsync ) 2> "$DD_ERROR_LOG"; then
         RESTORE_SUCCESS=false
     fi
-elif [[ "$BACKUP_FILE" == *.gz ]]; then
-    echo "Decompressing gz file..."
-    if ! ( zcat "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M conv=fsync ) 2> "$DD_ERROR_LOG"; then
-        RESTORE_SUCCESS=false
-    fi
 else
     echo -e "${RED}❌ Error: Unsupported backup file format.${NC}"
-    echo "   Only .gz and .7z compressed images are supported."
+    echo "   Only .gz (remote backups) and .7z (local backups) compressed images are supported."
     exit 1
 fi
 
