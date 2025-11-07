@@ -150,7 +150,10 @@ help:
 	@echo "  ar  - Record data"
 	@echo "  ac  - Close recording"
 	@echo "  af  - Launch argo with Foxglove visualization"
-
+	@echo "Development Environment (Host Machine Only):"
+	@echo "  setup-venv     - Create Python venv with uv (automatic activation)"
+	@echo "  update-venv    - Update venv dependencies"
+	@echo "  clean-venv     - Remove venv"
 # ==================== SIMULATION MANAGEMENT ====================
 
 simulate-local:
@@ -160,6 +163,47 @@ simulate-local:
 simulate-remote:
 	@echo "Starting Argo in REMOTE simulation mode..."
 	@python3 launch/argo_lifecycle_manager.py simulate_remote
+
+
+# ==================== DEVELOPMENT ENVIRONMENT (HOST ONLY) ====================
+
+setup-venv:
+	@echo "Setting up Python virtual environment for shore-side development..."
+	@if command -v uv >/dev/null 2>&1; then \
+		echo "Using uv (fast Python package installer)..."; \
+		uv venv .venv; \
+		echo "Installing dependencies with uv..."; \
+		uv pip install -r requirements-host.txt; \
+	else \
+		echo "uv not found, using standard venv..."; \
+		echo "💡 Install uv for faster dependency management: curl -LsSf https://astral.sh/uv/install.sh | sh"; \
+		python3 -m venv .venv; \
+		.venv/bin/pip install --upgrade pip; \
+		.venv/bin/pip install -r requirements-host.txt; \
+	fi
+	@echo "✅ Virtual environment created at .venv"
+	@echo ""
+	@echo "The venv will activate automatically when you open a terminal."
+	@echo "Or manually activate: source .venv/bin/activate"
+
+clean-venv:
+	@echo "Removing Python virtual environment..."
+	@rm -rf .venv
+	@echo "✅ Virtual environment removed"
+
+update-venv:
+	@echo "Updating Python dependencies in venv..."
+	@if [ ! -d .venv ]; then \
+		echo "❌ No venv found. Run 'make setup-venv' first."; \
+		exit 1; \
+	fi
+	@if command -v uv >/dev/null 2>&1; then \
+		uv pip install --upgrade -r requirements.txt; \
+	else \
+		.venv/bin/pip install --upgrade -r requirements.txt; \
+	fi
+	@echo "✅ Dependencies updated"
+
 
 # ==================== DEPENDENCY INSTALLATION ====================
 
