@@ -241,6 +241,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         # These are used when robot control is active but no external control is received
         self.last_rudder_angle = 0.0  # degrees (-30 to +30)
         self.last_sail_angle = 0.0    # degrees (-45 to +45)
+        self._last_sail_side = 1.0    # +1 = sail on port side (wind from starboard), -1 = sail on starboard
+        self._last_relative_wind = 0.0
         
         # Remote mode specific state
         if mode == 'remote':
@@ -1518,7 +1520,35 @@ class ArgoUnifiedSimulatorBridge(Node):
                 # Store control values for real simulator (they're applied in simulation_step)
                 # sailboat-playground expects angles in degrees, Argo sends normalized values
                 self.last_rudder_angle = rudder * 30.0  # Convert to degrees (-30 to +30)
-                self.last_sail_angle = sail * 45.0      # Convert to degrees (-45 to +45)
+
+                # Convert normalized sail command (-1=in, +1=out) to a signed angle in boat frame
+                # Determine which side of the boat the sail should be on based on apparent wind
+                relative_wind = None
+                if self.boat_state and isinstance(self.boat_state, dict):
+                    try:
+                        relative_wind = float(self.boat_state.get('wind_direction'))
+                    except (TypeError, ValueError):
+                        relative_wind = None
+
+                if relative_wind is None:
+                    relative_wind = self._last_relative_wind
+                else:
+                    self._last_relative_wind = relative_wind
+
+                deadband = 5.0  # degrees; avoid flapping when wind is nearly head-on
+                if abs(relative_wind) < deadband and self._last_sail_side is not None:
+                    sail_side = self._last_sail_side
+                else:
+                    sail_side = 1.0 if relative_wind >= 0.0 else -1.0
+                self._last_sail_side = sail_side
+
+                # Map sheet command to [0, 1] fraction (0 = fully in, 1 = fully out)
+                sheet_fraction = max(0.0, min(1.0, 0.5 * (sail + 1.0)))
+
+                max_sail_angle_deg = 45.0
+                sail_angle_deg = sail_side * sheet_fraction * max_sail_angle_deg
+
+                self.last_sail_angle = sail_angle_deg
         else:  # remote mode
             # In remote mode, we just forward the control command
             # The actual remote simulator will handle the control
@@ -1623,11 +1653,20 @@ class ArgoUnifiedSimulatorBridge(Node):
                 control_age = time.time() - self.last_auto_update
             mode = "HUMAN" if self.human_controlled else "ROBOT"
             
+            if self.use_mock:
+                rudder_angle_display = float(self.boat_state.get('rudder', 0.0)) * 30.0
+                sail_angle_display = float(self.boat_state.get('sail', 0.0)) * 45.0
+            else:
+                rudder_angle_display = getattr(self, 'last_rudder_angle', 0.0)
+                sail_angle_display = getattr(self, 'last_sail_angle', 0.0)
+
             # Log status message
             self.get_logger().info(
                 f'Boat: heading={self.boat_state["heading"]:.1f}°, '
                 f'speed={self.boat_state["speed"]:.1f}m/s, '
                 f'wind={self.boat_state["wind_direction"]:.0f}°, '
+                f'sail={sail_angle_display:.1f}°, '
+                f'rudder={rudder_angle_display:.1f}°, '
                 f'mode={mode}, '
                 f'last_cmd={control_age:.1f}s ago'
             )

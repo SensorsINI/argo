@@ -233,18 +233,26 @@ class KeyboardControlNode(Node):
         
         self.pub_rudder_sail_radio.publish(control_msg)
     
-    def create_control_bar(self, value, width=20):
+    def create_control_bar(self, value, width=20, control="generic"):
         """Create ASCII bar visualization for control position."""
         normalized = (value + 1.0) / 2.0  # -1..+1 -> 0..1
         filled_length = int(normalized * width)
         bar = "[" + "█" * filled_length + "░" * (width - filled_length) + "]"
         
-        if value < -0.1:
-            direction = "← LEFT"
-        elif value > 0.1:
-            direction = "RIGHT →"
+        if control == "sail":
+            if value < -0.1:
+                direction = "IN"
+            elif value > 0.1:
+                direction = "OUT"
+            else:
+                direction = "CENTER"
         else:
-            direction = "CENTER"
+            if value < -0.1:
+                direction = "← LEFT"
+            elif value > 0.1:
+                direction = "RIGHT →"
+            else:
+                direction = "CENTER"
         
         return f"{bar} {direction}"
     
@@ -267,11 +275,11 @@ class KeyboardControlNode(Node):
             self.stdscr.addstr(2, 1, " " * (width - 2))
             
             # Rudder visualization
-            rudder_bar = self.create_control_bar(self.rudder_position, 16)
+            rudder_bar = self.create_control_bar(self.rudder_position, 16, control="rudder")
             self.stdscr.addstr(3, 2, f"Rudder: {rudder_bar} ({self.rudder_position:+.3f})")
             
             # Sail visualization
-            sail_bar = self.create_control_bar(self.sail_position, 16)
+            sail_bar = self.create_control_bar(self.sail_position, 16, control="sail")
             self.stdscr.addstr(4, 2, f"Sail:   {sail_bar} ({self.sail_position:+.3f})")
             
             # Empty line
@@ -320,4 +328,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

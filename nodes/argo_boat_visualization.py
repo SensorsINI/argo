@@ -211,6 +211,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.gps_velocity_speed = 0.0  # knots
         self.gps_lat = 0.0
         self.gps_lon = 0.0
+        self._last_visual_sail_side = 1.0
         
         # Timer for publishing markers
         self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
@@ -620,17 +621,19 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # Sail goes to downwind side (opposite of where wind comes from)
         
         if abs(self.wind_angle) < 0.1:  # Wind from front/back
-            sail_side = 0.0  # No side preference when wind is head-on/from-back
+            sail_side = self._last_visual_sail_side
         else:
             # wind_angle > 0 means wind from starboard, sail goes to port (+Y)
             # wind_angle < 0 means wind from port, sail goes to starboard (-Y)
             sail_side = 1.0 if self.wind_angle > 0 else -1.0  # +1 = port (+Y), -1 = starboard (-Y)
+        if sail_side == 0.0:
+            sail_side = 1.0
+        self._last_visual_sail_side = sail_side
         
-        # Sail trim angle from sail command
-        # sail_cmd: -1 = fully out, 0 = half in, +1 = fully in (along hull)
-        # Note: Hardware convention from rudder_sail_radio.py is -1 = pulled in, +1 = let out
-        # So we negate sail_cmd to match visualization expectation
-        sail_angle_deg = -self.sail_cmd * 45.0  # Negate to match visualization convention, max 45 degrees
+        # Sail trim angle from sail command (-1 = sheeted in, +1 = fully eased)
+        sheet_fraction = max(0.0, min(1.0, 0.5 * (self.sail_cmd + 1.0)))
+        max_sail_angle_deg = 45.0
+        sail_angle_deg = -sail_side * sheet_fraction * max_sail_angle_deg
         sail_angle_rad = math.radians(sail_angle_deg)
         
         # Sail base angle: aligned with hull length (aft direction = -X = 180° or π radians)
@@ -739,7 +742,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # Position above boat - apply visualization scale
         marker.pose.position.x = 0.0
         marker.pose.position.y = 0.0
-        marker.pose.position.z = 1.1 * self.visualization_scale  # Above mast
+        marker.pose.position.z = 1.0 * self.visualization_scale  # Just above mast
         
         # Convert wind direction from "relative to boat, where wind comes from" 
         # to "relative to boat, where wind goes" (for visualization)
@@ -795,7 +798,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         # Color (green for wind, intensity based on speed, but always visible)
         wind_intensity = min(max(self.wind_speed / 10.0, 0.3), 1.0)  # Normalize to 0.3-1.0 for visibility
-        marker.color = ColorRGBA(r=0.0, g=wind_intensity, b=0.0, a=1.0)
+        marker.color = ColorRGBA(r=0.0, g=wind_intensity, b=0.0, a=0.2)
         
         # Lifetime - infinite so marker persists
         marker.lifetime.sec = 0
