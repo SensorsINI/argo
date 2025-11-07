@@ -64,6 +64,13 @@ log/
 .idea/inspectionProfiles/profiles_settings.xml
 .idea/inspectionProfiles/Project_Default.xml
 
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+
 # Obsolete development directory (local copies only, not in git)
 develop/
 
