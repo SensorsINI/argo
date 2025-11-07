@@ -82,6 +82,18 @@ def generate_launch_description():
     # Get default bags directory
     bags_dir = os.path.join(os.path.expanduser('~'), 'argo', 'bags')
     
+    # Load map name from argo_nodes.yaml (same as sailing_area_publisher does)
+    map_name = None
+    argo_nodes_yaml_path = os.path.join(argo_dir, 'launch', 'argo_nodes.yaml')
+    try:
+        with open(argo_nodes_yaml_path, 'r') as f:
+            config = yaml.safe_load(f)
+            simulation_config = config.get('simulation_config', {})
+            map_name = simulation_config.get('map_name')
+    except (FileNotFoundError, Exception):
+        # If config file not found or invalid, map_name will be None
+        pass
+    
     # Load recording configuration from record.yaml (same as record.py)
     record_config_path = os.path.join(argo_dir, 'nodes', 'record.yaml')
     storage_format = 'mcap'  # Default
@@ -272,9 +284,13 @@ After installation, try the re-recording again.
     
     # Sailing area publisher - provides boundaries/waypoints/hazards
     # Use simulated time to preserve original timestamps from playback
+    # Pass map name from config so it uses the correct map origin
+    sailing_area_args = [os.path.join(argo_dir, 'nodes', 'sailing_area_publisher.py')]
+    if map_name:
+        sailing_area_args.extend(['--map', map_name])
     sailing_area_node = Node(
         executable='python3',
-        arguments=[os.path.join(argo_dir, 'nodes', 'sailing_area_publisher.py')],
+        arguments=sailing_area_args,
         output='screen',
         condition=IfCondition(LaunchConfiguration('use_sailing_area')),
         name='sailing_area_publisher',
@@ -372,6 +388,7 @@ After installation, try the re-recording again.
         LogInfo(msg=['Output bag: ', LaunchConfiguration('output_bag')]),
         LogInfo(msg=['Storage format: ', storage_format, ' (from record.yaml config)']),
         LogInfo(msg=['Playback rate: ', LaunchConfiguration('playback_rate'), 'x (maximum speed)']),
+        LogInfo(msg=['Map name: ', map_name if map_name else 'None (will use first GPS fix for origin)']),
         LogInfo(msg='Recording will start automatically 2 seconds after playback begins'),
         LogInfo(msg='All processes will stop automatically when playback completes'),
         visualization_node,
