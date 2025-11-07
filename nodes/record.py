@@ -38,6 +38,7 @@ import tempfile
 from datetime import datetime
 
 import rclpy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_srvs.srv import Trigger
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
@@ -92,10 +93,17 @@ class ArgoRecordingNode(ArgoBaseNode):
         )
 
         # ROS2 Publishers
+        # Use TRANSIENT_LOCAL durability so subscribers get the last published value immediately
+        # This ensures the dashboard knows the current recording state when it subscribes
+        transient_local_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=10
+        )
         self.status_publisher = self.create_publisher(
             Bool,
             '/argo/recording/status',
-            10
+            transient_local_qos
         )
 
         self.info_publisher = self.create_publisher(
@@ -130,6 +138,9 @@ class ArgoRecordingNode(ArgoBaseNode):
         self._log_info("   /argo/recording/info - Recording info (String)")
         self._log_info(
             "   /argo/recording/control - Recording control (Twist)")
+
+        # Check for required dependencies
+        self._check_dependencies()
 
         # Set initial health status - record node is only healthy when recording
         self.set_unhealthy("Recording inactive")
@@ -204,6 +215,65 @@ class ArgoRecordingNode(ArgoBaseNode):
         if self.file_logger:
             self.file_logger.error(message)
 
+    def _check_dependencies(self):
+        """Check for required dependencies and exit with fatal error if missing."""
+        if self.storage_format == 'mcap':
+            # Check if MCAP storage plugin is installed
+            try:
+                # Get ROS_DISTRO from environment
+                ros_distro = os.environ.get('ROS_DISTRO', 'humble')
+                package_name = f'ros-{ros_distro}-rosbag2-storage-mcap'
+                
+                # Check if package is installed using dpkg
+                # dpkg -l returns 0 if package is found, non-zero if not found
+                check_cmd = ['dpkg', '-l', package_name]
+                result = subprocess.run(
+                    check_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                # Check if package is actually installed (dpkg -l returns 0 and output contains package name with 'ii' status)
+                is_installed = (result.returncode == 0 and 
+                               'ii' in result.stdout and 
+                               package_name in result.stdout)
+                
+                if not is_installed:
+                    # Package not installed - fatal error
+                    error_msg = (
+                        "=" * 60 + "\n"
+                        "❌ FATAL: MCAP storage plugin is NOT installed!\n"
+                        "\n"
+                        "The record node is configured to use MCAP format,\n"
+                        "but the required package is missing.\n"
+                        "\n"
+                        "To install the MCAP storage plugin, run:\n"
+                        "  make install-rosbag2-mcap\n"
+                        "\n"
+                        "Or manually:\n"
+                        f"  sudo apt install -y {package_name}\n"
+                        "\n"
+                        "The node will exit now. Please install the dependency and restart.\n"
+                        "=" * 60
+                    )
+                    self._log_error(error_msg)
+                    self.get_logger().fatal(error_msg)
+                    # Exit with error code
+                    sys.exit(1)
+                else:
+                    self._log_info(f"✅ MCAP storage plugin is installed ({package_name})")
+            except Exception as e:
+                # If we can't check, treat it as fatal to be safe
+                error_msg = (
+                    f"❌ FATAL: Could not check MCAP dependency: {e}\n"
+                    "The node cannot verify that MCAP plugin is installed.\n"
+                    "Please ensure the dependency is installed and restart the node."
+                )
+                self._log_error(error_msg)
+                self.get_logger().fatal(error_msg)
+                sys.exit(1)
+    
     def _load_recording_config(self):
         """Load recording configuration from record.yaml"""
         config_path = os.path.join(os.path.dirname(__file__), 'record.yaml')
@@ -399,7 +469,7 @@ class ArgoRecordingNode(ArgoBaseNode):
                 cmd,
                 cwd=self.bagfiles_dir,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,  # Capture stderr separately for better error reporting
                 universal_newlines=True,
                 bufsize=1
             )
@@ -567,22 +637,67 @@ class ArgoRecordingNode(ArgoBaseNode):
             return
 
         try:
-            # Read output from recording process
-            for line in iter(self.recording_process.stdout.readline, ''):
-                if line:
-                    # Log recording output (can be verbose, so use debug level)
-                    self._log_debug(f"rosbag: {line.strip()}")
-
-            # Check if process ended unexpectedly
+            stdout_lines = []
+            stderr_lines = []
+            
+            # Read stdout and stderr in parallel
+            import threading
+            
+            def read_output(pipe, output_list, label):
+                """Read from pipe and append to output list"""
+                try:
+                    for line in iter(pipe.readline, ''):
+                        if line:
+                            line_stripped = line.strip()
+                            output_list.append(line_stripped)
+                            # Log recording output (can be verbose, so use debug level)
+                            self._log_debug(f"rosbag {label}: {line_stripped}")
+                except Exception as e:
+                    self._log_debug(f"Error reading {label}: {e}")
+                finally:
+                    pipe.close()
+            
+            # Start threads to read stdout and stderr
+            stdout_thread = threading.Thread(target=read_output, args=(self.recording_process.stdout, stdout_lines, "stdout"))
+            stderr_thread = threading.Thread(target=read_output, args=(self.recording_process.stderr, stderr_lines, "stderr"))
+            stdout_thread.daemon = True
+            stderr_thread.daemon = True
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            # Wait for process to complete
             return_code = self.recording_process.wait()
+            
+            # Wait for threads to finish reading
+            stdout_thread.join(timeout=1.0)
+            stderr_thread.join(timeout=1.0)
+            
             if return_code != 0:
-                self._log_error(
-                    f"❌ Recording process ended with code {return_code}")
+                # Log full error output
+                error_msg = f"❌ Recording process ended with code {return_code}"
+                self._log_error(error_msg)
+                
+                # Log stderr output (usually contains the actual error)
+                if stderr_lines:
+                    self._log_error("📋 Error output from rosbag:")
+                    for line in stderr_lines:
+                        self._log_error(f"   {line}")
+                
+                # Log stdout output (may contain additional context)
+                if stdout_lines:
+                    # Only log stdout if it's not too verbose (last 10 lines)
+                    relevant_lines = stdout_lines[-10:] if len(stdout_lines) > 10 else stdout_lines
+                    if relevant_lines:
+                        self._log_error("📋 Output from rosbag (last lines):")
+                        for line in relevant_lines:
+                            self._log_error(f"   {line}")
+                
+                # Combine all error output for the info message
+                all_error_output = '\n'.join(stderr_lines) if stderr_lines else '\n'.join(stdout_lines[-5:]) if stdout_lines else "Unknown error"
                 self.is_recording = False
                 self.set_unhealthy("Recording failed")
                 self.publish_status()
-                self.publish_info(
-                    f"Recording failed (exit code {return_code})")
+                self.publish_info(f"Recording failed (exit code {return_code}): {all_error_output[:200]}")
             else:
                 self._log_info("✅ Recording process completed normally")
                 self.is_recording = False
@@ -597,11 +712,13 @@ class ArgoRecordingNode(ArgoBaseNode):
             self.publish_status()
 
     def publish_status(self):
-        """Publish current recording status"""
+        """Publish current recording status (called periodically every 5s and on state changes)"""
         try:
             status_msg = Bool()
             status_msg.data = self.is_recording
             self.status_publisher.publish(status_msg)
+            # Debug log only in debug mode to avoid log spam
+            self._log_debug(f"📡 Published recording status: {'ACTIVE' if self.is_recording else 'INACTIVE'}")
         except Exception as e:
             self._log_error(f"❌ Error publishing status: {e}")
 

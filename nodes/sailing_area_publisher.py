@@ -66,8 +66,10 @@ class SailingAreaPublisher(Node):
         self.origin_lat = 47.3981555
         self._find_origin_from_maps()
         
+        self._logged_marker_publicaton=False
         # Publish markers at startup
         self.publish_all_markers()
+        
         
         # Clock time for timestamp preservation during re-recording
         # Subscribe to /clock topic to get simulated time from bag playback
@@ -491,10 +493,12 @@ class SailingAreaPublisher(Node):
         self.hazard_pub.publish(hazard_markers)
         
         total_markers = len(waypoint_markers.markers) + len(boundary_markers.markers) + len(hazard_markers.markers)
-        self.get_logger().info(f"Published sailing area markers: {len(waypoint_markers.markers)} waypoints, "
-                              f"{len(boundary_markers.markers)} boundaries, "
-                              f"{len(hazard_markers.markers)} hazards "
-                              f"(total: {total_markers} markers)")
+        if not self._logged_marker_publicaton:
+            self.get_logger().info(f"Published sailing area markers: {len(waypoint_markers.markers)} waypoints, "
+                                  f"{len(boundary_markers.markers)} boundaries, "
+                                  f"{len(hazard_markers.markers)} hazards "
+                                  f"(total: {total_markers} markers)")
+            self._logged_marker_publicaton = True
 
 def load_map_from_yaml():
     """Load map name from argo_nodes.yaml configuration file."""

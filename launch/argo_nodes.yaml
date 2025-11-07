@@ -8,216 +8,23 @@
 #   - executable: Python script path relative to ARGO_DIR
 #   - package: Not used for Python nodes (leave empty)
 #   - parameters: Optional parameter files
-#   - required: true/false - if false, system continues if node fails
-#   - critical: true/false - if true, missing node is considered system failure and ros2 will attempt to restart it
 #   - description: Human-readable description
 #   - health_topic: ROS2 topic for health monitoring
-#   - excluded: true/false - if true, node is not launched by the lifecycle manager
+#   - excluded: true/false - if true, node is not launched by the launch system
 #   - special: true/false - if true, node is launched via ros2 run, not direct Python
 #   - args: Optional list of arguments to pass to the node
-
-nodes:
-  # Core System Nodes (Critical for operation)
-  - name: rudder_sail_radio_node
-    executable: nodes/rudder_sail_radio.py
-    required: true
-    critical: true
-    description: "Radio control interface and servo output (PWM control)"
-    health_topic: "/rudder_sail_radio_node_health"
-    
-  - name: argo_power_control
-    executable: power_control/argo_power_control.py
-    required: true
-    critical: true
-    description: "Power control, button monitoring, and LED status"
-    excluded: true # Runs as an independent systemd service
-    
-  - name: argo_battery_water
-    executable: nodes/argo_battery_water.py
-    required: true
-    critical: true
-    description: "Battery water monitoring"
-    excluded: true # Runs as an independent systemd service
-    health_topic: "/battery_water_node_health"
-    
-
-    
-  # Control and Sensor Nodes (Important but system can operate with some missing)
-  - name: controller_node
-    executable: nodes/controller.py
-    required: true
-    critical: false  # we can still control argo with RC control
-    description: "Autonomous navigation controller"
-    health_topic: "/controller_node_health"
-
-  - name: gps_node
-    executable: nodes/gps.py
-    required: true
-    critical: false # we can still control argo with RC control
-    description: "GPS navigation via UART5"
-    health_topic: "/gps_node_health"
-    
-  - name: anem_node
-    executable: nodes/anem.py
-    required: true
-    critical: false # we can still control argo with RC control
-    description: "Wind speed and direction sensor (I2C)"
-    health_topic: "/anem_node_health"
-    
-  - name: temp_monitor_node
-    executable: nodes/temp_monitor.py
-    required: false
-    critical: false
-    description: "System temperature monitoring"
-    health_topic: "/temp_monitor_node_health"
-    
-  - name: lora_node
-    executable: nodes/lora.py
-    required: false
-    critical: false
-    description: "Long range radio communication"
-    health_topic: "/lora_node_health"
-    
-  # Monitoring and Recording Nodes
-  - name: record_node
-    executable: nodes/record.py
-    required: false # we need to record data for analysis
-    critical: false
-    description: "Data recording management"
-    health_topic: "/record_health"
-    
-  # Remote Monitoring and Access
-  - name: argo_web_dashboard
-    executable: nodes/argo_web_dashboard.py
-    required: true
-    critical: true # essential for remote monitoring and control
-    description: "Web-based monitoring and control interface (mobile-friendly)"
-    health_topic: "/argo_web_dashboard_health"
-    
-  # Visualization and Transform Nodes
-  - name: argo_transform_publisher
-    executable: nodes/argo_transform_publisher.py
-    required: false
-    critical: false
-    description: "TF transform publisher for visualization"
-    health_topic: "/argo_transform_publisher_health"
-    
-  - name: argo_boat_visualization
-    executable: nodes/argo_boat_visualization.py
-    required: false
-    critical: false
-    description: "Boat state visualization node"
-    health_topic: "/argo_boat_visualization_health"
-
-  - name: sailing_area_publisher
-    executable: nodes/sailing_area_publisher.py
-    required: false
-    critical: false
-    description: "Publishes GeoJSON sailing boundaries for visualization"
-    
-  # Special Nodes (not launched directly but monitored)
-  - name: foxglove_bridge
-    executable: ros2 run foxglove_bridge foxglove_bridge
-    required: false
-    critical: false
-    description: "Foxglove Studio bridge (ROS2 package)"
-    special: true  # Launched via ros2 run, not direct Python
-    
-# Systemd Services Section
-# ========================
-# Unified definition of ROS2 nodes that run as independent systemd services.
-# These are ROS2 nodes (like nodes in the 'nodes' section above) but are managed
-# as systemd services rather than by the lifecycle manager.
 #
-# All services listed here:
-# - Are ROS2 nodes (can be monitored via health topics/services)
-# - Run as independent systemd services (not launched by lifecycle manager)
-# - Are included in total component counts (nodes + services)
-# - Should be marked as excluded: true in the 'nodes' section above for backward compatibility
-#
-# This unified section allows:
-# - Clear separation of launched nodes vs services
-# - Accurate total component counts (nodes + services)
-# - Single source of truth for service definitions
-services:
-  - name: argo_power_control
-    executable: power_control/argo_power_control.py
-    service_name: argo_power_control.service
-    description: "Power control, button monitoring, and LED status"
-    critical: true
-    
-  - name: argo_battery_water
-    executable: nodes/argo_battery_water.py
-    service_name: argo_battery_water.service
-    description: "Battery voltage and water intrusion monitoring"
-    critical: true
-    health_topic: "/battery_water_node_health"
-    
-  - name: argo_health_monitor
-    executable: launch/argo_health_monitor.py
-    service_name: argo_health_monitor.service
-    description: "Node health monitoring and aggregation service"
-    critical: true
-    
-  - name: bno085
-    executable: nodes/bno085_driver_launcher.sh  # Shell script that launches C++ driver
-    service_name: argo_bno085.service
-    description: "BNO085 IMU driver (C++ ROS2 node)"
-    critical: true
-    special: true  # Launched via shell script, not direct Python
-
-# Simulation Mode Configuration
-simulation_config:
-  # Map name (without .geojson extension) - start location will be at the "home" waypoint
-  # Maps are converted from maps/*.kmz to foxglove/maps/*.geojson using scripts/kmz_to_geojson.py
-  map_name: "Argo Irchel pond sailing area"  # Options: "Hotel dei Pini", "Argo Irchel pond sailing area"
-
-simulation_nodes:
-  - name: argo_unified_simulator_bridge
-    executable: nodes/argo_unified_simulator_bridge.py
-    required: true
-    critical: true
-    description: "Unified simulator bridge for simulated sensor data"
-    args: ["--mode", "local"]  # Can be "local" or "remote"
-    
-  - name: controller_node
-    executable: nodes/controller.py
-    required: true
-    critical: true
-    description: "Autonomous navigation controller"
-    
-  - name: sailing_area_publisher
-    executable: nodes/sailing_area_publisher.py
-    required: true
-    critical: false
-    description: "Sailing area visualization markers"
-    
-  - name: foxglove_bridge
-    executable: ros2 run foxglove_bridge foxglove_bridge
-    required: true
-    critical: true
-    description: "Foxglove Studio bridge"
-    special: true
-  
-  - name: argo_transform_publisher
-    executable: nodes/argo_transform_publisher.py
-    required: true
-    critical: true
-    description: "TF transform publisher for visualization"
-    
-  - name: argo_boat_visualization
-    executable: nodes/argo_boat_visualization.py
-    required: true
-    critical: true
-    description: "Boat state visualization node"
-
+# Launch Behavior:
+#   - All nodes in 'physical_robot' or 'simulation' groups attempt to start once
+#   - No automatic respawning - nodes that fail will show as stopped in status
+#   - Status and health monitoring will clearly show which nodes are running or failed
 
 # Node Groups for organization
 groups:
-  critical:
+  life_support:
     - rudder_sail_radio_node
     - argo_power_control
-    - argo_battery_water  
+    - argo_battery_water
     
   control:
     - controller_node
@@ -261,3 +68,155 @@ groups:
     - foxglove_bridge
     - argo_transform_publisher
     - argo_boat_visualization
+
+
+nodes:
+  # Core System Nodes (Critical for operation)
+  - name: rudder_sail_radio_node
+    executable: nodes/rudder_sail_radio.py
+    description: "Radio control interface and servo output (PWM control)"
+    health_topic: "/rudder_sail_radio_node_health"
+    
+  - name: argo_power_control
+    executable: power_control/argo_power_control.py
+    description: "Power control, button monitoring, and LED status"
+    excluded: true # Runs as an independent systemd service
+    
+  - name: argo_battery_water
+    executable: nodes/argo_battery_water.py
+    description: "Battery water monitoring"
+    excluded: true # Runs as an independent systemd service
+    health_topic: "/battery_water_node_health"
+    
+
+    
+  # Control and Sensor Nodes (Important but system can operate with some missing)
+  - name: controller_node
+    executable: nodes/controller.py
+    description: "Autonomous navigation controller"
+    health_topic: "/controller_node_health"
+
+  - name: gps_node
+    executable: nodes/gps.py
+    description: "GPS navigation via UART5"
+    health_topic: "/gps_node_health"
+    
+  - name: anem_node
+    executable: nodes/anem.py
+    description: "Wind speed and direction sensor (I2C)"
+    health_topic: "/anem_node_health"
+    
+  - name: temp_monitor_node
+    executable: nodes/temp_monitor.py
+    description: "System temperature monitoring"
+    health_topic: "/temp_monitor_node_health"
+    
+  - name: lora_node
+    executable: nodes/lora.py
+    description: "Long range radio communication"
+    health_topic: "/lora_node_health"
+    
+  # Monitoring and Recording Nodes
+  - name: record_node
+    executable: nodes/record.py
+    description: "Data recording management"
+    health_topic: "/record_health"
+    
+  # Remote Monitoring and Access
+  - name: argo_web_dashboard
+    executable: nodes/argo_web_dashboard.py
+    description: "Web-based monitoring and control interface (mobile-friendly)"
+    health_topic: "/argo_web_dashboard_health"
+    
+  # Visualization and Transform Nodes
+  - name: argo_transform_publisher
+    executable: nodes/argo_transform_publisher.py
+    description: "TF transform publisher for visualization"
+    health_topic: "/argo_transform_publisher_health"
+    
+  - name: argo_boat_visualization
+    executable: nodes/argo_boat_visualization.py
+    description: "Boat state visualization node"
+    health_topic: "/argo_boat_visualization_health"
+
+  - name: sailing_area_publisher
+    executable: nodes/sailing_area_publisher.py
+    description: "Publishes GeoJSON sailing boundaries for visualization"
+    
+  # Special Nodes (not launched directly but monitored)
+  - name: foxglove_bridge
+    executable: ros2 run foxglove_bridge foxglove_bridge
+    description: "Foxglove Studio bridge (ROS2 package)"
+    special: true  # Launched via ros2 run, not direct Python
+    
+# Systemd Services Section
+# ========================
+# Unified definition of ROS2 nodes that run as independent systemd services.
+# These are ROS2 nodes (like nodes in the 'nodes' section above) but are managed
+# as systemd services rather than by the lifecycle manager.
+#
+# All services listed here:
+# - Are ROS2 nodes (can be monitored via health topics/services)
+# - Run as independent systemd services (not launched by lifecycle manager)
+# - Are included in total component counts (nodes + services)
+# - Should be marked as excluded: true in the 'nodes' section above for backward compatibility
+#
+# This unified section allows:
+# - Clear separation of launched nodes vs services
+# - Accurate total component counts (nodes + services)
+# - Single source of truth for service definitions
+services:
+  - name: argo_power_control
+    executable: power_control/argo_power_control.py
+    service_name: argo_power_control.service
+    description: "Power control, button monitoring, and LED status"
+    
+  - name: argo_battery_water
+    executable: nodes/argo_battery_water.py
+    service_name: argo_battery_water.service
+    description: "Battery voltage and water intrusion monitoring"
+    health_topic: "/battery_water_node_health"
+    
+  - name: argo_health_monitor
+    executable: launch/argo_health_monitor.py
+    service_name: argo_health_monitor.service
+    description: "Node health monitoring and aggregation service"
+    
+  - name: bno085
+    executable: nodes/bno085_driver_launcher.sh  # Shell script that launches C++ driver
+    service_name: argo_bno085.service
+    description: "BNO085 IMU driver (C++ ROS2 node)"
+    special: true  # Launched via shell script, not direct Python
+
+# Simulation Mode Configuration
+simulation_config:
+  # Map name (without .geojson extension) - start location will be at the "home" waypoint
+  # Maps are converted from maps/*.kmz to foxglove/maps/*.geojson using scripts/kmz_to_geojson.py
+  map_name: "Argo Irchel pond sailing area"  # Options: "Hotel dei Pini", "Argo Irchel pond sailing area"
+
+simulation_nodes:
+  - name: argo_unified_simulator_bridge
+    executable: nodes/argo_unified_simulator_bridge.py
+    description: "Unified simulator bridge for simulated sensor data"
+    args: ["--mode", "local"]  # Can be "local" or "remote"
+    
+  - name: controller_node
+    executable: nodes/controller.py
+    description: "Autonomous navigation controller"
+    
+  - name: sailing_area_publisher
+    executable: nodes/sailing_area_publisher.py
+    description: "Sailing area visualization markers"
+    
+  - name: foxglove_bridge
+    executable: ros2 run foxglove_bridge foxglove_bridge
+    description: "Foxglove Studio bridge"
+    special: true
+  
+  - name: argo_transform_publisher
+    executable: nodes/argo_transform_publisher.py
+    description: "TF transform publisher for visualization"
+    
+  - name: argo_boat_visualization
+    executable: nodes/argo_boat_visualization.py
+    description: "Boat state visualization node"

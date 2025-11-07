@@ -1555,18 +1555,21 @@ class BatteryWaterNode(ArgoBaseNode):
             except Exception:
                 pass
 
-        # Publish GPIO status on change
+        # Publish GPIO status (always publish for web dashboard, but only log on actual changes)
         if rclpy.ok():
             try:
-                # change to True to publish always since web dashboard is watching this topic
-                if True: # charging_status is not None and charging_status != self._prev_charging_status:
+                # Always publish charging status (web dashboard needs frequent updates)
+                if charging_status is not None:
                     self.pub_charging_status.publish(Bool(data=charging_status))
-                    if self._prev_charging_status is not None:
-                        self.get_logger().info(f"Charging status changed: {charging_status}")
-                if True: # ac_power_present is not None and ac_power_present != self._prev_ac_power_present:
+                    # Only log when status actually changes
+                    if self._prev_charging_status is not None and charging_status != self._prev_charging_status:
+                        self.get_logger().info(f"Charging status changed: {self._prev_charging_status} -> {charging_status}")
+                # Always publish AC power status (web dashboard needs frequent updates)
+                if ac_power_present is not None:
                     self.pub_ac_power_present.publish(Bool(data=ac_power_present))
-                    if self._prev_ac_power_present is not None:
-                        self.get_logger().info(f"AC power status changed: {ac_power_present}")
+                    # Only log when status actually changes
+                    if self._prev_ac_power_present is not None and ac_power_present != self._prev_ac_power_present:
+                        self.get_logger().info(f"AC power status changed: {self._prev_ac_power_present} -> {ac_power_present}")
             except Exception:
                 pass
 

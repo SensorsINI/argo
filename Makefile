@@ -1,5 +1,43 @@
-# Argo Robot Services Makefile
-# Manages systemd services for ROS2 Argo robot
+# ============================================================================
+# Argo Autonomous Sailboat - Top Level Makefile
+# ============================================================================
+#
+# This Makefile provides centralized management for the Argo ROS2 autonomous
+# sailboat system, including hardware setup, dependencies, services, and
+# system configuration.
+#
+# QUICK START:
+#   make help                    - Show all available commands
+#   make install-all            - Complete hardware and dependency setup
+#   make install-argo-cli       - Install command-line aliases (al, aq, ar, ac, etc.)
+#   make -C launch install      - Install and enable Argo launch services
+#   make -C power_control install - Install power control system
+#
+# MAIN COMPONENTS:
+#   • Hardware & Dependencies   - ROS2 packages, Python deps, PWM modules
+#   • Service Management        - Lifecycle, power control, battery monitoring
+#   • System Configuration      - CPU tuning, WiFi, logging, MOTD
+#   • Simulation                - Local/remote simulation modes
+#   • Development Tools         - Git submodules, testing, debugging
+#
+# SERVICE ORGANIZATION:
+#   This top-level Makefile delegates to component Makefiles:
+#   • launch/Makefile           - ROS2 node lifecycle and launch services
+#   • power_control/Makefile    - Power button, LED, shutdown control
+#   • scripts/Makefile          - Battery monitoring and status display
+#   • system-monitoring/Makefile - Optional debugging and monitoring services
+#
+# IMPORTANT NOTES:
+#   • Most service operations are in launch/Makefile (use 'make -C launch <target>')
+#   • Convenience targets here forward to component Makefiles
+#   • Run 'make help' for complete list of available commands
+#   • Hardware changes typically require reboot to take effect
+#
+# For detailed documentation, see:
+#   • README.md                 - Project overview and getting started
+#   • launch/README.md          - Service management and lifecycle
+#   • power_control/README.md   - Power control system documentation
+# ============================================================================
 
 SERVICE_DIR = /etc/systemd/system
 LAUNCH_SERVICE = argo_launch.service
@@ -11,14 +49,15 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote
+.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote
 
 help:
 	@echo "Argo Robot Services Management"
 	@echo "=============================="
 	@echo ""
 	@echo "Hardware & Dependencies:"
-	@echo "  install-deps         - Install all ROS2 dependencies (foxglove-bridge, rosbag2-mcap, etc.)"
+	@echo "  install-deps         - Install all ROS2 dependencies (minimal ROS2, foxglove-bridge, rosbag2-mcap)"
+	@echo "  install-ros2-minimal - Install minimal ROS2 Humble packages (rclpy, messages, services, TF2, launch, rosbag2)"
 	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
 	@echo "  install-rosbag2-mcap - Install MCAP storage plugin for rosbag2 only"
 	@echo "  install-python-deps  - Install Python runtime dependencies (smbus2, pyserial, etc.)"
@@ -124,10 +163,11 @@ simulate-remote:
 
 # ==================== DEPENDENCY INSTALLATION ====================
 
-install-deps: install-foxglove-bridge install-rosbag2-mcap
+install-deps: install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap
 	@echo "✅ All ROS2 dependencies installed successfully!"
 	@echo ""
 	@echo "Installed packages:"
+	@echo "  - Minimal ROS2 Humble core packages (rclpy, messages, services, TF2, launch, rosbag2)"
 	@echo "  - ros-$(ROS_DISTRO)-foxglove-bridge (C++ WebSocket bridge for Foxglove Studio)"
 	@echo "  - ros-$(ROS_DISTRO)-rosbag2-storage-mcap (MCAP storage format for rosbag2)"
 	@echo ""
@@ -139,6 +179,66 @@ install-deps: install-foxglove-bridge install-rosbag2-mcap
 	@echo ""
 	@echo "MCAP Recording:"
 	@echo "  ros2 bag record -s mcap -a -o my_bag  # Record with MCAP format"
+
+install-ros2-minimal:
+	@echo "Installing minimal ROS2 Humble packages for Argo..."
+	@if [ -z "$(ROS_DISTRO)" ]; then \
+		echo "❌ ROS_DISTRO environment variable not set!"; \
+		echo "   Make sure ROS2 is properly sourced: source /opt/ros/*/setup.bash"; \
+		exit 1; \
+	fi
+	@echo "Installing core ROS2 Python runtime..."
+	sudo apt install -y \
+		ros-$(ROS_DISTRO)-rclpy \
+		ros-$(ROS_DISTRO)-rosidl-runtime-py \
+		ros-$(ROS_DISTRO)-rosidl-generator-py
+	@echo "Installing message and service types..."
+	sudo apt install -y \
+		ros-$(ROS_DISTRO)-std-msgs \
+		ros-$(ROS_DISTRO)-std-srvs \
+		ros-$(ROS_DISTRO)-geometry-msgs \
+		ros-$(ROS_DISTRO)-sensor-msgs \
+		ros-$(ROS_DISTRO)-visualization-msgs \
+		ros-$(ROS_DISTRO)-rosgraph-msgs \
+		ros-$(ROS_DISTRO)-rcl-interfaces \
+		ros-$(ROS_DISTRO)-diagnostic-msgs \
+		ros-$(ROS_DISTRO)-builtin-interfaces
+	@echo "Installing TF2 (transform library)..."
+	sudo apt install -y \
+		ros-$(ROS_DISTRO)-tf2 \
+		ros-$(ROS_DISTRO)-tf2-ros \
+		ros-$(ROS_DISTRO)-tf2-ros-py \
+		ros-$(ROS_DISTRO)-tf2-geometry-msgs \
+		ros-$(ROS_DISTRO)-tf2-msgs \
+		ros-$(ROS_DISTRO)-tf2-py
+	@echo "Installing ROS2 CLI tools..."
+	sudo apt install -y \
+		ros-$(ROS_DISTRO)-ros2cli \
+		ros-$(ROS_DISTRO)-ros2run \
+		ros-$(ROS_DISTRO)-ros2launch \
+		ros-$(ROS_DISTRO)-ros2node \
+		ros-$(ROS_DISTRO)-ros2param \
+		ros-$(ROS_DISTRO)-ros2pkg \
+		ros-$(ROS_DISTRO)-ros2service \
+		ros-$(ROS_DISTRO)-ros2topic
+	@echo "Installing Rosbag2 (for recording)..."
+	sudo apt install -y \
+		ros-$(ROS_DISTRO)-rosbag2 \
+		ros-$(ROS_DISTRO)-rosbag2-cpp \
+		ros-$(ROS_DISTRO)-rosbag2-storage
+	@echo "Installing GPS support..."
+	sudo apt install -y \
+		ros-$(ROS_DISTRO)-nmea-msgs \
+		ros-$(ROS_DISTRO)-nmea-navsat-driver
+	@echo "Installing launch system dependencies..."
+	sudo apt install -y \
+		ros-$(ROS_DISTRO)-launch \
+		ros-$(ROS_DISTRO)-launch-ros
+	@echo "✅ Minimal ROS2 Humble installation complete!"
+	@echo ""
+	@echo "To verify installation, run:"
+	@echo "  source /opt/ros/$(ROS_DISTRO)/setup.bash"
+	@echo "  python3 -c 'from std_srvs.srv import Trigger; print(\"✅ std_srvs OK\")'"
 
 install-foxglove-bridge:
 	@echo "Installing Foxglove Bridge for ROS2..."
@@ -184,11 +284,36 @@ check-deps:
 	@echo "🔍 Environment:"
 	@if [ -z "$(ROS_DISTRO)" ]; then \
 		echo "❌ ROS_DISTRO: Not set (ROS2 not sourced?)"; \
+		echo "   Source ROS2: source /opt/ros/*/setup.bash"; \
 	else \
 		echo "✅ ROS_DISTRO: $(ROS_DISTRO)"; \
 	fi
 	@echo ""
-	@echo "🔍 Package Status:"
+	@echo "🔍 Core ROS2 Packages:"
+	@if [ -n "$(ROS_DISTRO)" ]; then \
+		if dpkg -l | grep -q "ros-$(ROS_DISTRO)-rclpy"; then \
+			echo "✅ rclpy: Installed"; \
+		else \
+			echo "❌ rclpy: Not installed (run: make install-ros2-minimal)"; \
+		fi; \
+		if dpkg -l | grep -q "ros-$(ROS_DISTRO)-std-srvs"; then \
+			echo "✅ std-srvs: Installed"; \
+		else \
+			echo "❌ std-srvs: Not installed (run: make install-ros2-minimal)"; \
+		fi; \
+		if dpkg -l | grep -q "ros-$(ROS_DISTRO)-ros2launch"; then \
+			echo "✅ ros2launch: Installed"; \
+		else \
+			echo "❌ ros2launch: Not installed (run: make install-ros2-minimal)"; \
+		fi; \
+		if dpkg -l | grep -q "ros-$(ROS_DISTRO)-ros2run"; then \
+			echo "✅ ros2run: Installed"; \
+		else \
+			echo "❌ ros2run: Not installed (run: make install-ros2-minimal)"; \
+		fi; \
+	fi
+	@echo ""
+	@echo "🔍 Optional Packages:"
 	@if dpkg -l | grep -q "ros-$(ROS_DISTRO)-foxglove-bridge"; then \
 		version=$$(dpkg -l | grep "ros-$(ROS_DISTRO)-foxglove-bridge" | awk '{print $$3}'); \
 		echo "✅ foxglove-bridge: Installed ($$version)"; \

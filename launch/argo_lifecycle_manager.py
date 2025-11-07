@@ -1313,6 +1313,11 @@ class ArgoLifecycleManager:
             # Wait a moment for processes to terminate
             time.sleep(2)
             print("✅ Process group terminated.")
+            
+            # Also explicitly kill foxglove_bridge processes (they may not be in the same process group)
+            subprocess.run(['pkill', '-9', '-f', 'foxglove_bridge'], 
+                         capture_output=True, timeout=2)
+            
             self.node_processes.clear()
             self._cleanup_ros2()
             return True
@@ -1401,8 +1406,12 @@ class ArgoLifecycleManager:
         if hasattr(self, 'special_nodes') and self.special_nodes:
             for special_node in self.special_nodes:
                 if special_node == 'foxglove_bridge':
-                    print(f"  DEBUG: pkill -f foxglove_bridge")
-                    subprocess.run(['pkill', '-f', 'foxglove_bridge'],
+                    print(f"  DEBUG: pkill -9 -f foxglove_bridge")
+                    # Use -9 (SIGKILL) to force kill both parent and child processes
+                    subprocess.run(['pkill', '-9', '-f', 'foxglove_bridge'],
+                         capture_output=True, timeout=2)
+                    # Also try killing by process name directly
+                    subprocess.run(['pkill', '-9', 'foxglove_bridge'],
                          capture_output=True, timeout=2)
         
         print("✅ Argo processes terminated")
@@ -1527,13 +1536,14 @@ class ArgoLifecycleManager:
                 
         return True
 
-    def simulate_local(self, force_mock: bool = False) -> bool:
+    def simulate_local(self, force_mock: bool = False, debug: bool = False) -> bool:
         """Launch Argo in local simulation mode.
         
         Args:
             force_mock: If True, force use of mock simulator even if real simulator is available
+            debug: If True, enable debug tracing in the simulator bridge
         """
-        return self._simulate(mode='local', force_mock=force_mock)
+        return self._simulate(mode='local', force_mock=force_mock, debug=debug)
 
     def simulate_remote(self) -> bool:
         """Launch Argo in remote simulation mode."""
@@ -1547,7 +1557,7 @@ class ArgoLifecycleManager:
             return False
         return self._simulate(mode='remote')
 
-    def _simulate(self, mode: str, force_mock: bool = False) -> bool:
+    def _simulate(self, mode: str, force_mock: bool = False, debug: bool = False) -> bool:
         """
         Launch Argo in simulation mode.
 
@@ -1624,6 +1634,9 @@ class ArgoLifecycleManager:
             # Add --force-mock if requested
             if force_mock and '--force-mock' not in args:
                 args.append('--force-mock')
+            # Add --debug if requested
+            if debug and '--debug' not in args:
+                args.append('--debug')
             # Note: Map name is now automatically loaded from argo_nodes.yaml by the simulator bridge
             # --map can still be passed to override if needed
             self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
@@ -1633,6 +1646,9 @@ class ArgoLifecycleManager:
             # Add --force-mock if requested
             if force_mock:
                 args.append('--force-mock')
+            # Add --debug if requested
+            if debug:
+                args.append('--debug')
             # Note: Map name is now automatically loaded from argo_nodes.yaml by the simulator bridge
             self.simulation_node_args['argo_unified_simulator_bridge.py'] = args
         
@@ -3170,7 +3186,7 @@ EXAMPLES:
             manager.quick_status()
             manager._cleanup_ros2()
         elif args.command == 'simulate_local':
-            success = manager.simulate_local(force_mock=args.force_mock)
+            success = manager.simulate_local(force_mock=args.force_mock, debug=args.debug)
             # simulate handles its own cleanup
             sys.exit(0 if success else 1)
         elif args.command == 'simulate_remote':

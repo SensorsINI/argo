@@ -183,6 +183,14 @@ class ArgoWebDashboard(ArgoBaseNode):
             depth=10
         )
         
+        # QoS profile for subscriptions that should receive the last published value (transient_local)
+        # Used for recording status so dashboard gets current state immediately when subscribing
+        self.transient_local_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=10
+        )
+        
         self.status_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
         self.status_timer_period_idle = 30.0  # 30 seconds when idle (low-power)
         self.health_timer_period_active = 1/UPDATE_RATE  # 5 seconds when active
@@ -206,6 +214,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
         self.recording_start_client = self.create_client(Trigger, '/argo/recording/start')
         self.recording_stop_client = self.create_client(Trigger, '/argo/recording/stop')
+        self.recording_get_status_client = self.create_client(Trigger, '/argo/recording/get_status')
         self.controller_switch_client = self.create_client(Trigger, '/controller_node/switch_controller')
         self.battery_status_client = self.create_client(Trigger, '/battery_status')
         self.health_status_client = self.create_client(Trigger, '/argo/health/status')
@@ -228,6 +237,9 @@ class ArgoWebDashboard(ArgoBaseNode):
 
         if not self.low_power_mode: # only create initial subscriptions if not in low-power mode, now default
             self._create_all_subscriptions()
+            # Query initial recording status after subscriptions are created
+            # This ensures we get the current state even if the topic hasn't published yet
+            self._query_recording_status()
         
         # Lazy subscriptions: Don't subscribe to topics until a viewer accesses the dashboard
         # This minimizes startup CPU usage when dashboard is not being used
@@ -452,7 +464,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(String, '/controller_state', self.controller_state_cb, 10)
         )
         self._topic_subscriptions.append(
-            self.create_subscription(Bool, '/argo/recording/status', self.recording_status_cb, 10)
+            self.create_subscription(Bool, '/argo/recording/status', self.recording_status_cb, self.transient_local_qos)
         )
         
         # LoRa sources (fallback when WiFi unavailable)
@@ -1106,6 +1118,44 @@ class ArgoWebDashboard(ArgoBaseNode):
         if recording_changed:
             self._trigger_critical_state_update()
     
+    def _query_recording_status(self):
+        """Query the current recording status from the service to get initial state."""
+        try:
+            if not self.recording_get_status_client.wait_for_service(timeout_sec=2.0):
+                self.get_logger().debug("Recording status service not available, will wait for topic message")
+                return
+            
+            request = Trigger.Request()
+            future = self.recording_get_status_client.call_async(request)
+            
+            # Wait for response with timeout
+            timeout = 3.0
+            start_time = time.time()
+            while not future.done() and (time.time() - start_time) < timeout:
+                if self.signal_received or not rclpy.ok():
+                    break
+                try:
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                except Exception:
+                    if self.signal_received or not rclpy.ok():
+                        break
+            
+            if future.done():
+                try:
+                    response = future.result()
+                    with self.state_lock:
+                        prev_recording = self.state.get('recording')
+                        self.state['recording'] = response.success
+                        if prev_recording != response.success:
+                            self.get_logger().info(
+                                f"📹 Initial recording status queried: {'ACTIVE' if response.success else 'INACTIVE'}"
+                            )
+                except Exception as e:
+                    self.get_logger().debug(f"Error getting recording status response: {e}")
+        except Exception as e:
+            # Silently fail - topic subscription will provide the status
+            self.get_logger().debug(f"Could not query recording status service: {e}")
+    
     def _handle_health_request(self, request, response):
         """Override ArgoBaseNode health service callback with flag-based approach"""
         self.get_logger().info("🔥 HEALTH SERVICE CALLBACK CALLED!")
@@ -1596,9 +1646,43 @@ class ArgoWebDashboard(ArgoBaseNode):
         def toggle_recording():
             """Toggle recording state (start if stopped, stop if started)."""
             try:
-                # Get current recording state
-                with self.state_lock:
-                    is_recording = self.state.get('recording', False)
+                # First, query the actual recording status to avoid race conditions
+                # This ensures we have the most up-to-date state before toggling
+                if self.recording_get_status_client.wait_for_service(timeout_sec=2.0):
+                    request = Trigger.Request()
+                    future = self.recording_get_status_client.call_async(request)
+                    
+                    # Wait for response with short timeout
+                    timeout = 2.0
+                    start_time = time.time()
+                    while not future.done() and (time.time() - start_time) < timeout:
+                        if not rclpy.ok():
+                            break
+                        try:
+                            rclpy.spin_once(self, timeout_sec=0.1)
+                        except Exception:
+                            if not rclpy.ok():
+                                break
+                    
+                    if future.done():
+                        try:
+                            response = future.result()
+                            is_recording = response.success
+                            # Update state with actual status
+                            with self.state_lock:
+                                self.state['recording'] = is_recording
+                        except Exception:
+                            # Fall back to state dictionary if service call fails
+                            with self.state_lock:
+                                is_recording = self.state.get('recording', False)
+                    else:
+                        # Fall back to state dictionary if service call times out
+                        with self.state_lock:
+                            is_recording = self.state.get('recording', False)
+                else:
+                    # Fall back to state dictionary if service is not available
+                    with self.state_lock:
+                        is_recording = self.state.get('recording', False)
                 
                 # Choose appropriate client and service name based on current state
                 if is_recording:

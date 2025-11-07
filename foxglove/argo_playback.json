@@ -1,0 +1,383 @@
+{
+  "configById": {
+    "3D!argo_enhanced": {
+      "cameraState": {
+        "perspective": true,
+        "distance": 45.12499999999791,
+        "phi": 59.71875000000044,
+        "thetaOffset": 44.15625000000097,
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 1000
+      },
+      "followMode": "follow-position",
+      "followTf": "base_link",
+      "scene": {
+        "backgroundColor": "#d1e5ff",
+        "meshUpAxis": "y_up"
+      },
+      "transforms": {},
+      "topics": {
+        "/visualization_marker_array": {
+          "visible": true,
+          "color": "rgba(255, 255, 255, 1.0)",
+          "namespaces": {
+            "argo_boat_labels": {
+              "visible": false
+            }
+          }
+        },
+        "/visualization_marker": {
+          "visible": true,
+          "color": "rgba(255, 255, 255, 1.0)"
+        },
+        "/pose": {
+          "visible": true,
+          "color": "rgba(0, 255, 0, 0.8)"
+        },
+        "/gps_velocity": {
+          "visible": true,
+          "color": "rgba(255, 255, 0, 0.8)"
+        },
+        "/sailing_waypoints": {
+          "visible": true,
+          "color": "rgba(0, 255, 0, 0.8)"
+        },
+        "/sailing_boundaries": {
+          "visible": true,
+          "color": "rgba(0, 0, 255, 0.8)"
+        },
+        "/sailing_hazards": {
+          "visible": true,
+          "color": "rgba(255, 0, 0, 0.8)"
+        },
+        "/accel": {
+          "visible": true,
+          "color": "rgba(255, 0, 255, 0.8)"
+        },
+        "/gyro": {
+          "visible": true,
+          "color": "rgba(0, 255, 255, 0.8)"
+        },
+        "/compass": {
+          "visible": true,
+          "color": "rgba(255, 165, 0, 0.8)"
+        }
+      },
+      "layers": {
+        "grid": {
+          "visible": true,
+          "drawBehind": true,
+          "frameLocked": true,
+          "label": "Grid",
+          "instanceId": "8ea2528c-5352-4f83-ac3c-b9e0b7647a2a",
+          "layerId": "foxglove.Grid",
+          "size": 184.229,
+          "divisions": 10,
+          "lineWidth": 1,
+          "color": "#248eff",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "frameId": "map"
+        },
+        "axes": {
+          "visible": true,
+          "drawBehind": false,
+          "frameLocked": true,
+          "label": "Axes",
+          "instanceId": "axes-001",
+          "layerId": "foxglove.Axes",
+          "size": 5,
+          "lineWidth": 2,
+          "color": "#ffffff",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {}
+    },
+    "map!argo_sailing": {
+      "center": {
+        "lat": 47.37691174326479,
+        "lon": 8.540983248587132
+      },
+      "customTileUrl": "",
+      "disabledTopics": [],
+      "followTopic": "/fix",
+      "layer": "map",
+      "topicColors": {
+        "/fix": "rgba(0, 255, 0, 0.8)",
+        "/gps_velocity": "rgba(255, 255, 0, 0.8)",
+        "/sailing_waypoints": "rgba(0, 255, 0, 0.8)",
+        "/sailing_boundaries": "rgba(0, 0, 255, 0.8)",
+        "/sailing_hazards": "rgba(255, 0, 0, 0.8)"
+      },
+      "zoomLevel": 20,
+      "maxNativeZoom": 18,
+      "topicConfig": {
+        "/fix": {
+          "pointDisplayMode": "pin",
+          "historyMode": "all",
+          "pointSize": 8
+        },
+        "/gps_velocity": {
+          "pointDisplayMode": "arrow",
+          "historyMode": "all",
+          "pointSize": 6
+        }
+      },
+      "followFrame": ""
+    },
+    "Plot!gps_data": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gps_sog.data",
+          "enabled": true,
+          "color": "#4e98e2",
+          "label": "SOG"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": false,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": false,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "SOG"
+    },
+    "Plot!43fivgi": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/gps_cog.data",
+          "enabled": true,
+          "color": "#4e98e2",
+          "label": "COG"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": false,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": false,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "COG"
+    },
+    "Plot!wind_data": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/anem_speed_angle_temp.x",
+          "enabled": true,
+          "color": "#00e676",
+          "label": "m/s"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/anem_speed_angle_temp.y",
+          "enabled": true,
+          "color": "#ff1744",
+          "label": "deg"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "Wind"
+    },
+    "Plot!control_data": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/rudder_sail_cmd.x",
+          "enabled": true,
+          "color": "#d50000",
+          "label": "rudder"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/rudder_sail_cmd.y",
+          "enabled": true,
+          "color": "#00c853",
+          "label": "sail"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/human_controlled.data",
+          "enabled": true,
+          "color": "#aa00ff",
+          "showLine": true,
+          "label": "human"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "rud/sail"
+    },
+    "Gauge!battery": {
+      "path": "/battery_remaining_pct.data",
+      "minValue": 0,
+      "maxValue": 100,
+      "colorMap": "red-yellow-green",
+      "colorMode": "colormap",
+      "gradient": [
+        "#0000ff",
+        "#ff00ff"
+      ],
+      "reverse": false,
+      "reverseDirection": false,
+      "foxglovePanelTitle": "bat remaining"
+    },
+    "Plot!imu_data": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/compass.z",
+          "enabled": true,
+          "color": "#795548",
+          "label": "compass"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
+    },
+    "Plot!power_data": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/battery_voltage.data",
+          "enabled": true,
+          "color": "#00c853",
+          "label": "bat (V)"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/sail_current.data",
+          "enabled": true,
+          "color": "#ff6d00",
+          "label": "sail"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "/saltwater_voltage.data",
+          "enabled": true,
+          "color": "#2962ff",
+          "label": "water"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "showPlotValuesInLegend": false,
+      "sidebarDimension": 240
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "linkedGlobalVariables": [],
+  "playbackConfig": {
+    "speed": 4
+  },
+  "layout": {
+    "direction": "row",
+    "first": {
+      "first": "3D!argo_enhanced",
+      "second": "map!argo_sailing",
+      "direction": "column"
+    },
+    "second": {
+      "direction": "column",
+      "first": {
+        "direction": "row",
+        "first": {
+          "first": "Plot!gps_data",
+          "second": "Plot!43fivgi",
+          "direction": "column"
+        },
+        "second": "Plot!wind_data"
+      },
+      "second": {
+        "direction": "row",
+        "first": {
+          "first": "Plot!control_data",
+          "second": "Gauge!battery",
+          "direction": "column",
+          "splitPercentage": 67.64705882352942
+        },
+        "second": {
+          "direction": "column",
+          "first": "Plot!imu_data",
+          "second": "Plot!power_data"
+        }
+      },
+      "splitPercentage": 50
+    },
+    "splitPercentage": 48.43852922796291
+  }
+}
