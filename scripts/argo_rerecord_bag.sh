@@ -292,7 +292,31 @@ if [ $EXIT_CODE -eq 0 ]; then
         echo -e "   • Open Foxglove Studio → Open data source → Local file"
         echo -e "   • Select: ${CYAN}$BAGS_DIR/$OUTPUT_BAG${NC}"
     else
-        echo -e "${YELLOW}⚠️  Warning: Output bag folder not found at expected location${NC}"
+        echo -e "${RED}❌ Error: Output bag folder not found at expected location${NC}"
+        echo -e "   Expected: ${CYAN}$BAGS_DIR/$OUTPUT_BAG${NC}"
+        echo ""
+        echo -e "${YELLOW}⚠️  The re-recording process reported success, but the output bag was not created.${NC}"
+        echo -e "${YELLOW}   This may indicate:${NC}"
+        echo -e "   • The bag recording process failed silently"
+        echo -e "   • The output path was incorrect"
+        echo -e "   • The bag was created in a different location"
+        echo ""
+        # Try to find the bag in case it was created elsewhere
+        FOUND_BAG=$(find "$BAGS_DIR" -maxdepth 1 -type d -name "*${OUTPUT_BAG}*" 2>/dev/null | head -1)
+        if [ -n "$FOUND_BAG" ]; then
+            echo -e "${CYAN}💡 Found similar bag at: ${GREEN}$FOUND_BAG${NC}"
+        else
+            echo -e "${CYAN}💡 Searching for recently created bags...${NC}"
+            RECENT_BAGS=$(find "$BAGS_DIR" -maxdepth 1 -type d -name "argo_*" -newer "$SELECTED_BAG" 2>/dev/null | head -3)
+            if [ -n "$RECENT_BAGS" ]; then
+                echo -e "${CYAN}   Recent bags found:${NC}"
+                echo "$RECENT_BAGS" | while read -r bag; do
+                    echo -e "   ${GREEN}$bag${NC}"
+                done
+            fi
+        fi
+        # Update exit code to indicate failure
+        EXIT_CODE=1
     fi
 fi
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
