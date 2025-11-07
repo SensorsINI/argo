@@ -36,6 +36,9 @@ import sys
 import os
 import argparse
 import argcomplete
+import json
+import yaml
+from pathlib import Path
 
 # Import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
@@ -95,6 +98,10 @@ class ArgoTransformPublisher(ArgoBaseNode):
             clock_qos
         )
         
+        # Load map name from config and set map origin from map's "home" waypoint
+        # This ensures the transform publisher uses the same coordinate system as sailing_area_publisher
+        self._load_map_origin_from_config()
+        
         # Publish static transforms at startup
         self.publish_static_transforms()
         
@@ -135,6 +142,58 @@ class ArgoTransformPublisher(ArgoBaseNode):
         # Otherwise, use node's clock (normal operation)
         return self.get_clock().now().to_msg()
     
+    def _load_map_origin_from_config(self):
+        """Load map name from config and set map origin from map's 'home' waypoint.
+        This ensures the transform publisher uses the same coordinate system as sailing_area_publisher."""
+        try:
+            # Determine path to argo_nodes.yaml (launch/ directory)
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[1]  # nodes -> argo
+            yaml_path = argo_dir / "launch" / "argo_nodes.yaml"
+            
+            if not yaml_path.exists():
+                self.get_logger().debug("argo_nodes.yaml not found, will use first GPS fix for map origin")
+                return
+            
+            # Load map name from config
+            with open(yaml_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            simulation_config = config.get('simulation_config', {})
+            map_name = simulation_config.get('map_name')
+            
+            if not map_name:
+                self.get_logger().debug("No map_name in config, will use first GPS fix for map origin")
+                return
+            
+            # Load the map's GeoJSON file to find the "home" waypoint
+            maps_dir = argo_dir / "foxglove" / "maps"
+            geojson_path = maps_dir / f"{map_name}.geojson"
+            
+            if not geojson_path.exists():
+                self.get_logger().warn(f"Map file not found: {geojson_path}, will use first GPS fix for map origin")
+                return
+            
+            # Load GeoJSON and find "home" waypoint
+            with open(geojson_path, 'r') as f:
+                geojson_data = json.load(f)
+            
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                if props.get('name') == 'home' and props.get('type') == 'waypoint':
+                    coords = feature['geometry']['coordinates']
+                    # GeoJSON format: [longitude, latitude, altitude]
+                    self.map_origin_lon = coords[0]
+                    self.map_origin_lat = coords[1]
+                    self.map_origin_set = True
+                    self.get_logger().info(f"Map origin set from '{map_name}' home waypoint: "
+                                         f"lat={self.map_origin_lat:.6f}, lon={self.map_origin_lon:.6f}")
+                    return
+            
+            self.get_logger().warn(f"No 'home' waypoint found in map '{map_name}', will use first GPS fix for map origin")
+        except Exception as e:
+            self.get_logger().warn(f"Failed to load map origin from config: {e}, will use first GPS fix for map origin")
+    
     def lonlat_to_xy(self, lon, lat):
         """Converts longitude/latitude to local x/y meters using an equirectangular projection."""
         if not self.map_origin_set:
@@ -144,7 +203,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         return x, y
     
     def gps_callback(self, msg):
-        """Set map origin from first GPS fix and update current position"""
+        """Update current position from GPS fix. Map origin is set from config if available, otherwise from first GPS fix."""
         if math.isnan(msg.latitude) or math.isnan(msg.longitude):
             return # Ignore invalid GPS data
         
@@ -152,12 +211,13 @@ class ArgoTransformPublisher(ArgoBaseNode):
         if abs(msg.latitude) < 0.0001 and abs(msg.longitude) < 0.0001:
             self.get_logger().warn("Ignoring zero GPS coordinates - possible reset")
             return
-            
+        
+        # Set map origin from first GPS fix only if not already set from config
         if not self.map_origin_set:
             self.map_origin_lat = msg.latitude
             self.map_origin_lon = msg.longitude
             self.map_origin_set = True
-            self.get_logger().info(f"Map origin set to: {self.map_origin_lat:.6f}, {self.map_origin_lon:.6f}")
+            self.get_logger().info(f"Map origin set from first GPS fix: {self.map_origin_lat:.6f}, {self.map_origin_lon:.6f}")
             if self.debug_trace:
                 self.get_logger().debug(f"[TF_TRACE:GPS] Map origin set - lat={self.map_origin_lat:.8f}, lon={self.map_origin_lon:.8f}")
 
