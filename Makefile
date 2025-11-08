@@ -49,7 +49,27 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote
+.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm
+
+VM_REQUIREMENTS_FILE := requirements-host.txt
+VM_INSTALL_SCOPE := $(shell if [ $$(id -u) -eq 0 ]; then printf 'system'; else printf 'user'; fi)
+VM_HAS_UV := $(shell command -v uv >/dev/null 2>&1 && printf '1' || printf '0')
+VM_PIP_INSTALL_CMD := $(shell \
+	if command -v uv >/dev/null 2>&1 && [ $$(id -u) -eq 0 ]; then \
+		printf 'uv pip install --upgrade'; \
+	elif [ $$(id -u) -eq 0 ]; then \
+		printf 'pip3 install --upgrade'; \
+	elif command -v uv >/dev/null 2>&1; then \
+		printf 'pip3 install --user --upgrade'; \
+	else \
+		printf 'pip3 install --user --upgrade'; \
+	fi)
+VM_PIP_UNINSTALL_CMD := $(shell \
+	if command -v uv >/dev/null 2>&1 && [ $$(id -u) -eq 0 ]; then \
+		printf 'uv pip uninstall -y'; \
+	else \
+		printf 'pip3 uninstall -y'; \
+	fi)
 
 help:
 	@echo "Argo Robot Services Management"
@@ -154,6 +174,9 @@ help:
 	@echo "  setup-venv     - Create Python venv with uv (automatic activation)"
 	@echo "  update-venv    - Update venv dependencies"
 	@echo "  clean-venv     - Remove venv"
+	@echo "  setup-vm       - Install host dependencies to VM user/system site-packages"
+	@echo "  update-vm      - Update host dependencies on VM"
+	@echo "  clean-vm       - Uninstall host dependencies from VM"
 # ==================== SIMULATION MANAGEMENT ====================
 
 simulate-local:
@@ -203,6 +226,24 @@ update-venv:
 		.venv/bin/pip install --upgrade -r requirements.txt; \
 	fi
 	@echo "✅ Dependencies updated"
+
+setup-vm:
+	@echo "Installing Python host dependencies on dedicated VM ($(VM_INSTALL_SCOPE) site-packages)..."
+	@echo "Using $(if $(filter 1,$(VM_HAS_UV)),uv,pip3) for package management."
+	@$(VM_PIP_INSTALL_CMD) -r $(VM_REQUIREMENTS_FILE)
+	@echo "✅ Host dependencies installed for VM environment"
+
+update-vm:
+	@echo "Updating Python host dependencies on dedicated VM ($(VM_INSTALL_SCOPE) site-packages)..."
+	@echo "Using $(if $(filter 1,$(VM_HAS_UV)),uv,pip3) for package management."
+	@$(VM_PIP_INSTALL_CMD) -r $(VM_REQUIREMENTS_FILE)
+	@echo "✅ Host dependencies updated for VM environment"
+
+clean-vm:
+	@echo "Uninstalling Python host dependencies from dedicated VM..."
+	@echo "Using $(if $(filter 1,$(VM_HAS_UV)),uv,pip3) for package management."
+	@$(VM_PIP_UNINSTALL_CMD) -r $(VM_REQUIREMENTS_FILE) || true
+	@echo "✅ Host dependencies removed from VM environment"
 
 
 # ==================== DEPENDENCY INSTALLATION ====================
