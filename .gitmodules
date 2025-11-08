@@ -1,8 +1,13 @@
+# this is argo's fork of the sailboat-playground repository. The root Makefile will setup the submodule to point to this fork and build it. 
+#The sailboat-playground repository is used to simulate the sailboat and its environment.
+# the local branch will be setup to be connected to the master branch of our fork so we can edit it locally and push the changes to our fork.
 [submodule "simulator/sailboat-playground"]
 	path = simulator/sailboat-playground
 	url = https://github.com/SensorsINI/sailboat-playground.git
 
 
+# This submodule is the stock ros2 driver for the bno08x IMU driver.
+# argo has a python bridge that converts the ros2 driver topics to the argo format.
 [submodule "nodes/vendor/bno08x_driver"]
 	path = nodes/vendor/bno08x_driver
 	url = https://github.com/bnbhat/bno08x-ros2-driver.git

@@ -533,6 +533,9 @@ uninstall-power-control:
 
 # ==================== GIT SUBMODULE MANAGEMENT ====================
 
+SAILBOAT_SUBMODULE_PATH := simulator/sailboat-playground
+SAILBOAT_SUBMODULE_NAME := simulator/sailboat-playground
+
 submodule-init:
 	@echo "Initializing sailboat-playground submodule..."
 	@if [ ! -f .gitmodules ]; then \
@@ -548,12 +551,42 @@ submodule-init:
 		exit 1; \
 	fi
 	@echo "Initializing and checking out submodule..."
-	git submodule update --init --recursive simulator/sailboat-playground
-	@echo "✅ sailboat-playground submodule initialized successfully!"
+	git submodule update --init --recursive $(SAILBOAT_SUBMODULE_PATH)
+	@echo "Configuring submodule git remotes and tracking branch..."
+	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
+	if [ -z "$$submodule_url" ]; then \
+		echo "❌ Unable to determine submodule remote URL from .gitmodules"; \
+		exit 1; \
+	fi; \
+	cd $(SAILBOAT_SUBMODULE_PATH) && \
+	current_url=$$(git remote get-url origin); \
+	if [ "$$current_url" != "$$submodule_url" ]; then \
+		git remote set-url origin "$$submodule_url"; \
+		echo "   ➜ Updated origin to $$submodule_url"; \
+	else \
+		echo "   ➜ Origin already set to $$submodule_url"; \
+	fi; \
+	git fetch origin --prune; \
+	if git show-ref --verify --quiet refs/remotes/origin/master; then \
+		target_branch=master; \
+	elif git show-ref --verify --quiet refs/remotes/origin/main; then \
+		target_branch=main; \
+	else \
+		echo "❌ origin/master and origin/main not found. Please verify remote branch names."; \
+		exit 1; \
+	fi; \
+	current_commit=$$(git rev-parse HEAD); \
+	git checkout -B $$target_branch $$current_commit >/dev/null 2>&1 || exit 1; \
+	if git rev-parse --verify --quiet origin/$$target_branch >/dev/null 2>&1; then \
+		git branch --set-upstream-to=origin/$$target_branch $$target_branch >/dev/null 2>&1 || true; \
+	fi; \
+	echo "   ➜ Checked out $$target_branch tracking origin/$$target_branch"
+	@echo "✅ sailboat-playground submodule initialized and configured successfully!"
 	@echo ""
-	@echo "Submodule location: simulator/sailboat-playground/"
+	@echo "Submodule location: $(SAILBOAT_SUBMODULE_PATH)/"
 	@echo "Customizations location: simulator/customizations/sailboat-playground/"
-	@echo "Source repository: https://github.com/SensorsINI/sailboat-playground.git"
+	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
+	echo "Source repository: $$submodule_url"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Review the submodule code in simulator/sailboat-playground/"
@@ -562,21 +595,45 @@ submodule-init:
 
 submodule-update:
 	@echo "Updating sailboat-playground submodule..."
-	@if [ ! -d simulator/sailboat-playground ]; then \
+	@if [ ! -d $(SAILBOAT_SUBMODULE_PATH) ]; then \
 		echo "❌ Submodule not initialized!"; \
 		echo "   Run 'make submodule-init' first."; \
 		exit 1; \
 	fi
 	@echo "Fetching latest changes from remote..."
-	git submodule update --remote --merge simulator/sailboat-playground
+	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
+	if [ -z "$$submodule_url" ]; then \
+		echo "❌ Unable to determine submodule remote URL from .gitmodules"; \
+		exit 1; \
+	fi; \
+	cd $(SAILBOAT_SUBMODULE_PATH) && \
+	current_url=$$(git remote get-url origin); \
+	if [ "$$current_url" != "$$submodule_url" ]; then \
+		git remote set-url origin "$$submodule_url"; \
+		echo "   ➜ Updated origin to $$submodule_url"; \
+	fi; \
+	git fetch origin --prune; \
+	if git show-ref --verify --quiet refs/remotes/origin/master; then \
+		target_branch=master; \
+	elif git show-ref --verify --quiet refs/remotes/origin/main; then \
+		target_branch=main; \
+	else \
+		echo "❌ origin/master and origin/main not found. Please verify remote branch names."; \
+		exit 1; \
+	fi; \
+	git checkout $$target_branch >/dev/null 2>&1 || git checkout -B $$target_branch origin/$$target_branch >/dev/null 2>&1 || exit 1; \
+	if git rev-parse --verify --quiet origin/$$target_branch >/dev/null 2>&1; then \
+		git branch --set-upstream-to=origin/$$target_branch $$target_branch >/dev/null 2>&1 || true; \
+	fi; \
+	git pull --ff-only origin $$target_branch
 	@echo "✅ sailboat-playground submodule updated successfully!"
 	@echo ""
 	@echo "Current submodule status:"
-	@git submodule status simulator/sailboat-playground
+	@git submodule status $(SAILBOAT_SUBMODULE_PATH)
 	@echo ""
 	@echo "Note: The submodule has been updated to the latest version."
 	@echo "      Commit this change to lock the submodule to this version:"
-	@echo "      git add simulator/sailboat-playground"
+	@echo "      git add $(SAILBOAT_SUBMODULE_PATH)"
 	@echo "      git commit -m 'Update sailboat-playground submodule'"
 
 submodule-status:
@@ -614,6 +671,9 @@ submodule-status:
 			echo ""; \
 			echo "Remote status:"; \
 			cd simulator/sailboat-playground && git status -sb && cd ../..; \
+			echo ""; \
+			echo "Remote URL:"; \
+			cd simulator/sailboat-playground && git remote get-url origin && cd ../..; \
 		else \
 			echo "❌ Submodule directory exists but not initialized"; \
 			echo "   Run 'make submodule-init' to initialize"; \
