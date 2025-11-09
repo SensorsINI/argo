@@ -2,6 +2,7 @@
 Description=Boot history logger
 After=multi-user.target
 DefaultDependencies=no
+RequiresMountsFor=/var/log.hdd/persistent
 
 [Service]
 Type=oneshot

@@ -1,0 +1,14 @@
+[Unit]
+Description=Argo persistent log pruning
+RequiresMountsFor=/var/log.hdd/persistent
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/argo_persistent_log_manager.sh --prune
+
+[Install]
+WantedBy=none
+
+
+

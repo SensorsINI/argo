@@ -1074,14 +1074,26 @@ class ArgoWebDashboard(ArgoBaseNode):
         else:
             # No recent boat data - unhealthy
             data_age = f"{time_since_data:.1f}s ago"
+            viewer_idle = None
+            if self.last_viewer_request_time:
+                viewer_idle = now - self.last_viewer_request_time
+            
+            if self.low_power_mode:
+                if viewer_idle is not None:
+                    reason = f"Low-power mode: unsubscribed (no viewers for {viewer_idle:.1f}s; last boat data {data_age})"
+                else:
+                    reason = f"Low-power mode: unsubscribed from boat data (last boat data {data_age})"
+            else:
+                reason = f"No boat data received ({data_age})"
+            
             if should_log:
-                self.set_unhealthy(f"No boat data received ({data_age})")
+                self.set_unhealthy(reason)
                 self.last_health_log_time = now
                 self.last_logged_health_state = False
             else:
                 # Update health status silently (no logging)
                 self.health_status = False
-                self.health_details = f"No boat data received ({data_age})"
+                self.health_details = reason
                 self.last_health_update = now
     
     def controller_state_cb(self, msg):

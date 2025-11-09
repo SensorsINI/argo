@@ -1,0 +1,16 @@
+[Unit]
+Description=Argo persistent log rotation (boot)
+DefaultDependencies=no
+RequiresMountsFor=/var/log.hdd/persistent
+After=local-fs.target
+Before=argo_power_control.service argo_battery_water.service argo_bno085.service argo_health_monitor.service argo_launch_standard.service argo_radio_servo_module.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/argo_persistent_log_manager.sh --rotate-on-boot --prune
+
+[Install]
+WantedBy=multi-user.target
+
+
+

@@ -5,7 +5,8 @@ Before=argo_launch_standard.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'if ! lsmod | grep -q argo_radio_servo_module; then insmod /lib/modules/$(uname -r)/kernel/drivers/misc/argo/argo_radio_servo_module.ko; fi'
+ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
+ExecStart=/bin/bash -c 'set -eo pipefail; { if ! lsmod | grep -q argo_radio_servo_module; then insmod /lib/modules/$(uname -r)/kernel/drivers/misc/argo/argo_radio_servo_module.ko; else echo "argo_radio_servo_module already loaded"; fi; } |& tee -a /var/log.hdd/persistent/argo-radio-servo-module.log'
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal

@@ -113,6 +113,41 @@ uninstall-persistent-dmesg:
 	@sudo systemctl daemon-reload
 	@echo "✅ Persistent dmesg service uninstalled"
 
+# Persistent Log Manager Service
+install-persistent-log-manager:
+	@echo "📋 Installing Argo persistent log manager..."
+	@sudo cp $(MONITORING_DIR)/services/argo-persistent-logs.service $(SERVICE_DIR)/
+	@sudo cp $(MONITORING_DIR)/services/argo-persistent-logs-prune.service $(SERVICE_DIR)/
+	@sudo cp $(MONITORING_DIR)/services/argo-persistent-logs-prune.timer $(SERVICE_DIR)/
+	@sudo cp $(MONITORING_DIR)/../scripts/argo_persistent_log_manager.sh $(SCRIPT_DIR)/
+	@sudo chmod +x $(SCRIPT_DIR)/argo_persistent_log_manager.sh
+	@if [ -f /etc/logrotate.d/persistent-logs ]; then \
+		 sudo mv /etc/logrotate.d/persistent-logs /etc/logrotate.d/persistent-logs.disabled; \
+		 echo "↪︎ Disabled legacy logrotate policy for persistent logs"; \
+	 fi
+	@sudo systemctl daemon-reload
+	@sudo systemctl enable argo-persistent-logs.service
+	@sudo systemctl enable argo-persistent-logs-prune.timer
+	@sudo systemctl start argo-persistent-logs.service
+	@sudo systemctl start argo-persistent-logs-prune.timer
+	@echo "✅ Argo persistent log manager installed"
+
+uninstall-persistent-log-manager:
+	@echo "🗑️  Uninstalling Argo persistent log manager..."
+	@sudo systemctl stop argo-persistent-logs-prune.timer 2>/dev/null || true
+	@sudo systemctl disable argo-persistent-logs-prune.timer 2>/dev/null || true
+	@sudo systemctl disable argo-persistent-logs.service 2>/dev/null || true
+	@sudo rm -f $(SERVICE_DIR)/argo-persistent-logs.service
+	@sudo rm -f $(SERVICE_DIR)/argo-persistent-logs-prune.service
+	@sudo rm -f $(SERVICE_DIR)/argo-persistent-logs-prune.timer
+	@sudo rm -f $(SCRIPT_DIR)/argo_persistent_log_manager.sh
+	@if [ -f /etc/logrotate.d/persistent-logs.disabled ] && [ ! -f /etc/logrotate.d/persistent-logs ]; then \
+		 sudo mv /etc/logrotate.d/persistent-logs.disabled /etc/logrotate.d/persistent-logs; \
+		 echo "↩︎ Restored original logrotate policy for persistent logs"; \
+	 fi
+	@sudo systemctl daemon-reload
+	@echo "✅ Argo persistent log manager uninstalled"
+
 # Crash Dump Service
 install-crash-dump:
 	@echo "📋 Installing crash dump service..."
@@ -154,7 +189,7 @@ uninstall-temp-logger:
 # ==================== BULK OPERATIONS ====================
 
 # Install all system monitoring services
-install-all: install-boot-logger install-cursor-monitor install-memory-monitor install-orangepi-monitor install-persistent-dmesg install-crash-dump install-temp-logger
+install-all: install-boot-logger install-cursor-monitor install-memory-monitor install-orangepi-monitor install-persistent-dmesg install-persistent-log-manager install-crash-dump install-temp-logger
 	@echo ""
 	@echo "✅ All system monitoring services installed successfully!"
 	@echo ""
@@ -164,6 +199,7 @@ install-all: install-boot-logger install-cursor-monitor install-memory-monitor i
 	@echo "  • memory-monitor.service - Memory and process monitoring"
 	@echo "  • orangepi-monitor.service - Orange Pi hardware monitoring"
 	@echo "  • persistent-dmesg.service - Kernel message logging"
+	@echo "  • argo-persistent-logs.service - Argo persistent log rotation & pruning"
 	@echo "  • crash-dump.service - Crash dump collection"
 	@echo "  • temp-logger.service - Temperature logging"
 	@echo ""
@@ -171,7 +207,7 @@ install-all: install-boot-logger install-cursor-monitor install-memory-monitor i
 	@echo "🔍 Monitor logs with: tail -f $(PERSISTENT_LOG_DIR)/*.log"
 
 # Uninstall all system monitoring services
-uninstall-all: uninstall-boot-logger uninstall-cursor-monitor uninstall-memory-monitor uninstall-orangepi-monitor uninstall-persistent-dmesg uninstall-crash-dump uninstall-temp-logger
+uninstall-all: uninstall-boot-logger uninstall-cursor-monitor uninstall-memory-monitor uninstall-orangepi-monitor uninstall-persistent-dmesg uninstall-persistent-log-manager uninstall-crash-dump uninstall-temp-logger
 	@echo ""
 	@echo "✅ All system monitoring services uninstalled successfully!"
 
@@ -281,6 +317,7 @@ help:
 	@echo "  install-memory-monitor   - Install memory monitor service"
 	@echo "  install-orangepi-monitor - Install Orange Pi monitor service"
 	@echo "  install-persistent-dmesg - Install persistent dmesg service"
+	@echo "  install-persistent-log-manager - Install Argo persistent log manager"
 	@echo "  install-crash-dump       - Install crash dump service"
 	@echo "  install-temp-logger      - Install temperature logger service"
 	@echo ""

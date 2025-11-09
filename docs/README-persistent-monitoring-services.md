@@ -106,6 +106,26 @@ The Argo system uses a dual logging architecture:
 - System health monitoring
 - **Dual Logging**: Both persistent files and systemd journal
 
+### 5. Argo Persistent Log Manager
+
+**Service**: `argo-persistent-logs.service` + `argo-persistent-logs-prune.timer`  
+**Script**: `/usr/local/bin/argo_persistent_log_manager.sh`  
+**Installation**: `make -C system-monitoring install-persistent-log-manager`
+
+**Log Files**:
+- `argo-*.log` (live service logs)
+- `argo-*-YYYYMMDD-HHMMSS-<BOOT_ID>.boot.log` (per-boot snapshots)
+- `journalctl-<BOOT_ID>.log` (per-boot journal export)
+
+**Purpose**: Guarantees that Argo service logs survive reboots and are only rotated when either a reboot occurs or the persistent log partition exceeds a configurable usage threshold (85% by default).
+
+**Features**:
+- Rotates each Argo service log at boot before dependent services start
+- Maintains boot-specific log snapshots for retrospective analysis
+- Prunes oldest log artifacts only when persistent storage usage crosses the threshold
+- Disables the legacy `/etc/logrotate.d/persistent-logs` daily rotation policy
+- Hourly pruning timer that does nothing unless the threshold is exceeded
+
 ## System-Level Monitoring Services (Optional)
 
 **Note**: These services are **NOT installed by default** and are available as optional debugging tools in the `system-monitoring/` directory.
@@ -262,77 +282,21 @@ ForwardToSyslog=no
 - **MaxRetentionSec**: `2week` - Maximum retention time
 - **Compress**: `yes` - Compress old journal files
 
-### Logrotate Configuration
-Log rotation is managed by `/etc/logrotate.conf` and `/etc/logrotate.d/`:
+### Persistent Log Manager Configuration
 
-#### Global Settings (`/etc/logrotate.conf`)
-```bash
-# Rotate log files weekly
-weekly
-
-# Use the adm group by default
-su root adm
-
-# Keep 4 weeks worth of backlogs
-rotate 4
-
-# Create new (empty) log files after rotating old ones
-create
-
-# Compress rotated files
-compress
-```
-
-#### Persistent Logs (`/etc/logrotate.d/persistent-logs`)
-```bash
-/var/log.hdd/persistent/*.log {
-    daily
-    missingok
-    rotate 2
-    compress
-    delaycompress
-    create 644 root root
-    su root root
-}
-```
-
-#### System Logs (`/etc/logrotate.d/rsyslog`)
-```bash
-/var/log.hdd/syslog
-/var/log.hdd/mail.info
-/var/log.hdd/mail.warn
-/var/log.hdd/mail.err
-/var/log.hdd/mail.log
-/var/log.hdd/daemon.log
-/var/log.hdd/kern.log
-/var/log.hdd/auth.log
-/var/log.hdd/user.log
-/var/log.hdd/lpr.log
-/var/log.hdd/cron.log
-/var/log.hdd/debug
-/var/log.hdd/messages
-{
-    rotate 4
-    weekly
-    missingok
-    notifempty
-    compress
-    delaycompress
-    sharedscripts
-    postrotate
-        /usr/lib/rsyslog/rsyslog-rotate
-    endscript
-}
-```
+- The `install-persistent-log-manager` target **disables** the legacy `/etc/logrotate.d/persistent-logs` policy.
+- `/usr/local/bin/argo_persistent_log_manager.sh` rotates Argo service logs at boot and creates timestamped `*.boot.log` snapshots.
+- The companion timer (`argo-persistent-logs-prune.timer`) triggers an hourly check that only removes files when the persistent log partition exceeds the configurable threshold (default: 85%).
+- System logs outside the persistent directory continue to be rotated by the stock logrotate configuration in `/etc/logrotate.d/rsyslog`.
 
 ### Log Rotation Schedule
 
 | Log Type | Rotation Frequency | Retention | Compression | Location |
 |----------|-------------------|-----------|-------------|----------|
-| **Persistent Logs** | Daily | 2 days | Yes (delayed) | `/var/log.hdd/persistent/` |
-| **System Logs** | Weekly | 4 weeks | Yes (delayed) | `/var/log.hdd/` |
+| **Persistent Logs** | On boot + threshold | Oldest snapshots pruned when usage ≥ threshold | Optional (manual) | `/var/log.hdd/persistent/` |
+| **System Logs** | Weekly (logrotate) | 4 weeks | Yes (delayed) | `/var/log.hdd/` |
 | **Systemd Journal** | Automatic | 2 weeks | Yes | `/var/log/journal/` |
-| **Boot History** | Daily | 2 days | Yes (delayed) | `/var/log.hdd/persistent/` |
+| **Boot History** | Per boot | Unlimited (timestamped files) | No (plain text) | `/var/log.hdd/persistent/` |
 
 ### Log Rotation Troubleshooting
 
@@ -360,13 +324,13 @@ journalctl --list-boots
 systemctl status systemd-journald
 ```
 
-#### Manual Log Rotation
+#### Manual Log Maintenance
 ```bash
-# Rotate specific log files
-sudo logrotate -f /etc/logrotate.d/persistent-logs
+# Force a prune check (uses current threshold)
+sudo /usr/local/bin/argo_persistent_log_manager.sh --prune
 
-# Check rotated files
-ls -la /var/log.hdd/persistent/*.log*
+# Rotate service logs immediately (e.g. before manual testing)
+sudo /usr/local/bin/argo_persistent_log_manager.sh --rotate-on-boot
 ```
 
 ### Service-Specific Logging Configuration
@@ -376,13 +340,21 @@ These services are configured to log to `/var/log.hdd/persistent/`:
 
 1. **argo_power_control.service**:
    ```ini
-   StandardOutput=append:/var/log.hdd/persistent/argo-power-control.log
-   StandardError=append:/var/log.hdd/persistent/argo-power-control.log
+   Environment=PYTHONUNBUFFERED=1
+   ExecStart=/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash && \
+     /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py |& \
+     tee -a /var/log.hdd/persistent/argo-power-control.log'
+   StandardOutput=journal
+   StandardError=journal
    ```
 
-2. **argo_thermal_monitor.service**: Uses shell script with `>>` redirection
+2. **argo_battery_water.service** and **argo_health_monitor.service** follow the same pattern using `tee -a` to append to their respective persistent log files while keeping journald output.
 
-3. **Boot History Logger**: Uses shell script with `>>` redirection
+3. **argo_bno085.service** uses the launcher script and pipes combined stdout/stderr through `tee -a /var/log.hdd/persistent/argo-bno085.log`.
+
+4. **argo_launch_standard.service** logs to `argo-launch-standard.log` using the same `tee` approach and retains journald output for `journalctl` consumers.
+
+5. **argo_thermal_monitor.service** and **boot-history-logger.service** use shell redirection (`>>`) to append directly to persistent files.
 
 #### Services with System Logging Only
 These services log only to systemd journal:
@@ -444,10 +416,18 @@ cat /var/log.hdd/persistent/boot-history.log
 | `battery-monitor-YYYYMMDD.csv` | `argo_battery_water.py` (ROS2) | Battery/sensor data | 30s | Persistent |
 | `wifi-reconnect.log` | `argo_wifi_reconnect.service` | WiFi management | 5min | Persistent |
 | `argo-power-control.log` | `argo_power_control.service` | Power control | Event-based | **Dual** (Persistent + Journal) |
-| `boot-history.log` | `boot-history-logger.service` | Boot events | Per boot | Persistent |
+| `argo-battery-water.log` | `argo_battery_water.service` | Battery + water monitoring | Event-based | **Dual** |
+| `argo-health-monitor.log` | `argo_health_monitor.service` | Node health aggregation | Event-based | **Dual** |
+| `argo-launch-standard.log` | `argo_launch_standard.service` | ROS2 launch orchestration | Event-based | **Dual** |
+| `argo-bno085.log` | `argo_bno085.service` | IMU driver + bridge | Event-based | **Dual** |
+| `argo-radio-servo-module.log` | `argo_radio_servo_module.service` | Kernel module loader | Oneshot | **Dual** |
+| `argo-*-YYYYMMDD-HHMMSS-<BOOT_ID>.boot.log` | `argo-persistent-logs.service` | Per-boot service snapshots | Per boot | Persistent |
+| `boot-history.log` | `boot-history-logger.service` | Boot events (aggregate) | Per boot | Persistent |
+| `boot-history-YYYYMMDD-HHMMSS-<BOOT_ID>.log` | `boot-history-logger.service` | Boot event snapshot | Per boot | Persistent |
 | `dmesg-YYYYMMDD.log` | `boot-history-logger.service` | Boot-time kernel messages | Per boot | Persistent |
 | `dmesg-YYYYMMDD-HHMMSS.log` | `persistent-dmesg.service` | Timestamped kernel messages | Per boot | Persistent |
-| `journalctl-YYYYMMDD-HHMMSS.log` | `boot-history-logger.service` | Boot-time systemd journal | Per boot | Persistent |
+| `journalctl-YYYYMMDD-HHMMSS-<BOOT_ID>.log` | `boot-history-logger.service` | Boot-time systemd journal | Per boot | Persistent |
+| `journalctl-<BOOT_ID>.log` | `boot-history-logger.service` | Previous boot journal snapshots | Per boot | Persistent |
 | `cursor-processes-YYYYMMDD.log` | `cursor-monitor.service` | Cursor IDE monitoring | 60s | Persistent |
 | `memory-YYYYMMDD.log` | `memory-monitor.service` | Memory usage | 30s | Persistent |
 | `processes-YYYYMMDD.log` | `memory-monitor.service` | Process monitoring | 30s | Persistent |

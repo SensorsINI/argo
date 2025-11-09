@@ -40,6 +40,7 @@ psutil                   # System and process monitoring (lifecycle manager, con
 # Data visualization (for testing and analysis)
 matplotlib               # Plotting for ADC testing (argo_battery_water.py --test-adc)
 pandas                   # Data analysis for CSV files and plotting scripts
+pytz                     # Timezone support for datetime objects (battery voltage plotting)
 
 # ROS2 diagnostic system (optional, for advanced health monitoring)
 diagnostic-updater       # ROS2 diagnostic system for node health monitoring
