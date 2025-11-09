@@ -31,7 +31,9 @@ SIZE_BYTES=$(lsblk -b -d -n -o SIZE "$SD_DEVICE")
 # Round up to nearest GB for a user-friendly tag
 SIZE_GB=$(( (SIZE_BYTES + 1024*1024*1024 - 1) / (1024*1024*1024) ))
 SIZE_TAG="${SIZE_GB}GB"
-BACKUP_NAME="argo_${HOSTNAME}_${SIZE_TAG}_${TIMESTAMP}.img.7z"
+BACKUP_BYTES_TAG="${SIZE_BYTES}B"
+BACKUP_BASE="argo_${HOSTNAME}_${SIZE_TAG}_${BACKUP_BYTES_TAG}_${TIMESTAMP}"
+BACKUP_NAME="${BACKUP_BASE}.img.7z"
 
 # Colors for output
 RED='\033[0;31m'
@@ -55,6 +57,16 @@ cleanup() {
 
 # Trap signals to ensure cleanup
 trap cleanup INT TERM
+
+create_meta_content() {
+    cat <<EOF
+size_bytes=$SIZE_BYTES
+size_gb=$SIZE_GB
+sd_device=$SD_DEVICE
+timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+$(lsblk -b -o NAME,SIZE,FSTYPE,MOUNTPOINT "$SD_DEVICE")
+EOF
+}
 
 # Get disk size for progress bar
 get_disk_size() {
@@ -273,6 +285,12 @@ if [ "$LOCAL_ONLY" = true ]; then
     echo -e "${GREEN}✅ Local backup completed successfully!${NC}"
     echo "Location: $LOCAL_DIR/$BACKUP_NAME"
     ls -lh "$LOCAL_DIR/$BACKUP_NAME"
+    META_FILE="$LOCAL_DIR/${BACKUP_BASE}.meta"
+    create_meta_content > "$META_FILE"
+    echo "Metadata: $META_FILE"
+    END_TIME=$(date +%s)
+    ELAPSED=$((END_TIME - START_TIME))
+    printf "Backup duration: %d min %d sec\n" $((ELAPSED/60)) $((ELAPSED%60))
 else
     # Remote backup streamed over SSH
     # Note: Using gzip instead of 7z because p7zip doesn't support -so (stdout) on this system
@@ -288,6 +306,10 @@ else
         echo ""
         echo -e "${GREEN}✅ Remote backup streamed successfully!${NC}"
         echo "Remote location: $DESTINATION:~/$BACKUP_NAME_GZ"
+        META_REMOTE="${BACKUP_BASE}.meta"
+        META_CONTENT=$(create_meta_content)
+        printf "%s\n" "$META_CONTENT" | ssh "$DESTINATION" "cat > ~/$META_REMOTE"
+        echo "Metadata: $DESTINATION:~/$META_REMOTE"
     else
         echo -e "${RED}❌ Remote backup failed.${NC}"
         echo "   You may need to manually remove the partial file on the remote host."
@@ -299,4 +321,7 @@ fi
 trap - INT TERM
 
 echo ""
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+printf "Backup duration: %d min %d sec\n" $((ELAPSED/60)) $((ELAPSED%60))
 echo -e "${GREEN}Backup process completed!${NC}"

@@ -183,6 +183,14 @@ elif [[ "$BACKUP_FILE" == *.7z ]]; then
     fi
 fi
 
+SOURCE_SIZE_BYTES=""
+extract_size_from_meta() {
+    local content="$1"
+    if [[ "$content" =~ size_bytes=([0-9]+) ]]; then
+        SOURCE_SIZE_BYTES="${BASH_REMATCH[1]}"
+    fi
+}
+
 # Auto-detect device if not specified
 if [ -z "$DEVICE" ]; then
     echo -e "${YELLOW}Device not specified. Starting interactive detection...${NC}"
@@ -206,11 +214,11 @@ if [ -z "$DEVICE" ]; then
     # Find the new device
     NEW_DEVICE=$(comm -13 <(echo "$BEFORE_DEVICES") <(echo "$AFTER_DEVICES"))
 
-    NUM_NEW_DEVICES=$(echo "$NEW_DEVICE" | wc -l | xargs)
+    NUM_NEW_DEVICES=$(echo "$NEW_DEVICE" | sed '/^$/d' | wc -l | xargs)
 
     if [ "$NUM_NEW_DEVICES" -eq 1 ]; then
-        echo -e "${GREEN}✅ Detected new device: $NEW_DEVICE${NC}"
-        DEVICE="$NEW_DEVICE"
+        DEVICE=$(echo "$NEW_DEVICE")
+        echo -e "${GREEN}✅ Detected new device: $DEVICE${NC}"
         echo ""
         echo "Detected device summary:"
         lsblk -d -o NAME,SIZE,MODEL,SERIAL,TYPE,TRAN "$DEVICE"
@@ -220,6 +228,8 @@ if [ -z "$DEVICE" ]; then
     elif [ "$NUM_NEW_DEVICES" -eq 0 ]; then
         echo -e "${RED}❌ Error: No new storage device was detected.${NC}"
         echo "Please check the connection and try again."
+        echo "Hint: Disconnect all removable drives, run the script again,"
+        echo "      then connect the SD card when prompted."
         exit 1
     else
         echo -e "${RED}❌ Error: Multiple new storage devices were detected:${NC}"
@@ -287,25 +297,78 @@ PARTITION_INFO=$(lsblk -n -o NAME,SIZE,FSTYPE,MOUNTPOINT "$DEVICE" | tail -n +2 
 
 # Attempt to parse required size from backup filename (e.g., argo_..._32GB_....img.gz or .img.7z)
 BACKUP_SIZE_TAG=$(echo "$BACKUP_FILE" | grep -oP '_\K[0-9]+GB(?=_)')
-if [ -n "$BACKUP_SIZE_TAG" ]; then
-    REQUIRED_SIZE_GB=${BACKUP_SIZE_TAG%GB}
+REQUIRED_SIZE_BYTES=""
+TOLERANCE_BYTES=0
+
+if [ -n "$SOURCE_SIZE_BYTES" ]; then
+    REQUIRED_SIZE_BYTES=$SOURCE_SIZE_BYTES
+    SOURCE_SIZE_GIB=$(awk "BEGIN {printf \"%.2f\", $SOURCE_SIZE_BYTES/1024/1024/1024}")
+    echo "Source image exact size (bytes): $SOURCE_SIZE_BYTES"
+    echo "Source image size ≈ ${SOURCE_SIZE_GIB} GiB"
+else
+    if [ -n "$BACKUP_SIZE_TAG" ]; then
+        REQUIRED_SIZE_GB=${BACKUP_SIZE_TAG%GB}
+        REQUIRED_SIZE_BYTES=$((REQUIRED_SIZE_GB * 1024 * 1024 * 1024))
+        REQUIRED_SIZE_GIB=$(awk "BEGIN {printf \"%.2f\", $REQUIRED_SIZE_BYTES/1024/1024/1024}")
+        echo -e "${GREEN}Backup filename indicates it requires a ${REQUIRED_SIZE_GB}GB card.${NC}"
+    fi
+fi
+
+if [ -n "$REQUIRED_SIZE_BYTES" ]; then
     DEVICE_SIZE_BYTES=$(lsblk -b -d -n -o SIZE "$DEVICE")
     DEVICE_SIZE_GB=$((DEVICE_SIZE_BYTES / 1024 / 1024 / 1024))
-    REQUIRED_SIZE_BYTES=$((REQUIRED_SIZE_GB * 1024 * 1024 * 1024))
+    DEVICE_SIZE_GIB=$(awk "BEGIN {printf \"%.2f\", $DEVICE_SIZE_BYTES/1024/1024/1024}")
 
-    echo -e "${GREEN}Backup filename indicates it requires a ${REQUIRED_SIZE_GB}GB card.${NC}"
-    
-    # Allow a small tolerance (up to 5% smaller) to account for manufacturer variations
-    TOLERANCE_BYTES=$((REQUIRED_SIZE_BYTES * 95 / 100))
-    if (( DEVICE_SIZE_BYTES < TOLERANCE_BYTES )); then
-        echo -e "${RED}❌ Error: Target device is too small.${NC}"
-        echo "   Backup requires approximately ${REQUIRED_SIZE_GB}GB (${REQUIRED_SIZE_BYTES} bytes), but target is only"
-        echo "   ${DEVICE_SIZE_GB}GB (${DEVICE_SIZE_BYTES} bytes)."
-        echo "   Please use a card rated the same or larger than the source." 
+    if [ -n "$SOURCE_SIZE_BYTES" ]; then
+        if (( DEVICE_SIZE_BYTES < REQUIRED_SIZE_BYTES )); then
+            echo -e "${RED}❌ Error: Target device is too small.${NC}"
+            echo "   Backup requires ${REQUIRED_SIZE_BYTES} bytes (~${SOURCE_SIZE_GIB} GiB)."
+            echo "   Target provides only ${DEVICE_SIZE_BYTES} bytes (~${DEVICE_SIZE_GIB} GiB)."
+            exit 1
+        else
+            echo -e "${GREEN}✅ Target device size is sufficient (${DEVICE_SIZE_BYTES} bytes).${NC}"
+        fi
     else
-        echo -e "${GREEN}✅ Target device size is sufficient.${NC}"
+        TOLERANCE_BYTES=$((REQUIRED_SIZE_BYTES * 95 / 100))
+        if (( DEVICE_SIZE_BYTES < TOLERANCE_BYTES )); then
+            echo -e "${RED}❌ Error: Target device is too small.${NC}"
+            echo "   Backup requires approximately ${REQUIRED_SIZE_BYTES} bytes (~${REQUIRED_SIZE_GIB:-${REQUIRED_SIZE_GB}} GiB), but target is only ${DEVICE_SIZE_BYTES} bytes (~${DEVICE_SIZE_GIB} GiB)."
+            echo "   Please use a card rated the same or larger than the source." 
+            exit 1
+        else
+            echo -e "${GREEN}✅ Target device size is sufficient.${NC}"
+        fi
     fi
     echo ""
+fi
+
+# Load metadata from local or remote backup.
+if [[ "$BACKUP_FILE" == *":"* ]]; then
+    REMOTE_HOST=$(echo "$BACKUP_FILE" | cut -d: -f1)
+    REMOTE_PATH=$(echo "$BACKUP_FILE" | cut -d: -f2)
+    REMOTE_META_BASE=${REMOTE_PATH%.img.gz}
+    REMOTE_META_BASE=${REMOTE_META_BASE%.img.7z}
+    REMOTE_META_PATH="${REMOTE_META_BASE}.meta"
+    META_CONTENT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "cat '$REMOTE_META_PATH'" 2>/dev/null || true)
+    if [ -n "$META_CONTENT" ]; then
+        extract_size_from_meta "$META_CONTENT"
+    fi
+else
+    LOCAL_META_BASE=${BACKUP_FILE%.img.gz}
+    LOCAL_META_BASE=${LOCAL_META_BASE%.img.7z}
+    LOCAL_META_PATH="${LOCAL_META_BASE}.meta"
+    if [ -f "$LOCAL_META_PATH" ]; then
+        META_CONTENT=$(cat "$LOCAL_META_PATH")
+        extract_size_from_meta "$META_CONTENT"
+    fi
+fi
+
+if [ -z "$SOURCE_SIZE_BYTES" ]; then
+    if [[ "$BACKUP_FILE" =~ _([0-9]+)B_ ]]; then
+        SOURCE_SIZE_BYTES="${BASH_REMATCH[1]}"
+    elif [[ "$BACKUP_FILE" == *":"* && "$REMOTE_PATH" =~ _([0-9]+)B_ ]]; then
+        SOURCE_SIZE_BYTES="${BASH_REMATCH[1]}"
+    fi
 fi
 
 # Safety confirmation
@@ -411,24 +474,49 @@ echo ""
 echo "This will take 15-25 minutes..."
 echo ""
 
-# Create a temporary file to capture dd's stderr
+START_TIME=$(date +%s)
 DD_ERROR_LOG=$(mktemp)
+LOG_PV=$(mktemp)
 
-# Enable pipefail to catch errors in any part of the pipe
-set -o pipefail
+cleanup() {
+    trap - INT TERM
+    echo -e "\n${YELLOW}⚠️  Restore interrupted. Cleaning up...${NC}"
+    if [ -n "$RESTORE_PGID" ]; then
+        kill -- -"$RESTORE_PGID" 2>/dev/null || true
+    else
+        kill -- -$$ 2>/dev/null || true
+    fi
+    sync
+    if [ -n "$TMP_FILE" ] && [ -f "$TMP_FILE" ]; then
+        rm -f "$TMP_FILE"
+    fi
+    rm -f "$DD_ERROR_LOG" "$LOG_PV"
+    exit 1
+}
 
-# Decompress and write to device with progress
-# Note: Remote backups use .gz (streaming), local backups may use .7z (better compression)
-RESTORE_SUCCESS=true
-PV_ARGS=""
+trap cleanup INT TERM
+
+PV_ARGS="-f -N Restore -i 30" # only newline every 30s
 if [ -n "$UNCOMPRESSED_SIZE_BYTES" ] && [ "$UNCOMPRESSED_SIZE_BYTES" -gt 0 ]; then
-    PV_ARGS="-s $UNCOMPRESSED_SIZE_BYTES"
+    PV_ARGS="-f -N Restore -s $UNCOMPRESSED_SIZE_BYTES"
 fi
+PV_ENV="PV_LINE_MODE=1"
 if [[ "$BACKUP_FILE" == *.gz ]]; then
     echo "Decompressing and writing SD card (gzip)..."
-    if ! ( gunzip -c "$BACKUP_FILE" | pv $PV_ARGS | sudo dd of="$DEVICE" bs=4M conv=fsync status=progress ) 2> "$DD_ERROR_LOG"; then
+    set +o pipefail
+    ( set -o pipefail; gunzip -c "$BACKUP_FILE" \
+        | env $PV_ENV pv $PV_ARGS \
+        | sudo dd of="$DEVICE" bs=4M conv=fsync status=progress \
+            2> >(tee "$DD_ERROR_LOG" >&2) ) &
+    RESTORE_PID=$!
+    RESTORE_PGID=$(ps -o pgid= "$RESTORE_PID" | tr -d ' ')
+    wait $RESTORE_PID
+    RC=$?
+    if [ $RC -ne 0 ]; then
         RESTORE_SUCCESS=false
+        kill -- -"$RESTORE_PGID" 2>/dev/null || true
     fi
+    set -o pipefail
 elif [[ "$BACKUP_FILE" == *.7z ]]; then
     if ! command -v 7z &> /dev/null; then
         echo -e "${RED}❌ Error: '7z' command not found.${NC}"
@@ -437,9 +525,20 @@ elif [[ "$BACKUP_FILE" == *.7z ]]; then
         exit 1
     fi
     echo "Decompressing and writing SD card (7z)..."
-    if ! ( 7z x -so "$BACKUP_FILE" | pv $PV_ARGS | sudo dd of="$DEVICE" bs=4M conv=fsync status=progress ) 2> "$DD_ERROR_LOG"; then
+    set +o pipefail
+    ( set -o pipefail; 7z x -so "$BACKUP_FILE" \
+        | env $PV_ENV pv $PV_ARGS \
+        | sudo dd of="$DEVICE" bs=4M conv=fsync status=progress \
+            2> >(tee "$DD_ERROR_LOG" >&2) ) &
+    RESTORE_PID=$!
+    RESTORE_PGID=$(ps -o pgid= "$RESTORE_PID" | tr -d ' ')
+    wait $RESTORE_PID
+    RC=$?
+    if [ $RC -ne 0 ]; then
         RESTORE_SUCCESS=false
+        kill -- -"$RESTORE_PGID" 2>/dev/null || true
     fi
+    set -o pipefail
 else
     echo -e "${RED}❌ Error: Unsupported backup file format.${NC}"
     echo "   Only .gz (remote backups) and .7z (local backups) compressed images are supported."
@@ -452,6 +551,9 @@ set +o pipefail
 if [ "$RESTORE_SUCCESS" = true ]; then
     echo ""
     echo -e "${GREEN}✅ Restore completed successfully!${NC}"
+    END_TIME=$(date +%s)
+    ELAPSED=$((END_TIME - START_TIME))
+    printf "Restore duration: %d min %d sec\n" $((ELAPSED/60)) $((ELAPSED%60))
     echo ""
     echo "Next steps:"
     echo "  1. Safely remove the SD card"
@@ -479,3 +581,4 @@ if [ -n "$TMP_FILE" ] && [ -f "$TMP_FILE" ]; then
     echo "Cleaned up temporary file."
 fi
 rm -f "$DD_ERROR_LOG"
+trap - INT TERM
