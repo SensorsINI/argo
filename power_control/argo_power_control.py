@@ -474,6 +474,7 @@ class PowerController(ArgoBaseNode):
         
         # Health monitor integration for comprehensive node health
         self.health_monitor_unhealthy_count = 0
+        self.health_monitor_unhealthy_nodes = []
         self.health_monitor_query_interval = 5.0  # Query every 5 seconds
         self.last_health_monitor_query = 0.0
 
@@ -1718,7 +1719,11 @@ class PowerController(ArgoBaseNode):
             failure_count = self.get_failure_count()
             # Use health monitor count if available, otherwise show local checks
             if self.health_monitor_unhealthy_count > 0:
-                parts.append(f"{failure_count} unhealthy nodes")
+                if self.health_monitor_unhealthy_nodes:
+                    names_str = ", ".join(self.health_monitor_unhealthy_nodes)
+                    parts.append(f"{failure_count} unhealthy: {names_str}")
+                else:
+                    parts.append(f"{failure_count} unhealthy nodes")
             else:
                 # Fallback to local component checks
                 unhealthy_components = []
@@ -3272,20 +3277,39 @@ class PowerController(ArgoBaseNode):
                         health_data = json.loads(response.message)
                         nodes_data = health_data.get('nodes', {})
                         
-                        # Count unhealthy nodes
+                        # Count unhealthy nodes and capture their names for logging
                         unhealthy_count = 0
+                        unhealthy_nodes = []
                         for node_name, node_info in nodes_data.items():
                             health_status = node_info.get('healthy')
                             if health_status is False:
                                 unhealthy_count += 1
+                                unhealthy_nodes.append(
+                                    self._format_health_monitor_node_name(node_name, node_info)
+                                )
                         
                         self.health_monitor_unhealthy_count = unhealthy_count
+                        self.health_monitor_unhealthy_nodes = unhealthy_nodes
                         self.last_health_monitor_query = current_time
-                        self.get_logger().debug(f"Health monitor query: {unhealthy_count} unhealthy nodes")
+                        self.get_logger().debug(
+                            f"Health monitor query: {unhealthy_count} unhealthy nodes"
+                            f"{' (' + ', '.join(unhealthy_nodes) + ')' if unhealthy_nodes else ''}"
+                        )
                     except (json.JSONDecodeError, KeyError) as e:
                         self.get_logger().debug(f"Error parsing health monitor response: {e}")
         except Exception as e:
             self.get_logger().debug(f"Error querying health monitor: {e}")
+    
+    def _format_health_monitor_node_name(self, node_key: str, node_info: dict) -> str:
+        """Format node name from health monitor data for human-readable output."""
+        candidate = node_info.get('display_name')
+        if candidate:
+            return candidate
+        
+        normalized = os.path.basename(node_key.strip())
+        if normalized.endswith('.py'):
+            normalized = normalized[:-3]
+        return normalized
     
     def get_failure_count(self) -> int:
         """Get the number of system failures for LED indication"""
