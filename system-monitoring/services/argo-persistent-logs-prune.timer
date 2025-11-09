@@ -1,0 +1,14 @@
+[Unit]
+Description=Argo persistent log pruning timer
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+Unit=argo-persistent-logs-prune.service
+
+[Install]
+WantedBy=timers.target
+
+
+

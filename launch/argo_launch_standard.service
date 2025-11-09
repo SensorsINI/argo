@@ -9,7 +9,9 @@ User=orangepi
 Group=orangepi
 WorkingDirectory=/home/orangepi/argo
 # Use standard ROS2 launch system (health monitor is launched by the launch file)
-ExecStart=/bin/bash -c 'set -m && source /opt/ros/humble/setup.bash && source launch/argo.env && ros2 launch launch/argo_launch.py'
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
+ExecStart=/bin/bash -c 'set -eo pipefail; set -m; source /opt/ros/humble/setup.bash && source launch/argo.env && ros2 launch launch/argo_launch.py |& tee -a /var/log.hdd/persistent/argo-launch-standard.log'
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15
