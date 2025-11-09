@@ -119,6 +119,70 @@ else
 fi
 echo ""
 
+# Determine approximate size of backup and ensure there is sufficient space for temporary storage/decompression.
+if [[ "$BACKUP_FILE" == *.gz ]]; then
+    if command -v gzip >/dev/null 2>&1; then
+        if [[ "$BACKUP_FILE" == *":"* ]]; then
+            REMOTE_HOST=$(echo "$BACKUP_FILE" | cut -d: -f1)
+            REMOTE_PATH=$(echo "$BACKUP_FILE" | cut -d: -f2)
+            REMOTE_SIZE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "gzip -l '$REMOTE_PATH'" | awk 'NR==2 {print $2}')
+            COMPRESSED_SIZE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "stat -c%s '$REMOTE_PATH'")
+        else
+            REMOTE_SIZE=0
+            COMPRESSED_SIZE=$(stat -c%s "$BACKUP_FILE")
+        fi
+        if [ -z "$REMOTE_SIZE" ] || [ "$REMOTE_SIZE" -eq 0 ]; then
+            if [ "$COMPRESSED_SIZE" -gt 0 ]; then
+                REMOTE_SIZE=$((COMPRESSED_SIZE * 3))
+            else
+                REMOTE_SIZE=0
+            fi
+        else
+            UNCOMPRESSED_SIZE_BYTES=$REMOTE_SIZE
+        fi
+        COMPRESSED_SIZE_BYTES=$COMPRESSED_SIZE
+        REQUIRED_TEMP_BYTES=$((REMOTE_SIZE + COMPRESSED_SIZE + (500*1024*1024)))
+        TMP_FREE_BYTES=$(df -P /tmp | awk 'NR==2 {print $4}')
+        TMP_FREE_BYTES=$((TMP_FREE_BYTES * 1024))
+        if [ "$TMP_FREE_BYTES" -lt "$REQUIRED_TEMP_BYTES" ]; then
+            echo -e "${RED}❌ Error: Not enough free space in /tmp for decompression.${NC}"
+            echo "   Required approx: $((REQUIRED_TEMP_BYTES / 1024 / 1024)) MB"
+            echo "   Available: $((TMP_FREE_BYTES / 1024 / 1024)) MB"
+            echo "   Reduce the size of /tmp usage or set TMPDIR to a larger location."
+            exit 1
+        fi
+    fi
+elif [[ "$BACKUP_FILE" == *.7z ]]; then
+    if command -v 7z >/dev/null 2>&1; then
+        if [[ "$BACKUP_FILE" == *":"* ]]; then
+            REMOTE_HOST=$(echo "$BACKUP_FILE" | cut -d: -f1)
+            REMOTE_PATH=$(echo "$BACKUP_FILE" | cut -d: -f2)
+            REMOTE_SIZE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "7z l '$REMOTE_PATH'" | awk '/^-----------/ {getline; print $3; exit}')
+            COMPRESSED_SIZE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "stat -c%s '$REMOTE_PATH'")
+        else
+            REMOTE_SIZE=$(7z l "$BACKUP_FILE" | awk '/^-----------/ {getline; print $3; exit}')
+            COMPRESSED_SIZE=$(stat -c%s "$BACKUP_FILE")
+        fi
+        UNCOMPRESSED_SIZE_BYTES=$REMOTE_SIZE
+        COMPRESSED_SIZE_BYTES=$COMPRESSED_SIZE
+        REQUIRED_TEMP_BYTES=$((REMOTE_SIZE + COMPRESSED_SIZE + (1024*1024*1024)))
+        TMP_FREE_BYTES=$(df -P /tmp | awk 'NR==2 {print $4}')
+        TMP_FREE_BYTES=$((TMP_FREE_BYTES * 1024))
+        if [ "$TMP_FREE_BYTES" -lt "$REQUIRED_TEMP_BYTES" ]; then
+            echo -e "${RED}❌ Error: Not enough free space in /tmp for decompression.${NC}"
+            echo "   Required approx: $((REQUIRED_TEMP_BYTES / 1024 / 1024)) MB"
+            echo "   Available: $((TMP_FREE_BYTES / 1024 / 1024)) MB"
+            echo "   Reduce the size of /tmp usage or set TMPDIR to a larger location."
+            exit 1
+        fi
+    else
+        echo -e "${RED}❌ Error: '7z' command not found.${NC}"
+        echo "   Please install p7zip-full to restore .7z archives."
+        echo "   Run: sudo apt update && sudo apt install p7zip-full"
+        exit 1
+    fi
+fi
+
 # Auto-detect device if not specified
 if [ -z "$DEVICE" ]; then
     echo -e "${YELLOW}Device not specified. Starting interactive detection...${NC}"
@@ -147,6 +211,12 @@ if [ -z "$DEVICE" ]; then
     if [ "$NUM_NEW_DEVICES" -eq 1 ]; then
         echo -e "${GREEN}✅ Detected new device: $NEW_DEVICE${NC}"
         DEVICE="$NEW_DEVICE"
+        echo ""
+        echo "Detected device summary:"
+        lsblk -d -o NAME,SIZE,MODEL,SERIAL,TYPE,TRAN "$DEVICE"
+        echo ""
+        echo "Existing partitions on $DEVICE:"
+        lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DEVICE"
     elif [ "$NUM_NEW_DEVICES" -eq 0 ]; then
         echo -e "${RED}❌ Error: No new storage device was detected.${NC}"
         echo "Please check the connection and try again."
@@ -165,6 +235,25 @@ MOUNTED_PARTITIONS=$(lsblk -ln -o NAME,MOUNTPOINT "$DEVICE" | grep -v "^${DEVICE
 if [ -n "$MOUNTED_PARTITIONS" ]; then
     echo -e "${YELLOW}Warning: The target device has mounted partitions:${NC}"
     echo "$MOUNTED_PARTITIONS"
+    echo ""
+    echo "Mounted partition content preview:"
+    echo "=================================="
+    while read -r ENTRY; do
+        PART_PATH=$(echo "$ENTRY" | awk '{print $1}')
+        MOUNT_POINT=$(echo "$ENTRY" | awk '{sub(".*mounted on ", ""); print}')
+        echo "Partition: $PART_PATH"
+        echo "Mountpoint: $MOUNT_POINT"
+        if [ -d "$MOUNT_POINT" ]; then
+            echo "Contents:"
+            ls -l "$MOUNT_POINT"
+        else
+            echo "Mount directory not accessible."
+        fi
+        echo "----------------------------------"
+    done <<< "$MOUNTED_PARTITIONS"
+    echo ""
+    echo "Detailed partition info:"
+    lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DEVICE"
     echo ""
     read -p "Shall I attempt to unmount them before proceeding? (yes/no): " UNMOUNT_CONFIRM
     if [ "$UNMOUNT_CONFIRM" = "yes" ]; then
@@ -202,13 +291,17 @@ if [ -n "$BACKUP_SIZE_TAG" ]; then
     REQUIRED_SIZE_GB=${BACKUP_SIZE_TAG%GB}
     DEVICE_SIZE_BYTES=$(lsblk -b -d -n -o SIZE "$DEVICE")
     DEVICE_SIZE_GB=$((DEVICE_SIZE_BYTES / 1024 / 1024 / 1024))
+    REQUIRED_SIZE_BYTES=$((REQUIRED_SIZE_GB * 1024 * 1024 * 1024))
 
     echo -e "${GREEN}Backup filename indicates it requires a ${REQUIRED_SIZE_GB}GB card.${NC}"
     
-    if (( DEVICE_SIZE_GB < REQUIRED_SIZE_GB )); then
+    # Allow a small tolerance (up to 5% smaller) to account for manufacturer variations
+    TOLERANCE_BYTES=$((REQUIRED_SIZE_BYTES * 95 / 100))
+    if (( DEVICE_SIZE_BYTES < TOLERANCE_BYTES )); then
         echo -e "${RED}❌ Error: Target device is too small.${NC}"
-        echo "   Backup requires a ${REQUIRED_SIZE_GB}GB card, but target is only ${DEVICE_SIZE_GB}GB."
-        exit 1
+        echo "   Backup requires approximately ${REQUIRED_SIZE_GB}GB (${REQUIRED_SIZE_BYTES} bytes), but target is only"
+        echo "   ${DEVICE_SIZE_GB}GB (${DEVICE_SIZE_BYTES} bytes)."
+        echo "   Please use a card rated the same or larger than the source." 
     else
         echo -e "${GREEN}✅ Target device size is sufficient.${NC}"
     fi
@@ -327,9 +420,13 @@ set -o pipefail
 # Decompress and write to device with progress
 # Note: Remote backups use .gz (streaming), local backups may use .7z (better compression)
 RESTORE_SUCCESS=true
+PV_ARGS=""
+if [ -n "$UNCOMPRESSED_SIZE_BYTES" ] && [ "$UNCOMPRESSED_SIZE_BYTES" -gt 0 ]; then
+    PV_ARGS="-s $UNCOMPRESSED_SIZE_BYTES"
+fi
 if [[ "$BACKUP_FILE" == *.gz ]]; then
-    echo "Decompressing gzip file..."
-    if ! ( gunzip -c "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M conv=fsync ) 2> "$DD_ERROR_LOG"; then
+    echo "Decompressing and writing SD card (gzip)..."
+    if ! ( gunzip -c "$BACKUP_FILE" | pv $PV_ARGS | sudo dd of="$DEVICE" bs=4M conv=fsync status=progress ) 2> "$DD_ERROR_LOG"; then
         RESTORE_SUCCESS=false
     fi
 elif [[ "$BACKUP_FILE" == *.7z ]]; then
@@ -339,8 +436,8 @@ elif [[ "$BACKUP_FILE" == *.7z ]]; then
         echo "   Run: sudo apt update && sudo apt install p7zip-full"
         exit 1
     fi
-    echo "Decompressing 7z file..."
-    if ! ( 7z x -so "$BACKUP_FILE" | pv | sudo dd of="$DEVICE" bs=4M conv=fsync ) 2> "$DD_ERROR_LOG"; then
+    echo "Decompressing and writing SD card (7z)..."
+    if ! ( 7z x -so "$BACKUP_FILE" | pv $PV_ARGS | sudo dd of="$DEVICE" bs=4M conv=fsync status=progress ) 2> "$DD_ERROR_LOG"; then
         RESTORE_SUCCESS=false
     fi
 else

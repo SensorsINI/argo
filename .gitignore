@@ -64,6 +64,13 @@ log/
 .idea/inspectionProfiles/profiles_settings.xml
 .idea/inspectionProfiles/Project_Default.xml
 
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+
 # Obsolete development directory (local copies only, not in git)
 develop/
 
@@ -133,3 +140,4 @@ power_control/sys_heartbeat/argo-ph4-led-overlay-overlay.dtbo
 power_control/sys_heartbeat/argo-ph4-led-overlay-overlay.dts.preprocessed
 scripts/nohup.out
 a.out
+pcb/datasheets/Molex SL connectors I2C 987651-0406.pdf

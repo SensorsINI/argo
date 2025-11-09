@@ -49,7 +49,27 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
-.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote
+.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm
+
+VM_REQUIREMENTS_FILE := requirements-host.txt
+VM_INSTALL_SCOPE := $(shell if [ $$(id -u) -eq 0 ]; then printf 'system'; else printf 'user'; fi)
+VM_HAS_UV := $(shell command -v uv >/dev/null 2>&1 && printf '1' || printf '0')
+VM_PIP_INSTALL_CMD := $(shell \
+	if command -v uv >/dev/null 2>&1 && [ $$(id -u) -eq 0 ]; then \
+		printf 'uv pip install --upgrade'; \
+	elif [ $$(id -u) -eq 0 ]; then \
+		printf 'pip3 install --upgrade'; \
+	elif command -v uv >/dev/null 2>&1; then \
+		printf 'pip3 install --user --upgrade'; \
+	else \
+		printf 'pip3 install --user --upgrade'; \
+	fi)
+VM_PIP_UNINSTALL_CMD := $(shell \
+	if command -v uv >/dev/null 2>&1 && [ $$(id -u) -eq 0 ]; then \
+		printf 'uv pip uninstall -y'; \
+	else \
+		printf 'pip3 uninstall -y'; \
+	fi)
 
 help:
 	@echo "Argo Robot Services Management"
@@ -150,7 +170,13 @@ help:
 	@echo "  ar  - Record data"
 	@echo "  ac  - Close recording"
 	@echo "  af  - Launch argo with Foxglove visualization"
-
+	@echo "Development Environment (Host Machine Only):"
+	@echo "  setup-venv     - Create Python venv with uv (automatic activation)"
+	@echo "  update-venv    - Update venv dependencies"
+	@echo "  clean-venv     - Remove venv"
+	@echo "  setup-vm       - Install host dependencies to VM user/system site-packages"
+	@echo "  update-vm      - Update host dependencies on VM"
+	@echo "  clean-vm       - Uninstall host dependencies from VM"
 # ==================== SIMULATION MANAGEMENT ====================
 
 simulate-local:
@@ -160,6 +186,65 @@ simulate-local:
 simulate-remote:
 	@echo "Starting Argo in REMOTE simulation mode..."
 	@python3 launch/argo_lifecycle_manager.py simulate_remote
+
+
+# ==================== DEVELOPMENT ENVIRONMENT (HOST ONLY) ====================
+
+setup-venv:
+	@echo "Setting up Python virtual environment for shore-side development..."
+	@if command -v uv >/dev/null 2>&1; then \
+		echo "Using uv (fast Python package installer)..."; \
+		uv venv .venv; \
+		echo "Installing dependencies with uv..."; \
+		uv pip install -r requirements-host.txt; \
+	else \
+		echo "uv not found, using standard venv..."; \
+		echo "💡 Install uv for faster dependency management: curl -LsSf https://astral.sh/uv/install.sh | sh"; \
+		python3 -m venv .venv; \
+		.venv/bin/pip install --upgrade pip; \
+		.venv/bin/pip install -r requirements-host.txt; \
+	fi
+	@echo "✅ Virtual environment created at .venv"
+	@echo ""
+	@echo "The venv will activate automatically when you open a terminal."
+	@echo "Or manually activate: source .venv/bin/activate"
+
+clean-venv:
+	@echo "Removing Python virtual environment..."
+	@rm -rf .venv
+	@echo "✅ Virtual environment removed"
+
+update-venv:
+	@echo "Updating Python dependencies in venv..."
+	@if [ ! -d .venv ]; then \
+		echo "❌ No venv found. Run 'make setup-venv' first."; \
+		exit 1; \
+	fi
+	@if command -v uv >/dev/null 2>&1; then \
+		uv pip install --upgrade -r requirements.txt; \
+	else \
+		.venv/bin/pip install --upgrade -r requirements.txt; \
+	fi
+	@echo "✅ Dependencies updated"
+
+setup-vm:
+	@echo "Installing Python host dependencies on dedicated VM ($(VM_INSTALL_SCOPE) site-packages)..."
+	@echo "Using $(if $(filter 1,$(VM_HAS_UV)),uv,pip3) for package management."
+	@$(VM_PIP_INSTALL_CMD) -r $(VM_REQUIREMENTS_FILE)
+	@echo "✅ Host dependencies installed for VM environment"
+
+update-vm:
+	@echo "Updating Python host dependencies on dedicated VM ($(VM_INSTALL_SCOPE) site-packages)..."
+	@echo "Using $(if $(filter 1,$(VM_HAS_UV)),uv,pip3) for package management."
+	@$(VM_PIP_INSTALL_CMD) -r $(VM_REQUIREMENTS_FILE)
+	@echo "✅ Host dependencies updated for VM environment"
+
+clean-vm:
+	@echo "Uninstalling Python host dependencies from dedicated VM..."
+	@echo "Using $(if $(filter 1,$(VM_HAS_UV)),uv,pip3) for package management."
+	@$(VM_PIP_UNINSTALL_CMD) -r $(VM_REQUIREMENTS_FILE) || true
+	@echo "✅ Host dependencies removed from VM environment"
+
 
 # ==================== DEPENDENCY INSTALLATION ====================
 
@@ -489,6 +574,9 @@ uninstall-power-control:
 
 # ==================== GIT SUBMODULE MANAGEMENT ====================
 
+SAILBOAT_SUBMODULE_PATH := simulator/sailboat-playground
+SAILBOAT_SUBMODULE_NAME := simulator/sailboat-playground
+
 submodule-init:
 	@echo "Initializing sailboat-playground submodule..."
 	@if [ ! -f .gitmodules ]; then \
@@ -504,12 +592,42 @@ submodule-init:
 		exit 1; \
 	fi
 	@echo "Initializing and checking out submodule..."
-	git submodule update --init --recursive simulator/sailboat-playground
-	@echo "✅ sailboat-playground submodule initialized successfully!"
+	git submodule update --init --recursive $(SAILBOAT_SUBMODULE_PATH)
+	@echo "Configuring submodule git remotes and tracking branch..."
+	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
+	if [ -z "$$submodule_url" ]; then \
+		echo "❌ Unable to determine submodule remote URL from .gitmodules"; \
+		exit 1; \
+	fi; \
+	cd $(SAILBOAT_SUBMODULE_PATH) && \
+	current_url=$$(git remote get-url origin); \
+	if [ "$$current_url" != "$$submodule_url" ]; then \
+		git remote set-url origin "$$submodule_url"; \
+		echo "   ➜ Updated origin to $$submodule_url"; \
+	else \
+		echo "   ➜ Origin already set to $$submodule_url"; \
+	fi; \
+	git fetch origin --prune; \
+	if git show-ref --verify --quiet refs/remotes/origin/master; then \
+		target_branch=master; \
+	elif git show-ref --verify --quiet refs/remotes/origin/main; then \
+		target_branch=main; \
+	else \
+		echo "❌ origin/master and origin/main not found. Please verify remote branch names."; \
+		exit 1; \
+	fi; \
+	current_commit=$$(git rev-parse HEAD); \
+	git checkout -B $$target_branch $$current_commit >/dev/null 2>&1 || exit 1; \
+	if git rev-parse --verify --quiet origin/$$target_branch >/dev/null 2>&1; then \
+		git branch --set-upstream-to=origin/$$target_branch $$target_branch >/dev/null 2>&1 || true; \
+	fi; \
+	echo "   ➜ Checked out $$target_branch tracking origin/$$target_branch"
+	@echo "✅ sailboat-playground submodule initialized and configured successfully!"
 	@echo ""
-	@echo "Submodule location: simulator/sailboat-playground/"
+	@echo "Submodule location: $(SAILBOAT_SUBMODULE_PATH)/"
 	@echo "Customizations location: simulator/customizations/sailboat-playground/"
-	@echo "Source repository: https://github.com/SensorsINI/sailboat-playground.git"
+	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
+	echo "Source repository: $$submodule_url"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Review the submodule code in simulator/sailboat-playground/"
@@ -518,21 +636,45 @@ submodule-init:
 
 submodule-update:
 	@echo "Updating sailboat-playground submodule..."
-	@if [ ! -d simulator/sailboat-playground ]; then \
+	@if [ ! -d $(SAILBOAT_SUBMODULE_PATH) ]; then \
 		echo "❌ Submodule not initialized!"; \
 		echo "   Run 'make submodule-init' first."; \
 		exit 1; \
 	fi
 	@echo "Fetching latest changes from remote..."
-	git submodule update --remote --merge simulator/sailboat-playground
+	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
+	if [ -z "$$submodule_url" ]; then \
+		echo "❌ Unable to determine submodule remote URL from .gitmodules"; \
+		exit 1; \
+	fi; \
+	cd $(SAILBOAT_SUBMODULE_PATH) && \
+	current_url=$$(git remote get-url origin); \
+	if [ "$$current_url" != "$$submodule_url" ]; then \
+		git remote set-url origin "$$submodule_url"; \
+		echo "   ➜ Updated origin to $$submodule_url"; \
+	fi; \
+	git fetch origin --prune; \
+	if git show-ref --verify --quiet refs/remotes/origin/master; then \
+		target_branch=master; \
+	elif git show-ref --verify --quiet refs/remotes/origin/main; then \
+		target_branch=main; \
+	else \
+		echo "❌ origin/master and origin/main not found. Please verify remote branch names."; \
+		exit 1; \
+	fi; \
+	git checkout $$target_branch >/dev/null 2>&1 || git checkout -B $$target_branch origin/$$target_branch >/dev/null 2>&1 || exit 1; \
+	if git rev-parse --verify --quiet origin/$$target_branch >/dev/null 2>&1; then \
+		git branch --set-upstream-to=origin/$$target_branch $$target_branch >/dev/null 2>&1 || true; \
+	fi; \
+	git pull --ff-only origin $$target_branch
 	@echo "✅ sailboat-playground submodule updated successfully!"
 	@echo ""
 	@echo "Current submodule status:"
-	@git submodule status simulator/sailboat-playground
+	@git submodule status $(SAILBOAT_SUBMODULE_PATH)
 	@echo ""
 	@echo "Note: The submodule has been updated to the latest version."
 	@echo "      Commit this change to lock the submodule to this version:"
-	@echo "      git add simulator/sailboat-playground"
+	@echo "      git add $(SAILBOAT_SUBMODULE_PATH)"
 	@echo "      git commit -m 'Update sailboat-playground submodule'"
 
 submodule-status:
@@ -570,6 +712,9 @@ submodule-status:
 			echo ""; \
 			echo "Remote status:"; \
 			cd simulator/sailboat-playground && git status -sb && cd ../..; \
+			echo ""; \
+			echo "Remote URL:"; \
+			cd simulator/sailboat-playground && git remote get-url origin && cd ../..; \
 		else \
 			echo "❌ Submodule directory exists but not initialized"; \
 			echo "   Run 'make submodule-init' to initialize"; \

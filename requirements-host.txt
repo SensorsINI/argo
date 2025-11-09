@@ -1,0 +1,24 @@
+# Argo Host-Side Python Dependencies
+# ==================================
+# These packages are needed for shore-side tasks such as simulation,
+# log analysis, plotting, and other tooling that does not interact
+# directly with Orange Pi hardware. ROS2 packages (rclpy, std_msgs, etc.)
+# must be installed via apt on the host system and exposed to the virtual
+# environment by creating it with --system-site-packages.
+
+# Reqired for simulation on host machine
+# sudo apt install ros-humble-desktop  # or ros-humble-ros-base if you want smaller footprint
+
+
+numpy
+pandas
+matplotlib
+PyYAML
+psutil
+argparse
+argcomplete
+pyglet
+
+# Optional extras (uncomment if you need them on the host)
+# pynmea2
+# pyserial
