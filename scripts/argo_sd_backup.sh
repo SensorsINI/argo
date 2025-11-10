@@ -255,7 +255,8 @@ if [ "$NON_INTERACTIVE" = false ]; then
     echo ""
     echo -e "${YELLOW}⚠️  WARNING: This will create a backup of the entire SD card${NC}"
     echo "   Backup size: ~30GB (compressed to ~10-15GB)"
-    echo "   This will take 20-40 minutes depending on network speed"
+    echo "   Expected duration: up to ~3 hours over Wi-Fi (≈2–3 MB/s observed)"
+    echo "   For a clean snapshot, perform the backup while the system is idle or offline"
     echo ""
     read -p "Continue? (yes/no): " CONFIRM
 
