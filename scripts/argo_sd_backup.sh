@@ -279,7 +279,8 @@ if [ "$LOCAL_ONLY" = true ]; then
     echo "Saving to: $LOCAL_DIR/$BACKUP_NAME"
     echo "Compression with 7z (ultra) will be slow but space-efficient."
     echo ""
-    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | 7z a -t7z -mx=9 -si "$LOCAL_DIR/$BACKUP_NAME"
+    # Reduce pv progress updates to once per minute to avoid excessive newlines in logs
+    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -i 60 -s 30G | 7z a -t7z -mx=9 -si "$LOCAL_DIR/$BACKUP_NAME"
     
     echo ""
     echo -e "${GREEN}✅ Local backup completed successfully!${NC}"
@@ -300,7 +301,8 @@ else
     echo "Compression with gzip will be fast and space-efficient."
     echo ""
     
-    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -s 30G | gzip -9 | ssh "$DESTINATION" "cat > ~/$BACKUP_NAME_GZ"
+    # Reduce pv progress updates to once per minute to avoid excessive newlines in logs
+    sudo dd if="$SD_DEVICE" bs=4M status=progress | pv -i 60 -s 30G | gzip -9 | ssh "$DESTINATION" "cat > ~/$BACKUP_NAME_GZ"
 
     if [ $? -eq 0 ]; then
         echo ""
