@@ -124,5 +124,3 @@ fi
 c_echo "No GPIO method available; nothing to do"
 
 exit 0
-
-
