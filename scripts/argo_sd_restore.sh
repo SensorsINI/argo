@@ -471,7 +471,8 @@ echo "========================================="
 echo "Device: $DEVICE"
 echo "Backup: $BACKUP_FILE"
 echo ""
-echo "This will take 15-25 minutes..."
+echo "Expected duration: ~45 minutes at ~12 MB/s write rate"
+echo "Note: Restoring a live-system backup may require fsck cleanup; script will attempt this automatically."
 echo ""
 
 START_TIME=$(date +%s)
@@ -554,6 +555,16 @@ if [ "$RESTORE_SUCCESS" = true ]; then
     END_TIME=$(date +%s)
     ELAPSED=$((END_TIME - START_TIME))
     printf "Restore duration: %d min %d sec\n" $((ELAPSED/60)) $((ELAPSED%60))
+    echo "Running partprobe to inform kernel of updated partition table..."
+    sudo partprobe "$DEVICE" || true
+    echo "Running fsck on ext partitions to ensure clean boot..."
+    lsblk -ln -o NAME,FSTYPE "$DEVICE" | tail -n +2 | while read -r PART FST; do
+        if [ "$FST" = "ext4" ] || [ "$FST" = "ext3" ] || [ "$FST" = "ext2" ]; then
+            echo "  Checking /dev/$PART..."
+            sudo fsck -fy "/dev/$PART"
+        fi
+    done
+    echo "If fsck reported unresolved errors, consider re-imaging or creating a fresh backup while the source system is offline."
     echo ""
     echo "Next steps:"
     echo "  1. Safely remove the SD card"
