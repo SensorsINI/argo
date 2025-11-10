@@ -741,7 +741,14 @@ class ArgoLifecycleManager:
                 print(f"✅ Launching {special_node}...")
                 # Launch foxglove_bridge as a ROS2 package
                 cmd = [
-                    'bash', '-c', f'source /opt/ros/humble/setup.bash && ros2 run foxglove_bridge foxglove_bridge']
+                    'bash',
+                    '-c',
+                    (
+                        'source /opt/ros/humble/setup.bash && '
+                        'ros2 run foxglove_bridge foxglove_bridge '
+                        '--ros-args --log-level warn'
+                    ),
+                ]
                 try:
                     # First, verify the package exists by trying to get package info
                     import shutil
