@@ -91,6 +91,10 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 # Final notice and pause before asserting GPIO so operator can see console
+c_echo "Syncing filesystems before power relay cut"
+sync || true
+sleep 0.5
+
 c_echo "╔══════════════════════════════════════════════════════════════════════════════╗"
 c_echo "║ NORMAL SHUTDOWN - CUTTING POWER RELAY by Asserting GPIO 259 to cut power NOW ║"
 c_echo "╚══════════════════════════════════════════════════════════════════════════════╝"
