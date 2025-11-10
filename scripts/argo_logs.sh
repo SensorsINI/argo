@@ -186,18 +186,23 @@ journalctl_cmd+=" -u $SERVICE_ARGO -u $SERVICE_BATTERY -u $SERVICE_POWER -u $SER
 
 # Add options based on flags
 if [ "$ALL_LOGS" = true ]; then
-    journalctl_cmd+=" --boot=-1..0"
-elif [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ]; then
-    # -ef combination: show recent errors, then follow
+    journalctl_cmd+=" -b -1 -b 0"
+else
     if [ -n "$TIME_WINDOW" ]; then
         journalctl_cmd+=" --since \"${TIME_WINDOW} ago\""
     fi
-    journalctl_cmd+=" -f"
-elif [ "$FOLLOW" = true ]; then
-    journalctl_cmd+=" -n $LINES -f"
-# If not following and no pattern/error check, limit lines
-elif [ -z "$GREP_PATTERN" ] && [ "$ERROR_CHECK" = false ]; then
-    journalctl_cmd+=" -n $LINES"
+
+    if [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ]; then
+        journalctl_cmd+=" -f"
+    elif [ "$FOLLOW" = true ]; then
+        if [ -n "$TIME_WINDOW" ]; then
+            journalctl_cmd+=" -f"
+        else
+            journalctl_cmd+=" -n $LINES -f"
+        fi
+    elif [ -z "$GREP_PATTERN" ] && [ "$ERROR_CHECK" = false ] && [ -z "$TIME_WINDOW" ]; then
+        journalctl_cmd+=" -n $LINES"
+    fi
 fi
 
 journalctl_cmd+=" --output=short-iso-precise"
