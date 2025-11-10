@@ -516,6 +516,8 @@ if [[ "$BACKUP_FILE" == *.gz ]]; then
     if [ $RC -ne 0 ]; then
         RESTORE_SUCCESS=false
         kill -- -"$RESTORE_PGID" 2>/dev/null || true
+    elif [ ! -s "$DD_ERROR_LOG" ]; then
+        RESTORE_SUCCESS=true
     fi
     set -o pipefail
 elif [[ "$BACKUP_FILE" == *.7z ]]; then
@@ -538,6 +540,8 @@ elif [[ "$BACKUP_FILE" == *.7z ]]; then
     if [ $RC -ne 0 ]; then
         RESTORE_SUCCESS=false
         kill -- -"$RESTORE_PGID" 2>/dev/null || true
+    elif [ ! -s "$DD_ERROR_LOG" ]; then
+        RESTORE_SUCCESS=true
     fi
     set -o pipefail
 else
@@ -580,8 +584,12 @@ else
     else
         echo "   The SD card may be in an inconsistent state."
         echo "   You may need to format and restore again."
-        echo "   Error details from dd:"
-        cat "$DD_ERROR_LOG"
+        if [ -s "$DD_ERROR_LOG" ]; then
+            echo "   Error details from dd:"
+            tail -n +1 "$DD_ERROR_LOG"
+        else
+            echo "   No additional error output was captured."
+        fi
     fi
     exit 1
 fi
