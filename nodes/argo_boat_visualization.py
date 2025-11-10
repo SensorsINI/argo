@@ -212,6 +212,11 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.gps_lat = 0.0
         self.gps_lon = 0.0
         self._last_visual_sail_side = 1.0
+        self.base_lat = None
+        self.base_lon = None
+        self.boat_pos_x = 0.0
+        self.boat_pos_y = 0.0
+        self.overlay_markers = []
         
         # Timer for publishing markers
         self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
@@ -326,6 +331,19 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Update true wind direction (absolute, compass convention)"""
         self.true_wind_direction = msg.data
     
+    def _update_boat_position_from_gps(self):
+        """Convert current GPS lat/lon to local map XY offsets."""
+        if self.base_lat is None or self.base_lon is None:
+            return
+        try:
+            R = 6378137.0  # Earth radius in meters
+            d_lat = math.radians(self.gps_lat - self.base_lat)
+            d_lon = math.radians(self.gps_lon - self.base_lon)
+            self.boat_pos_y = d_lat * R
+            self.boat_pos_x = d_lon * R * math.cos(math.radians(self.base_lat))
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to update boat XY from GPS: {exc}")
+
     def velocity_callback(self, msg):
         """Update GPS velocity data"""
         self.gps_velocity_north = msg.x  # knots north
@@ -337,12 +355,16 @@ class ArgoBoatVisualization(ArgoBaseNode):
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
             self.gps_lat = msg.latitude
             self.gps_lon = msg.longitude
+            if self.base_lat is None or self.base_lon is None:
+                self.base_lat = msg.latitude
+                self.base_lon = msg.longitude
+            self._update_boat_position_from_gps()
     
     def create_boat_hull_marker(self):
         """Create a simple boat hull marker as a triangle with tip at bow"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
+        marker.header.frame_id = "base_link"  # Use base_link so marker follows boat position
         marker.header.stamp = self.get_current_time()
         
         marker.id = 1
@@ -385,7 +407,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.scale.z = 1.0
         
         # Color (blue for hull)
-        marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.8)
+        marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.6)
         
         # Lifetime - infinite so marker persists
         marker.lifetime.sec = 0
@@ -431,7 +453,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_rudder_indicator_marker(self):
-        """Create rudder position indicator as gray triangle below stern"""
+        """Create rudder position indicator as gray rectangular fin below stern"""
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
@@ -452,57 +474,67 @@ class ArgoBoatVisualization(ArgoBaseNode):
         rudder_angle_deg = self.rudder_cmd * 30.0  # Max 30 degrees
         rudder_angle_rad = math.radians(rudder_angle_deg)
         
-        # Rudder triangle dimensions
-        # Rudder is a vertical fin that extends downward from hull
         rudder_height = 0.3 * self.visualization_scale  # 30cm tall (vertical)
-        rudder_base_length = 0.10 * self.visualization_scale  # 10cm base length along hull
-        
-        # Rudder base edge: along hull (forward-aft direction), from inside hull to stern
-        # Base starts forward of stern, ends at stern
-        # Tip extends downward from stern end of base and rotates left/right based on rudder angle
-        
-        # Vertex 1: Forward end of rudder base (inside hull, at bottom)
-        base_start_x = stern_x + rudder_base_length  # Forward of stern by base_length
-        vertex1 = Point()
-        vertex1.x = base_start_x  # Forward end of base
-        vertex1.y = 0.0  # At centerline
-        vertex1.z = hull_bottom_z  # At hull bottom
-        
-        # Vertex 2: Stern end of rudder base (at stern, at bottom)
-        vertex2 = Point()
-        vertex2.x = stern_x  # At stern x position (aft, -X)
-        vertex2.y = 0.0  # At centerline
-        vertex2.z = hull_bottom_z  # At hull bottom
-        
-        # Vertex 3: Tip of rudder (below stern end of base, rotated by rudder angle)
-        # Rudder rotates around vertical Z axis (horizontal rotation in XY plane)
-        # Pivot point: (x=stern_x, y=0, z=hull_bottom_z) - the stern end of the base (vertex2)
-        # The rudder is a vertical fin. When angle=0, it extends straight back (in -X direction)
-        # When rotated, the tip rotates horizontally around the pivot point in XY plane
-        # When angle = 0: tip is at (x=stern_x-rudder_height, y=0, z=hull_bottom_z-rudder_height) - straight back and down
-        # Positive angle: tip rotates to starboard (negative Y, right side) and slightly forward
-        # Negative angle: tip rotates to port (positive Y, left side) and slightly forward
-        vertex3 = Point()
-        # Rotate tip position around pivot in XY plane
-        # Initial direction when angle=0: pointing in -X direction (straight back/aft)
-        # Rotate this direction by rudder_angle_rad
-        # In ROS convention: +X = forward, so -X = aft
-        # When rotating: +angle rotates starboard (negative Y), -angle rotates port (positive Y)
-        vertex3.x = stern_x - rudder_height * math.cos(rudder_angle_rad)  # Extends back when angle=0
-        vertex3.y = 0.0 - rudder_height * math.sin(rudder_angle_rad)  # Rotates starboard/port (positive angle = negative Y = starboard)
-        vertex3.z = hull_bottom_z - rudder_height  # Always extends straight down (vertical, Z axis)
-        
-        # Create triangle using three vertices
-        marker.points = [vertex1, vertex2, vertex3]
-        
-        # Scale not used for TRIANGLE_LIST
+        rudder_chord = 0.10 * self.visualization_scale  # 10cm chord length (front to back)
+
+        base_start_x = stern_x + rudder_chord  # Forward of stern by chord length
+        pivot_top = Point()
+        pivot_top.x = base_start_x
+        pivot_top.y = 0.0
+        pivot_top.z = hull_bottom_z
+
+        pivot_bottom = Point()
+        pivot_bottom.x = base_start_x
+        pivot_bottom.y = 0.0
+        pivot_bottom.z = hull_bottom_z - rudder_height
+
+        cos_angle = math.cos(rudder_angle_rad)
+        sin_angle = math.sin(rudder_angle_rad)
+        rotated_dx = -rudder_chord * cos_angle
+        rotated_dy = -rudder_chord * sin_angle
+
+        trailing_top = Point()
+        trailing_top.x = base_start_x + rotated_dx
+        trailing_top.y = rotated_dy
+        trailing_top.z = hull_bottom_z
+
+        trailing_bottom = Point()
+        trailing_bottom.x = base_start_x + rotated_dx
+        trailing_bottom.y = rotated_dy
+        trailing_bottom.z = hull_bottom_z - rudder_height
+
+        marker.points = [
+            pivot_top, trailing_top, trailing_bottom,
+            pivot_top, trailing_bottom, pivot_bottom,
+        ]
+
         marker.scale.x = 1.0
         marker.scale.y = 1.0
         marker.scale.z = 1.0
-        
-        # Color (gray for rudder)
+
         marker.color = ColorRGBA(r=0.5, g=0.5, b=0.5, a=0.9)
-        
+        # Add overlay arrow for top-down visibility
+        overlay = Marker()
+        overlay.header = marker.header
+        overlay.id = 103
+        overlay.type = Marker.ARROW
+        overlay.action = Marker.ADD
+        overlay.ns = "argo_boat_overlay"
+        overlay.pose.position.x = base_start_x
+        overlay.pose.position.y = 0.0
+        overlay.pose.position.z = hull_bottom_z
+        # Flip rudder arrow to point backwards (add 180 deg = pi rad to angle)
+        flipped_angle = rudder_angle_rad + math.pi
+        overlay.pose.orientation.w = math.cos(flipped_angle * 0.5)
+        overlay.pose.orientation.x = 0.0
+        overlay.pose.orientation.y = 0.0
+        overlay.pose.orientation.z = math.sin(flipped_angle * 0.5)
+        overlay.scale.x = rudder_height
+        overlay.scale.y = 0.005 * self.visualization_scale
+        overlay.scale.z = 0.0 # no head needed
+        overlay.color = marker.color
+        self.overlay_markers.append(overlay)
+
         # Lifetime - infinite so marker persists
         marker.lifetime.sec = 0
         marker.lifetime.nanosec = 0
@@ -592,7 +624,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_sail_indicator_marker(self):
-        """Create sail position indicator as white triangle on downwind side"""
+        """Create sail position indicator as a white rectangular panel on the downwind side"""
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
@@ -606,7 +638,6 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # Mast dimensions
         mast_top_z = 0.915 * self.visualization_scale  # Top of mast (0.915m tall)
         mast_bottom_z = 0.0  # Bottom of mast at hull center
-        mast_mid_z = 0.1 * self.visualization_scale  # 10cm from bottom
         
         # Hull dimensions
         # base_link coordinate system (ROS standard): +X = forward (bow), +Y = left (port), +Z = up
@@ -632,77 +663,58 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         # Sail trim angle from sail command (-1 = sheeted in, +1 = fully eased)
         sheet_fraction = max(0.0, min(1.0, 0.5 * (self.sail_cmd + 1.0)))
-        max_sail_angle_deg = 45.0
-        sail_angle_deg = -sail_side * sheet_fraction * max_sail_angle_deg
-        sail_angle_rad = math.radians(sail_angle_deg)
+        max_sail_angle_deg = 60.0
+        max_sail_angle_rad = math.radians(max_sail_angle_deg)
         
-        # Sail base angle: aligned with hull length (aft direction = -X = 180° or π radians)
-        # In base_link: +X = forward (0°), -X = aft (180°)
-        base_aft_rad = math.pi  # 180° = aft direction (toward stern, -X)
+        # Sail orientation: start centered (straight aft) and ease toward the downwind side
+        # When sheet_fraction=0 (cmd = -1) → straight aft (π rad)
+        # When sheet_fraction=1 (cmd = +1) → π ± max_sail_angle depending on side
+        base_aft_rad = math.pi  # 180° = aft direction (-X)
+        total_sail_angle_rad = base_aft_rad + sail_side * sheet_fraction * max_sail_angle_rad
         
-        # Rotation to downwind side: perpendicular component (90° from base)
-        # When wind comes from starboard (wind_angle > 0): sail goes to port (+Y), so perpendicular = +90°
-        # When wind comes from port (wind_angle < 0): sail goes to starboard (-Y), so perpendicular = -90°
-        # In base_link: 0° = +X, 90° = +Y (port), -90° = -Y (starboard)
-        perpendicular_component_rad = (math.pi / 2.0) * sail_side  # +90° for port, -90° for starboard
-        
-        # Total sail angle: aft direction + perpendicular rotation + trim angle
-        # When sail_cmd = 0 (halfway pulled in): sail_angle_rad = 0, so total = base + perpendicular
-        # When sail_cmd = 0 and wind head-on (sail_side = 0): total = π (straight aft, -X)
-        # When sail_cmd = 0 and wind from starboard (sail_side = +1): total = π + π/2 = 3π/2 (aft and port, -X and +Y)
-        total_sail_angle_rad = base_aft_rad + perpendicular_component_rad + sail_angle_rad
-        
-        # Vertex 1: Top of mast (at boat center)
+        boom_length = hull_half_length
+
         vertex1 = Point()
         vertex1.x = 0.0
         vertex1.y = 0.0
         vertex1.z = mast_top_z
-        
-        # Vertex 2: 10cm above back hull (at stern), position depends on sail angle
-        # When sail_cmd = 0: should be at stern (x=stern_x, y=0 on centerline), aligned with hull
-        # When sail rotates: y offset based on sail angle from mast center
-        
-        # Calculate vertex2 position using parametric line equation:
-        # Sail extends from mast (0,0) at angle total_sail_angle_rad
-        # In base_link (ROS standard): 0° = +X (forward), 90° = +Y (port), 180° = -X (aft), 270° = -Y (starboard)
-        # Parametric: x = t * cos(θ), y = t * sin(θ) where θ is measured from +X axis
-        # We want vertex2 at stern (x = stern_x), so solve for y
-        cos_angle = math.cos(total_sail_angle_rad)
-        sin_angle = math.sin(total_sail_angle_rad)
-        
+
         vertex2 = Point()
-        vertex2.x = stern_x  # Always at stern x position (aft, -X)
-        
-        if abs(cos_angle) > 0.001:  # Normal case: not perpendicular to X axis
-            # When x = stern_x: t = stern_x / cos(θ)
-            # Then: y = stern_x * sin(θ) / cos(θ) = stern_x * tan(θ)
-            vertex2.y = stern_x * sin_angle / cos_angle
-        else:
-            # Edge case: sail is perpendicular to X axis (cos ≈ 0)
-            # When perpendicular, y is determined by sign of sin and distance to stern
-            # If sin > 0: sail extends to port (+Y), y should be large positive
-            # If sin < 0: sail extends to starboard (-Y), y should be large negative
-            max_y_offset = abs(stern_x) * 2.0  # Allow sail to extend 2x hull length sideways
-            vertex2.y = max_y_offset if sin_angle > 0 else -max_y_offset
-        
-        vertex2.z = hull_top_z + 0.10 * self.visualization_scale  # 10cm above hull top
-        
-        # Vertex 3: 10cm from bottom of mast (at boat center)
+        vertex2.x = boom_length * math.cos(total_sail_angle_rad)
+        vertex2.y = boom_length * math.sin(total_sail_angle_rad)
+        vertex2.z = hull_top_z + 0.10 * self.visualization_scale
+
         vertex3 = Point()
         vertex3.x = 0.0
         vertex3.y = 0.0
-        vertex3.z = mast_mid_z  # 10cm from bottom (mast bottom is at 0)
-        
-        # Create triangle using three vertices
+        vertex3.z = 0.1 * self.visualization_scale
+
         marker.points = [vertex1, vertex2, vertex3]
-        
-        # Scale not used for TRIANGLE_LIST
+
         marker.scale.x = 1.0
         marker.scale.y = 1.0
         marker.scale.z = 1.0
-        
-        # Color (white for sail)
+
         marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.8)
+        # Add overlay arrow for top-down visibility
+        overlay = Marker()
+        overlay.header = marker.header
+        overlay.id = 104
+        overlay.type = Marker.ARROW
+        overlay.action = Marker.ADD
+        overlay.ns = "argo_boat_overlay"
+        overlay.pose.position.x = 0.0
+        overlay.pose.position.y = 0.0
+        overlay.pose.position.z = 0.1 * self.visualization_scale
+        overlay.pose.orientation.w = math.cos(total_sail_angle_rad * 0.5)
+        overlay.pose.orientation.x = 0.0
+        overlay.pose.orientation.y = 0.0
+        overlay.pose.orientation.z = math.sin(total_sail_angle_rad * 0.5)
+        overlay.scale.x = boom_length
+        overlay.scale.y = 0.02 * self.visualization_scale
+        overlay.scale.z = 0.0 # no head
+        overlay.color = marker.color
+        self.overlay_markers.append(overlay)
         
         # Lifetime - infinite so marker persists
         marker.lifetime.sec = 0
@@ -731,7 +743,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
+        marker.header.frame_id = "map"  # Use global frame so arrow stays aligned with wind
         marker.header.stamp = self.get_current_time()
         
         marker.id = 5
@@ -739,9 +751,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.action = Marker.ADD
         marker.ns = "argo_boat"
         
-        # Position above boat - apply visualization scale
-        marker.pose.position.x = 0.0
-        marker.pose.position.y = 0.0
+        # Position above boat in map frame - apply visualization scale
+        marker.pose.position.x = self.boat_pos_x
+        marker.pose.position.y = self.boat_pos_y
         marker.pose.position.z = 1.0 * self.visualization_scale  # Just above mast
         
         # Convert wind direction from "relative to boat, where wind comes from" 
@@ -772,19 +784,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # If wind comes from 0° (north), it goes toward 180° (south)
         absolute_wind_to = (absolute_wind_from + 180.0) % 360.0
         
-        # Step 3: Convert back to relative direction for base_link frame visualization
-        # This gives us the direction the wind arrow should point in base_link coordinates
-        relative_wind_to = (absolute_wind_to - self.boat_heading) % 360.0
-        # Normalize to -180 to +180 range for easier angle calculation
-        if relative_wind_to > 180.0:
-            relative_wind_to -= 360.0
-        
-        # Convert to radians for quaternion calculation
-        # Note: In base_link, +X = forward, so 0° relative means pointing forward (+X direction)
-        # The relative_wind_to angle is a compass bearing (clockwise from forward),
-        # but ROS quaternion rotation is counterclockwise, so we need to negate
-        wind_angle_rad = -math.radians(relative_wind_to)
-        
+        # Step 3: Convert to map frame yaw (0° = East, increasing CCW)
+        # Compass 0° = North, so yaw = (90 - compass)
+        yaw_deg = (90.0 - absolute_wind_to) % 360.0
+        wind_angle_rad = math.radians(yaw_deg)
         marker.pose.orientation.w = math.cos(wind_angle_rad * 0.5)
         marker.pose.orientation.x = 0.0
         marker.pose.orientation.y = 0.0
@@ -1058,6 +1061,11 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_wind_vector_marker())
             marker_array.markers.append(self.create_velocity_vector_marker())
             marker_array.markers.append(self.create_heading_arrow_marker())
+
+            # Add overlay markers (e.g., top-down indicators) and clear buffer
+            if self.overlay_markers:
+                marker_array.markers.extend(self.overlay_markers)
+                self.overlay_markers = []
             
             # Add optional text labels (in separate namespace for independent toggling)
             marker_array.markers.append(self.create_rudder_label_marker())

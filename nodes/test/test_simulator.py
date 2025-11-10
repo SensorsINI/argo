@@ -61,7 +61,7 @@ def test_mock_simulator():
         nodes_dir = argo_dir / "nodes"
         sys.path.append(str(nodes_dir))
         
-        from argo_simulator_bridge import MockSailboatSimulator
+        from mock_sailboat_simulator import MockSailboatSimulator
         
         print("✅ Mock simulator imported successfully")
         
@@ -151,8 +151,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
