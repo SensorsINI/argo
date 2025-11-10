@@ -3630,11 +3630,14 @@ If you take no action within 30 seconds, the system will automatically
         else:
             if CRITICAL_BATTERY_USE_SHUTDOWN:
                 self.get_logger().error(
-                    "⚠️  DEVELOPMENT MODE: Executing shutdown command NOW - POWER WILL BE CUT")
+                    "⚠️  DEVELOPMENT MODE: Executing systemctl poweroff NOW - POWER WILL BE CUT")
                 self.get_logger().error(
-                    "⚠️  CRITICAL_BATTERY_USE_SHUTDOWN=True - Using shutdown instead of halt")
-                subprocess.run(['shutdown', '-h', 'now'], check=True)
-                self.get_logger().error("Shutdown command executed - system will shutdown and cut power")
+                    "⚠️  CRITICAL_BATTERY_USE_SHUTDOWN=True - Using systemctl poweroff instead of halt")
+                subprocess.run(
+                    ['systemctl', 'poweroff', '--message', 'ARGO critical battery shutdown'],
+                    check=True
+                )
+                self.get_logger().error("Poweroff command executed - system will shutdown and cut power")
             else:
                 self.get_logger().error(
                     "PRODUCTION MODE: Executing halt command NOW for critical battery preservation")
