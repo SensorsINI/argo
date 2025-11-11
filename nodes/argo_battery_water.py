@@ -161,6 +161,8 @@ class BatteryWaterNode(ArgoBaseNode):
         self._ac_power_window_s = 30.0   # Report "AC power" if seen in last 30s
         self._last_charging_true_time = 0.0
         self._last_ac_power_true_time = 0.0
+        self._charging_conflict_log_interval = 60.0
+        self._last_charging_conflict_log_time = 0.0
         
         # Battery lifetime estimation publisher
         self.pub_battery_lifetime_hours = self.create_publisher(
@@ -1079,9 +1081,22 @@ class BatteryWaterNode(ArgoBaseNode):
         
         # Determine status based on time windows
         # Report True if seen as True within the time window
-        charging_status = (current_time - self._last_charging_true_time) < self._charging_window_s
+        charging_status_recent = (current_time - self._last_charging_true_time) < self._charging_window_s
         ac_power_present = (current_time - self._last_ac_power_true_time) < self._ac_power_window_s
-            
+
+        # Fail-safe: charging cannot be true if AC power is absent
+        if charging_status_recent and not ac_power_present:
+            if (current_time - self._last_charging_conflict_log_time) >= self._charging_conflict_log_interval:
+                self.get_logger().warning(
+                    "Charging GPIO asserted but AC power is absent; suppressing charging status (check charger hardware)."
+                )
+                self._last_charging_conflict_log_time = current_time
+            # Age out the stale charging timestamp so it clears immediately
+            self._last_charging_true_time = current_time - self._charging_window_s
+            charging_status_recent = False
+
+        charging_status = charging_status_recent
+        
         return charging_status, ac_power_present
 
     # ---------- I2C Recovery Methods (similar to imu.py) ----------
@@ -1695,6 +1710,27 @@ class BatteryWaterNode(ArgoBaseNode):
             battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
             temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
             
+            # Determine slope information (convert to V/h for readability)
+            charging_slope_vph = self._charging_slope_v_per_s * 3600.0 if self._charging_slope_v_per_s is not None else None
+            discharging_slope_vph = self._discharging_slope_v_per_s * 3600.0 if self._discharging_slope_v_per_s is not None else None
+
+            slope_str = ""
+            if charging_status is True and charging_slope_vph is not None:
+                slope_str = f", ChargingSlope={charging_slope_vph:.3f} V/h"
+            elif charging_status is False and discharging_slope_vph is not None:
+                slope_str = f", DischargingSlope={discharging_slope_vph:.3f} V/h"
+            elif charging_slope_vph is not None or discharging_slope_vph is not None:
+                slope_str = ", Slope=unknown-state"
+
+            # Determine lifetime information
+            lifetime_str = ""
+            if charging_status is True and self._latest_time_to_full_hours is not None:
+                lifetime_str = f", TTF={self._latest_time_to_full_hours:.2f}h"
+            elif charging_status is False and self._latest_time_to_empty_hours is not None:
+                lifetime_str = f", TTE={self._latest_time_to_empty_hours:.2f}h"
+            elif self._latest_battery_lifetime_hours is not None:
+                lifetime_str = f", Lifetime≈{self._latest_battery_lifetime_hours:.2f}h"
+
             charging_str = ""
             if charging_status is not None and ac_power_present is not None:
                 charging_icon = "🔌" if charging_status else "🔋"
@@ -1710,7 +1746,7 @@ class BatteryWaterNode(ArgoBaseNode):
             self.get_logger().info(
                 f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
                 f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
-                f"{temp_humid_str}{charging_str}"
+                f"{temp_humid_str}{charging_str}{slope_str}{lifetime_str}"
             )
             self._last_log_time = current_time
 
