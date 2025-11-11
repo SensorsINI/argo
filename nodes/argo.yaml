@@ -13,6 +13,7 @@
     simulation:
       publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz) - 2Hz sufficient for visualization
       simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics simulation
+      heading_trail_limit: 20   # Number of historical heading markers to display in visualization
 
 # High-level controller (controller.py)
 controller_node:

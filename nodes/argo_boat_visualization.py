@@ -109,6 +109,7 @@ import os
 import argparse
 import argcomplete
 import copy
+from collections import deque
 
 # Import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
@@ -131,6 +132,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.update_rate = self.get_parameter('simulation.publish_rate').get_parameter_value().double_value
         if self.update_rate <= 0:
             self.update_rate = DEFAULT_UPDATE_RATE
+        
+        # Historical heading trail configuration
+        self.declare_parameter('simulation.heading_trail_limit', 20)
+        initial_trail_limit = max(
+            0,
+            int(self.get_parameter('simulation.heading_trail_limit').get_parameter_value().integer_value)
+        )
+        self.heading_trail_limit = initial_trail_limit
+        self.heading_trail = deque(maxlen=self.heading_trail_limit) if self.heading_trail_limit > 0 else deque()
         
         # Log scale setting for debugging
         if self.visualization_scale != 1.0:
@@ -270,7 +280,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
     
     def pose_callback(self, msg):
         """Update boat heading from pose topic"""
-        self.boat_heading = msg.z
+        heading_math = float(msg.z) % 360.0
+        # Convert mathematical (counter-clockwise, 0° = East) heading to compass convention (clockwise from North)
+        self.boat_heading = (450.0 - heading_math) % 360.0
     
     def accel_callback(self, msg):
         """Estimate roll and pitch from accelerometer data"""
@@ -310,6 +322,23 @@ class ArgoBoatVisualization(ArgoBaseNode):
                 else:
                     result.successful = False
                     result.reason = f"Invalid publish_rate: {new_rate} (must be > 0)"
+            elif param.name == 'simulation.heading_trail_limit':
+                new_limit = int(param.get_parameter_value().integer_value)
+                if new_limit < 0:
+                    result.successful = False
+                    result.reason = f"Invalid heading_trail_limit: {new_limit} (must be >= 0)"
+                else:
+                    if new_limit != self.heading_trail_limit:
+                        self.get_logger().info(
+                            f"Heading trail limit changed from {self.heading_trail_limit} to {new_limit} "
+                            f"(change via ros2 param set or Foxglove)"
+                        )
+                        self.heading_trail_limit = new_limit
+                        if self.heading_trail_limit == 0:
+                            self.heading_trail = deque()
+                        else:
+                            existing = list(self.heading_trail)[-self.heading_trail_limit:]
+                            self.heading_trail = deque(existing, maxlen=self.heading_trail_limit)
             else:
                 # Allow other parameters (don't fail on unknown parameters)
                 pass
@@ -343,6 +372,65 @@ class ArgoBoatVisualization(ArgoBaseNode):
             self.boat_pos_x = d_lon * R * math.cos(math.radians(self.base_lat))
         except Exception as exc:
             self.get_logger().warn(f"Failed to update boat XY from GPS: {exc}")
+
+    def _update_heading_trail(self):
+        """Store the current boat position and heading for historical visualization."""
+        if self.heading_trail_limit == 0:
+            return
+        if self.base_lat is None or self.base_lon is None:
+            return
+        pos_x = self.boat_pos_x
+        pos_y = self.boat_pos_y
+        if pos_x is None or pos_y is None:
+            return
+        if any(map(math.isnan, (pos_x, pos_y, self.boat_heading))):
+            return
+
+        yaw_rad = math.radians((90.0 - self.boat_heading) % 360.0)
+        self.heading_trail.append((float(pos_x), float(pos_y), yaw_rad))
+
+    def _create_heading_trail_markers(self):
+        """Create markers representing the historical heading trace."""
+        markers = []
+        if self.heading_trail_limit == 0 or not self.heading_trail:
+            return markers
+
+        base_id = 400
+        arrow_length = 0.35 * self.visualization_scale
+        arrow_width = 0.015 * self.visualization_scale
+        arrow_height = 0.015 * self.visualization_scale
+
+        for idx, (pos_x, pos_y, yaw_rad) in enumerate(self.heading_trail):
+            marker = Marker()
+            marker.header = Header()
+            marker.header.frame_id = "map"
+            marker.header.stamp = self.get_current_time()
+
+            marker.ns = "argo_heading_trail"
+            marker.id = base_id + idx
+            marker.type = Marker.ARROW
+            marker.action = Marker.ADD
+
+            marker.pose.position.x = pos_x
+            marker.pose.position.y = pos_y
+            marker.pose.position.z = 0.05 * self.visualization_scale
+
+            marker.pose.orientation.w = math.cos(yaw_rad * 0.5)
+            marker.pose.orientation.x = 0.0
+            marker.pose.orientation.y = 0.0
+            marker.pose.orientation.z = math.sin(yaw_rad * 0.5)
+
+            marker.scale.x = arrow_length
+            marker.scale.y = arrow_width
+            marker.scale.z = arrow_height
+
+            marker.color = ColorRGBA(r=0.7, g=0.7, b=0.7, a=0.35)
+            marker.lifetime.sec = 0
+            marker.lifetime.nanosec = 0
+
+            markers.append(marker)
+
+        return markers
 
     def velocity_callback(self, msg):
         """Update GPS velocity data"""
@@ -1052,6 +1140,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
         try:
             marker_array = MarkerArray()
             
+            self._update_heading_trail()
+            
             # Add boat visualization markers
             marker_array.markers.append(self.create_boat_hull_marker())
             marker_array.markers.append(self.create_mast_marker())
@@ -1061,6 +1151,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_wind_vector_marker())
             marker_array.markers.append(self.create_velocity_vector_marker())
             marker_array.markers.append(self.create_heading_arrow_marker())
+
+            # Add historical heading markers
+            if self.heading_trail_limit > 0 and self.heading_trail:
+                marker_array.markers.extend(self._create_heading_trail_markers())
 
             # Add overlay markers (e.g., top-down indicators) and clear buffer
             if self.overlay_markers:
