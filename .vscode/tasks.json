@@ -2,6 +2,34 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "asimmock debugpy",
+            "type": "shell",
+            "command": "/bin/bash",
+            "args": [
+                "-lc",
+                "cd /home/tobi/argo && python3 -m debugpy --listen localhost:5678 --wait-for-client launch/argo_lifecycle_manager.py simulate_local --force-mock & sleep 1"
+            ],
+            "problemMatcher": [],
+            "runOptions": {
+                "reevaluateOnRerun": true
+            }
+        },
+        {
+            "label": "asimmock debugpy cleanup",
+            "type": "shell",
+            "command": "/bin/bash",
+            "args": [
+                "-lc",
+                "pkill -f \"debugpy --listen localhost:5678\" || true"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
             "label": "Forward WSL Port 8765 (Foxglove)",
             "type": "process",
             "command": "powershell.exe",
