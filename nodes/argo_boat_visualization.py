@@ -110,6 +110,7 @@ import argparse
 import argcomplete
 import copy
 from collections import deque
+from dataclasses import dataclass
 
 # Import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
@@ -117,6 +118,15 @@ from argo_base_node import ArgoBaseNode
 
 # Default update rate (Hz) - can be overridden by parameter
 DEFAULT_UPDATE_RATE = 10.0
+
+@dataclass
+class HeadingTrailEntry:
+    """Snapshot of boat position and heading for trail visualization."""
+    x: float
+    y: float
+    yaw_rad: float
+    compass_deg: float
+
 
 class ArgoBoatVisualization(ArgoBaseNode):
     def __init__(self, debug_mode=False):
@@ -141,6 +151,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
         )
         self.heading_trail_limit = initial_trail_limit
         self.heading_trail = deque(maxlen=self.heading_trail_limit) if self.heading_trail_limit > 0 else deque()
+        self.heading_trail_spacing_m = 0.75  # Minimum spacing between trail markers
+        self.heading_trail_heading_threshold_deg = 12.0  # Heading delta to force a new marker
         
         # Log scale setting for debugging
         if self.visualization_scale != 1.0:
@@ -387,7 +399,25 @@ class ArgoBoatVisualization(ArgoBaseNode):
             return
 
         yaw_rad = math.radians((90.0 - self.boat_heading) % 360.0)
-        self.heading_trail.append((float(pos_x), float(pos_y), yaw_rad))
+        entry = HeadingTrailEntry(
+            x=float(pos_x),
+            y=float(pos_y),
+            yaw_rad=yaw_rad,
+            compass_deg=float(self.boat_heading)
+        )
+
+        if not self.heading_trail:
+            self.heading_trail.append(entry)
+            return
+
+        last_entry = self.heading_trail[-1]
+        dx = entry.x - last_entry.x
+        dy = entry.y - last_entry.y
+        dist = math.hypot(dx, dy)
+        heading_delta = self._heading_delta(entry.compass_deg, last_entry.compass_deg)
+
+        if dist >= self.heading_trail_spacing_m or heading_delta >= self.heading_trail_heading_threshold_deg:
+            self.heading_trail.append(entry)
 
     def _create_heading_trail_markers(self):
         """Create markers representing the historical heading trace."""
@@ -400,7 +430,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         arrow_width = 0.015 * self.visualization_scale
         arrow_height = 0.015 * self.visualization_scale
 
-        for idx, (pos_x, pos_y, yaw_rad) in enumerate(self.heading_trail):
+        for idx, entry in enumerate(self.heading_trail):
             marker = Marker()
             marker.header = Header()
             marker.header.frame_id = "map"
@@ -410,15 +440,16 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker.id = base_id + idx
             marker.type = Marker.ARROW
             marker.action = Marker.ADD
+            marker.frame_locked = True
 
-            marker.pose.position.x = pos_x
-            marker.pose.position.y = pos_y
+            marker.pose.position.x = entry.x
+            marker.pose.position.y = entry.y
             marker.pose.position.z = 0.05 * self.visualization_scale
 
-            marker.pose.orientation.w = math.cos(yaw_rad * 0.5)
+            marker.pose.orientation.w = math.cos(entry.yaw_rad * 0.5)
             marker.pose.orientation.x = 0.0
             marker.pose.orientation.y = 0.0
-            marker.pose.orientation.z = math.sin(yaw_rad * 0.5)
+            marker.pose.orientation.z = math.sin(entry.yaw_rad * 0.5)
 
             marker.scale.x = arrow_length
             marker.scale.y = arrow_width
@@ -431,6 +462,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
             markers.append(marker)
 
         return markers
+
+    @staticmethod
+    def _heading_delta(a_deg, b_deg):
+        """Return the smallest absolute difference between two compass headings."""
+        diff = (a_deg - b_deg + 180.0) % 360.0 - 180.0
+        return abs(diff)
 
     def velocity_callback(self, msg):
         """Update GPS velocity data"""
