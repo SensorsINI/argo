@@ -2362,6 +2362,9 @@ class ArgoLifecycleManager:
                 with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
                     temp_millicelsius = int(f.read().strip())
                     cpu_temp = str(temp_millicelsius // 1000)
+            except KeyboardInterrupt:
+                print("🚢 ARGO: Keyboard interrupt detected, exiting...")
+                return
             except Exception:
                 pass
             
@@ -2387,6 +2390,9 @@ class ArgoLifecycleManager:
                             if attempt == 0:
                                 time.sleep(0.1)  # Brief delay before retry
                             pass
+            except KeyboardInterrupt:
+                print("🚢 ARGO: Keyboard interrupt detected, exiting...")
+                return
             except Exception:
                 pass
             
@@ -2437,7 +2443,9 @@ class ArgoLifecycleManager:
                     f.write(str(current_time))
             except Exception:
                 pass
-                
+        except KeyboardInterrupt:
+            print("🚢 ARGO: Keyboard interrupt detected, exiting...")
+            return
         except Exception as e:
             print(f"🚢 ARGO: Status check failed - {e}", flush=True)
     
