@@ -151,8 +151,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
         )
         self.heading_trail_limit = initial_trail_limit
         self.heading_trail = deque(maxlen=self.heading_trail_limit) if self.heading_trail_limit > 0 else deque()
-        self.heading_trail_spacing_m = 0.75  # Minimum spacing between trail markers
+        self.heading_trail_spacing_m = 2.0  # Minimum spacing between trail markers
         self.heading_trail_heading_threshold_deg = 12.0  # Heading delta to force a new marker
+        self.heading_trail_time_spacing_s = 5.0  # Minimum time between markers
+        self.heading_trail_last_time_s = None
         
         # Log scale setting for debugging
         if self.visualization_scale != 1.0:
@@ -239,6 +241,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.boat_pos_x = 0.0
         self.boat_pos_y = 0.0
         self.overlay_markers = []
+        self.heading_trail_clear_needed = False
         
         # Timer for publishing markers
         self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
@@ -351,6 +354,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
                         else:
                             existing = list(self.heading_trail)[-self.heading_trail_limit:]
                             self.heading_trail = deque(existing, maxlen=self.heading_trail_limit)
+                        if new_limit == 0:
+                            self.heading_trail.clear()
+                        self.heading_trail_last_time_s = None
+                        self.heading_trail_clear_needed = True
             else:
                 # Allow other parameters (don't fail on unknown parameters)
                 pass
@@ -388,6 +395,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
     def _update_heading_trail(self):
         """Store the current boat position and heading for historical visualization."""
         if self.heading_trail_limit == 0:
+            self.heading_trail_last_time_s = None
             return
         if self.base_lat is None or self.base_lon is None:
             return
@@ -399,6 +407,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
             return
 
         yaw_rad = math.radians((90.0 - self.boat_heading) % 360.0)
+        current_time_s = self.get_clock().now().nanoseconds / 1e9
         entry = HeadingTrailEntry(
             x=float(pos_x),
             y=float(pos_y),
@@ -408,6 +417,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
 
         if not self.heading_trail:
             self.heading_trail.append(entry)
+            self.heading_trail_last_time_s = current_time_s
             return
 
         last_entry = self.heading_trail[-1]
@@ -415,9 +425,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         dy = entry.y - last_entry.y
         dist = math.hypot(dx, dy)
         heading_delta = self._heading_delta(entry.compass_deg, last_entry.compass_deg)
+        time_delta = current_time_s - self.heading_trail_last_time_s if self.heading_trail_last_time_s is not None else float('inf')
 
-        if dist >= self.heading_trail_spacing_m or heading_delta >= self.heading_trail_heading_threshold_deg:
+        if (
+            (dist >= self.heading_trail_spacing_m
+            or heading_delta >= self.heading_trail_heading_threshold_deg)
+            and time_delta >= self.heading_trail_time_spacing_s
+        ):
             self.heading_trail.append(entry)
+            self.heading_trail_last_time_s = current_time_s
 
     def _create_heading_trail_markers(self):
         """Create markers representing the historical heading trace."""
@@ -812,7 +828,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         vertex3 = Point()
         vertex3.x = 0.0
         vertex3.y = 0.0
-        vertex3.z = 0.1 * self.visualization_scale
+        vertex3.z =  hull_top_z +  0.1 * self.visualization_scale
 
         marker.points = [vertex1, vertex2, vertex3]
 
@@ -1057,14 +1073,14 @@ class ArgoBoatVisualization(ArgoBaseNode):
         # Position near rudder indicator (slightly offset) - apply visualization scale
         marker.pose.position.x = -0.3 * self.visualization_scale  # At stern
         marker.pose.position.y = 0.15 * self.visualization_scale  # Offset to the side
-        marker.pose.position.z = 0.1 * self.visualization_scale  # Slightly above
+        marker.pose.position.z = -0.1 * self.visualization_scale  # Slightly below water
         
         # Text content with value
         rudder_angle_deg = self.rudder_cmd * 30.0  # Max 30 degrees
         marker.text = f"Rudder: {rudder_angle_deg:.1f}°"
         
         # Scale (text size) - apply visualization scale
-        marker.scale.z = 0.1 * self.visualization_scale  # Text height in meters
+        marker.scale.z = 0.03 * self.visualization_scale  # Text height in meters
         
         # Color matching rudder indicator (red)
         marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
@@ -1097,7 +1113,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Sail: {sail_angle_deg:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.15 * self.visualization_scale
+        marker.scale.z = 0.03 * self.visualization_scale
         
         # Color matching sail indicator (white, but darker for visibility)
         marker.color = ColorRGBA(r=0.9, g=0.9, b=0.9, a=1.0)
@@ -1129,7 +1145,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Wind: {self.wind_speed:.1f} m/s @ {self.wind_angle:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.1 * self.visualization_scale
+        marker.scale.z = 0.05 * self.visualization_scale
         
         # Color matching wind vector (green)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
@@ -1161,7 +1177,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Heading: {self.boat_heading:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.1 * self.visualization_scale
+        marker.scale.z = 0.03 * self.visualization_scale
         
         # Color matching heading arrow (cyan)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
@@ -1180,6 +1196,17 @@ class ArgoBoatVisualization(ArgoBaseNode):
             self._update_heading_trail()
             
             # Add boat visualization markers
+            if self.heading_trail_clear_needed:
+                delete_marker = Marker()
+                delete_marker.header = Header()
+                delete_marker.header.frame_id = "map"
+                delete_marker.header.stamp = self.get_current_time()
+                delete_marker.ns = "argo_heading_trail"
+                delete_marker.id = 0
+                delete_marker.action = Marker.DELETEALL
+                marker_array.markers.append(delete_marker)
+                self.heading_trail_clear_needed = False
+
             marker_array.markers.append(self.create_boat_hull_marker())
             marker_array.markers.append(self.create_mast_marker())
             marker_array.markers.append(self.create_rudder_indicator_marker())  # Gray triangle
