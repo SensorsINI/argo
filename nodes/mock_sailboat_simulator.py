@@ -41,7 +41,7 @@ class MockSailboatSimulator:
         self.max_speed = 1.5  # metres / second (approximate hull speed)
         self.no_go_angle_deg = 40.0  # approximate close-hauled limit
         self.stall_decay_rate = 2.5  # m/s^2 equivalent deceleration while stalled
-        self.stall_recovery_threshold = 0.2  # m/s; once above this we treat stall as cleared
+        self.stall_recovery_threshold = 0.1  # m/s; once above this we treat stall as cleared
 
     # ------------------------------------------------------------------
     # Compatibility properties (legacy direct attribute access)
@@ -76,7 +76,7 @@ class MockSailboatSimulator:
 
     @boat_speed.setter
     def boat_speed(self, value: float) -> None:
-        self.state.boat_speed = max(0.0, float(value))
+        self.state.boat_speed = max(0.05, float(value))
 
     @property
     def rudder_angle(self) -> float:
@@ -100,7 +100,7 @@ class MockSailboatSimulator:
 
     @wind_speed.setter
     def wind_speed(self, value: float) -> None:
-        self.state.wind_speed = max(0.0, float(value))
+        self.state.wind_speed = max(0.05, float(value))
 
     @property
     def wind_direction(self) -> float:
@@ -129,16 +129,16 @@ class MockSailboatSimulator:
         # Estimate speed based on wind alignment and sail trim
         if is_in_no_go_zone:
             # Deep stall: boat luffs head-to-wind and rapidly loses way
-            target_speed = 0.0
+            target_speed = 0.01
             self.state.stalled = True
 
             # Apply an aggressive decay to current speed to simulate "in irons"
             stall_delta = self.stall_decay_rate * self.dt
-            self.state.boat_speed = max(0.0, self.state.boat_speed - stall_delta)
+            self.state.boat_speed = max(0.05, self.state.boat_speed - stall_delta)
         else:
             wind_efficiency = max(0.1, abs(math.sin(math.radians(wind_boat_angle))))
             sail_efficiency = 1.0 - abs(self.state.sail_angle * 0.3)
-            target_speed = self.state.wind_speed * 0.3 * wind_efficiency * sail_efficiency
+            target_speed = self.state.wind_speed * 0.5 * wind_efficiency * sail_efficiency
             target_speed = min(target_speed, self.max_speed)
             # Recover from stall once moving again
             if self.state.stalled and self.state.boat_speed <= self.stall_recovery_threshold:
@@ -154,7 +154,7 @@ class MockSailboatSimulator:
             self.state.stalled = False
 
         # Apply rudder-induced turn rate when moving
-        if self.state.boat_speed > 0.05:
+        if self.state.boat_speed >= 0.05:
             speed_ratio = self.state.boat_speed / self.max_speed if self.max_speed > 0 else 0.0
             effective_ratio = max(0.2, min(1.0, speed_ratio))
             turn_rate = self.state.rudder_angle * self.max_turn_rate * effective_ratio
