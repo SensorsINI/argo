@@ -455,6 +455,10 @@ class PowerController(ArgoBaseNode):
         self.heartbeat_frequency_hz = 1.0/3.0  # 3-second cycle
         self.heartbeat_duty_cycle = 0.1    # 10% duty cycle per slot
         self.heartbeat_paused = False  # Flag to pause heartbeat for special patterns
+        self.heartbeat_pause_reason = None
+        self.heartbeat_pause_time = 0.0
+        self.last_heartbeat_pause_log = 0.0
+        self.heartbeat_pause_log_interval = 5.0
         
         # LED pattern logging
         self.last_logged_pattern = None
@@ -490,6 +494,7 @@ class PowerController(ArgoBaseNode):
         self.battery_monitoring_active = False
         self.sos_led_active = False
         self.last_logged_battery_voltage = None  # Track last logged voltage for throttling
+        self.last_battery_voltage = None  # Last valid battery voltage reading
 
         # WiFi monitoring state
         self.wifi_connected = True  # Assume connected at startup
@@ -1629,11 +1634,17 @@ class PowerController(ArgoBaseNode):
             if not self.running:
                 break
 
+            current_time = time.time()
+
             # Check network status periodically (only one that needs active checking)
             self._check_network_status()
 
             # Skip heartbeat if paused (for SOS, service wait, or other special patterns)
             if self.heartbeat_paused:
+                if current_time - self.last_heartbeat_pause_log >= self.heartbeat_pause_log_interval:
+                    reason = self.heartbeat_pause_reason or "unspecified"
+                    self.get_logger().debug(f"Heartbeat paused (reason: {reason})")
+                    self.last_heartbeat_pause_log = current_time
                 time.sleep(0.1)
                 continue
 
@@ -1641,7 +1652,6 @@ class PowerController(ArgoBaseNode):
             pattern = self._generate_led_pattern()
             
             # Log pattern changes and periodic updates
-            current_time = time.time()
             pattern_changed = pattern != self.last_logged_pattern
             time_since_log = current_time - self.last_pattern_log_time
             
@@ -2889,6 +2899,9 @@ class PowerController(ArgoBaseNode):
                     battery_voltage = battery_data.get('battery_voltage', 0)
                     charging_status = battery_data.get('charging_status', None)
                     ac_power_present = battery_data.get('ac_power_present', None)
+                    self.last_battery_voltage = battery_voltage
+                    self.get_logger().debug(
+                        f"Battery data received: {battery_voltage:.3f}V (charging={charging_status}, ac_power={ac_power_present})")
 
                     # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
                     # Invalid readings (0V, very low, or impossibly high) indicate sensor/communication errors
@@ -2956,7 +2969,7 @@ class PowerController(ArgoBaseNode):
                                 f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
                             self.critical_battery_detected = True
                             # Pause heartbeat for critical battery
-                            self.pause_heartbeat()
+                            self.pause_heartbeat(reason="critical_battery")
                             # Stop SOS pattern if running (critical takes priority)
                             if self.sos_led_active:
                                 self.sos_led_active = False
@@ -2970,7 +2983,7 @@ class PowerController(ArgoBaseNode):
                                 f"LOW BATTERY DETECTED: {battery_voltage:.3f}V < {LOW_BATTERY_THRESHOLD_V}V - Starting SOS LED pattern")
                             self.low_battery_detected = True
                             # Pause heartbeat to make SOS pattern visible
-                            self.pause_heartbeat()
+                            self.pause_heartbeat(reason="low_battery")
                             # Start SOS LED pattern in separate thread
                             threading.Thread(target=self.sos_led_pattern, daemon=True).start()
                             # Send desktop notification
@@ -2990,7 +3003,7 @@ class PowerController(ArgoBaseNode):
                             self.low_battery_detected = False
                             self.sos_led_active = False  # Stop SOS pattern
                             # Resume heartbeat now that battery is stable
-                            self.resume_heartbeat()
+                            self.resume_heartbeat(reason="low_battery_recovered")
                             self.send_desktop_notification(
                                 "Battery Recovered",
                                 f"Battery voltage recovered: {battery_voltage:.3f}V\nSOS LED pattern stopped",
@@ -3142,7 +3155,7 @@ class PowerController(ArgoBaseNode):
                 self.get_logger().error(f"Error parsing battery service response: {e}")
                 return None
         else:
-            self.get_logger().error(f"Battery service call failed: {message}")
+            self.get_logger().warning(f"Battery service call failed: {message}")
             return None
 
     def check_wifi_connectivity(self) -> bool:
@@ -3584,7 +3597,7 @@ If you take no action within 30 seconds, the system will automatically
             if not CRITICAL_BATTERY_USE_SHUTDOWN:
                 self._clear_critical_battery_flag()
             # Resume heartbeat since shutdown was cancelled
-            self.resume_heartbeat()
+            self.resume_heartbeat(reason="critical_battery_cancelled")
             # Send cancellation notification
             self.send_desktop_notification(
                 "SHUTDOWN CANCELLED BY USER",
@@ -3761,15 +3774,29 @@ If you take no action within 30 seconds, the system will automatically
         else:
             self.get_logger().warning(f"Invalid heartbeat frequency: {frequency_hz}")
 
-    def pause_heartbeat(self):
+    def pause_heartbeat(self, reason: Optional[str] = None):
         """Pause the heartbeat to allow special LED patterns to be visible"""
+        reason = reason or "unspecified"
+        if not self.heartbeat_paused or self.heartbeat_pause_reason != reason:
+            self.get_logger().info(f"Pausing heartbeat (reason: {reason})")
+        else:
+            self.get_logger().debug(f"Heartbeat already paused (reason: {reason})")
         self.heartbeat_paused = True
-        self.get_logger().debug("Heartbeat paused for special LED pattern")
+        self.heartbeat_pause_reason = reason
+        self.heartbeat_pause_time = time.time()
+        self.last_heartbeat_pause_log = 0.0
 
-    def resume_heartbeat(self):
+    def resume_heartbeat(self, reason: Optional[str] = None):
         """Resume the heartbeat after special LED patterns are done"""
+        resume_reason = reason or self.heartbeat_pause_reason or "unspecified"
+        if self.heartbeat_paused:
+            self.get_logger().info(f"Resuming heartbeat (reason: {resume_reason})")
+        else:
+            self.get_logger().debug(f"Heartbeat resume requested while already running (requested reason: {resume_reason})")
         self.heartbeat_paused = False
-        self.get_logger().debug("Heartbeat resumed")
+        self.heartbeat_pause_reason = None
+        self.heartbeat_pause_time = 0.0
+        self.last_heartbeat_pause_log = 0.0
 
     def _update_led_heartbeat_for_pause_state(self):
         """Update LED heartbeat frequency based on controller pause state and Argo service state"""
