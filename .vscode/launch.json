@@ -22,6 +22,43 @@
             "args": [
                 "status"
             ]
+        },
+        {
+            "name": "asimmock",
+            "type": "python",
+            "request": "launch",
+            "python": "/usr/bin/python3",
+            "program": "/home/tobi/argo/launch/argo_lifecycle_manager.py",
+            "args": [
+                "simulate_local",
+                "--force-mock",
+                "--debug-nodes",
+                "--debug-node-port-base",
+                "5680",
+                "--debug-node-wait"
+            ],
+            "cwd": "/home/tobi/argo",
+            "console": "internalConsole",
+            "justMyCode": true,
+            "env": {
+                "ARGO_DEBUG_NODE_HOST": "127.0.0.1"
+            }
+        },
+        {
+            "name": "Python: Attach to Argo Node",
+            "type": "python",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5680
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "/home/tobi/argo",
+                    "remoteRoot": "/home/tobi/argo"
+                }
+            ],
+            "justMyCode": false
         }
     ]
 }
