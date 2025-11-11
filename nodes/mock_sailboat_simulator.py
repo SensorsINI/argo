@@ -40,7 +40,7 @@ class MockSailboatSimulator:
         self.max_turn_rate = 30.0  # degrees per second at full rudder and speed
         self.max_speed = 1.5  # metres / second (approximate hull speed)
         self.no_go_angle_deg = 40.0  # approximate close-hauled limit
-        self.stall_decay_rate = 2.5  # m/s^2 equivalent deceleration while stalled
+        self.stall_decay_rate = 0.5  # m/s^2 equivalent deceleration while stalled
         self.stall_recovery_threshold = 0.1  # m/s; once above this we treat stall as cleared
 
     # ------------------------------------------------------------------
@@ -117,8 +117,12 @@ class MockSailboatSimulator:
 
     def step(self) -> dict:
         """Advance simulation by a single time step and return the new state."""
-        # Calculate apparent wind angle relative to boat heading
-        wind_boat_angle = (self.state.wind_direction - self.state.boat_heading) % 360.0
+        # Calculate apparent wind angle relative to boat heading. The simulator stores
+        # wind_direction as the heading the wind is BLOWING TOWARD (trigonometric
+        # convention, 0° = East). For sail trim we need the direction the wind is
+        # COMING FROM relative to the bow, so add 180° before computing the offset.
+        wind_from_direction = (self.state.wind_direction + 180.0) % 360.0
+        wind_boat_angle = (wind_from_direction - self.state.boat_heading) % 360.0
         if wind_boat_angle > 180.0:
             wind_boat_angle -= 360.0
 
@@ -128,15 +132,12 @@ class MockSailboatSimulator:
 
         # Estimate speed based on wind alignment and sail trim
         if is_in_no_go_zone:
-            # Deep stall: boat luffs head-to-wind and rapidly loses way
-            target_speed = 0.01
+            # Deep stall: drift slowly downwind
+            target_speed = 0.1
             self.state.stalled = True
-
-            # Apply an aggressive decay to current speed to simulate "in irons"
-            stall_delta = self.stall_decay_rate * self.dt
-            self.state.boat_speed = max(0.05, self.state.boat_speed - stall_delta)
         else:
-            wind_efficiency = max(0.1, abs(math.sin(math.radians(wind_boat_angle))))
+            abs_sin = abs(math.sin(math.radians(wind_boat_angle)))
+            wind_efficiency = 0.5 + 0.5 * abs_sin  # 0.5 dead downwind, 1.0 beam reach
             sail_efficiency = 1.0 - abs(self.state.sail_angle * 0.3)
             target_speed = self.state.wind_speed * 0.5 * wind_efficiency * sail_efficiency
             target_speed = min(target_speed, self.max_speed)
@@ -146,7 +147,13 @@ class MockSailboatSimulator:
 
         # Smooth speed changes towards target
         speed_diff = target_speed - self.state.boat_speed
-        self.state.boat_speed += float(np.clip(speed_diff * 2.0 * self.dt, -1.0, 1.0))
+        if is_in_no_go_zone:
+            adjustment = np.clip(speed_diff * 1.5 * self.dt,
+                                 -self.stall_decay_rate * self.dt,
+                                 self.stall_decay_rate * self.dt)
+        else:
+            adjustment = np.clip(speed_diff * 2.0 * self.dt, -1.0, 1.0)
+        self.state.boat_speed += float(adjustment)
         self.state.boat_speed = max(0.0, self.state.boat_speed)
 
         # Ensure stall flag clears once boat resumes sailing on a valid tack
@@ -154,7 +161,13 @@ class MockSailboatSimulator:
             self.state.stalled = False
 
         # Apply rudder-induced turn rate when moving
-        if self.state.boat_speed >= 0.05:
+        if is_in_no_go_zone:
+            turn_sign = -1.0 if wind_boat_angle >= 0.0 else 1.0
+            if wind_boat_angle == 0.0:
+                turn_sign = -1.0 if self.state.rudder_angle >= 0.0 else 1.0
+            turn_rate = self.max_turn_rate * 0.4
+            self.state.boat_heading = (self.state.boat_heading + turn_sign * turn_rate * self.dt) % 360.0
+        elif self.state.boat_speed >= 0.05:
             speed_ratio = self.state.boat_speed / self.max_speed if self.max_speed > 0 else 0.0
             effective_ratio = max(0.2, min(1.0, speed_ratio))
             # Positive rudder input represents a starboard (right) turn. In the simulator's
