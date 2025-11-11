@@ -193,7 +193,9 @@ class KeyboardControlNode(Node):
 
     def pose_callback(self, msg):
         """Receive heading/pose from simulator."""
-        self.simulator_heading = msg.z  # Heading in degrees
+        heading_math = float(msg.z) % 360.0
+        # Convert mathematical (counter-clockwise, 0° = East) heading back to compass convention (clockwise from North)
+        self.simulator_heading = (450.0 - heading_math) % 360.0
     
     def velocity_callback(self, msg):
         """Receive velocity from simulator."""

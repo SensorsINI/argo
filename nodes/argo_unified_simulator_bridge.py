@@ -662,8 +662,12 @@ class ArgoUnifiedSimulatorBridge(Node):
         heading_simulator = self.boat_state['heading']  # Heading in simulator convention
         heading_compass = (90.0 - heading_simulator) % 360.0  # Convert to compass convention
         
-        # IMU/Compass data (heading in degrees, compass convention)
-        pose_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
+        # IMU/Compass data
+        # Convert compass heading (clockwise from North) to mathematical convention (counter-clockwise from East)
+        # so Foxglove visuals align with simulator axes.
+        heading_math = (450.0 - heading_compass) % 360.0
+
+        pose_msg = Vector3(x=0.0, y=0.0, z=heading_math)
         self.pub_pose.publish(pose_msg)
         
         compass_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
@@ -1617,8 +1621,12 @@ class ArgoUnifiedSimulatorBridge(Node):
                 sail_angle_display = getattr(self, 'last_sail_angle', 0.0)
 
             # Log status message
+            heading_simulator = float(self.boat_state.get("heading", 0.0))
+            heading_compass = (90.0 - heading_simulator) % 360.0
+
             self.get_logger().info(
-                f'Boat: heading={self.boat_state["heading"]:.1f}°, '
+                f'Boat: heading={heading_compass:.1f}° (compass), '
+                f'heading_sim={heading_simulator:.1f}°, '
                 f'speed={self.boat_state["speed"]:.1f}m/s, '
                 f'wind={self.boat_state["wind_direction"]:.0f}°, '
                 f'sail={sail_angle_display:.1f}°, '

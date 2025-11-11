@@ -157,7 +157,10 @@ class MockSailboatSimulator:
         if self.state.boat_speed >= 0.05:
             speed_ratio = self.state.boat_speed / self.max_speed if self.max_speed > 0 else 0.0
             effective_ratio = max(0.2, min(1.0, speed_ratio))
-            turn_rate = self.state.rudder_angle * self.max_turn_rate * effective_ratio
+            # Positive rudder input represents a starboard (right) turn. In the simulator's
+            # coordinate system (0° = East, positive angles rotate counter-clockwise), a right
+            # turn corresponds to a negative rotation, so apply the rudder input with inverted sign.
+            turn_rate = -self.state.rudder_angle * self.max_turn_rate * effective_ratio
             self.state.boat_heading = (self.state.boat_heading + turn_rate * self.dt) % 360.0
 
         # Update position in simulator frame (0° = East)
