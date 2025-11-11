@@ -17,7 +17,7 @@ PyYAML
 psutil
 argparse
 argcomplete
-pyglet
+pyglet==1.5.27
 
 # Optional extras (uncomment if you need them on the host)
 # pynmea2

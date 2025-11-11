@@ -241,49 +241,52 @@ if [ -z "$DEVICE" ]; then
 fi
 
 # Check for and handle mounted partitions on the target device
-MOUNTED_PARTITIONS=$(lsblk -ln -o NAME,MOUNTPOINT "$DEVICE" | grep -v "^${DEVICE##*/}$" | awk '$2!="" {print "/"$1" mounted on "$2}')
+MOUNTED_PARTITIONS=$(lsblk -ln -o NAME,MOUNTPOINT "$DEVICE" | grep -v "^${DEVICE##*/}$" | awk '$2!="" {print "/"$1" " $2}')
 if [ -n "$MOUNTED_PARTITIONS" ]; then
-    echo -e "${YELLOW}Warning: The target device has mounted partitions:${NC}"
+    echo -e "${YELLOW}Warning: The target device has mounted partitions. The restore must run on an unmounted SD card to avoid corrupting the live filesystem.${NC}"
     echo "$MOUNTED_PARTITIONS"
     echo ""
-    echo "Mounted partition content preview:"
-    echo "=================================="
-    while read -r ENTRY; do
-        PART_PATH=$(echo "$ENTRY" | awk '{print $1}')
-        MOUNT_POINT=$(echo "$ENTRY" | awk '{sub(".*mounted on ", ""); print}')
-        echo "Partition: $PART_PATH"
-        echo "Mountpoint: $MOUNT_POINT"
-        if [ -d "$MOUNT_POINT" ]; then
-            echo "Contents:"
-            ls -l "$MOUNT_POINT"
-        else
-            echo "Mount directory not accessible."
+    while true; do
+        MOUNTED_PARTITIONS=$(lsblk -ln -o NAME,MOUNTPOINT "$DEVICE" | grep -v "^${DEVICE##*/}$" | awk '$2!="" {print "/"$1" " $2}')
+        if [ -z "$MOUNTED_PARTITIONS" ]; then
+            break
         fi
-        echo "----------------------------------"
-    done <<< "$MOUNTED_PARTITIONS"
-    echo ""
-    echo "Detailed partition info:"
-    lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DEVICE"
-    echo ""
-    read -p "Shall I attempt to unmount them before proceeding? (yes/no): " UNMOUNT_CONFIRM
-    if [ "$UNMOUNT_CONFIRM" = "yes" ]; then
-        echo "Attempting to unmount..."
-        lsblk -ln -o NAME "$DEVICE" | tail -n +2 | while read -r PART; do
-            umount "/dev/$PART" 2>/dev/null || true
-        done
-        # Verify unmount was successful
-        sleep 1
-        UPDATED_MOUNTS=$(lsblk -ln -o NAME,MOUNTPOINT "$DEVICE" | grep -v "^${DEVICE##*/}$" | awk '$2!="" {print "/"$1}')
-        if [ -n "$UPDATED_MOUNTS" ]; then
-            echo -e "${RED}❌ Error: Failed to unmount all partitions. Please unmount manually.${NC}"
+        echo "Current mounts:"
+        echo "$MOUNTED_PARTITIONS"
+        echo ""
+        read -p "Attempt to unmount automatically? (yes/manual/quit): " UNMOUNT_MODE
+        if [ "$UNMOUNT_MODE" = "quit" ]; then
+            echo "Restore cancelled. Please unmount the partitions manually and try again."
             exit 1
+        elif [ "$UNMOUNT_MODE" = "manual" ]; then
+            echo "Please unmount the partitions manually, then press [Enter] to re-check."
+            read -p ""
+            continue
         else
-            echo -e "${GREEN}✅ All partitions unmounted successfully.${NC}"
+            echo "Attempting to unmount..."
+            lsblk -ln -o NAME "$DEVICE" | tail -n +2 | while read -r PART; do
+                umount "/dev/$PART" 2>/dev/null || true
+            done
+            sleep 1
+            UPDATED_MOUNTS=$(lsblk -ln -o NAME,MOUNTPOINT "$DEVICE" | grep -v "^${DEVICE##*/}$" | awk '$2!="" {print "/"$1" " $2}')
+            if [ -n "$UPDATED_MOUNTS" ]; then
+                echo -e "${RED}❌ Unable to unmount all partitions automatically.${NC}"
+                echo "Processes holding the device:"
+                echo "$UPDATED_MOUNTS" | while read -r ENTRY; do
+                    MP=$(echo "$ENTRY" | awk '{print $2}')
+                    sudo lsof +f -- "$MP" 2>/dev/null || true
+                done
+                echo "Please close the above processes and unmount manually. Press [Enter] to retry or type 'quit' to abort."
+                read USER_CHOICE
+                if [ "$USER_CHOICE" = "quit" ]; then
+                    echo "Restore cancelled."
+                    exit 1
+                fi
+            else
+                echo -e "${GREEN}✅ All partitions unmounted successfully.${NC}"
+            fi
         fi
-    else
-        echo "Restore cancelled. Please unmount the partitions manually and try again."
-        exit 1
-    fi
+    done
     echo ""
 fi
 
@@ -516,6 +519,18 @@ if [[ "$BACKUP_FILE" == *.gz ]]; then
     if [ $RC -ne 0 ]; then
         RESTORE_SUCCESS=false
         kill -- -"$RESTORE_PGID" 2>/dev/null || true
+    else
+        if [ -s "$DD_ERROR_LOG" ]; then
+            FILTERED_ERRORS=$(grep -Ev '(^[0-9]+\+[0-9]+ records (in|out)$|^[0-9]+ bytes .*copied.*$|Restore:)' "$DD_ERROR_LOG")
+            if [ -n "$FILTERED_ERRORS" ]; then
+                RESTORE_SUCCESS=false
+            else
+                RESTORE_SUCCESS=true
+                : > "$DD_ERROR_LOG"
+            fi
+        else
+            RESTORE_SUCCESS=true
+        fi
     fi
     set -o pipefail
 elif [[ "$BACKUP_FILE" == *.7z ]]; then
@@ -538,6 +553,18 @@ elif [[ "$BACKUP_FILE" == *.7z ]]; then
     if [ $RC -ne 0 ]; then
         RESTORE_SUCCESS=false
         kill -- -"$RESTORE_PGID" 2>/dev/null || true
+    else
+        if [ -s "$DD_ERROR_LOG" ]; then
+            FILTERED_ERRORS=$(grep -Ev '(^[0-9]+\+[0-9]+ records (in|out)$|^[0-9]+ bytes .*copied.*$|Restore:)' "$DD_ERROR_LOG")
+            if [ -n "$FILTERED_ERRORS" ]; then
+                RESTORE_SUCCESS=false
+            else
+                RESTORE_SUCCESS=true
+                : > "$DD_ERROR_LOG"
+            fi
+        else
+            RESTORE_SUCCESS=true
+        fi
     fi
     set -o pipefail
 else
@@ -580,8 +607,12 @@ else
     else
         echo "   The SD card may be in an inconsistent state."
         echo "   You may need to format and restore again."
-        echo "   Error details from dd:"
-        cat "$DD_ERROR_LOG"
+        if [ -s "$DD_ERROR_LOG" ]; then
+            echo "   Error details from dd:"
+            tail -n +1 "$DD_ERROR_LOG"
+        else
+            echo "   No additional error output was captured."
+        fi
     fi
     exit 1
 fi

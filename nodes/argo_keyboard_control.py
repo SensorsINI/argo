@@ -23,6 +23,9 @@ Keyboard Controls:
     ↑  : Sail out (increase)
     ↓  : Sail in (decrease)
     c  : Center both controls
+    w  : Rotate wind +10°
+    e  : Rotate wind -10°
+    SPACE : Toggle simulation pause
     r  : Reset simulation
     q  : Quit
 """
@@ -30,7 +33,10 @@ Keyboard Controls:
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
+from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
+from rcl_interfaces.srv import GetParameters, SetParameters
+from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType, ParameterEvent
 import curses
 import time
 import queue
@@ -45,6 +51,13 @@ class KeyboardControlNode(Node):
         
         # Publisher for control commands
         self.pub_rudder_sail_radio = self.create_publisher(Vector3, '/rudder_sail_radio', 10)
+        self.pub_simulation_paused = self.create_publisher(Bool, '/simulation_paused', 10)
+        self.wind_param_name = 'simulation.wind_direction'
+        self.wind_param_target = '/argo_unified_simulator_bridge'
+        self.wind_get_client = self.create_client(GetParameters, f'{self.wind_param_target}/get_parameters')
+        self.wind_set_client = self.create_client(SetParameters, f'{self.wind_param_target}/set_parameters')
+        self.wind_direction_deg = None
+        self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
         
         # Service client for simulation reset
         self.reset_service_client = self.create_client(Trigger, '/simulator/reset')
@@ -54,6 +67,7 @@ class KeyboardControlNode(Node):
         self.sail_position = 0.0    # -1.0 to +1.0
         self.step_size = 1.0 / 8.0  # 8 steps for full scale (0.125)
         self.running = True
+        self.simulation_paused = False
         
         # Status from simulator (for display)
         self.simulator_heading = 0.0
@@ -63,7 +77,6 @@ class KeyboardControlNode(Node):
         # Subscribe to status topics for display
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
-        from std_msgs.msg import Bool
         self.create_subscription(Bool, '/human_controlled', self.control_mode_callback, 10)
         
         # Setup curses
@@ -84,8 +97,11 @@ class KeyboardControlNode(Node):
         # Keyboard input timer
         self.keyboard_timer = self.create_timer(0.05, self.handle_keyboard_input)
         
+        self.publish_simulation_paused()
+        self._initialize_wind_direction()
+
         self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | R=Reset | Q=Quit')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | Q=Quit')
     
     def _setup_curses(self):
         """Setup curses for terminal control."""
@@ -133,10 +149,53 @@ class KeyboardControlNode(Node):
             curses.endwin()
         except:
             pass
-    
+        # Ensure simulation resumes when exiting
+        if self.simulation_paused:
+            self.simulation_paused = False
+            try:
+                self.publish_simulation_paused()
+            except Exception:
+                pass
+    def parameter_event_callback(self, event: ParameterEvent):
+        """Handle parameter events to track wind direction updates."""
+        if event.node != self.wind_param_target:
+            return
+        for param in list(event.changed_parameters) + list(event.new_parameters):
+            if param.name != self.wind_param_name:
+                continue
+            if param.value.type == ParameterType.PARAMETER_DOUBLE:
+                self.wind_direction_deg = param.value.double_value % 360.0
+                self.get_logger().info(f"Wind direction parameter event: {self.wind_direction_deg:.1f}°")
+            return
+
+    def _initialize_wind_direction(self):
+        """Fetch current wind direction parameter from simulator (best effort)."""
+        attempts = 0
+        while attempts < 5 and not self.wind_get_client.wait_for_service(timeout_sec=1.0):
+            attempts += 1
+            self.get_logger().info("Waiting for simulator wind parameter service...")
+        if attempts == 5:
+            self.get_logger().warn("Could not contact wind parameter service; waiting for parameter events")
+            return
+        request = GetParameters.Request()
+        request.names = [self.wind_param_name]
+        future = self.wind_get_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        if future.done():
+            response = future.result()
+            if response and response.values:
+                value = response.values[0]
+                if value.type == ParameterType.PARAMETER_DOUBLE:
+                    self.wind_direction_deg = value.double_value % 360.0
+                    self.get_logger().info(f"Initial wind direction: {self.wind_direction_deg:.1f}°")
+                    return
+        self.get_logger().warn("Failed to fetch initial wind direction; waiting for parameter events")
+
     def pose_callback(self, msg):
         """Receive heading/pose from simulator."""
-        self.simulator_heading = msg.z  # Heading in degrees
+        heading_math = float(msg.z) % 360.0
+        # Convert mathematical (counter-clockwise, 0° = East) heading back to compass convention (clockwise from North)
+        self.simulator_heading = (450.0 - heading_math) % 360.0
     
     def velocity_callback(self, msg):
         """Receive velocity from simulator."""
@@ -167,6 +226,12 @@ class KeyboardControlNode(Node):
                 self.adjust_sail(-1)     # Sail in
             elif key == ord('c') or key == ord('C'):
                 self.center_controls()
+            elif key == ord('w') or key == ord('W'):
+                self.adjust_wind_direction(10.0)
+            elif key == ord('e') or key == ord('E'):
+                self.adjust_wind_direction(-10.0)
+            elif key == ord(' '):
+                self.toggle_simulation_pause()
             elif key == ord('r') or key == ord('R'):
                 self.reset_simulation()
             elif key == ord('q') or key == ord('Q'):
@@ -196,6 +261,51 @@ class KeyboardControlNode(Node):
         """Center both rudder and sail."""
         self.rudder_position = 0.0
         self.sail_position = 0.0
+    
+    def toggle_simulation_pause(self):
+        """Toggle simulation pause state and publish."""
+        self.simulation_paused = not self.simulation_paused
+        self.publish_simulation_paused()
+        state = "PAUSED" if self.simulation_paused else "RUNNING"
+        self.get_logger().info(f'Simulation {state}')
+    
+    def publish_simulation_paused(self):
+        """Publish current simulation pause state."""
+        msg = Bool()
+        msg.data = self.simulation_paused
+        self.pub_simulation_paused.publish(msg)
+
+    def adjust_wind_direction(self, delta_deg: float):
+        """Adjust simulator wind direction parameter."""
+        if self.wind_direction_deg is None:
+            self.get_logger().warn("Wind direction unknown; awaiting parameter event before adjusting")
+            return
+        new_value = (self.wind_direction_deg + delta_deg) % 360.0
+
+        if not self.wind_set_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn("Wind direction service unavailable")
+            return
+
+        param = Parameter()
+        param.name = self.wind_param_name
+        value = ParameterValue()
+        value.type = ParameterType.PARAMETER_DOUBLE
+        value.double_value = new_value
+        param.value = value
+
+        request = SetParameters.Request()
+        request.parameters.append(param)
+        future = self.wind_set_client.call_async(request)
+        if rclpy.spin_until_future_complete(self, future, timeout_sec=2.0) is None or not future.done():
+            self.get_logger().warn("Failed to set wind direction parameter (timeout)")
+            return
+        result = future.result()
+        if result is None or not result.results or not result.results[0].successful:
+            self.get_logger().warn("Failed to set wind direction parameter (service error)")
+            return
+
+        self.wind_direction_deg = new_value
+        self.get_logger().info(f"Wind direction set to {self.wind_direction_deg:.1f}°")
     
     def reset_simulation(self):
         """Reset simulation to initial state."""
@@ -291,15 +401,24 @@ class KeyboardControlNode(Node):
                 status_line = status_line[:width - 7] + "..."
             self.stdscr.addstr(6, 2, status_line)
             
+            wind_value = self.wind_direction_deg if self.wind_direction_deg is not None else float('nan')
+            wind_line = f"Wind Dir: {wind_value:.1f}°"
+            if len(wind_line) > width - 4:
+                wind_line = wind_line[:width - 7] + "..."
+            self.stdscr.addstr(7, 2, wind_line)
+            
+            pause_line = f"Simulation: {'PAUSED' if self.simulation_paused else 'RUNNING'}"
+            self.stdscr.addstr(8, 2, pause_line)
+            
             # Controls
-            controls_line = "Controls: ←→ Rudder | ↑↓ Sail | C=Center | R=Reset | Q=Quit"
+            controls_line = "Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | Q=Quit"
             if len(controls_line) > width - 4:
                 controls_line = controls_line[:width - 7] + "..."
-            self.stdscr.addstr(7, 2, controls_line)
+            self.stdscr.addstr(9, 2, controls_line)
             
             # Topic info
             topic_line = f"Publishing to: /rudder_sail_radio"
-            self.stdscr.addstr(8, 2, topic_line)
+            self.stdscr.addstr(10, 2, topic_line)
             
             self.stdscr.refresh()
         except:

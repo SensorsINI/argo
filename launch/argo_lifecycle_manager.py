@@ -46,6 +46,7 @@ import argparse
 import argcomplete
 import json
 import shlex
+import importlib.util
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import select
@@ -84,7 +85,11 @@ except ImportError:
 
 
 class ArgoLifecycleManager:
-    def __init__(self, quiet: bool = True):
+    def __init__(self,
+                 quiet: bool = True,
+                 debug_nodes: bool = False,
+                 debug_node_port_base: int = 5678,
+                 debug_node_wait: bool = False):
         # Become session leader to manage child processes effectively
         try:
             os.setsid()
@@ -97,6 +102,11 @@ class ArgoLifecycleManager:
         self.process = None
         self.node_processes = []
         self.quiet = quiet  # Suppress initialization messages
+        self.debug_nodes = debug_nodes
+        self.debug_node_port_base = debug_node_port_base
+        self.debug_node_wait = debug_node_wait
+        self.debug_node_listen_host = os.environ.get('ARGO_DEBUG_NODE_HOST', '127.0.0.1')
+        self._next_debug_port = debug_node_port_base
         # Removed restart logic - nodes should not be restarted automatically
         # Failures should be preserved for debugging
         self.stabilization_wait = 15.0  # Additional wait time for nodes to stabilize
@@ -105,6 +115,13 @@ class ArgoLifecycleManager:
         self.remote_tunnel_proc = None
         self.shutdown_requested = False  # Flag to coordinate shutdown
         self.pgid = os.getpgrp() # Get our own process group ID
+
+        if self.debug_nodes:
+            if importlib.util.find_spec("debugpy") is None:
+                print("⚠️  debugpy is not installed; launching nodes without debugger.")
+                self.debug_nodes = False
+            else:
+                print(f"🐞 Node debugging enabled (host={self.debug_node_listen_host}, start_port={self.debug_node_port_base})")
 
         # Initialize ROS2 for service client if available
         self.ros2_node = None
@@ -664,12 +681,24 @@ class ArgoLifecycleManager:
                         if "RUNNING" in status and node in self.expected_nodes]
         return len(running_nodes) > 0
     
+    def _reset_debug_ports(self):
+        """Reset debug port allocator to the base value."""
+        self._next_debug_port = self.debug_node_port_base
+
+    def _allocate_debug_port(self) -> int:
+        """Return the next debug port and increment allocator."""
+        port = self._next_debug_port
+        self._next_debug_port += 1
+        return port
+    
     def _launch_nodes_directly(self):
         """Launch all expected nodes directly without using ros2 launch"""
         print("🚀 Launching nodes directly...")
         
         # Clear the process cache so we get fresh results after launching
         self.node_manager.clear_process_cache()
+        if self.debug_nodes:
+            self._reset_debug_ports()
         
         # Get the nodes directory
         nodes_dir = os.path.join(self.argo_dir, 'nodes')
@@ -696,20 +725,38 @@ class ArgoLifecycleManager:
                 # Launch each node with proper ROS2 environment
                 # Use None for stdout/stderr so output goes directly to systemd journal
                 argo_yaml_path = os.path.join(self.argo_dir, 'nodes', 'argo.yaml')
-                cmd_str = f'source /opt/ros/humble/setup.bash && python3 {script_path}'
-                
+                python_cmd_parts: List[str] = []
+                debug_port: Optional[int] = None
+
+                if self.debug_nodes:
+                    debug_port = self._allocate_debug_port()
+                    python_cmd_parts.extend([
+                        'python3',
+                        '-m',
+                        'debugpy',
+                        '--listen',
+                        shlex.quote(f'{self.debug_node_listen_host}:{debug_port}')
+                    ])
+                    if self.debug_node_wait:
+                        python_cmd_parts.append('--wait-for-client')
+                else:
+                    python_cmd_parts.append('python3')
+
+                python_cmd_parts.append(shlex.quote(script_path))
+
                 # Add args from YAML configuration if available (for simulation nodes)
                 if hasattr(self, 'simulation_node_args') and script in self.simulation_node_args:
                     args = self.simulation_node_args[script]
                     if args:
                         # Properly quote arguments to handle spaces in values (e.g., map names)
-                        # Use shlex.quote to safely escape arguments for shell use
                         quoted_args = [shlex.quote(arg) for arg in args]
-                        cmd_str += ' ' + ' '.join(quoted_args)
-                
+                        python_cmd_parts.extend(quoted_args)
+
                 # Add parameter file so nodes can load argo.yaml parameters
-                cmd_str += f' --ros-args --params-file {shlex.quote(argo_yaml_path)}'
-                
+                python_cmd_parts.extend(['--ros-args', '--params-file', shlex.quote(argo_yaml_path)])
+
+                cmd_str = 'source /opt/ros/humble/setup.bash && ' + ' '.join(python_cmd_parts)
+
                 cmd = ['bash', '-c', cmd_str]
                 proc = subprocess.Popen(
                     cmd,
@@ -719,7 +766,12 @@ class ArgoLifecycleManager:
                     universal_newlines=True
                 )
                 # Store process with script name for easier debugging
-                self.node_processes.append({'proc': proc, 'name': script})
+                process_info = {'proc': proc, 'name': script}
+                if debug_port is not None:
+                    process_info['debug_port'] = debug_port
+                    wait_text = "waiting for debugger attach" if self.debug_node_wait else "listening for debugger"
+                    print(f"🐞 {script} {wait_text} on {self.debug_node_listen_host}:{debug_port}")
+                self.node_processes.append(process_info)
                 print(f"✅ Launched {script} (PID: {proc.pid})")
             else:
                 print(f"⚠️  Warning: {script} not found at {script_path}")
@@ -741,7 +793,14 @@ class ArgoLifecycleManager:
                 print(f"✅ Launching {special_node}...")
                 # Launch foxglove_bridge as a ROS2 package
                 cmd = [
-                    'bash', '-c', f'source /opt/ros/humble/setup.bash && ros2 run foxglove_bridge foxglove_bridge']
+                    'bash',
+                    '-c',
+                    (
+                        'source /opt/ros/humble/setup.bash && '
+                        'ros2 run foxglove_bridge foxglove_bridge '
+                        '--ros-args --log-level warn'
+                    ),
+                ]
                 try:
                     # First, verify the package exists by trying to get package info
                     import shutil
@@ -2303,6 +2362,9 @@ class ArgoLifecycleManager:
                 with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
                     temp_millicelsius = int(f.read().strip())
                     cpu_temp = str(temp_millicelsius // 1000)
+            except KeyboardInterrupt:
+                print("🚢 ARGO: Keyboard interrupt detected, exiting...")
+                return
             except Exception:
                 pass
             
@@ -2328,6 +2390,9 @@ class ArgoLifecycleManager:
                             if attempt == 0:
                                 time.sleep(0.1)  # Brief delay before retry
                             pass
+            except KeyboardInterrupt:
+                print("🚢 ARGO: Keyboard interrupt detected, exiting...")
+                return
             except Exception:
                 pass
             
@@ -2378,7 +2443,9 @@ class ArgoLifecycleManager:
                     f.write(str(current_time))
             except Exception:
                 pass
-                
+        except KeyboardInterrupt:
+            print("🚢 ARGO: Keyboard interrupt detected, exiting...")
+            return
         except Exception as e:
             print(f"🚢 ARGO: Status check failed - {e}", flush=True)
     
@@ -3158,6 +3225,12 @@ EXAMPLES:
                         help='Toggle controller pause state (pauses autonomous navigation)')
     parser.add_argument('--force-mock', action='store_true',
                         help='Force use of mock simulator even if real simulator (sailboat-playground) is available (only for simulate_local)')
+    parser.add_argument('--debug-nodes', action='store_true',
+                        help='Launch Python node subprocesses under debugpy so IDE breakpoints trigger')
+    parser.add_argument('--debug-node-port-base', type=int, default=5678,
+                        help='Starting TCP port for debugpy listeners when --debug-nodes is enabled (increments per node)')
+    parser.add_argument('--debug-node-wait', action='store_true',
+                        help='If set with --debug-nodes, each node waits for debugger to attach before running')
     
     # Enable bash completion for command-line arguments
     argcomplete.autocomplete(parser)
@@ -3173,7 +3246,12 @@ EXAMPLES:
         # Default to status if no command is given
         args.command = 'status'
     
-    manager = ArgoLifecycleManager(quiet=args.quiet)
+    manager = ArgoLifecycleManager(
+        quiet=args.quiet,
+        debug_nodes=args.debug_nodes,
+        debug_node_port_base=args.debug_node_port_base,
+        debug_node_wait=args.debug_node_wait
+    )
     if args.debug:
         print("🔧 DEBUG: Debug mode enabled")
     

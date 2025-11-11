@@ -32,6 +32,8 @@ import json
 import yaml
 from pathlib import Path
 
+from mock_sailboat_simulator import MockSailboatSimulator
+
 # Try to import sailboat-playground for local simulation
 SIMULATOR_AVAILABLE = False
 try:
@@ -105,73 +107,6 @@ except Exception as e:
     tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
     print(f'Stack trace for initialization failure:\n{tb_str}')
     SIMULATOR_AVAILABLE = False
-
-class MockSailboatSimulator:
-    """Mock simulator for testing when sailboat-playground is not available."""
-    
-    def __init__(self):
-        self.boat_x = 0.0
-        self.boat_y = 0.0
-        self.boat_heading = 180.0  # degrees
-        self.boat_speed = 1.0    # m/s
-        self.rudder_angle = 0.0  # -1 to +1
-        self.sail_angle = 0.0    # -1 to +1
-        
-        # Wind conditions
-        self.wind_speed = 1.0    # m/s
-        self.wind_direction = 0.0  # degrees (where wind goes to, simulator convention: 0°=East, 90°=North)
-        
-        # Physics parameters
-        self.dt = 0.1  # time step
-        self.max_turn_rate = 30.0  # degrees per second
-        self.max_speed = 5.0  # m/s
-        
-    def set_control(self, rudder, sail):
-        """Set rudder and sail positions (-1 to +1)."""
-        self.rudder_angle = np.clip(rudder, -1.0, 1.0)
-        self.sail_angle = np.clip(sail, -1.0, 1.0)
-    
-    def step(self):
-        """Update simulation by one time step."""
-        # Simple boat physics simulation
-        
-        # Calculate apparent wind angle relative to boat
-        wind_boat_angle = (self.wind_direction - self.boat_heading) % 360
-        if wind_boat_angle > 180:
-            wind_boat_angle -= 360
-            
-        # Speed based on wind angle and sail setting
-        # Best speed when wind is 90-120 degrees off bow
-        wind_efficiency = max(0.1, abs(math.sin(math.radians(wind_boat_angle))))
-        sail_efficiency = 1.0 - abs(self.sail_angle * 0.3)  # Better when sail is pulled in
-        target_speed = self.wind_speed * 0.3 * wind_efficiency * sail_efficiency
-        target_speed = min(target_speed, self.max_speed)
-        
-        # Smooth speed changes
-        speed_diff = target_speed - self.boat_speed
-        self.boat_speed += np.clip(speed_diff * 2.0 * self.dt, -1.0, 1.0)
-        self.boat_speed = max(0.0, self.boat_speed)
-        
-        # Turning based on rudder
-        if self.boat_speed > 0.5:  # Need some speed to turn
-            turn_rate = self.rudder_angle * self.max_turn_rate * (self.boat_speed / self.max_speed)
-            self.boat_heading += turn_rate * self.dt
-            self.boat_heading = self.boat_heading % 360
-        
-        # Update position
-        self.boat_x += self.boat_speed * math.cos(math.radians(self.boat_heading)) * self.dt
-        self.boat_y += self.boat_speed * math.sin(math.radians(self.boat_heading)) * self.dt
-        
-        return {
-            'x': self.boat_x,
-            'y': self.boat_y,
-            'heading': self.boat_heading,
-            'speed': self.boat_speed,
-            'wind_speed': self.wind_speed,
-            'wind_direction': wind_boat_angle,  # Relative to boat
-            'rudder': self.rudder_angle,
-            'sail': self.sail_angle
-        }
 
 class ArgoUnifiedSimulatorBridge(Node):
     """Unified bridge for local and remote sailboat simulation."""
@@ -276,6 +211,10 @@ class ArgoUnifiedSimulatorBridge(Node):
         # This allows external tools to control the simulator
         # NOTE: We only subscribe, not publish, to avoid schema conflicts in Foxglove
         self.create_subscription(Vector3, '/rudder_sail_radio', self.radio_control_callback, 10)
+
+        # Simulation pause control (e.g., keyboard space bar)
+        self.simulation_paused = False
+        self.create_subscription(Bool, '/simulation_paused', self.simulation_pause_callback, 10)
         
         # Joystick input (from Foxglove Joystick panel or physical gamepad)
         # Converts Joy messages to rudder/sail control
@@ -547,6 +486,13 @@ class ArgoUnifiedSimulatorBridge(Node):
             
             if self.debug_position_trace:
                 self.get_logger().info(f"[POS_TRACE:{trace_id}] === STEP START === sim_id={id(self.sim_manager) if hasattr(self, 'sim_manager') else 'N/A'}")
+
+            if self.simulation_paused:
+                if self.debug_position_trace:
+                    self.get_logger().info(f"[POS_TRACE:{trace_id}] Simulation paused - skipping physics step")
+                if self.boat_state:
+                    self.publish_sensor_data(trace_id=trace_id)
+                return
             
             # Generate mock human input for testing (optional)
             if self.mock_human_input and self.human_controlled:
@@ -716,8 +662,12 @@ class ArgoUnifiedSimulatorBridge(Node):
         heading_simulator = self.boat_state['heading']  # Heading in simulator convention
         heading_compass = (90.0 - heading_simulator) % 360.0  # Convert to compass convention
         
-        # IMU/Compass data (heading in degrees, compass convention)
-        pose_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
+        # IMU/Compass data
+        # Convert compass heading (clockwise from North) to mathematical convention (counter-clockwise from East)
+        # so Foxglove visuals align with simulator axes.
+        heading_math = (450.0 - heading_compass) % 360.0
+
+        pose_msg = Vector3(x=0.0, y=0.0, z=heading_math)
         self.pub_pose.publish(pose_msg)
         
         compass_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
@@ -1511,6 +1461,16 @@ class ArgoUnifiedSimulatorBridge(Node):
         
         self.get_logger().debug(f'External control: rudder={self.external_rudder:.3f}, sail={self.external_sail:.3f}')
     
+    def simulation_pause_callback(self, msg: Bool):
+        """Handle simulation pause toggles."""
+        paused = bool(msg.data)
+        if paused != self.simulation_paused:
+            self.simulation_paused = paused
+            state = "PAUSED" if paused else "RUNNING"
+            self.get_logger().info(f'Simulation {state} (received /simulation_paused={paused})')
+        else:
+            self.simulation_paused = paused
+    
     def _apply_control_to_simulator(self, rudder, sail):
         """Apply control commands to the simulator."""
         if self.mode == 'local':
@@ -1661,8 +1621,12 @@ class ArgoUnifiedSimulatorBridge(Node):
                 sail_angle_display = getattr(self, 'last_sail_angle', 0.0)
 
             # Log status message
+            heading_simulator = float(self.boat_state.get("heading", 0.0))
+            heading_compass = (90.0 - heading_simulator) % 360.0
+
             self.get_logger().info(
-                f'Boat: heading={self.boat_state["heading"]:.1f}°, '
+                f'Boat: heading={heading_compass:.1f}° (compass), '
+                f'heading_sim={heading_simulator:.1f}°, '
                 f'speed={self.boat_state["speed"]:.1f}m/s, '
                 f'wind={self.boat_state["wind_direction"]:.0f}°, '
                 f'sail={sail_angle_display:.1f}°, '
