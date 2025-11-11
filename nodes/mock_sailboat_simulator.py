@@ -10,6 +10,7 @@ sail inputs with crude wind interaction to approximate basic sailing dynamics.
 
 import math
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -27,6 +28,10 @@ class MockSimulatorState:
     wind_speed: float = 1.0  # metres / second
     wind_direction: float = 0.0  # degrees (direction wind is blowing toward)
     stalled: bool = False  # indicates whether the boat is stalled (in irons)
+    tack_in_progress: bool = False
+    tack_start_sign: int = 0
+    tack_time_elapsed_s: float = 0.0
+    last_wind_boat_angle: Optional[float] = None  # previous apparent wind angle (degrees)
 
 
 class MockSailboatSimulator:
@@ -42,6 +47,17 @@ class MockSailboatSimulator:
         self.no_go_angle_deg = 40.0  # approximate close-hauled limit
         self.stall_decay_rate = 0.5  # m/s^2 equivalent deceleration while stalled
         self.stall_recovery_threshold = 0.1  # m/s; once above this we treat stall as cleared
+        self.tack_entry_buffer_deg = 12.0  # allow tacks to begin slightly before the no-go boundary
+        self.tack_exit_buffer_deg = 6.0  # required clearance before finishing a tack
+        self.tack_speed_threshold = 0.35  # m/s minimum speed to initiate a tack
+        self.tack_min_speed_to_continue = 0.25  # m/s minimum to keep crossing the wind
+        self.tack_time_limit_s = 8.0  # abort tack if it takes longer than this
+        self.tack_turn_boost = 1.8  # multiplier applied to turn rate during a tack window
+        self.debug_tack = False # TODO: disable after tacking is working
+
+    def set_debug_tack_logging(self, enabled: bool) -> None:
+        """Enable or disable verbose logging for tack detection."""
+        self.debug_tack = bool(enabled)
 
     # ------------------------------------------------------------------
     # Compatibility properties (legacy direct attribute access)
@@ -126,15 +142,111 @@ class MockSailboatSimulator:
         if wind_boat_angle > 180.0:
             wind_boat_angle -= 360.0
 
+        previous_angle = (
+            self.state.last_wind_boat_angle
+            if self.state.last_wind_boat_angle is not None
+            else wind_boat_angle
+        )
+        previous_sign = 1 if previous_angle >= 0.0 else -1
+        current_sign = 1 if wind_boat_angle >= 0.0 else -1
+
         # Detect if we are attempting to sail inside the "no-go" zone
         abs_apparent = abs(wind_boat_angle)
         is_in_no_go_zone = abs_apparent < self.no_go_angle_deg
 
+        tack_candidate = (
+            abs(self.state.rudder_angle) > 0.25
+            and self.state.boat_speed > self.tack_speed_threshold
+            and abs_apparent < (self.no_go_angle_deg + self.tack_entry_buffer_deg)
+        )
+
+        if self.debug_tack and abs_apparent <= (self.no_go_angle_deg + self.tack_entry_buffer_deg + 5.0):
+            print(
+                "[MockSim] tack check | "
+                f"abs_angle={abs_apparent:.1f} deg | "
+                f"speed={self.state.boat_speed:.2f} m/s | "
+                f"rudder={self.state.rudder_angle:.2f} | "
+                f"candidate={tack_candidate} | "
+                f"in_progress={self.state.tack_in_progress}"
+            )
+
+        if not self.state.tack_in_progress and tack_candidate:
+            self.state.tack_in_progress = True
+            self.state.tack_start_sign = current_sign
+            self.state.tack_time_elapsed_s = 0.0
+            self.state.stalled = False
+            if self.debug_tack:
+                print(
+                    "[MockSim] tack initiated | "
+                    f"heading={self.state.boat_heading:.1f} deg | "
+                    f"wind_angle={wind_boat_angle:.1f} deg | "
+                    f"speed={self.state.boat_speed:.2f} m/s"
+                )
+
+        in_tack_window = False
+        effective_no_go = is_in_no_go_zone
+
+        if self.state.tack_in_progress:
+            self.state.tack_time_elapsed_s += self.dt
+            in_tack_window = True
+            if (
+                self.state.boat_speed < self.tack_min_speed_to_continue
+                or self.state.tack_time_elapsed_s > self.tack_time_limit_s
+            ):
+                # Tack failed – fall back to stall behaviour
+                self.state.tack_in_progress = False
+                in_tack_window = False
+                effective_no_go = True
+                self.state.stalled = True
+                if self.debug_tack:
+                    reason = (
+                        "low_speed"
+                        if self.state.boat_speed < self.tack_min_speed_to_continue
+                        else "timeout"
+                    )
+                    print(
+                        "[MockSim] tack failed | "
+                        f"reason={reason} | "
+                        f"time={self.state.tack_time_elapsed_s:.2f}s | "
+                        f"speed={self.state.boat_speed:.2f} m/s"
+                    )
+            else:
+                crossing_complete = (
+                    abs_apparent >= (self.no_go_angle_deg + self.tack_exit_buffer_deg)
+                    and current_sign != self.state.tack_start_sign
+                )
+                sign_flip_without_clearance = (
+                    current_sign != self.state.tack_start_sign and abs_apparent >= self.no_go_angle_deg
+                )
+                if crossing_complete or (sign_flip_without_clearance and previous_sign != current_sign):
+                    # Successful tack: crossed the wind and cleared the no-go zone
+                    self.state.tack_in_progress = False
+                    in_tack_window = False
+                    effective_no_go = False
+                    self.state.stalled = False
+                    if self.debug_tack:
+                        print(
+                            "[MockSim] tack complete | "
+                            f"heading={self.state.boat_heading:.1f} deg | "
+                            f"wind_angle={wind_boat_angle:.1f} deg | "
+                            f"time={self.state.tack_time_elapsed_s:.2f}s"
+                        )
+                else:
+                    effective_no_go = False
+
+        self.state.last_wind_boat_angle = wind_boat_angle
+
         # Estimate speed based on wind alignment and sail trim
-        if is_in_no_go_zone:
+        if effective_no_go:
             # Deep stall: drift slowly downwind
             target_speed = 0.1
             self.state.stalled = True
+            if self.debug_tack and not in_tack_window:
+                print(
+                    "[MockSim] stall enforced | "
+                    f"heading={self.state.boat_heading:.1f} deg | "
+                    f"wind_angle={wind_boat_angle:.1f} deg"
+                )
         else:
             abs_sin = abs(math.sin(math.radians(wind_boat_angle)))
             wind_efficiency = 0.5 + 0.5 * abs_sin  # 0.5 dead downwind, 1.0 beam reach
@@ -147,7 +259,7 @@ class MockSailboatSimulator:
 
         # Smooth speed changes towards target
         speed_diff = target_speed - self.state.boat_speed
-        if is_in_no_go_zone:
+        if effective_no_go:
             adjustment = np.clip(speed_diff * 1.5 * self.dt,
                                  -self.stall_decay_rate * self.dt,
                                  self.stall_decay_rate * self.dt)
@@ -157,11 +269,11 @@ class MockSailboatSimulator:
         self.state.boat_speed = max(0.0, self.state.boat_speed)
 
         # Ensure stall flag clears once boat resumes sailing on a valid tack
-        if not is_in_no_go_zone and self.state.stalled and self.state.boat_speed > self.stall_recovery_threshold:
+        if not effective_no_go and self.state.stalled and self.state.boat_speed > self.stall_recovery_threshold:
             self.state.stalled = False
 
         # Apply rudder-induced turn rate when moving
-        if is_in_no_go_zone:
+        if effective_no_go:
             turn_sign = -1.0 if wind_boat_angle >= 0.0 else 1.0
             if wind_boat_angle == 0.0:
                 turn_sign = -1.0 if self.state.rudder_angle >= 0.0 else 1.0
@@ -170,10 +282,9 @@ class MockSailboatSimulator:
         elif self.state.boat_speed >= 0.05:
             speed_ratio = self.state.boat_speed / self.max_speed if self.max_speed > 0 else 0.0
             effective_ratio = max(0.2, min(1.0, speed_ratio))
-            # Positive rudder input represents a starboard (right) turn. In the simulator's
-            # coordinate system (0° = East, positive angles rotate counter-clockwise), a right
-            # turn corresponds to a negative rotation, so apply the rudder input with inverted sign.
             turn_rate = -self.state.rudder_angle * self.max_turn_rate * effective_ratio
+            if in_tack_window:
+                turn_rate *= self.tack_turn_boost
             self.state.boat_heading = (self.state.boat_heading + turn_rate * self.dt) % 360.0
 
         # Update position in simulator frame (0° = East)
@@ -191,4 +302,5 @@ class MockSailboatSimulator:
             "rudder": self.state.rudder_angle,
             "sail": self.state.sail_angle,
             "stalled": self.state.stalled,
+            "tack_in_progress": self.state.tack_in_progress,
         }

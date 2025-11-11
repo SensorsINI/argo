@@ -410,9 +410,9 @@ class ArgoTransformPublisher(ArgoBaseNode):
                 self.get_logger().debug(f"[TF_TRACE:{tf_id}] TF_PUBLISH_END - Transforms published")
             
             # Update health status - successful publishing
-            self.publish_success_count += 1
-            if self.publish_success_count % 100 == 0:  # Update health every 100 successful publishes
+            if self.publish_success_count % 1000 == 0:  # Update health every 1000 successful publishes
                 self.set_healthy(f"Publishing transforms successfully (count: {self.publish_success_count})")
+            self.publish_success_count += 1
                 
         except Exception as e:
             # Update health status - publishing failure

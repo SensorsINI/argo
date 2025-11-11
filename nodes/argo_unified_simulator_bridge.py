@@ -202,6 +202,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.pub_wind = self.create_publisher(Vector3, '/anem_speed_angle_temp', 10)
         # True wind direction (absolute, in compass convention) for monitoring
         self.pub_true_wind = self.create_publisher(Float64, '/simulator/true_wind_direction', 10)
+        # Simulation status indicators
+        self.pub_tacking = self.create_publisher(Bool, '/simulator/tacking', 10)
         
         # --- Subscribers (Argo → Simulator) ---
         # Control commands from Argo (final servo commands)
@@ -536,7 +538,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                     'wind_speed': float(new_state['wind_speed']),
                     'wind_direction': float(new_state['wind_direction']),
                     'rudder': float(new_state['rudder']),
-                    'sail': float(new_state['sail'])
+                    'sail': float(new_state['sail']),
+                    'tacking': bool(new_state.get('tack_in_progress', False))
                 }
                 
                 if self.debug_position_trace:
@@ -621,7 +624,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                         'wind_speed': float(agent_state.get('wind_speed', 8.0)),
                         'wind_direction': float(agent_state.get('wind_direction', 45.0)),
                         'rudder': current_rudder,  # Store normalized values
-                        'sail': current_sail
+                        'sail': current_sail,
+                        'tacking': False
                     }
                     
                     if self.debug_position_trace:
@@ -697,6 +701,10 @@ class ArgoUnifiedSimulatorBridge(Node):
             z=22.5                               # temperature (mock)
         )
         self.pub_wind.publish(wind_msg)
+
+        # Publish tack status for visualization/diagnostics
+        tack_msg = Bool(data=bool(self.boat_state.get('tacking', False)))
+        self.pub_tacking.publish(tack_msg)
         
         # Publish true wind direction (absolute, in compass convention) for monitoring
         # Get true wind direction from simulator's Environment
@@ -1071,6 +1079,7 @@ class ArgoUnifiedSimulatorBridge(Node):
             if self.mode == 'local' and hasattr(self, 'simulator'):
                 if self.use_mock:
                     # Mock simulator state
+                    simulator_state = getattr(self.simulator, "state", None)
                     self.boat_state = {
                         'x': self.simulator.boat_x,
                         'y': self.simulator.boat_y,
@@ -1079,7 +1088,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                         'wind_speed': wind_speed,
                         'wind_direction': wind_direction,
                         'rudder': 0.0,
-                        'sail': 0.0
+                        'sail': 0.0,
+                        'tacking': bool(getattr(simulator_state, "tack_in_progress", False))
                     }
                 else:
                     # Real simulator state
@@ -1110,7 +1120,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                             'wind_speed': float(agent_state.get('wind_speed', wind_speed)),
                             'wind_direction': float(agent_state.get('wind_direction', wind_direction)),
                             'rudder': 0.0,
-                            'sail': 0.0
+                            'sail': 0.0,
+                            'tacking': False
                         }
                     except Exception as e:
                         self.get_logger().warn(f"Could not read simulator state after recreation: {e}, using defaults")
@@ -1122,7 +1133,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                             'wind_speed': wind_speed,
                             'wind_direction': wind_direction,
                             'rudder': 0.0,
-                            'sail': 0.0
+                            'sail': 0.0,
+                            'tacking': False
                         }
             else:
                 # Fallback if simulator not available
@@ -1134,7 +1146,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                     'wind_speed': wind_speed,
                     'wind_direction': wind_direction,
                     'rudder': 0.0,
-                    'sail': 0.0
+                    'sail': 0.0,
+                    'tacking': False
                 }
             
             self.get_logger().info(f"boat_state after reset: position=({self.boat_state['x']:.2f}, {self.boat_state['y']:.2f}), heading={self.boat_state['heading']:.1f}°")

@@ -100,7 +100,7 @@ import rclpy
 from geometry_msgs.msg import Vector3, PoseStamped, Point
 from sensor_msgs.msg import NavSatFix
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA, Header, Float64
+from std_msgs.msg import Bool, ColorRGBA, Header, Float64
 from rosgraph_msgs.msg import Clock
 import math
 import numpy as np
@@ -151,7 +151,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         )
         self.heading_trail_limit = initial_trail_limit
         self.heading_trail = deque(maxlen=self.heading_trail_limit) if self.heading_trail_limit > 0 else deque()
-        self.heading_trail_spacing_m = 2.0  # Minimum spacing between trail markers
+        self.heading_trail_spacing_m = 3.0  # Minimum spacing between trail markers
         self.heading_trail_heading_threshold_deg = 12.0  # Heading delta to force a new marker
         self.heading_trail_time_spacing_s = 5.0  # Minimum time between markers
         self.heading_trail_last_time_s = None
@@ -200,6 +200,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.create_subscription(Vector3, '/anem_speed_angle_temp', self.wind_callback, 10)
         # Subscribe to true wind direction for accurate relative wind calculation
         self.create_subscription(Float64, '/simulator/true_wind_direction', self.true_wind_callback, 10)
+        self.create_subscription(Bool, '/simulator/tacking', self.tacking_status_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(NavSatFix, '/fix', self.gps_callback, 10)
         
@@ -242,6 +243,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.boat_pos_y = 0.0
         self.overlay_markers = []
         self.heading_trail_clear_needed = False
+        self.is_tacking = False
+        self._tacking_marker_active = False
         
         # Timer for publishing markers
         self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
@@ -378,6 +381,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
     def true_wind_callback(self, msg):
         """Update true wind direction (absolute, compass convention)"""
         self.true_wind_direction = msg.data
+
+    def tacking_status_callback(self, msg: Bool):
+        """Track whether the simulator reports a tack in progress."""
+        self.is_tacking = bool(msg.data)
     
     def _update_boat_position_from_gps(self):
         """Convert current GPS lat/lon to local map XY offsets."""
@@ -428,9 +435,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
         time_delta = current_time_s - self.heading_trail_last_time_s if self.heading_trail_last_time_s is not None else float('inf')
 
         if (
-            (dist >= self.heading_trail_spacing_m
-            or heading_delta >= self.heading_trail_heading_threshold_deg)
-            and time_delta >= self.heading_trail_time_spacing_s
+            dist >= self.heading_trail_spacing_m
+            or heading_delta >= self.heading_trail_heading_threshold_deg
+            or time_delta >= self.heading_trail_time_spacing_s
         ):
             self.heading_trail.append(entry)
             self.heading_trail_last_time_s = current_time_s
@@ -1045,7 +1052,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.orientation.z = 0.0
         
         # Scale - apply visualization scale
-        marker.scale.x = 0.2 * self.visualization_scale  # arrow length
+        marker.scale.x = (1.0 - min(4*self.gps_velocity_speed , 1.0)) * 0.2 * self.visualization_scale  # arrow length
         marker.scale.y = 0.03 * self.visualization_scale # arrow width
         marker.scale.z = 0.03 * self.visualization_scale
         
@@ -1187,6 +1194,33 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.lifetime.nanosec = 0
         
         return marker
+
+    def create_tacking_status_marker(self):
+        """Create text banner when the simulator reports an in-progress tack."""
+        marker = Marker()
+        marker.header = Header()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = self.get_current_time()
+
+        marker.id = 14
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.ns = "argo_boat_labels"
+
+        marker.pose.position.x = 0.0
+        marker.pose.position.y = 0.0
+        marker.pose.position.z = 1.0 * self.visualization_scale
+
+        marker.text = "TACKING"
+
+        marker.scale.z = 0.08 * self.visualization_scale
+
+        marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=1.0)
+
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+
+        return marker
     
     def publish_markers(self):
         """Publish all visualization markers"""
@@ -1230,6 +1264,19 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_sail_label_marker())
             marker_array.markers.append(self.create_wind_label_marker())
             marker_array.markers.append(self.create_heading_label_marker())
+            if self.is_tacking:
+                marker_array.markers.append(self.create_tacking_status_marker())
+                self._tacking_marker_active = True
+            elif self._tacking_marker_active:
+                delete_marker = Marker()
+                delete_marker.header = Header()
+                delete_marker.header.frame_id = "base_link"
+                delete_marker.header.stamp = self.get_current_time()
+                delete_marker.ns = "argo_boat_labels"
+                delete_marker.id = 14
+                delete_marker.action = Marker.DELETE
+                marker_array.markers.append(delete_marker)
+                self._tacking_marker_active = False
             
             # Add sailing area markers (boundaries, waypoints, hazards) for 3D visualization
             # Note: These come from sailing_area_publisher and may be empty initially
