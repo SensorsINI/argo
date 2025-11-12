@@ -123,9 +123,10 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'support'))
 from safe_publish import safe_publish, safe_log, is_context_valid
+from geofence_manager import GeofenceManager
 import threading
 import json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 import numpy as np
@@ -203,6 +204,11 @@ class BoatState:
     current_latitude: Optional[float] = None     # degrees
     current_longitude: Optional[float] = None    # degrees
     return_to_home_active: bool = False          # RTH mode active
+
+    # Geofence tracking (for patrol controller)
+    geofence_polygon: Optional[List[Tuple[float, float]]] = None  # Cached polygon in local x/y coordinates
+    distance_to_boundary: Optional[float] = None  # Current distance to nearest edge (meters, negative if inside)
+    predicted_boundary_crossing_time: Optional[float] = None  # Seconds until boundary crossing
 
     def is_valid_for_control(self) -> bool:
         """Check if we have minimum required data for autonomous control."""
@@ -481,6 +487,264 @@ class ReturnToHomeController(BaseController):
         )
 
 
+class PatrolController(BaseController):
+    """
+    Patrol controller that autonomously patrols a geofence sailing area.
+    
+    Sailing strategy:
+    - Uses broad/beam reaches (90-135° to wind) for efficient patrol
+    - Detects approaching boundaries and executes tacks/jibes before reaching edge
+    - Tacks upwind when reaching downwind side of area
+    - Maintains patrol pattern by sailing back and forth across the area
+    """
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.rudder_gain = config.get('rudder_gain', 1.0)
+        self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)
+        self.sail_wind_gain = config.get('sail_wind_gain', 0.5)
+        
+        # Patrol-specific parameters
+        self.patrol_lookahead_time = config.get('patrol_lookahead_time', 15.0)  # seconds
+        self.boundary_turn_threshold = config.get('boundary_turn_threshold', 15.0)  # meters
+        self.tack_angle = config.get('tack_angle', 90.0)  # degrees to turn during tack
+        self.broad_reach_angle = config.get('broad_reach_angle', 110.0)  # preferred angle to wind
+        
+        # Geofence management
+        self.geofence_manager = GeofenceManager()
+        map_name = config.get('geofence_map_name', 'Argo Irchel pond sailing area')
+        
+        # Load geofence polygon
+        if not self.geofence_manager.load_geofence(map_name):
+            print(f"Warning: Failed to load geofence for map '{map_name}'")
+        
+        # Patrol state
+        self.patrol_mode = 'broad_reach'  # 'broad_reach', 'tacking', 'jibing'
+        self.last_turn_time = 0.0
+        self.turn_cooldown = 5.0  # seconds between turns
+        
+        # Wind direction tracking (for determining tack vs jibe)
+        self.wind_direction_absolute = None  # Absolute wind direction (0-360, 0=North)
+    
+    def reset(self):
+        """Reset controller state when switching to this controller."""
+        self.patrol_mode = 'broad_reach'
+        self.last_turn_time = 0.0
+    
+    def _calculate_absolute_wind_direction(self, state: BoatState) -> Optional[float]:
+        """
+        Calculate absolute wind direction from boat-relative wind angle.
+        
+        Args:
+            state: Current boat state
+            
+        Returns:
+            Absolute wind direction in degrees (0-360, 0=North), or None if unavailable
+        """
+        if state.wind_angle is None or state.compass_heading is None:
+            return None
+        
+        # Wind angle is degrees CW from front of boat
+        # Compass heading is boat's heading (0-360, 0=North)
+        # Absolute wind = boat heading + wind angle (relative to boat)
+        absolute_wind = (state.compass_heading + state.wind_angle) % 360.0
+        return absolute_wind
+    
+    def _determine_sailing_mode(self, state: BoatState) -> str:
+        """
+        Determine current sailing mode based on position and boundary proximity.
+        
+        Returns:
+            'broad_reach', 'tacking', 'jibing', or 'upwind_recovery'
+        """
+        current_time = time.time()
+        
+        # Check if we're in cooldown period after last turn
+        if current_time - self.last_turn_time < self.turn_cooldown:
+            return self.patrol_mode  # Continue current mode
+        
+        # Check if we have required data
+        if (state.current_latitude is None or state.current_longitude is None or
+            state.compass_heading is None):
+            return 'broad_reach'  # Default mode
+        
+        # Calculate distance to boundary
+        distance = self.geofence_manager.distance_to_boundary_lonlat(
+            state.current_longitude, state.current_latitude)
+        
+        # Check if approaching boundary
+        if abs(distance) < self.boundary_turn_threshold:
+            # Predict boundary crossing time
+            if state.gps_sog is not None:
+                speed_ms = state.gps_sog * 0.514444  # knots to m/s
+            else:
+                speed_ms = 1.0  # Default 1 m/s if speed unknown
+            
+            crossing_time = self.geofence_manager.predict_boundary_crossing_time(
+                state.current_latitude, state.current_longitude,
+                state.compass_heading, speed_ms, self.patrol_lookahead_time)
+            
+            if crossing_time is not None and crossing_time < self.patrol_lookahead_time:
+                # Determine whether to tack or jibe based on wind direction
+                absolute_wind = self._calculate_absolute_wind_direction(state)
+                
+                if absolute_wind is not None:
+                    # Determine if we should tack (into wind) or jibe (away from wind)
+                    # For now, prefer tacking when approaching boundary
+                    # More sophisticated logic could consider which side of area we're on
+                    return 'tacking'
+                else:
+                    # Default to tacking if wind direction unknown
+                    return 'tacking'
+        
+        # Check if we're on the downwind side and need to tack upwind
+        # This is a simplified check - could be enhanced with area analysis
+        if distance < -5.0:  # Inside area, but close to downwind edge
+            absolute_wind = self._calculate_absolute_wind_direction(state)
+            if absolute_wind is not None:
+                # If we're sailing downwind relative to the area center, tack upwind
+                return 'tacking'
+        
+        return 'broad_reach'
+    
+    def _calculate_target_heading_broad_reach(self, state: BoatState) -> Optional[float]:
+        """
+        Calculate target heading for broad reach sailing.
+        
+        Args:
+            state: Current boat state
+            
+        Returns:
+            Target heading in degrees, or None if unavailable
+        """
+        if state.wind_angle is None or state.compass_heading is None:
+            return None
+        
+        # Calculate absolute wind direction
+        absolute_wind = self._calculate_absolute_wind_direction(state)
+        if absolute_wind is None:
+            return None
+        
+        # Target heading for broad reach: wind direction + broad_reach_angle
+        # We want to sail at broad_reach_angle to the wind
+        # If wind is from North (0°), and we want 110° to wind, we can sail at 110° or 250°
+        # Choose the direction that maintains current heading direction (port or starboard)
+        
+        # Calculate two possible headings
+        heading1 = (absolute_wind + self.broad_reach_angle) % 360.0
+        heading2 = (absolute_wind - self.broad_reach_angle) % 360.0
+        
+        # Choose the one closer to current heading
+        err1 = abs(signed_angle_difference_degrees(heading1, state.compass_heading))
+        err2 = abs(signed_angle_difference_degrees(heading2, state.compass_heading))
+        
+        return heading1 if err1 < err2 else heading2
+    
+    def _calculate_target_heading_tack(self, state: BoatState) -> Optional[float]:
+        """
+        Calculate target heading for tacking maneuver.
+        
+        Args:
+            state: Current boat state
+            
+        Returns:
+            Target heading in degrees, or None if unavailable
+        """
+        if state.compass_heading is None:
+            return None
+        
+        absolute_wind = self._calculate_absolute_wind_direction(state)
+        if absolute_wind is None:
+            # Default tack: turn 90 degrees
+            return (state.compass_heading + self.tack_angle) % 360.0
+        
+        # Tack: turn toward the wind (into the wind)
+        # Calculate heading that's closer to wind direction
+        # We want to turn so we're sailing closer to upwind
+        
+        # Determine which direction to turn based on current heading relative to wind
+        wind_relative_to_boat = state.wind_angle  # Already relative to boat
+        
+        # If wind is on port side, tack to starboard (turn right)
+        # If wind is on starboard side, tack to port (turn left)
+        if wind_relative_to_boat > 180:
+            # Wind on port side, turn right
+            new_heading = (state.compass_heading + self.tack_angle) % 360.0
+        else:
+            # Wind on starboard side, turn left
+            new_heading = (state.compass_heading - self.tack_angle) % 360.0
+        
+        return new_heading
+    
+    def generate_control(self, state: BoatState) -> ControlCommand:
+        """Generate control commands for patrol sailing."""
+        if not state.is_valid_for_control():
+            return ControlCommand(timestamp=state.timestamp)
+        
+        # Update geofence data in state
+        if self.geofence_manager.polygon_xy is not None:
+            state.geofence_polygon = self.geofence_manager.polygon_xy
+        
+        # Calculate distance to boundary
+        if state.current_latitude is not None and state.current_longitude is not None:
+            state.distance_to_boundary = self.geofence_manager.distance_to_boundary_lonlat(
+                state.current_longitude, state.current_latitude)
+            
+            # Predict boundary crossing time
+            if state.gps_sog is not None and state.compass_heading is not None:
+                speed_ms = state.gps_sog * 0.514444  # knots to m/s
+                state.predicted_boundary_crossing_time = self.geofence_manager.predict_boundary_crossing_time(
+                    state.current_latitude, state.current_longitude,
+                    state.compass_heading, speed_ms, self.patrol_lookahead_time)
+        
+        # Determine sailing mode
+        new_mode = self._determine_sailing_mode(state)
+        if new_mode != self.patrol_mode:
+            self.patrol_mode = new_mode
+            self.last_turn_time = time.time()
+        
+        # Calculate target heading based on mode
+        if self.patrol_mode == 'broad_reach':
+            target_heading = self._calculate_target_heading_broad_reach(state)
+        elif self.patrol_mode == 'tacking':
+            target_heading = self._calculate_target_heading_tack(state)
+        else:
+            # Default: maintain current heading
+            target_heading = state.compass_heading
+        
+        if target_heading is None:
+            # Fallback: maintain current heading
+            target_heading = state.compass_heading if state.compass_heading is not None else 0.0
+        
+        # Update state target heading
+        state.target_heading = target_heading
+        
+        # Calculate rudder command (proportional control to target heading)
+        if state.compass_heading is not None:
+            compass_err = signed_angle_difference_degrees(target_heading, state.compass_heading)
+            cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
+            cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
+        else:
+            cmd_rudder = 0.0
+        
+        # Wind-aware sail control
+        cmd_sail = 0.0
+        if state.wind_angle is not None:
+            # Simple sail control based on wind angle
+            # Wind from ahead (0°): pull sail in (-1)
+            # Wind from side (90°): moderate sail position (0)
+            # Wind from behind (180°): let sail out (+1)
+            wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
+            wind_sail_cmd = np.clip(wind_sail_cmd, -1.0, 1.0)
+            cmd_sail = self.sail_wind_gain * wind_sail_cmd
+        
+        return ControlCommand(
+            rudder=cmd_rudder,
+            sail=cmd_sail,
+            timestamp=state.timestamp
+        )
+
+
 class DataCollector:
     """Collects state-action pairs for training data."""
 
@@ -601,6 +865,12 @@ class ControllerNode(ArgoBaseNode):
         self.declare_parameter('rudder_full_scale_deg', 60.0)
         # Allow disabling param file monitoring
         self.declare_parameter('enable_param_reload', True)
+        # Patrol controller parameters
+        self.declare_parameter('patrol_lookahead_time', 15.0)
+        self.declare_parameter('boundary_turn_threshold', 15.0)
+        self.declare_parameter('tack_angle', 90.0)
+        self.declare_parameter('broad_reach_angle', 110.0)
+        self.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
 
         self.param_file = Path(self.get_parameter(
             'param_file_path').get_parameter_value().string_value)
@@ -753,6 +1023,14 @@ class ControllerNode(ArgoBaseNode):
             config['shore_connection_timeout'] = 120.0
             config['arrival_distance_nm'] = 0.05
             self.controller = ReturnToHomeController(config)
+        elif controller_type == 'patrol':
+            config['sail_wind_gain'] = 0.5
+            config['patrol_lookahead_time'] = self.get_parameter('patrol_lookahead_time').get_parameter_value().double_value
+            config['boundary_turn_threshold'] = self.get_parameter('boundary_turn_threshold').get_parameter_value().double_value
+            config['tack_angle'] = self.get_parameter('tack_angle').get_parameter_value().double_value
+            config['broad_reach_angle'] = self.get_parameter('broad_reach_angle').get_parameter_value().double_value
+            config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
+            self.controller = PatrolController(config)
         else:
             self.get_logger().warn(
                 f"Unknown controller type '{controller_type}', using proportional")
@@ -805,7 +1083,7 @@ class ControllerNode(ArgoBaseNode):
                 self.get_logger().debug(f"Parameter callback: controller_type set to '{new_controller_type}' (current: {self.controller.name if self.controller else 'None'})")
                 
                 # Validate controller type
-                valid_types = ['proportional', 'wind_aware', 'return_to_home']
+                valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol']
                 if new_controller_type not in valid_types:
                     result.successful = False
                     result.reason = f"Invalid controller type '{new_controller_type}'. Valid types: {', '.join(valid_types)}"
@@ -816,7 +1094,8 @@ class ControllerNode(ArgoBaseNode):
                 current_controller_name = self.controller.name if self.controller else "None"
                 if (new_controller_type == 'proportional' and current_controller_name == 'ProportionalHeadingController') or \
                    (new_controller_type == 'wind_aware' and current_controller_name == 'WindAwareController') or \
-                   (new_controller_type == 'return_to_home' and current_controller_name == 'ReturnToHomeController'):
+                   (new_controller_type == 'return_to_home' and current_controller_name == 'ReturnToHomeController') or \
+                   (new_controller_type == 'patrol' and current_controller_name == 'PatrolController'):
                     self.get_logger().debug(f"Controller is already {current_controller_name} (requested: {new_controller_type}), no switch needed")
                     return result
                 

@@ -229,12 +229,27 @@ class ArgoTransformPublisher(ArgoBaseNode):
             dy = (msg.latitude - self.current_lat) * 111320.0  # meters
             distance = math.sqrt(dx*dx + dy*dy)
             
-            # If jump is more than 100m, it's likely a reset or error - ignore it
+            # Check if new position is near the map origin (home waypoint) - indicates a reset
+            # Calculate distance from new position to map origin
+            dx_to_origin = (msg.longitude - self.map_origin_lon) * 111320.0 * math.cos(math.radians(self.map_origin_lat))  # meters
+            dy_to_origin = (msg.latitude - self.map_origin_lat) * 111320.0  # meters
+            distance_to_origin = math.sqrt(dx_to_origin*dx_to_origin + dy_to_origin*dy_to_origin)
+            
+            # If jump is more than 100m, check if it's a reset (position near origin)
             if distance > 100.0 and self.current_lat != 0.0 and self.current_lon != 0.0:
-                self.get_logger().warn(f"Ignoring GPS position jump: {distance:.1f}m (from {self.current_lat:.6f},{self.current_lon:.6f} to {msg.latitude:.6f},{msg.longitude:.6f})")
-                if self.debug_trace:
-                    self.get_logger().debug(f"[TF_TRACE:GPS] Position jump ignored - distance={distance:.1f}m")
-                return
+                # Allow the jump if new position is close to origin (within 50m) - this is a reset
+                # 50m threshold accounts for coordinate conversion errors while still detecting resets
+                if distance_to_origin < 50.0:
+                    self.get_logger().info(f"Detected simulation reset: accepting position jump of {distance:.1f}m to home location (distance to origin: {distance_to_origin:.1f}m)")
+                    if self.debug_trace:
+                        self.get_logger().debug(f"[TF_TRACE:GPS] Reset detected - accepting jump to origin")
+                    # Continue to update position (don't return)
+                else:
+                    # Large jump but not near origin - likely an error, ignore it
+                    self.get_logger().warn(f"Ignoring GPS position jump: {distance:.1f}m (from {self.current_lat:.6f},{self.current_lon:.6f} to {msg.latitude:.6f},{msg.longitude:.6f}) - not near origin (distance to origin: {distance_to_origin:.1f}m)")
+                    if self.debug_trace:
+                        self.get_logger().debug(f"[TF_TRACE:GPS] Position jump ignored - distance={distance:.1f}m, not a reset")
+                    return
         
         old_lat, old_lon = self.current_lat, self.current_lon
         self.current_lat = msg.latitude
@@ -410,8 +425,8 @@ class ArgoTransformPublisher(ArgoBaseNode):
                 self.get_logger().debug(f"[TF_TRACE:{tf_id}] TF_PUBLISH_END - Transforms published")
             
             # Update health status - successful publishing
-            if self.publish_success_count % 1000 == 0:  # Update health every 1000 successful publishes
-                self.set_healthy(f"Publishing transforms successfully (count: {self.publish_success_count})")
+            if self.publish_success_count % 100 == 0:  # Update health every 1000 successful publishes
+                self.set_healthy(f"Published dynamics transforms successfully") # leave out count to avoid log chatter from change detection logging
             self.publish_success_count += 1
                 
         except Exception as e:
