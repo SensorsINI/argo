@@ -853,11 +853,20 @@ class BatteryWaterNode(ArgoBaseNode):
             Time in hours, or None if estimation not possible
         """
         try:
-            # Use linear regression on recent samples
+            # Priority 1: Use persistent slopes immediately if available (no need to wait for 5 samples)
+            # This allows estimates to be provided right after startup if we have saved slopes
+            slope_v_per_s = None
+            if charging:
+                slope_v_per_s = self._charging_slope_v_per_s
+            else:
+                slope_v_per_s = self._discharging_slope_v_per_s
+            
+            # Priority 2: Try linear regression on recent samples to update persistent slopes
+            # This provides more accurate estimates when we have sufficient recent data
             fit_result = self._linear_least_squares(self._voltage_samples)
             
             if fit_result is not None:
-                slope_v_per_s, intercept = fit_result
+                regression_slope_v_per_s, intercept = fit_result
                 
                 # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
                 # 0.3 V/h = 8.33e-5 V/s minimum for meaningful slope updates
@@ -870,28 +879,44 @@ class BatteryWaterNode(ArgoBaseNode):
                 
                 # Update persistent slopes if we have good data, sufficient samples, and proper charging state
                 if (charging and 
-                    slope_v_per_s > MIN_CHARGING_SLOPE_V_PER_S and  # Significant positive slope
+                    regression_slope_v_per_s > MIN_CHARGING_SLOPE_V_PER_S and  # Significant positive slope
                     len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
                     self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
                     not is_fully_charged):  # Don't update slope when already fully charged
-                    self._charging_slope_v_per_s = slope_v_per_s
-                    self.get_logger().debug(f"Updated charging slope: {slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    self._charging_slope_v_per_s = regression_slope_v_per_s
+                    self.get_logger().debug(f"Updated charging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    # Use the updated slope for this estimation
+                    slope_v_per_s = regression_slope_v_per_s
                 elif (not charging and 
-                      slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and  # Significant negative slope
+                      regression_slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and  # Significant negative slope
                       len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
                       self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
                       not is_near_empty):  # Don't update slope when already near empty
-                    self._discharging_slope_v_per_s = slope_v_per_s
-                    self.get_logger().debug(f"Updated discharging slope: {slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
-            else:
-                # Use persistent slopes if available
-                if charging:
-                    slope_v_per_s = self._charging_slope_v_per_s
-                else:
-                    slope_v_per_s = self._discharging_slope_v_per_s
-                
-                if slope_v_per_s is None:
-                    return None
+                    self._discharging_slope_v_per_s = regression_slope_v_per_s
+                    self.get_logger().debug(f"Updated discharging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    # Use the updated slope for this estimation
+                    slope_v_per_s = regression_slope_v_per_s
+                elif slope_v_per_s is None:
+                    # If we have regression result but no persistent slope, validate sign before using
+                    # For charging: slope must be positive; for discharging: slope must be negative
+                    if charging and regression_slope_v_per_s > 1e-6:
+                        slope_v_per_s = regression_slope_v_per_s
+                    elif not charging and regression_slope_v_per_s < -1e-6:
+                        slope_v_per_s = regression_slope_v_per_s
+                    # Otherwise, regression slope has wrong sign - don't use it
+            
+            # If no slope available at all, cannot estimate
+            if slope_v_per_s is None:
+                return None
+            
+            # CRITICAL: Validate slope sign matches charging state
+            # Charging requires positive slope, discharging requires negative slope
+            if charging and slope_v_per_s <= 1e-6:
+                # Charging but slope is not positive - invalid
+                return None
+            if not charging and slope_v_per_s >= -1e-6:
+                # Discharging but slope is not negative - invalid
+                return None
             
             # Compute time to target voltage
             if charging:
@@ -899,16 +924,12 @@ class BatteryWaterNode(ArgoBaseNode):
                 target_voltage = BATTERY_FULLY_CHARGED_THRESHOLD_V
                 if voltage >= target_voltage:
                     return 0.0  # Already at target - check this FIRST
-                if slope_v_per_s <= 1e-6:  # Not charging or charging too slowly
-                    return None
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             else:
                 # Time to 0% (approximate as 6.0V for 2S LiPo, empty)
                 target_voltage = 6.0  # Conservative empty voltage
                 if voltage <= target_voltage:
                     return 0.0  # Already depleted - check this FIRST
-                if slope_v_per_s >= -1e-6:  # Not discharging or discharging too slowly
-                    return None
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             
             # Convert to hours and clamp to reasonable range
@@ -1610,6 +1631,7 @@ class BatteryWaterNode(ArgoBaseNode):
                 self._latest_battery_lifetime_hours = self._latest_time_to_full_hours
             else:
                 # Discharging: estimate time to empty
+                # CRITICAL: Always clear TTF when discharging to prevent stale values
                 self._latest_time_to_full_hours = None
                 self._latest_time_to_empty_hours = self._estimate_battery_lifetime(
                     battery_voltage, charging=False)
@@ -1623,21 +1645,28 @@ class BatteryWaterNode(ArgoBaseNode):
                 except Exception:
                     pass
         else:
-            # If charging status is unknown, still try to estimate based on voltage trend
+            # If charging status is unknown, try to estimate based on voltage trend
             # This helps provide estimates even when GPIO is not available
+            # Prefer TTE (time to empty) as it's safer when status is unknown
             self._latest_time_to_full_hours = self._estimate_battery_lifetime(
                 battery_voltage, charging=True)
             self._latest_time_to_empty_hours = self._estimate_battery_lifetime(
                 battery_voltage, charging=False)
-            # Use the more conservative estimate (longer time)
-            if (self._latest_time_to_full_hours is not None and 
-                self._latest_time_to_empty_hours is not None):
-                self._latest_battery_lifetime_hours = max(
-                    self._latest_time_to_full_hours, self._latest_time_to_empty_hours)
-            elif self._latest_time_to_full_hours is not None:
-                self._latest_battery_lifetime_hours = self._latest_time_to_full_hours
-            elif self._latest_time_to_empty_hours is not None:
+            
+            # When charging status is unknown, prefer TTE for safety (batteries typically discharge)
+            # Only use TTF if we have clear evidence of charging (voltage increasing)
+            if self._latest_time_to_empty_hours is not None:
+                # Prefer TTE when available (safer assumption)
                 self._latest_battery_lifetime_hours = self._latest_time_to_empty_hours
+            elif self._latest_time_to_full_hours is not None:
+                # Only use TTF if TTE is not available
+                # Check voltage trend to validate: if voltage is near full (>= 8.0V), TTF might be valid
+                if battery_voltage >= 8.0:
+                    self._latest_battery_lifetime_hours = self._latest_time_to_full_hours
+                else:
+                    # Voltage is not near full, so TTF is likely incorrect - don't use it
+                    self._latest_time_to_full_hours = None
+                    self._latest_battery_lifetime_hours = None
             else:
                 self._latest_battery_lifetime_hours = None
 
