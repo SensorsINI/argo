@@ -18,11 +18,17 @@
 # High-level controller (controller.py)
 controller_node:
   ros__parameters:
-    controller_type: "proportional"  # Options: "proportional", "wind_aware"
+    controller_type: "proportional"  # Options: "proportional", "wind_aware", "return_to_home", "patrol"
     data_collection_enabled: false
     rudder_gain: 2.0
     rudder_full_scale_deg: 60.0
     param_file_path: "argo.yaml"
+    # Patrol controller parameters (used when controller_type: "patrol")
+    patrol_lookahead_time: 15.0      # Seconds to predict ahead for boundary crossing
+    boundary_turn_threshold: 15.0     # Distance to boundary to trigger turn (meters)
+    tack_angle: 90.0                  # Degrees to turn during tack maneuver
+    broad_reach_angle: 110.0          # Preferred angle to wind for patrol (degrees)
+    geofence_map_name: "Argo Irchel pond sailing area"  # GeoJSON map name (without .geojson extension)
 
 # Low-level arbitration and hardware interface (rudder_sail_radio.py)
 rudder_sail_radio_node:
@@ -46,6 +52,18 @@ argo_boat_visualization:
 #     rudder_gain: 1.5
 #     sail_wind_gain: 0.3  # How much to blend wind-based sail control
 #     data_collection_enabled: true
+
+# Patrol controller:
+# controller_node:
+#   ros__parameters:
+#     controller_type: "patrol"
+#     rudder_gain: 2.0
+#     rudder_full_scale_deg: 60.0
+#     patrol_lookahead_time: 15.0
+#     boundary_turn_threshold: 15.0
+#     tack_angle: 90.0
+#     broad_reach_angle: 110.0
+#     geofence_map_name: "Argo Irchel pond sailing area"
 
 # Conservative human priority:
 # rudder_sail_radio_node:
