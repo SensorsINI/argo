@@ -334,8 +334,20 @@ class GeofenceManager:
         is_future_inside = self.is_point_inside_polygon(pred_x, pred_y)
         
         # If both inside or both outside, no crossing
+        # However, if currently outside and heading further out, don't predict a crossing
+        # (we only care about crossing from inside to outside, or returning from outside to inside)
         if is_currently_inside == is_future_inside:
             return None
+        
+        # If currently outside and heading further out (future also outside), no crossing to predict
+        # Only predict if we're crossing from inside to outside, or outside to inside
+        if not is_currently_inside and not is_future_inside:
+            # Both outside - check if we're heading toward or away from boundary
+            current_dist = self.distance_to_boundary(x, y)
+            future_dist = self.distance_to_boundary(pred_x, pred_y)
+            # If getting further away (more negative), no crossing to predict
+            if abs(future_dist) > abs(current_dist):
+                return None
         
         # Binary search for crossing point
         while t_max - t_min > tolerance:

@@ -172,6 +172,10 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.external_sail = 0.0    # -1 to +1
         self.last_external_control_time = 0.0
         
+        # Autonomous control state (from controller.py via /rudder_sail_cmd)
+        self.auto_rudder = 0.0  # -1 to +1 (normalized)
+        self.auto_sail = 0.0    # -1 to +1 (normalized)
+        
         # Initialize stored control angles (in degrees) for real simulator
         # These are used when robot control is active but no external control is received
         self.last_rudder_angle = 0.0  # degrees (-30 to +30)
@@ -301,9 +305,14 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.pub_control_authority = self.create_publisher(Vector3, '/control_authority', 10)
         
         # Control arbitration state
-        self.human_controlled = True  # Start in human control for safety
-        self.last_human_activity = time.time()
-        self.last_auto_update = 0.0
+        # Initialize last_human_activity to 0.0 (no activity yet) so it times out immediately
+        # unless actual human activity is detected
+        self.last_human_activity = 0.0  # 0.0 means no human activity detected yet
+        self.last_auto_update = 0.0  # 0.0 means no auto commands received yet
+        # Start in robot control since there's no human activity
+        # This allows the controller to start publishing commands immediately
+        # Human control will take over as soon as any human activity is detected
+        self.human_controlled = False
         self.control_arbitration_timer = self.create_timer(0.1, self.publish_control_arbitration)
         
         # Subscribe to autonomous commands (from controller.py)
@@ -320,20 +329,80 @@ class ArgoUnifiedSimulatorBridge(Node):
         current_time = time.time()
         
         # Check for recent human activity (within 2 seconds)
-        time_since_human_activity = current_time - self.last_human_activity
-        time_since_auto_update = current_time - self.last_auto_update
+        # If last_human_activity is 0.0, it means no activity detected yet, so time_since is very large
+        if self.last_human_activity > 0.0:
+            time_since_human_activity = current_time - self.last_human_activity
+        else:
+            time_since_human_activity = float('inf')  # No activity detected yet
+        
+        if self.last_auto_update > 0.0:
+            time_since_auto_update = current_time - self.last_auto_update
+        else:
+            time_since_auto_update = float('inf')  # No auto commands received yet
+        
         human_override_timeout = 2.0  # seconds
         
-        # Human has control if there's been recent activity
-        if time_since_human_activity < human_override_timeout:
+        # Determine new control state
+        old_human_controlled = self.human_controlled
+        
+        # Human has control if there's been recent activity (and activity was detected)
+        if self.last_human_activity > 0.0 and time_since_human_activity < human_override_timeout:
             self.human_controlled = True
         else:
-            # Check if we have recent autonomous commands
-            if time_since_auto_update < 1.0:  # Auto commands are fresh
-                self.human_controlled = False
+            # Human timeout expired or no activity detected - switch to robot control
+            # This allows the controller to start publishing commands, which will then
+            # keep robot control active via the auto_update check below
+            if self.last_auto_update > 0.0:
+                # We've received auto commands before - check if they're fresh
+                if time_since_auto_update < 1.0:  # Auto commands are fresh
+                    self.human_controlled = False
+                else:
+                    # Auto commands are stale - but no human activity, so try robot control
+                    # The controller should start publishing once it sees robot control
+                    self.human_controlled = False
             else:
-                # Default to human control for safety if no recent commands
-                self.human_controlled = True
+                # No auto commands received yet, but no human activity either
+                # Switch to robot control to allow controller to start publishing
+                # This breaks the chicken-and-egg problem
+                self.human_controlled = False
+        
+        # Debug logging when state changes or periodically
+        if not hasattr(self, '_last_arbitration_log_time'):
+            self._last_arbitration_log_time = 0.0
+            self._arbitration_log_counter = 0
+        
+        should_log = False
+        if old_human_controlled != self.human_controlled:
+            should_log = True  # Always log state changes
+            self._arbitration_log_counter = 0
+        elif (current_time - self._last_arbitration_log_time) > 5.0:
+            should_log = True  # Log every 5 seconds for debugging
+            self._arbitration_log_counter += 1
+        
+        if should_log:
+            mode_str = "HUMAN" if self.human_controlled else "ROBOT"
+            old_mode_str = "HUMAN" if old_human_controlled else "ROBOT"
+            # Format time_since values for display
+            human_time_str = f"{time_since_human_activity:.2f}s" if time_since_human_activity != float('inf') else "never"
+            auto_time_str = f"{time_since_auto_update:.2f}s" if time_since_auto_update != float('inf') else "never"
+            
+            if old_human_controlled != self.human_controlled:
+                self.get_logger().info(
+                    f"🔄 Control authority changed: {old_mode_str} → {mode_str} | "
+                    f"time_since_human={human_time_str} (timeout={human_override_timeout:.1f}s), "
+                    f"time_since_auto={auto_time_str}, "
+                    f"last_human_activity={self.last_human_activity:.2f}, "
+                    f"last_auto_update={self.last_auto_update:.2f}"
+                )
+            else:
+                self.get_logger().debug(
+                    f"Control arbitration: {mode_str} | "
+                    f"time_since_human={human_time_str} (timeout={human_override_timeout:.1f}s), "
+                    f"time_since_auto={auto_time_str}, "
+                    f"last_human_activity={self.last_human_activity:.2f}, "
+                    f"last_auto_update={self.last_auto_update:.2f}"
+                )
+            self._last_arbitration_log_time = current_time
         
         # Publish human control status
         human_msg = Bool(data=self.human_controlled)
@@ -349,10 +418,25 @@ class ArgoUnifiedSimulatorBridge(Node):
     
     def auto_control_callback(self, msg):
         """Receive autonomous control commands from controller.py."""
+        old_auto_update = self.last_auto_update
         self.last_auto_update = time.time()
         # Store autonomous commands for potential use
         self.auto_rudder = msg.x
         self.auto_sail = msg.y
+        
+        # Debug logging for auto commands
+        if not hasattr(self, '_last_auto_log_time'):
+            self._last_auto_log_time = 0.0
+        
+        time_since_last_log = self.last_auto_update - self._last_auto_log_time
+        if time_since_last_log > 5.0:  # Log every 5 seconds
+            time_since_old = self.last_auto_update - old_auto_update if old_auto_update > 0 else float('inf')
+            self.get_logger().debug(
+                f'🤖 Auto command received: rudder={self.auto_rudder:.3f}, sail={self.auto_sail:.3f} | '
+                f'Updating last_auto_update (was {old_auto_update:.2f}, now {self.last_auto_update:.2f}, '
+                f'gap={time_since_old:.2f}s)'
+            )
+            self._last_auto_log_time = self.last_auto_update
     
     def _create_simulator(self, boat_heading, force_mock=False):
         """Create a simulator instance (real or mock).
@@ -508,11 +592,18 @@ class ArgoUnifiedSimulatorBridge(Node):
                 current_sail = self.external_sail
                 control_source = "external"
             else:
-                # Use stored robot control values (from control_callback)
-                # Convert from degrees back to normalized (-1 to +1)
-                current_rudder = self.last_rudder_angle / 30.0  # Convert back from degrees
-                current_sail = self.last_sail_angle / 45.0     # Convert back from degrees
-                control_source = "robot"
+                # Use robot control values from auto_control_callback (from /rudder_sail_cmd)
+                # These are already normalized (-1 to +1)
+                if hasattr(self, 'auto_rudder') and hasattr(self, 'auto_sail'):
+                    current_rudder = self.auto_rudder
+                    current_sail = self.auto_sail
+                    control_source = "robot_auto"
+                else:
+                    # Fallback: use stored values from control_callback (from /rudder_sail_servo)
+                    # Convert from degrees back to normalized (-1 to +1)
+                    current_rudder = self.last_rudder_angle / 30.0  # Convert back from degrees
+                    current_sail = self.last_sail_angle / 45.0     # Convert back from degrees
+                    control_source = "robot_servo"
             
             if self.debug_position_trace:
                 self.get_logger().info(f"[POS_TRACE:{trace_id}] Control: source={control_source}, rudder={current_rudder:.3f}, sail={current_sail:.3f}")
@@ -1447,30 +1538,65 @@ class ArgoUnifiedSimulatorBridge(Node):
         """Receive external radio control commands (from Foxglove Teleop, keyboard, etc.) and apply to simulator."""
         current_time = time.time()
         self.last_external_control_time = current_time
-        self.last_human_activity = current_time
         
         # Store external control values
         self.external_rudder = msg.x  # -1 to +1
         self.external_sail = msg.y    # -1 to +1
         
-        # Mark as human controlled when receiving external input
-        self.human_controlled = True
+        # Check for significant changes to update human activity (deadband threshold)
+        # Use same deadband logic as rudder_sail_radio.py to prevent noise from triggering activity
+        deadband_threshold = 0.1875  # Same as rudder_sail_radio.py default (5σ measured)
         
-        # Apply control to simulator immediately
-        self._apply_control_to_simulator(self.external_rudder, self.external_sail)
-        
-        # Check for significant changes to update human activity
-        if hasattr(self, 'prev_external_rudder') and hasattr(self, 'prev_external_sail'):
+        # Initialize previous values if not set
+        if not hasattr(self, 'prev_external_rudder'):
+            self.prev_external_rudder = self.external_rudder
+            self.prev_external_sail = self.external_sail
+            # First message counts as activity (user just started controlling)
+            old_activity_time = self.last_human_activity
+            self.last_human_activity = current_time
+            self.human_controlled = True
+            self.get_logger().info(
+                f'📡 First external control message received: rudder={self.external_rudder:.3f}, sail={self.external_sail:.3f} | '
+                f'Setting last_human_activity (was {old_activity_time:.2f}, now {self.last_human_activity:.2f})'
+            )
+        else:
+            # Calculate change from previous values
             rudder_change = abs(self.external_rudder - self.prev_external_rudder)
             sail_change = abs(self.external_sail - self.prev_external_sail)
             
-            # Update human activity if there's significant change
-            if rudder_change > 0.01 or sail_change > 0.01:
+            # Only update human activity if there's significant change (above deadband threshold)
+            # This prevents continuous publishing from keyboard control from keeping human control active
+            if rudder_change > deadband_threshold or sail_change > deadband_threshold:
+                old_activity_time = self.last_human_activity
                 self.last_human_activity = current_time
+                self.human_controlled = True
+                self.get_logger().info(
+                    f'📡 Human activity detected: rudder_change={rudder_change:.3f}, sail_change={sail_change:.3f}, '
+                    f'threshold={deadband_threshold:.3f} | '
+                    f'Updating last_human_activity (was {old_activity_time:.2f}, now {self.last_human_activity:.2f})'
+                )
+            else:
+                # No significant change - don't update activity timestamp
+                time_since_last_activity = current_time - self.last_human_activity
+                if not hasattr(self, '_last_no_activity_log_time'):
+                    self._last_no_activity_log_time = 0.0
+                
+                # Log occasionally when no activity detected (every 2 seconds max)
+                if (current_time - self._last_no_activity_log_time) > 2.0:
+                    self.get_logger().debug(
+                        f'📡 No significant change: rudder_change={rudder_change:.3f}, sail_change={sail_change:.3f}, '
+                        f'threshold={deadband_threshold:.3f} | '
+                        f'NOT updating last_human_activity (still {self.last_human_activity:.2f}, '
+                        f'{time_since_last_activity:.2f}s ago)'
+                    )
+                    self._last_no_activity_log_time = current_time
         
         # Store for next comparison
         self.prev_external_rudder = self.external_rudder
         self.prev_external_sail = self.external_sail
+        
+        # Apply control to simulator immediately (always apply, even if not counting as activity)
+        self._apply_control_to_simulator(self.external_rudder, self.external_sail)
         
         self.get_logger().debug(f'External control: rudder={self.external_rudder:.3f}, sail={self.external_sail:.3f}')
     

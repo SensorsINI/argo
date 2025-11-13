@@ -1747,8 +1747,11 @@ class ArgoLifecycleManager:
             # Progress reporting (journal-friendly)
             elapsed = time.time() - start_time
             if int(elapsed * 10) % 10 == 0:
+                all_expected = self.expected_nodes + self.special_nodes
+                missing_nodes = [node for node in all_expected if node not in running_nodes]
+                missing_str = f" (missing: {', '.join(missing_nodes)})" if missing_nodes else ""
                 print(
-                    f"⏳ Waiting for simulation nodes... {len(running_nodes)}/{total_expected_nodes} running")
+                    f"⏳ Waiting for simulation nodes... {len(running_nodes)}/{total_expected_nodes} running{missing_str}")
 
             if len(running_nodes) == total_expected_nodes:
                 break  # All nodes detected, proceed to stabilization
@@ -1757,10 +1760,25 @@ class ArgoLifecycleManager:
 
         # Check if all expected nodes are running
         if len(running_nodes) != total_expected_nodes:
+            all_expected = self.expected_nodes + self.special_nodes
+            missing_nodes = [node for node in all_expected if node not in running_nodes]
             print(
                 f"❌ Only {len(running_nodes)}/{total_expected_nodes} simulation nodes started")
-            print(f"Running: {running_nodes}")
-            print(f"Expected: {self.expected_nodes + self.special_nodes}")
+            print(f"✅ Running: {', '.join(running_nodes) if running_nodes else '(none)'}")
+            print(f"❌ Missing: {', '.join(missing_nodes) if missing_nodes else '(none)'}")
+            print(f"📋 Expected: {', '.join(all_expected)}")
+            
+            # Check if missing nodes have error logs
+            for missing_node in missing_nodes:
+                # Check if the process exists but isn't running
+                node_status = self._get_node_status()
+                if missing_node in node_status:
+                    status = node_status[missing_node]
+                    if "STOPPED" in status or "ERROR" in status:
+                        print(f"   ⚠️  {missing_node}: {status}")
+                else:
+                    print(f"   ⚠️  {missing_node}: Not found in node status")
+            
             return False
 
         # Monitor during stabilization period

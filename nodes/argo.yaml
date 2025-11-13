@@ -18,7 +18,7 @@
 # High-level controller (controller.py)
 controller_node:
   ros__parameters:
-    controller_type: "proportional"  # Options: "proportional", "wind_aware", "return_to_home", "patrol"
+    controller_type: "patrol"  # Options: "proportional", "wind_aware", "return_to_home", "patrol"
     data_collection_enabled: false
     rudder_gain: 2.0
     rudder_full_scale_deg: 60.0
