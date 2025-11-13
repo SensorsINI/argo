@@ -93,6 +93,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Track previous human_controlled state for change detection
         self._prev_human_controlled_state = None
         
+        # Restart progress tracking
+        self.restart_in_progress = False
+        self.restart_progress_messages = []
+        self.restart_progress_lock = threading.Lock()
+        
         # Initialize state storage (thread-safe with lock)
         self.state_lock = threading.Lock()
         self.state = {
@@ -1493,15 +1498,23 @@ class ArgoWebDashboard(ArgoBaseNode):
                         # This prevents overriding topic data if it arrived between check and response
                         with self.state_lock:
                             self.get_logger().debug(f"Battery status response: {battery_data}")
-                            if self.state.get('battery_charging') is None and charging_status is not None:
-                                self.get_logger().debug(f"Updating battery charging status: {charging_status}")
+                            # Always update charging status from service (service is authoritative)
+                            if charging_status is not None:
+                                old_charging = self.state.get('battery_charging')
                                 self.state['battery_charging'] = charging_status
-                            if self.state.get('battery_usb_power') is None and usb_power_status is not None:
+                                if old_charging != charging_status:
+                                    self.get_logger().debug(f"Battery charging status changed: {old_charging} -> {charging_status}")
+                            # Always update USB power status from service (service is authoritative)
+                            if usb_power_status is not None:
+                                old_usb = self.state.get('battery_usb_power')
                                 self.state['battery_usb_power'] = usb_power_status
-                            # Also update voltage and percentage if missing from topics
-                            if self.state.get('battery_voltage') is None and battery_voltage is not None:
+                                if old_usb != usb_power_status:
+                                    self.get_logger().debug(f"Battery USB power status changed: {old_usb} -> {usb_power_status}")
+                            # Update voltage and percentage from service (service is authoritative for consistency)
+                            # Service provides consistent data with time estimates, so prefer service values
+                            if battery_voltage is not None:
                                 self.state['battery_voltage'] = battery_voltage
-                            if self.state.get('battery_pct') is None and battery_pct is not None:
+                            if battery_pct is not None:
                                 self.state['battery_pct'] = battery_pct
                             # Update PCB temperature if missing from topic
                             if self.state.get('pcb_temp') is None and pcb_temperature is not None:
@@ -1513,17 +1526,195 @@ class ArgoWebDashboard(ArgoBaseNode):
                             if self.state.get('saltwater_voltage') is None and saltwater_voltage is not None:
                                 self.state['saltwater_voltage'] = saltwater_voltage
                             # Always update time estimates from service (topics don't provide this)
-                            if time_to_full is not None:
+                            # CRITICAL: Always update (even if None) to clear stale values
+                            # Respect charging status: if charging, clear TTE; if discharging, clear TTF
+                            if charging_status is True:
+                                # Charging: use TTF, clear TTE
                                 self.state['battery_time_to_full'] = time_to_full
-                                self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
-                            if time_to_empty is not None:
+                                self.state['battery_time_to_empty'] = None
+                                if time_to_full is not None:
+                                    self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
+                            elif charging_status is False:
+                                # Discharging: use TTE, clear TTF
+                                self.state['battery_time_to_full'] = None
                                 self.state['battery_time_to_empty'] = time_to_empty
-                                self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
+                                if time_to_empty is not None:
+                                    self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
+                            else:
+                                # Unknown charging status: update both (let template decide)
+                                self.state['battery_time_to_full'] = time_to_full
+                                self.state['battery_time_to_empty'] = time_to_empty
+                                if time_to_full is not None:
+                                    self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
+                                if time_to_empty is not None:
+                                    self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
                     except (json.JSONDecodeError, KeyError) as e:
                         self.get_logger().debug(f"Error parsing battery status response: {e}")
         except Exception as e:
             # Silently fail - this is just a fallback, topics are primary source
             pass
+    
+    def _call_trigger_service_simple(self, service_name, timeout_sec=10.0):
+        """Call a Trigger service and return (success: bool, message: str) tuple."""
+        try:
+            # Create a temporary client for this service call
+            client = self.create_client(Trigger, service_name)
+            if not client.wait_for_service(timeout_sec=min(5.0, timeout_sec)):
+                return False, f'Service {service_name} unavailable'
+            
+            request = Trigger.Request()
+            future = client.call_async(request)
+            
+            # Wait for response with timeout
+            start_time = time.time()
+            while not future.done() and (time.time() - start_time) < timeout_sec:
+                if self.signal_received or not rclpy.ok():
+                    return False, 'Shutdown requested'
+                try:
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                except Exception:
+                    if self.signal_received or not rclpy.ok():
+                        return False, 'Context shutting down'
+            
+            if future.done():
+                try:
+                    response = future.result()
+                    return response.success, response.message if response.message else 'Service call completed'
+                except Exception as e:
+                    return False, f'Error getting response: {str(e)}'
+            else:
+                return False, f'Service call timed out after {timeout_sec}s'
+                
+        except Exception as e:
+            return False, f'Service call error: {str(e)}'
+    
+    def _run_restart_with_progress(self):
+        """Run restart via argo_lifecycle_manager.py and capture progress messages."""
+        def add_progress_message(msg, level='info'):
+            """Add a progress message with timestamp."""
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            with self.restart_progress_lock:
+                self.restart_progress_messages.append({
+                    'timestamp': timestamp,
+                    'level': level,
+                    'message': msg
+                })
+                # Keep only last 100 messages
+                if len(self.restart_progress_messages) > 100:
+                    self.restart_progress_messages = self.restart_progress_messages[-100:]
+        
+        try:
+            add_progress_message("🔄 Starting Argo restart (consistent with CLI 'ars' alias)...", 'info')
+            
+            # Use same approach as CLI 'ars' alias: stop then start
+            # But first check if recording is active and stop it (like lifecycle manager restart() does)
+            
+            # Check recording status
+            add_progress_message("Checking recording status...", 'info')
+            try:
+                success, message = self._call_trigger_service_simple('/argo/recording/get_status', timeout_sec=5.0)
+                if success and message.lower() != 'not active':
+                    add_progress_message("⚠️ Recording is active - stopping recording before restart...", 'warning')
+                    success, message = self._call_trigger_service_simple('/argo/recording/stop', timeout_sec=10.0)
+                    if success:
+                        add_progress_message("✅ Recording stopped successfully", 'success')
+                        time.sleep(2)  # Allow recording to fully stop
+                    else:
+                        add_progress_message(f"⚠️ Failed to stop recording: {message}", 'warning')
+                        add_progress_message("⚠️ Proceeding with restart anyway...", 'warning')
+            except Exception as e:
+                add_progress_message(f"⚠️ Could not check recording status: {e}", 'warning')
+            
+            # Stop nodes (using same method as CLI 'aq' alias)
+            add_progress_message("🛑 Stopping Argo nodes...", 'info')
+            stop_script = os.path.join(self.argo_dir, 'launch', 'argo_stop_standard.sh')
+            stop_result = subprocess.run(
+                ['bash', stop_script],
+                capture_output=True, text=True, timeout=30
+            )
+            
+            # Parse stop output for progress messages (show all meaningful lines)
+            if stop_result.stdout:
+                for line in stop_result.stdout.split('\n'):
+                    line = line.strip()
+                    if line and not line.startswith('#'):  # Skip comments
+                        # Determine level based on content
+                        if any(emoji in line for emoji in ['✅', '🟢']):
+                            add_progress_message(line, 'success')
+                        elif any(emoji in line for emoji in ['❌', '🔴']):
+                            add_progress_message(line, 'error')
+                        elif any(emoji in line for emoji in ['⚠️', '🟡']):
+                            add_progress_message(line, 'warning')
+                        else:
+                            add_progress_message(line, 'info')
+            
+            if stop_result.stderr:
+                for line in stop_result.stderr.strip().split('\n'):
+                    if line.strip():
+                        add_progress_message(line.strip(), 'warning')
+            
+            if stop_result.returncode == 0:
+                if not any('stopped' in msg['message'].lower() for msg in self.restart_progress_messages[-5:]):
+                    add_progress_message("✅ Nodes stopped successfully", 'success')
+            else:
+                add_progress_message(f"⚠️ Stop command returned code {stop_result.returncode}", 'warning')
+            
+            time.sleep(1)  # Brief pause between stop and start
+            
+            # Start nodes (using same method as CLI 'al' alias)
+            add_progress_message("🚀 Starting Argo nodes...", 'info')
+            start_script = os.path.join(self.argo_dir, 'launch', 'argo_start_standard.sh')
+            start_result = subprocess.run(
+                ['bash', start_script],
+                capture_output=True, text=True, timeout=90  # Start can take longer
+            )
+            
+            # Parse start output for progress messages (show all meaningful lines)
+            if start_result.stdout:
+                for line in start_result.stdout.split('\n'):
+                    line = line.strip()
+                    if line and not line.startswith('#'):  # Skip comments
+                        # Determine level based on content
+                        if any(emoji in line for emoji in ['✅', '🟢']):
+                            add_progress_message(line, 'success')
+                        elif any(emoji in line for emoji in ['❌', '🔴']):
+                            add_progress_message(line, 'error')
+                        elif any(emoji in line for emoji in ['⚠️', '🟡']):
+                            add_progress_message(line, 'warning')
+                        elif any(emoji in line for emoji in ['⏳', '📊', '🔍']):
+                            add_progress_message(line, 'info')
+                        else:
+                            add_progress_message(line, 'info')
+            
+            if start_result.stderr:
+                for line in start_result.stderr.strip().split('\n'):
+                    if line.strip():
+                        add_progress_message(line.strip(), 'warning')
+            
+            if start_result.returncode == 0:
+                if not any('started' in msg['message'].lower() or 'active' in msg['message'].lower() 
+                          for msg in self.restart_progress_messages[-10:]):
+                    add_progress_message("✅ Nodes started successfully", 'success')
+            else:
+                add_progress_message(f"❌ Start command returned code {start_result.returncode}", 'error')
+                if start_result.stdout:
+                    # Show last few lines of output for debugging
+                    lines = [l.strip() for l in start_result.stdout.strip().split('\n') if l.strip()]
+                    for line in lines[-5:]:
+                        if line:
+                            add_progress_message(line, 'error')
+            
+            # Final status
+            add_progress_message("✅ Restart completed", 'success')
+            
+        except subprocess.TimeoutExpired:
+            add_progress_message("❌ Restart timed out", 'error')
+        except Exception as e:
+            add_progress_message(f"❌ Error during restart: {str(e)}", 'error')
+            self.get_logger().error(f"Restart error: {e}")
+        finally:
+            with self.restart_progress_lock:
+                self.restart_in_progress = False
     
     # ==================== Flask Routes ====================
     
@@ -1835,24 +2026,48 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         @self.app.route('/api/lifecycle/restart', methods=['POST'])
         def lifecycle_restart():
-            """Restart Argo launch service via systemctl."""
+            """Restart Argo nodes using argo_lifecycle_manager.py restart method (consistent with CLI 'ars' alias)."""
             try:
-                self.get_logger().info("Restarting argo_launch_standard.service from web dashboard")
-                result = subprocess.run([
-                    'sudo', 'systemctl', 'restart', 'argo_launch_standard.service'
-                ], capture_output=True, text=True, timeout=15)
+                # Check if restart is already in progress
+                with self.restart_progress_lock:
+                    if self.restart_in_progress:
+                        return jsonify({
+                            'success': False,
+                            'message': 'Restart already in progress'
+                        }), 409
+                    
+                    # Mark restart as in progress and clear previous messages
+                    self.restart_in_progress = True
+                    self.restart_progress_messages = []
                 
-                if result.returncode == 0:
-                    return jsonify({'success': True, 'message': 'Argo nodes restarting...'})
-                else:
-                    error_msg = result.stderr.strip() if result.stderr else 'Unknown error'
-                    return jsonify({
-                        'success': False, 
-                        'message': f'Failed to restart service: {error_msg}'
-                    }), 500
+                self.get_logger().info("Starting Argo restart via lifecycle manager (consistent with CLI 'ars')")
+                
+                # Start restart in background thread
+                restart_thread = threading.Thread(
+                    target=self._run_restart_with_progress,
+                    daemon=True
+                )
+                restart_thread.start()
+                
+                return jsonify({
+                    'success': True,
+                    'message': 'Restart started - use /api/lifecycle/restart/progress to monitor'
+                })
                     
             except Exception as e:
-                return jsonify({'success': False, 'message': str(e)}), 500
+                with self.restart_progress_lock:
+                    self.restart_in_progress = False
+                self.get_logger().error(f"Error starting restart: {e}")
+                return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+        
+        @self.app.route('/api/lifecycle/restart/progress', methods=['GET'])
+        def lifecycle_restart_progress():
+            """Get restart progress messages."""
+            with self.restart_progress_lock:
+                return jsonify({
+                    'in_progress': self.restart_in_progress,
+                    'messages': self.restart_progress_messages.copy()
+                })
                 
         @self.app.route('/api/shutdown', methods=['POST'])
         def shutdown():

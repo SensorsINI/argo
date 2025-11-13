@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Argo Control Dashboard</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⛵</text></svg>">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -847,23 +848,149 @@
             btn.disabled = true;
             btn.textContent = '⏳ Restarting...';
             
+            // Show progress modal
+            const progressModal = showProgressModal('🔄 Restarting Argo Nodes', 'Starting restart...');
+            let lastMessageCount = 0;
+            
+            // Start restart
             fetch('/api/lifecycle/restart', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
-                    if (data.success) {
-                        alert(`✅ ${data.message}`);
-                        updateStatus();
-                    } else {
+                    if (!data.success) {
+                        progressModal.close();
                         alert(`❌ ${data.message}`);
                         btn.disabled = false;
                         btn.textContent = originalText;
+                        return;
                     }
+                    
+                    // Poll for progress updates
+                    const progressInterval = setInterval(() => {
+                        fetch('/api/lifecycle/restart/progress')
+                            .then(response => response.json())
+                            .then(progress => {
+                                // Update progress modal with new messages
+                                if (progress.messages && progress.messages.length > lastMessageCount) {
+                                    const newMessages = progress.messages.slice(lastMessageCount);
+                                    newMessages.forEach(msg => {
+                                        progressModal.addMessage(msg.message, msg.level || 'info');
+                                    });
+                                    lastMessageCount = progress.messages.length;
+                                }
+                                
+                                // Check if restart is complete
+                                if (!progress.in_progress) {
+                                    clearInterval(progressInterval);
+                                    progressModal.close();
+                                    
+                                    // Show final status
+                                    const lastMessage = progress.messages && progress.messages.length > 0 
+                                        ? progress.messages[progress.messages.length - 1].message 
+                                        : 'Restart completed';
+                                    
+                                    if (lastMessage.includes('✅') || lastMessage.includes('completed')) {
+                                        alert(`✅ ${lastMessage}`);
+                                    } else if (lastMessage.includes('❌') || lastMessage.includes('Error')) {
+                                        alert(`❌ ${lastMessage}`);
+                                    }
+                                    
+                                    btn.disabled = false;
+                                    btn.textContent = originalText;
+                                    updateStatus();
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error polling progress:', error);
+                            });
+                    }, 500); // Poll every 500ms
+                    
+                    // Timeout after 2 minutes
+                    setTimeout(() => {
+                        clearInterval(progressInterval);
+                        if (progressModal.isOpen) {
+                            progressModal.close();
+                            alert('⚠️ Restart is taking longer than expected. Check status manually.');
+                            btn.disabled = false;
+                            btn.textContent = originalText;
+                        }
+                    }, 120000);
                 })
                 .catch(error => {
+                    progressModal.close();
                     alert(`❌ Error: ${error}`);
                     btn.disabled = false;
                     btn.textContent = originalText;
                 });
+        }
+        
+        function showProgressModal(title, initialMessage) {
+            // Create modal elements
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay';
+            overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; display: flex; align-items: center; justify-content: center;';
+            
+            const modal = document.createElement('div');
+            modal.className = 'progress-modal';
+            modal.style.cssText = 'background: white; padding: 20px; border-radius: 8px; max-width: 90%; max-height: 80%; overflow: auto; box-shadow: 0 4px 6px rgba(0,0,0,0.3);';
+            
+            const titleEl = document.createElement('h2');
+            titleEl.textContent = title;
+            titleEl.style.cssText = 'margin: 0 0 15px 0; font-size: 1.2em;';
+            
+            const messagesDiv = document.createElement('div');
+            messagesDiv.id = 'restart-progress-messages';
+            messagesDiv.style.cssText = 'max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 0.9em; line-height: 1.4;';
+            
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = 'Close';
+            closeBtn.className = 'btn btn-primary';
+            closeBtn.style.cssText = 'margin-top: 15px; width: 100%;';
+            closeBtn.onclick = () => {
+                document.body.removeChild(overlay);
+                modal.isOpen = false;
+            };
+            
+            modal.appendChild(titleEl);
+            modal.appendChild(messagesDiv);
+            modal.appendChild(closeBtn);
+            overlay.appendChild(modal);
+            document.body.appendChild(overlay);
+            
+            // Add initial message
+            if (initialMessage) {
+                addMessage(initialMessage, 'info');
+            }
+            
+            function addMessage(message, level) {
+                const msgDiv = document.createElement('div');
+                msgDiv.style.cssText = 'padding: 4px 0; border-bottom: 1px solid #eee;';
+                
+                // Color code by level
+                if (level === 'error' || message.includes('❌')) {
+                    msgDiv.style.color = '#d32f2f';
+                } else if (level === 'success' || message.includes('✅')) {
+                    msgDiv.style.color = '#388e3c';
+                } else if (level === 'warning' || message.includes('⚠️')) {
+                    msgDiv.style.color = '#f57c00';
+                }
+                
+                msgDiv.textContent = message;
+                messagesDiv.appendChild(msgDiv);
+                
+                // Auto-scroll to bottom
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }
+            
+            return {
+                addMessage: addMessage,
+                close: () => {
+                    if (overlay.parentNode) {
+                        document.body.removeChild(overlay);
+                    }
+                    modal.isOpen = false;
+                },
+                isOpen: true
+            };
         }
 
         function requestShutdown() {
