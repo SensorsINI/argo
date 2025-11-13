@@ -68,6 +68,8 @@
 #     /rudder_sail_cmd (Vector3) - Autonomous control commands (-1 to +1)
 #     /controller_state (String) - Current controller name for monitoring
 #     /controller_pause_state (Bool) - Current pause state for system monitoring
+#     /controller/captains_log (String) - Captain's log entries for analysis and visualization
+#     /controller/state (String) - Controller state (e.g., "broad_reach", "tacking") for visualization
 #
 #   Subscribed:
 #     /human_controlled (Bool) - Control authority from rudder_sail_radio.py
@@ -90,6 +92,14 @@
 # SERVICES:
 #   /controller_node/pause (SetBool) - Pause/unpause controller (True=pause, False=unpause, None=query)
 #   /controller_node/switch_controller (Trigger) - Switch to return-to-home controller
+#
+# CAPTAIN'S LOG SYSTEM:
+#   Controllers can publish log entries and state information:
+#   - self.log_entry(message, level="INFO") - Publish log entry to /controller/captains_log
+#   - self.publish_state(state_name) - Publish state to /controller/state for visualization
+#   - self.log_periodic_state(state, interval_sec=30.0) - Log periodic boat/environmental state
+#   Log entries are formatted as "[LEVEL] message" and can be visualized in Foxglove
+#   and recorded in bag files for post-analysis.
 #
 # EXTENDING THE CONTROLLER:
 #   To add a new controller:
@@ -292,9 +302,15 @@ class ControlCommand:
 class BaseController(ABC):
     """Abstract base class for all controllers."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], logger=None, parent_node=None):
         self.config = config
         self.name = self.__class__.__name__
+        self.logger = logger  # Optional logger from parent ROS2 node
+        self.parent_node = parent_node  # Optional reference to ControllerNode for publishing
+        
+        # Captain's log publisher (created lazily on first use)
+        self._captains_log_pub = None
+        self._controller_state_pub = None
 
     @abstractmethod
     def generate_control(self, state: BoatState) -> ControlCommand:
@@ -316,13 +332,112 @@ class BaseController(ABC):
     def update_config(self, config: Dict[str, Any]):
         """Update controller configuration."""
         self.config.update(config)
+    
+    def _get_captains_log_publisher(self):
+        """Get or create the captain's log publisher."""
+        if self.parent_node and self._captains_log_pub is None:
+            # Create publisher on first use
+            from std_msgs.msg import String
+            self._captains_log_pub = self.parent_node.create_publisher(
+                String, '/controller/captains_log', 10)
+        return self._captains_log_pub
+    
+    def _get_controller_state_publisher(self):
+        """Get or create the controller state publisher."""
+        if self.parent_node and self._controller_state_pub is None:
+            # Create publisher on first use
+            from std_msgs.msg import String
+            self._controller_state_pub = self.parent_node.create_publisher(
+                String, '/controller/state', 10)
+        return self._controller_state_pub
+    
+    def log_entry(self, message: str, level: str = "INFO"):
+        """
+        Publish a captain's log entry.
+        
+        Args:
+            message: Log message text (e.g., "Approaching geofence edge, executing starboard tack")
+            level: Log level (INFO, WARN, ERROR)
+        """
+        pub = self._get_captains_log_publisher()
+        if pub and self.parent_node:
+            from std_msgs.msg import String
+            from safe_publish import safe_publish
+            # Format: "[LEVEL] message"
+            log_msg = String(data=f"[{level}] {message}")
+            safe_publish(pub, log_msg, self.parent_node)
+        
+        # Also log to ROS2 logger if available
+        if self.logger:
+            if level == "WARN":
+                self.logger.warn(message)
+            elif level == "ERROR":
+                self.logger.error(message)
+            else:
+                self.logger.info(message)
+    
+    def publish_state(self, state_name: str, state_value: str = ""):
+        """
+        Publish controller state for visualization.
+        
+        Args:
+            state_name: State identifier (e.g., "broad_reach", "tacking", "jibing")
+            state_value: Optional additional state information
+        """
+        pub = self._get_controller_state_publisher()
+        if pub and self.parent_node:
+            from std_msgs.msg import String
+            from safe_publish import safe_publish
+            state_msg = String(data=f"{state_name}:{state_value}" if state_value else state_name)
+            safe_publish(pub, state_msg, self.parent_node)
+    
+    def log_periodic_state(self, state: BoatState, interval_sec: float = 30.0):
+        """
+        Log periodic boat and environmental state.
+        
+        This should be called periodically (e.g., every 30 seconds) to log:
+        - Boat position, heading, speed
+        - Wind direction and speed
+        - Other relevant environmental conditions
+        
+        Args:
+            state: Current boat state
+            interval_sec: Minimum interval between log entries (throttling)
+        """
+        # This is a base implementation - subclasses can override for more detail
+        if not hasattr(self, '_last_periodic_log_time'):
+            self._last_periodic_log_time = 0.0
+        
+        current_time = time.time()
+        if current_time - self._last_periodic_log_time < interval_sec:
+            return
+        
+        # Build state summary
+        state_parts = []
+        
+        if state.compass_heading is not None:
+            state_parts.append(f"heading={state.compass_heading:.1f}°")
+        
+        if state.gps_sog is not None:
+            state_parts.append(f"speed={state.gps_sog:.1f}kt")
+        
+        if state.wind_speed is not None and state.wind_angle is not None:
+            state_parts.append(f"wind={state.wind_speed:.1f}m/s @ {state.wind_angle:.1f}°")
+        
+        if state.current_latitude is not None and state.current_longitude is not None:
+            state_parts.append(f"pos=({state.current_latitude:.6f}, {state.current_longitude:.6f})")
+        
+        if state_parts:
+            self.log_entry(f"State: {', '.join(state_parts)}", level="INFO")
+        
+        self._last_periodic_log_time = current_time
 
 
 class ProportionalHeadingController(BaseController):
     """Simple proportional controller for heading maintenance."""
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], logger=None, parent_node=None):
+        super().__init__(config, logger=logger, parent_node=parent_node)
         self.rudder_gain = config.get('rudder_gain', 1.0)
         self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)
 
@@ -330,6 +445,9 @@ class ProportionalHeadingController(BaseController):
         """Generate control commands using proportional heading control."""
         if not state.is_valid_for_control():
             return ControlCommand(timestamp=state.timestamp)
+
+        # Publish controller state
+        self.publish_state('proportional')
 
         # Calculate heading error (target - current)
         compass_err = signed_angle_difference_degrees(
@@ -353,8 +471,8 @@ class ProportionalHeadingController(BaseController):
 class WindAwareController(BaseController):
     """Enhanced controller that considers wind conditions."""
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], logger=None, parent_node=None):
+        super().__init__(config, logger=logger, parent_node=parent_node)
         self.rudder_gain = config.get('rudder_gain', 1.0)
         self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)
         self.sail_wind_gain = config.get('sail_wind_gain', 0.5)
@@ -363,6 +481,9 @@ class WindAwareController(BaseController):
         """Generate control commands considering wind conditions."""
         if not state.is_valid_for_control():
             return ControlCommand(timestamp=state.timestamp)
+
+        # Publish controller state
+        self.publish_state('wind_aware')
 
         # Heading control (same as proportional)
         compass_err = signed_angle_difference_degrees(
@@ -405,8 +526,8 @@ class ReturnToHomeController(BaseController):
     Uses GPS-based navigation to calculate bearing to home and sail toward it.
     """
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], logger=None, parent_node=None):
+        super().__init__(config, logger=logger, parent_node=parent_node)
         self.rudder_gain = config.get('rudder_gain', 1.0)
         self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)
         self.sail_wind_gain = config.get('sail_wind_gain', 0.5)
@@ -438,6 +559,9 @@ class ReturnToHomeController(BaseController):
         if not state.is_valid_for_control():
             return ControlCommand(timestamp=state.timestamp)
 
+        # Publish controller state
+        self.publish_state('return_to_home')
+        
         # Check if we have GPS home position
         bearing_to_home = state.get_bearing_to_home()
         distance_to_home = state.get_distance_to_home()
@@ -458,11 +582,18 @@ class ReturnToHomeController(BaseController):
         # Check if we've arrived at home
         if distance_to_home < self.arrival_distance:
             # Arrived! Switch to drift mode with neutral controls
+            if not hasattr(self, '_arrival_logged') or not self._arrival_logged:
+                self.log_entry(f"Arrived at home position (distance: {distance_to_home:.3f}nm)", level="INFO")
+                self._arrival_logged = True
             return ControlCommand(
                 rudder=0.0,
                 sail=0.0,
                 timestamp=state.timestamp
             )
+        
+        # Reset arrival flag if we've moved away
+        if hasattr(self, '_arrival_logged'):
+            self._arrival_logged = False
         
         # Navigate toward home bearing
         # Use bearing to home as target heading
@@ -498,8 +629,8 @@ class PatrolController(BaseController):
     - Maintains patrol pattern by sailing back and forth across the area
     """
     
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], logger=None, parent_node=None):
+        super().__init__(config, logger=logger, parent_node=parent_node)
         self.rudder_gain = config.get('rudder_gain', 1.0)
         self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)
         self.sail_wind_gain = config.get('sail_wind_gain', 0.5)
@@ -516,7 +647,10 @@ class PatrolController(BaseController):
         
         # Load geofence polygon
         if not self.geofence_manager.load_geofence(map_name):
-            print(f"Warning: Failed to load geofence for map '{map_name}'")
+            self.log_entry(f"Failed to load geofence for map '{map_name}'", level="WARN")
+        else:
+            self.log_entry(f"Geofence loaded: {map_name}", level="INFO")
+            self.publish_state('broad_reach')  # Initial state
         
         # Patrol state
         self.patrol_mode = 'broad_reach'  # 'broad_reach', 'tacking', 'jibing'
@@ -525,11 +659,23 @@ class PatrolController(BaseController):
         
         # Wind direction tracking (for determining tack vs jibe)
         self.wind_direction_absolute = None  # Absolute wind direction (0-360, 0=North)
+        
+        # Geofence status logging
+        self.last_geofence_log_time = 0.0
+        self.geofence_log_interval = 5.0  # Log geofence status every 5 seconds
+        self.last_reported_distance = None
+        self.last_reported_inside = None
     
     def reset(self):
         """Reset controller state when switching to this controller."""
+        old_mode = self.patrol_mode
         self.patrol_mode = 'broad_reach'
         self.last_turn_time = 0.0
+        
+        # Log controller activation
+        if old_mode != 'broad_reach':
+            self.log_entry("Patrol controller activated - starting broad reach sailing", level="INFO")
+            self.publish_state('broad_reach')
     
     def _calculate_absolute_wind_direction(self, state: BoatState) -> Optional[float]:
         """
@@ -690,18 +836,96 @@ class PatrolController(BaseController):
             state.distance_to_boundary = self.geofence_manager.distance_to_boundary_lonlat(
                 state.current_longitude, state.current_latitude)
             
+            # Log geofence status periodically
+            current_time = time.time()
+            if (current_time - self.last_geofence_log_time) >= self.geofence_log_interval:
+                is_inside = state.distance_to_boundary is not None and state.distance_to_boundary < 0
+                distance_abs = abs(state.distance_to_boundary) if state.distance_to_boundary is not None else None
+                
+                # Log status change or periodic update
+                should_log = False
+                if distance_abs != self.last_reported_distance or is_inside != self.last_reported_inside:
+                    should_log = True  # Always log when status changes
+                elif distance_abs is not None and distance_abs < self.boundary_turn_threshold * 2:
+                    should_log = True  # Log when approaching boundary
+                elif not is_inside:
+                    should_log = True  # Always log when outside geofence
+                elif (current_time - self.last_geofence_log_time) >= 10.0:
+                    should_log = True  # Log at least every 10 seconds
+                
+                if should_log and distance_abs is not None:
+                    status = "INSIDE" if is_inside else "OUTSIDE ⚠️"
+                    if not is_inside:
+                        # Geofence violation - log as WARN
+                        log_msg = (f"Geofence violation: {distance_abs:.1f}m outside boundary | "
+                                  f"Position: ({state.current_latitude:.6f}, {state.current_longitude:.6f})")
+                        self.log_entry(log_msg, level="WARN")
+                    elif distance_abs < self.boundary_turn_threshold:
+                        # Approaching boundary - log as INFO
+                        log_msg = f"Approaching boundary: {distance_abs:.1f}m from edge"
+                        self.log_entry(log_msg, level="INFO")
+                    else:
+                        # Normal status - log as INFO
+                        log_msg = f"Geofence status: {status} | Distance to boundary: {distance_abs:.1f}m"
+                        self.log_entry(log_msg, level="INFO")
+                    
+                    self.last_geofence_log_time = current_time
+                    self.last_reported_distance = distance_abs
+                    self.last_reported_inside = is_inside
+            
             # Predict boundary crossing time
             if state.gps_sog is not None and state.compass_heading is not None:
                 speed_ms = state.gps_sog * 0.514444  # knots to m/s
                 state.predicted_boundary_crossing_time = self.geofence_manager.predict_boundary_crossing_time(
                     state.current_latitude, state.current_longitude,
                     state.compass_heading, speed_ms, self.patrol_lookahead_time)
+                
+                # Log predicted crossing time if approaching boundary
+                if (state.predicted_boundary_crossing_time is not None and 
+                    state.predicted_boundary_crossing_time < self.patrol_lookahead_time and
+                    state.distance_to_boundary is not None and 
+                    abs(state.distance_to_boundary) < self.boundary_turn_threshold * 2):
+                    self.log_entry(
+                        f"Predicted boundary crossing in {state.predicted_boundary_crossing_time:.1f}s",
+                        level="INFO"
+                    )
         
         # Determine sailing mode
         new_mode = self._determine_sailing_mode(state)
         if new_mode != self.patrol_mode:
+            old_mode = self.patrol_mode
             self.patrol_mode = new_mode
             self.last_turn_time = time.time()
+            
+            # Publish state change and log entry
+            self.publish_state(new_mode)
+            
+            # Create descriptive log entry for mode change
+            mode_descriptions = {
+                'broad_reach': 'Broad reach sailing',
+                'tacking': 'Executing tack',
+                'jibing': 'Executing jibe',
+                'upwind_recovery': 'Recovering upwind'
+            }
+            description = mode_descriptions.get(new_mode, new_mode)
+            
+            # Add context if available
+            context_parts = []
+            if state.distance_to_boundary is not None:
+                dist_abs = abs(state.distance_to_boundary)
+                if dist_abs < self.boundary_turn_threshold:
+                    context_parts.append(f"{dist_abs:.1f}m from boundary")
+            
+            if state.wind_angle is not None:
+                # Determine tack direction
+                if new_mode == 'tacking':
+                    if state.wind_angle > 180:
+                        context_parts.append("starboard tack")
+                    else:
+                        context_parts.append("port tack")
+            
+            context = f" ({', '.join(context_parts)})" if context_parts else ""
+            self.log_entry(f"{description}{context}", level="INFO")
         
         # Calculate target heading based on mode
         if self.patrol_mode == 'broad_reach':
@@ -724,6 +948,13 @@ class PatrolController(BaseController):
             compass_err = signed_angle_difference_degrees(target_heading, state.compass_heading)
             cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
             cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
+            
+            # Log when in tacking mode to debug control application
+            if self.patrol_mode == 'tacking' and self.logger:
+                self.logger.debug(
+                    f"Tacking: current={state.compass_heading:.1f}°, target={target_heading:.1f}°, "
+                    f"error={compass_err:.1f}°, rudder_cmd={cmd_rudder:.3f}"
+                )
         else:
             cmd_rudder = 0.0
         
@@ -737,6 +968,9 @@ class PatrolController(BaseController):
             wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
             wind_sail_cmd = np.clip(wind_sail_cmd, -1.0, 1.0)
             cmd_sail = self.sail_wind_gain * wind_sail_cmd
+        
+        # Periodic state logging (every 30 seconds)
+        self.log_periodic_state(state, interval_sec=30.0)
         
         return ControlCommand(
             rudder=cmd_rudder,
@@ -1013,16 +1247,20 @@ class ControllerNode(ArgoBaseNode):
             'rudder_full_scale_deg': self.get_parameter('rudder_full_scale_deg').get_parameter_value().double_value,
         }
 
+        # Get logger and parent node reference to pass to controllers
+        logger = self.get_logger()
+        parent_node = self  # Pass reference to this ControllerNode
+        
         if controller_type == 'proportional':
-            self.controller = ProportionalHeadingController(config)
+            self.controller = ProportionalHeadingController(config, logger=logger, parent_node=parent_node)
         elif controller_type == 'wind_aware':
             config['sail_wind_gain'] = 0.5  # Could be a parameter
-            self.controller = WindAwareController(config)
+            self.controller = WindAwareController(config, logger=logger, parent_node=parent_node)
         elif controller_type == 'return_to_home':
             config['sail_wind_gain'] = 0.5
             config['shore_connection_timeout'] = 120.0
             config['arrival_distance_nm'] = 0.05
-            self.controller = ReturnToHomeController(config)
+            self.controller = ReturnToHomeController(config, logger=logger, parent_node=parent_node)
         elif controller_type == 'patrol':
             config['sail_wind_gain'] = 0.5
             config['patrol_lookahead_time'] = self.get_parameter('patrol_lookahead_time').get_parameter_value().double_value
@@ -1030,11 +1268,11 @@ class ControllerNode(ArgoBaseNode):
             config['tack_angle'] = self.get_parameter('tack_angle').get_parameter_value().double_value
             config['broad_reach_angle'] = self.get_parameter('broad_reach_angle').get_parameter_value().double_value
             config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
-            self.controller = PatrolController(config)
+            self.controller = PatrolController(config, logger=logger, parent_node=parent_node)
         else:
             self.get_logger().warn(
                 f"Unknown controller type '{controller_type}', using proportional")
-            self.controller = ProportionalHeadingController(config)
+            self.controller = ProportionalHeadingController(config, logger=logger, parent_node=parent_node)
 
         self.get_logger().info(
             f"Initialized controller: {self.controller.name}")
@@ -1460,7 +1698,7 @@ class ControllerNode(ArgoBaseNode):
                         'shore_connection_timeout': 120.0,
                         'arrival_distance_nm': 0.05
                     }
-                    temp_rth = ReturnToHomeController(rth_config)
+                    temp_rth = ReturnToHomeController(rth_config, logger=self.get_logger(), parent_node=self)
                     if temp_rth.should_activate(self.boat_state):
                         self.get_logger().warn(
                             "🏠 Switching to RETURN TO HOME mode due to connectivity loss",

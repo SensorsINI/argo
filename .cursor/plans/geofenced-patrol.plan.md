@@ -150,12 +150,13 @@ controller_node:
 - Test edge distance calculations
 - Test position prediction
 
-**Phase 2: Mock Simulator Testing**
+**Phase 2: Mock Simulator Testing** ✅
 
-- Test with `mock_sailboat_simulator.py`
-- Verify geofence loading
-- Test boundary detection
-- Test tack/jibe execution
+- ✅ Test with `mock_sailboat_simulator.py`
+- ✅ Verify geofence loading
+- ✅ Test boundary detection
+- ✅ Test tack/jibe execution logic
+- ✅ Integration tests with actual map files
 
 **Phase 3: Sailboat-Playground Testing**
 
@@ -208,7 +209,7 @@ def predict_position(lat, lon, heading_deg, speed_ms, time_sec):
 
 **Modified Files**:
 
-- `nodes/controller.py` - Add PatrolController class and integration ✅
+- `nodes/controller.py` - Add PatrolController class, integration, and captain's log system ✅
 - `nodes/argo.yaml` - Add patrol controller parameters ✅
 
 ## Implementation Status
@@ -250,6 +251,46 @@ def predict_position(lat, lon, heading_deg, speed_ms, time_sec):
    - Added patrol controller parameters
    - Added example configuration
    - Updated controller_type options documentation
+
+6. ✅ Captain's Log System (`nodes/controller.py`)
+
+   - **BaseController Publishing Infrastructure**:
+     - Added `parent_node` reference to all controllers for publishing through ControllerNode
+     - Lazy publisher creation (only when needed)
+     - No overhead when not used
+   
+   - **Logging Methods in BaseController**:
+     - `log_entry(message, level="INFO")` - Publishes formatted log entries to `/controller/captains_log`
+     - `publish_state(state_name)` - Publishes controller state to `/controller/state` for Foxglove visualization
+     - `log_periodic_state(state, interval_sec=30.0)` - Logs periodic boat/environmental state
+   
+   - **Controller State Publishing**:
+     - All controllers publish their state (e.g., "proportional", "wind_aware", "return_to_home", "broad_reach", "tacking")
+     - State changes published immediately for real-time visualization
+   
+   - **PatrolController Logging**:
+     - Geofence violations logged as WARN
+     - Boundary approach warnings logged as INFO
+     - Mode changes (broad_reach → tacking) logged with context
+     - Periodic state logging every 30 seconds (heading, speed, wind, position)
+     - Geofence loading confirmation
+   
+   - **ReturnToHomeController Logging**:
+     - Periodic updates every 60 seconds with distance, bearing, and heading
+     - Arrival notifications
+   
+   - **Topics Published**:
+     - `/controller/captains_log` (String) - Formatted log entries: `"[LEVEL] message"`
+     - `/controller/state` (String) - Controller state for visualization: `"broad_reach"`, `"tacking"`, etc.
+   
+   - **Usage**:
+     - Can be visualized in Foxglove (Text panels)
+     - Recorded in bag files for post-analysis
+     - Example log entries:
+       - `[INFO] Geofence loaded: Argo Irchel pond sailing area`
+       - `[INFO] Executing tack (15.2m from boundary, starboard tack)`
+       - `[WARN] Geofence violation: 2.3m outside boundary`
+       - `[INFO] State: heading=145.2°, speed=2.1kt, wind=3.5m/s @ 45.0°`
 
 ### Pending
 
