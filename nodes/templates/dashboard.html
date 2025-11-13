@@ -865,10 +865,22 @@
                     }
                     
                     // Poll for progress updates
+                    let completed = false; // Flag to prevent multiple completion handlers
                     const progressInterval = setInterval(() => {
+                        // Don't poll if already completed
+                        if (completed) {
+                            clearInterval(progressInterval);
+                            return;
+                        }
+                        
                         fetch('/api/lifecycle/restart/progress')
                             .then(response => response.json())
                             .then(progress => {
+                                // Don't process if already completed
+                                if (completed) {
+                                    return;
+                                }
+                                
                                 // Update progress modal with new messages
                                 if (progress.messages && progress.messages.length > lastMessageCount) {
                                     const newMessages = progress.messages.slice(lastMessageCount);
@@ -879,11 +891,12 @@
                                 }
                                 
                                 // Check if restart is complete
-                                if (!progress.in_progress) {
+                                if (!progress.in_progress && !completed) {
+                                    completed = true; // Mark as completed immediately
                                     clearInterval(progressInterval);
                                     progressModal.close();
                                     
-                                    // Show final status
+                                    // Show final status (only once)
                                     const lastMessage = progress.messages && progress.messages.length > 0 
                                         ? progress.messages[progress.messages.length - 1].message 
                                         : 'Restart completed';
@@ -906,12 +919,15 @@
                     
                     // Timeout after 2 minutes
                     setTimeout(() => {
-                        clearInterval(progressInterval);
-                        if (progressModal.isOpen) {
-                            progressModal.close();
-                            alert('⚠️ Restart is taking longer than expected. Check status manually.');
-                            btn.disabled = false;
-                            btn.textContent = originalText;
+                        if (!completed) {
+                            completed = true; // Mark as completed to prevent other handlers
+                            clearInterval(progressInterval);
+                            if (progressModal.isOpen) {
+                                progressModal.close();
+                                alert('⚠️ Restart is taking longer than expected. Check status manually.');
+                                btn.disabled = false;
+                                btn.textContent = originalText;
+                            }
                         }
                     }, 120000);
                 })
