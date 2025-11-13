@@ -218,6 +218,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.controller_switch_client = self.create_client(Trigger, '/controller_node/switch_controller')
         self.battery_status_client = self.create_client(Trigger, '/battery_status')
         self.health_status_client = self.create_client(Trigger, '/argo/health/status')
+        self.power_shutdown_client = self.create_client(Trigger, '/argo/power/shutdown')
         
         # Parameter service client for setting controller type parameter
         # ROS2 nodes expose parameter services when start_parameter_services=True (default)
@@ -1594,14 +1595,47 @@ class ArgoWebDashboard(ArgoBaseNode):
             except Exception as e:
                 return jsonify({'success': False, 'message': f'Error: {str(e)}'})
         
+        @self.app.route('/api/controllers', methods=['GET'])
+        def get_controllers():
+            """Get list of available controllers from controller.py."""
+            controllers = [
+                {
+                    'type': 'proportional',
+                    'display_name': 'Proportional',
+                    'icon': '🎯',
+                    'description': 'Simple proportional heading control'
+                },
+                {
+                    'type': 'wind_aware',
+                    'display_name': 'Wind Aware',
+                    'icon': '🌬️',
+                    'description': 'Enhanced control with wind-based sail adjustment'
+                },
+                {
+                    'type': 'return_to_home',
+                    'display_name': 'Return to Home',
+                    'icon': '🏠',
+                    'description': 'GPS-based navigation to return to starting position'
+                },
+                {
+                    'type': 'patrol',
+                    'display_name': 'Patrol',
+                    'icon': '🛥️',
+                    'description': 'Autonomous patrol within geofence area'
+                }
+            ]
+            return jsonify({'success': True, 'controllers': controllers})
+        
         @self.app.route('/api/controller/switch', methods=['POST'])
         def switch_controller():
             """Switch controller type using ROS2 parameters."""
             data = request.get_json()
             controller_type = data.get('type', '')
             
-            if controller_type not in ['proportional', 'wind_aware', 'return_to_home']:
-                return jsonify({'success': False, 'message': 'Invalid controller type'}), 400
+            # Valid controller types from controller.py _on_parameters_set callback
+            valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol']
+            if controller_type not in valid_types:
+                return jsonify({'success': False, 'message': f'Invalid controller type. Valid types: {", ".join(valid_types)}'}), 400
             
             try:
                 # Check if parameter service is available
@@ -1798,6 +1832,27 @@ class ArgoWebDashboard(ArgoBaseNode):
                     
             except Exception as e:
                 return jsonify({'success': False, 'message': str(e)}), 500
+        
+        @self.app.route('/api/lifecycle/restart', methods=['POST'])
+        def lifecycle_restart():
+            """Restart Argo launch service via systemctl."""
+            try:
+                self.get_logger().info("Restarting argo_launch_standard.service from web dashboard")
+                result = subprocess.run([
+                    'sudo', 'systemctl', 'restart', 'argo_launch_standard.service'
+                ], capture_output=True, text=True, timeout=15)
+                
+                if result.returncode == 0:
+                    return jsonify({'success': True, 'message': 'Argo nodes restarting...'})
+                else:
+                    error_msg = result.stderr.strip() if result.stderr else 'Unknown error'
+                    return jsonify({
+                        'success': False, 
+                        'message': f'Failed to restart service: {error_msg}'
+                    }), 500
+                    
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)}), 500
                 
         @self.app.route('/api/shutdown', methods=['POST'])
         def shutdown():
@@ -1811,6 +1866,12 @@ class ArgoWebDashboard(ArgoBaseNode):
             else:
                 self.get_logger().error('Not running with a managed Werkzeug Server, cannot shutdown!')
                 return jsonify({'success': False, 'message': 'Not running with managed Werkzeug server.'})
+        
+        @self.app.route('/api/system/shutdown', methods=['POST'])
+        def system_shutdown():
+            """Shutdown the entire system via power control service."""
+            self.get_logger().info("System shutdown requested from web dashboard")
+            return self._call_service(self.power_shutdown_client, '/argo/power/shutdown')
     
     def _call_service(self, client, service_name):
         """Generic service call wrapper with improved timeout and error handling."""

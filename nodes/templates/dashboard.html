@@ -141,16 +141,9 @@
         <!-- Controller Selection -->
         <div class="card">
             <h2>Controller Selection</h2>
-            <div class="button-grid">
-                <button class="btn btn-secondary" id="btn-return-to-home" onclick="switchController('return_to_home')">
-                    🏠 Return to Home
-                </button>
-                <button class="btn btn-secondary" id="btn-proportional" onclick="switchController('proportional')">
-                    🎯 Proportional
-                </button>
-                <button class="btn btn-secondary" id="btn-wind-aware" onclick="switchController('wind_aware')">
-                    🌬️ Wind Aware
-                </button>
+            <div class="button-grid" id="controller-buttons-container">
+                <!-- Buttons will be dynamically populated from API -->
+                <div style="text-align: center; color: #666;">Loading controllers...</div>
             </div>
         </div>
 
@@ -164,8 +157,11 @@
                 <button class="btn" id="recording-toggle-btn" onclick="toggleRecording()">
                     🔴 Recording: Unknown
                 </button>
-                <button class="btn" id="system-toggle-btn" onclick="toggleSystem()">
-                    🛑 System: Unknown
+                <button class="btn btn-warning" id="system-toggle-btn" onclick="restartSystem()">
+                    🔄 Restart nodes
+                </button>
+                <button class="btn btn-danger" id="shutdown-btn" onclick="requestShutdown()">
+                    🔌 Shutdown System
                 </button>
             </div>
         </div>
@@ -606,26 +602,30 @@
             });
             
             // Update controller button highlighting based on current controller type
-            // Controller publishes class names like "ProportionalHeadingController", "WindAwareController", "ReturnToHomeController"
+            // Controller publishes class names like "ProportionalHeadingController", "WindAwareController", "ReturnToHomeController", "PatrolController"
             const controllerType = (data.controller_type || '').toLowerCase();
-            const btnReturnToHome = document.getElementById('btn-return-to-home');
-            const btnProportional = document.getElementById('btn-proportional');
-            const btnWindAware = document.getElementById('btn-wind-aware');
             
-            // Reset all buttons to secondary
-            btnReturnToHome.className = 'btn btn-secondary';
-            btnProportional.className = 'btn btn-secondary';
-            btnWindAware.className = 'btn btn-secondary';
-            
-            // Highlight the active controller based on class name
-            // Controller class names: ProportionalHeadingController, WindAwareController, ReturnToHomeController
-            if (controllerType.includes('returntohome') || controllerType.includes('return_to_home') || 
-                controllerType.includes('return') && controllerType.includes('home')) {
-                btnReturnToHome.className = 'btn btn-warning';
-            } else if (controllerType.includes('proportionalheading') || controllerType.includes('proportional')) {
-                btnProportional.className = 'btn btn-warning';
-            } else if (controllerType.includes('windaware') || controllerType.includes('wind_aware')) {
-                btnWindAware.className = 'btn btn-warning';
+            // Update all controller buttons dynamically
+            const container = document.getElementById('controller-buttons-container');
+            if (container) {
+                const buttons = container.querySelectorAll('button[data-controller-type]');
+                buttons.forEach(btn => {
+                    const btnType = btn.getAttribute('data-controller-type').toLowerCase();
+                    // Reset to secondary
+                    btn.className = 'btn btn-secondary';
+                    
+                    // Highlight active controller
+                    if ((controllerType.includes('proportionalheading') || controllerType.includes('proportional')) && btnType === 'proportional') {
+                        btn.className = 'btn btn-warning';
+                    } else if ((controllerType.includes('windaware') || controllerType.includes('wind_aware')) && btnType === 'wind_aware') {
+                        btn.className = 'btn btn-warning';
+                    } else if ((controllerType.includes('returntohome') || controllerType.includes('return_to_home') || 
+                               (controllerType.includes('return') && controllerType.includes('home'))) && btnType === 'return_to_home') {
+                        btn.className = 'btn btn-warning';
+                    } else if (controllerType.includes('patrol') && btnType === 'patrol') {
+                        btn.className = 'btn btn-warning';
+                    }
+                });
             }
             
             // Pause status - update toggle button
@@ -645,18 +645,10 @@
             // Recording status (updated reactively via updateCriticalUIElements, but also update here for consistency)
             // No need to duplicate - updateCriticalUIElements handles it
             
-            // System status - update toggle button
+            // System status - update restart button
             const systemBtn = document.getElementById('system-toggle-btn');
-            if (data.system_running === true) {
-                systemBtn.textContent = '🛑 Stop System';
-                systemBtn.className = 'btn btn-danger';
-            } else if (data.system_running === false) {
-                systemBtn.textContent = '▶️ Start System';
-                systemBtn.className = 'btn btn-success';
-            } else {
-                systemBtn.textContent = '🛑 System: Unknown';
-                systemBtn.className = 'btn btn-secondary';
-            }
+            systemBtn.textContent = '🔄 Restart nodes';
+            systemBtn.className = 'btn btn-warning';
             systemBtn.disabled = false;
             
             // Node details
@@ -733,16 +725,53 @@
                 });
         }
 
+        // Load available controllers and populate buttons
+        let availableControllers = [];
+        
+        function loadControllers() {
+            fetch('/api/controllers')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.controllers) {
+                        availableControllers = data.controllers;
+                        renderControllerButtons();
+                    } else {
+                        console.error('Failed to load controllers:', data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading controllers:', error);
+                });
+        }
+        
+        function renderControllerButtons() {
+            const container = document.getElementById('controller-buttons-container');
+            if (!container) return;
+            
+            // Clear existing content
+            container.innerHTML = '';
+            
+            // Create buttons for each controller
+            availableControllers.forEach(controller => {
+                const btn = document.createElement('button');
+                btn.className = 'btn btn-secondary';
+                btn.id = `btn-${controller.type.replace(/_/g, '-')}`;
+                btn.setAttribute('data-controller-type', controller.type);
+                btn.textContent = `${controller.icon} ${controller.display_name}`;
+                btn.onclick = () => switchController(controller.type);
+                btn.title = controller.description; // Tooltip
+                container.appendChild(btn);
+            });
+        }
+        
         function switchController(type) {
-            const typeNames = {
-                'return_to_home': 'Return to Home',
-                'proportional': 'Proportional',
-                'wind_aware': 'Wind Aware'
-            };
+            // Find controller info for display name
+            const controller = availableControllers.find(c => c.type === type);
+            const displayName = controller ? controller.display_name : type;
             
             showModal(
                 'Switch Controller',
-                `Switch to ${typeNames[type]} controller?`,
+                `Switch to ${displayName} controller?`,
                 () => {
                     fetch('/api/controller/switch', {
                         method: 'POST',
@@ -799,34 +828,26 @@
                 });
         }
 
-        function toggleSystem() {
-            // Get current state from status data
-            const isRunning = statusData.system_running;
-            
-            // Show confirmation modal for stop action
-            if (isRunning) {
-                showModal(
-                    '⚠️ Stop System',
-                    'This will stop all Argo nodes. Are you sure?',
-                    () => {
-                        performSystemToggle();
-                    }
-                );
-            } else {
-                // Start system - no confirmation needed
-                performSystemToggle();
-            }
+        function restartSystem() {
+            showModal(
+                '🔄 Restart Nodes',
+                'This will restart all Argo nodes by restarting the launch service.\n\n' +
+                'The system will stop and then start all nodes. Are you sure?',
+                () => {
+                    performSystemRestart();
+                }
+            );
         }
         
-        function performSystemToggle() {
+        function performSystemRestart() {
             const btn = document.getElementById('system-toggle-btn');
             const originalText = btn.textContent;
             
             // Disable button during request
             btn.disabled = true;
-            btn.textContent = '⏳ Processing...';
+            btn.textContent = '⏳ Restarting...';
             
-            fetch('/api/lifecycle/toggle', { method: 'POST' })
+            fetch('/api/lifecycle/restart', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
@@ -845,6 +866,50 @@
                 });
         }
 
+        function requestShutdown() {
+            showModal(
+                '⚠️ CRITICAL: System Shutdown',
+                'This will shut down the entire system:\n\n' +
+                '• Stop all recording\n' +
+                '• Stop all nodes\n' +
+                '• Power off the system\n\n' +
+                'This action cannot be undone. Are you absolutely sure?',
+                () => {
+                    performShutdown();
+                }
+            );
+        }
+
+        function performShutdown() {
+            const btn = document.getElementById('shutdown-btn');
+            const originalText = btn.textContent;
+            
+            // Disable button during request
+            btn.disabled = true;
+            btn.textContent = '⏳ Shutting down...';
+            
+            fetch('/api/system/shutdown', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(`✅ ${data.message}\n\nSystem is shutting down. This page will disconnect shortly.`);
+                        // Keep button disabled - system is shutting down
+                    } else {
+                        alert(`❌ ${data.message}`);
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
+                })
+                .catch(error => {
+                    alert(`❌ Error: ${error}`);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
+        }
+
+        // Load controllers on page load
+        loadControllers();
+        
         // Auto-update every 2 seconds
         // Initial status update
         updateStatus();
