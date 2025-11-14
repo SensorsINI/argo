@@ -129,6 +129,9 @@ class HeadingTrailEntry:
 
 
 class ArgoBoatVisualization(ArgoBaseNode):
+    # Common text size for all marker text labels (in meters, before visualization scale)
+    TEXT_MARKER_SIZE = 0.05
+    
     def __init__(self, debug_mode=False):
         super().__init__('argo_boat_visualization')
         
@@ -772,7 +775,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_sail_indicator_marker(self):
-        """Create sail position indicator as a white rectangular panel on the downwind side"""
+        """Create sail position indicator as a white triangle panel on the downwind side"""
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
@@ -843,7 +846,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.scale.y = 1.0
         marker.scale.z = 1.0
 
-        marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.8)
+        marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.8) # transparent gray
         # Add overlay arrow for top-down visibility
         overlay = Marker()
         overlay.header = marker.header
@@ -853,15 +856,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         overlay.ns = "argo_boat_overlay"
         overlay.pose.position.x = 0.0
         overlay.pose.position.y = 0.0
-        overlay.pose.position.z = 0.1 * self.visualization_scale
+        overlay.pose.position.z = hull_top_z + 0.1 * self.visualization_scale
         overlay.pose.orientation.w = math.cos(total_sail_angle_rad * 0.5)
         overlay.pose.orientation.x = 0.0
         overlay.pose.orientation.y = 0.0
         overlay.pose.orientation.z = math.sin(total_sail_angle_rad * 0.5)
         overlay.scale.x = boom_length
         overlay.scale.y = 0.02 * self.visualization_scale
-        overlay.scale.z = 0.0 # no head
-        overlay.color = marker.color
+        overlay.scale.z = 0.0 # flat along water
+        overlay.color = marker.color # saame as sail
         self.overlay_markers.append(overlay)
         
         # Lifetime - infinite so marker persists
@@ -1011,7 +1014,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.scale.z = 0.03 * self.visualization_scale
         
         # Color (yellow for velocity)
-        marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
+        marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.5)
         
         # Lifetime - infinite so marker persists
         marker.lifetime.sec = 0
@@ -1052,12 +1055,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.orientation.z = 0.0
         
         # Scale - apply visualization scale
-        marker.scale.x = (1.0 - min(4*self.gps_velocity_speed , 1.0)) * 0.2 * self.visualization_scale  # arrow length
-        marker.scale.y = 0.03 * self.visualization_scale # arrow width
-        marker.scale.z = 0.03 * self.visualization_scale
+        marker.scale.x = self.gps_velocity_speed * 0.2 * self.visualization_scale  # arrow length
+        marker.scale.y = 0.02 * self.visualization_scale # arrow width
+        marker.scale.z = 0.01 * self.visualization_scale
         
         # Color (cyan for heading)
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
+        marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.5)
         
         # Lifetime - infinite so marker persists
         marker.lifetime.sec = 0
@@ -1087,7 +1090,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Rudder: {rudder_angle_deg:.1f}°"
         
         # Scale (text size) - apply visualization scale
-        marker.scale.z = 0.03 * self.visualization_scale  # Text height in meters
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
         
         # Color matching rudder indicator (red)
         marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
@@ -1120,7 +1123,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Sail: {sail_angle_deg:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.03 * self.visualization_scale
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
         
         # Color matching sail indicator (white, but darker for visibility)
         marker.color = ColorRGBA(r=0.9, g=0.9, b=0.9, a=1.0)
@@ -1132,10 +1135,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_wind_label_marker(self):
-        """Create optional text label for wind vector"""
+        """Create optional text label for wind vector, positioned at the middle of the wind arrow"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "base_link"
+        marker.header.frame_id = "map"  # Use same frame as wind arrow
         marker.header.stamp = self.get_current_time()
         
         marker.id = 12
@@ -1143,16 +1146,36 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.action = Marker.ADD
         marker.ns = "argo_boat_labels"
         
-        # Position near wind vector (above boat) - apply visualization scale
-        marker.pose.position.x = 0.3 * self.visualization_scale  # Offset forward
-        marker.pose.position.y = 0.0
-        marker.pose.position.z = 1.2 * self.visualization_scale  # Above wind arrow
+        # Calculate wind direction for positioning (same calculation as wind arrow)
+        if self.true_wind_direction is not None:
+            absolute_wind_from = self.true_wind_direction
+        else:
+            absolute_wind_from = (self.boat_heading + self.wind_angle) % 360.0
+        
+        # Convert "wind comes from" to "wind goes toward" (add 180°)
+        absolute_wind_to = (absolute_wind_from + 180.0) % 360.0
+        
+        # Calculate arrow length (same as wind arrow marker)
+        wind_scale = min(max(self.wind_speed * 0.5, 0.1), 2.0)
+        arrow_length = wind_scale * self.visualization_scale
+        
+        # Position at middle of wind arrow: start position + half arrow length in wind direction
+        # Wind arrow starts at boat position, points in absolute_wind_to direction
+        # Convert absolute_wind_to (compass: 0°=North) to map frame (0°=East, CCW)
+        wind_yaw_deg = (90.0 - absolute_wind_to) % 360.0
+        wind_yaw_rad = math.radians(wind_yaw_deg)
+        
+        # Calculate midpoint offset (half arrow length in wind direction)
+        midpoint_offset = arrow_length * 0.5
+        marker.pose.position.x = self.boat_pos_x + midpoint_offset * math.cos(wind_yaw_rad)
+        marker.pose.position.y = self.boat_pos_y + midpoint_offset * math.sin(wind_yaw_rad)
+        marker.pose.position.z = 1.0 * self.visualization_scale  # Same height as wind arrow start
         
         # Text content with values
         marker.text = f"Wind: {self.wind_speed:.1f} m/s @ {self.wind_angle:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.05 * self.visualization_scale
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
         
         # Color matching wind vector (green)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
@@ -1184,7 +1207,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Heading: {self.boat_heading:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.03 * self.visualization_scale
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
         
         # Color matching heading arrow (cyan)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
@@ -1213,9 +1236,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
 
         marker.text = "TACKING"
 
-        marker.scale.z = 0.08 * self.visualization_scale
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
 
-        marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=1.0)
+        marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.75)
 
         marker.lifetime.sec = 0
         marker.lifetime.nanosec = 0
@@ -1247,7 +1270,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_rudder_arrow_marker())  # Red arrow
             marker_array.markers.append(self.create_sail_indicator_marker())  # White triangle
             marker_array.markers.append(self.create_wind_vector_marker())
-            marker_array.markers.append(self.create_velocity_vector_marker())
+            # marker_array.markers.append(self.create_velocity_vector_marker())
             marker_array.markers.append(self.create_heading_arrow_marker())
 
             # Add historical heading markers

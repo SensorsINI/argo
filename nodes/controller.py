@@ -29,6 +29,7 @@
 #      - Simple proportional rudder control to maintain heading
 #      - Target heading = last human-controlled heading at handoff
 #      - Rudder command proportional to heading error (target - current)
+#      - Negative sign: positive error (target right of current) -> positive rudder (starboard) -> turn right
 #      - Sail command passes through from radio input
 #      - Good for: Basic autonomous heading hold, testing, development
 #
@@ -111,6 +112,7 @@
 # CURRENT DEFAULT CONTROLLER: ProportionalHeadingController
 #   - Proportional rudder control to steer back to last human-controlled heading
 #   - Formula: rudder_cmd = rudder_gain * (target_heading - current_heading) / rudder_full_scale_deg
+#   - Positive error (target right) -> positive rudder (starboard) -> turn right
 #   - Clamped to [-1, +1] range
 #   - Target heading set during human control, maintained during autonomous control
 #
@@ -454,6 +456,7 @@ class ProportionalHeadingController(BaseController):
             state.target_heading, state.compass_heading)
 
         # Proportional controller for rudder
+        # Positive error (target right) -> turn right -> starboard rudder (positive)
         cmd_rudder = self.rudder_gain * \
             (compass_err / self.rudder_full_scale_deg)
         cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
@@ -488,6 +491,7 @@ class WindAwareController(BaseController):
         # Heading control (same as proportional)
         compass_err = signed_angle_difference_degrees(
             state.target_heading, state.compass_heading)
+        # Positive error (target right) -> turn right -> starboard rudder (positive)
         cmd_rudder = self.rudder_gain * \
             (compass_err / self.rudder_full_scale_deg)
         cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
@@ -570,6 +574,7 @@ class ReturnToHomeController(BaseController):
             # Fall back to maintaining current heading
             compass_err = signed_angle_difference_degrees(
                 state.target_heading, state.compass_heading)
+            # Positive error (target right) -> turn right -> starboard rudder (positive)
             cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
             cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
             cmd_sail = 0.0  # Neutral sail
@@ -601,6 +606,7 @@ class ReturnToHomeController(BaseController):
         
         compass_err = signed_angle_difference_degrees(
             bearing_to_home, state.compass_heading)
+        # Positive error (target right) -> turn right -> starboard rudder (positive)
         cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
         cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
         
@@ -655,10 +661,24 @@ class PatrolController(BaseController):
         # Patrol state
         self.patrol_mode = 'broad_reach'  # 'broad_reach', 'tacking', 'jibing'
         self.last_turn_time = 0.0
+        
+        # Control decision logging state (for throttling and change detection)
+        self._last_captains_log_time = 0.0
+        self._last_logged_rudder = None
+        self._last_logged_sail = None
+        self._last_logged_mode = None
+        self._last_logged_target_heading = None
+        self._last_logged_distance = None
         self.turn_cooldown = 5.0  # seconds between turns
+        
+        # Stable target heading for broad reach (prevents target from "chasing" the boat)
+        self._stable_broad_reach_target = None
+        self._broad_reach_target_lock_time = 0.0
+        self._broad_reach_target_lock_duration = 10.0  # Lock target for 10 seconds
         
         # Wind direction tracking (for determining tack vs jibe)
         self.wind_direction_absolute = None  # Absolute wind direction (0-360, 0=North)
+        self._last_absolute_wind = None  # Track last absolute wind for target recalculation
         
         # Geofence status logging
         self.last_geofence_log_time = 0.0
@@ -672,10 +692,32 @@ class PatrolController(BaseController):
         self.patrol_mode = 'broad_reach'
         self.last_turn_time = 0.0
         
+        # Reset stable target heading
+        self._stable_broad_reach_target = None
+        self._broad_reach_target_lock_time = 0.0
+        
         # Log controller activation
         if old_mode != 'broad_reach':
             self.log_entry("Patrol controller activated - starting broad reach sailing", level="INFO")
             self.publish_state('broad_reach')
+    
+    def on_human_control_started(self, state: BoatState):
+        """
+        Called when human control is detected.
+        Exits tacking/jibing mode and sets a new stable target heading based on current heading.
+        """
+        if self.patrol_mode in ['tacking', 'jibing']:
+            old_mode = self.patrol_mode
+            self.patrol_mode = 'broad_reach'
+            self.last_turn_time = 0.0
+            self.log_entry(f"Human control detected - exiting {old_mode} mode", level="INFO")
+            self.publish_state('broad_reach')
+        
+        # Set new stable target heading to current heading (human is steering)
+        if state.compass_heading is not None:
+            self._stable_broad_reach_target = state.compass_heading
+            self._broad_reach_target_lock_time = time.time()
+            self.log_entry(f"New target heading set to current heading: {state.compass_heading:.1f}°", level="INFO")
     
     def _calculate_absolute_wind_direction(self, state: BoatState) -> Optional[float]:
         """
@@ -685,14 +727,23 @@ class PatrolController(BaseController):
             state: Current boat state
             
         Returns:
-            Absolute wind direction in degrees (0-360, 0=North), or None if unavailable
+            Absolute wind direction in degrees (0-360, 0=North, compass convention, where wind comes from), 
+            or None if unavailable
+            
+        Note: If available, uses true_wind_direction_from_bridge for verification/consistency.
+        This should match the bridge's wind_direction parameter (compass convention, where wind comes from).
         """
+        # Prefer bridge's true wind direction if available (more accurate, already in compass convention)
+        if hasattr(self, 'true_wind_direction_from_bridge') and self.true_wind_direction_from_bridge is not None:
+            return self.true_wind_direction_from_bridge
+        
+        # Fallback: calculate from relative wind angle and boat heading
         if state.wind_angle is None or state.compass_heading is None:
             return None
         
-        # Wind angle is degrees CW from front of boat
-        # Compass heading is boat's heading (0-360, 0=North)
-        # Absolute wind = boat heading + wind angle (relative to boat)
+        # Wind angle is degrees CW from front of boat (0° = wind from front)
+        # Compass heading is boat's heading (0-360, 0=North, compass convention)
+        # Absolute wind (where wind comes from) = boat heading + wind angle (relative to boat)
         absolute_wind = (state.compass_heading + state.wind_angle) % 360.0
         return absolute_wind
     
@@ -706,8 +757,20 @@ class PatrolController(BaseController):
         current_time = time.time()
         
         # Check if we're in cooldown period after last turn
+        # BUT: if we're far from boundary and in tacking mode, allow exit from tacking
         if current_time - self.last_turn_time < self.turn_cooldown:
-            return self.patrol_mode  # Continue current mode
+            # If we're in tacking mode but far from boundary, allow exit
+            if self.patrol_mode == 'tacking':
+                distance = self.geofence_manager.distance_to_boundary_lonlat(
+                    state.current_longitude, state.current_latitude) if (
+                    state.current_latitude is not None and state.current_longitude is not None) else None
+                if distance is not None and abs(distance) > self.boundary_turn_threshold * 2:
+                    # Far from boundary, allow exit from tacking even during cooldown
+                    pass  # Continue to check below
+                else:
+                    return self.patrol_mode  # Continue current mode
+            else:
+                return self.patrol_mode  # Continue current mode
         
         # Check if we have required data
         if (state.current_latitude is None or state.current_longitude is None or
@@ -717,6 +780,22 @@ class PatrolController(BaseController):
         # Calculate distance to boundary
         distance = self.geofence_manager.distance_to_boundary_lonlat(
             state.current_longitude, state.current_latitude)
+        
+        # If currently in tacking mode, check if we've completed the tack
+        if self.patrol_mode == 'tacking':
+            # Check if we're far enough from boundary to exit tacking
+            if abs(distance) > self.boundary_turn_threshold * 2:
+                # Far from boundary - exit tacking mode
+                return 'broad_reach'
+            
+            # Check if we've reached the target heading (tack complete)
+            if state.compass_heading is not None:
+                target_heading = self._calculate_target_heading_tack(state)
+                if target_heading is not None:
+                    heading_error = abs(signed_angle_difference_degrees(target_heading, state.compass_heading))
+                    # If we're within 10 degrees of target and far from boundary, exit tacking
+                    if heading_error < 10.0 and abs(distance) > self.boundary_turn_threshold:
+                        return 'broad_reach'
         
         # Check if approaching boundary
         if abs(distance) < self.boundary_turn_threshold:
@@ -757,6 +836,9 @@ class PatrolController(BaseController):
         """
         Calculate target heading for broad reach sailing.
         
+        Uses a stable target heading that doesn't change every cycle, preventing
+        the target from "chasing" the boat in circles.
+        
         Args:
             state: Current boat state
             
@@ -771,20 +853,63 @@ class PatrolController(BaseController):
         if absolute_wind is None:
             return None
         
-        # Target heading for broad reach: wind direction + broad_reach_angle
-        # We want to sail at broad_reach_angle to the wind
-        # If wind is from North (0°), and we want 110° to wind, we can sail at 110° or 250°
-        # Choose the direction that maintains current heading direction (port or starboard)
+        current_time = time.time()
         
-        # Calculate two possible headings
-        heading1 = (absolute_wind + self.broad_reach_angle) % 360.0
-        heading2 = (absolute_wind - self.broad_reach_angle) % 360.0
+        # Check if we should recalculate the stable target
+        # IMPORTANT: If state.target_heading was set by human control handoff, use it as the stable target
+        # This ensures smooth transition from human control to robot control
+        if (state.target_heading is not None and 
+            self._stable_broad_reach_target is None and
+            abs(signed_angle_difference_degrees(state.target_heading, state.compass_heading)) < 90.0):
+            # Human control just ended - use the handoff target heading as stable target
+            self._stable_broad_reach_target = state.target_heading
+            self._broad_reach_target_lock_time = current_time
+            self._last_absolute_wind = absolute_wind
+            if self.logger:
+                self.logger.info(
+                    f"Using human control handoff target heading: {state.target_heading:.1f}° "
+                    f"(will maintain this until lock expires or wind changes)"
+                )
+            return self._stable_broad_reach_target
         
-        # Choose the one closer to current heading
-        err1 = abs(signed_angle_difference_degrees(heading1, state.compass_heading))
-        err2 = abs(signed_angle_difference_degrees(heading2, state.compass_heading))
+        should_recalculate = False
+        if self._stable_broad_reach_target is None:
+            should_recalculate = True
+        elif (current_time - self._broad_reach_target_lock_time) > self._broad_reach_target_lock_duration:
+            # Lock expired - recalculate
+            should_recalculate = True
+        elif self._last_absolute_wind is not None and abs(absolute_wind - self._last_absolute_wind) > 15.0:
+            # Wind direction changed significantly - recalculate
+            should_recalculate = True
         
-        return heading1 if err1 < err2 else heading2
+        if should_recalculate:
+            # Target heading for broad reach: wind direction + broad_reach_angle
+            # We want to sail at broad_reach_angle to the wind
+            # If wind is from North (0°), and we want 110° to wind, we can sail at 110° or 250°
+            # Choose the direction that's closer to current heading
+            
+            # Calculate two possible headings
+            heading1 = (absolute_wind + self.broad_reach_angle) % 360.0
+            heading2 = (absolute_wind - self.broad_reach_angle) % 360.0
+            
+            # Choose the one closer to current heading
+            err1 = abs(signed_angle_difference_degrees(heading1, state.compass_heading))
+            err2 = abs(signed_angle_difference_degrees(heading2, state.compass_heading))
+            
+            old_target = self._stable_broad_reach_target
+            self._stable_broad_reach_target = heading1 if err1 < err2 else heading2
+            self._broad_reach_target_lock_time = current_time
+            self._last_absolute_wind = absolute_wind
+            
+            # Log target heading change if significant
+            if old_target is not None and abs(signed_angle_difference_degrees(self._stable_broad_reach_target, old_target)) > 5.0:
+                if self.logger:
+                    self.logger.info(
+                        f"Broad reach target heading changed: {old_target:.1f}° -> {self._stable_broad_reach_target:.1f}° "
+                        f"(wind={absolute_wind:.1f}°, closer to current={state.compass_heading:.1f}°)"
+                    )
+        
+        return self._stable_broad_reach_target
     
     def _calculate_target_heading_tack(self, state: BoatState) -> Optional[float]:
         """
@@ -945,36 +1070,31 @@ class PatrolController(BaseController):
         
         # Calculate rudder command (proportional control to target heading)
         if state.compass_heading is not None:
+            # Calculate error: target - current (positive = target is clockwise/right of current)
             compass_err = signed_angle_difference_degrees(target_heading, state.compass_heading)
-            cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
+            
+            # Verify consistency: also calculate error using state.target_heading for comparison
+            compass_err_state = signed_angle_difference_degrees(state.target_heading, state.compass_heading)
+            
+            # Rudder control: positive error (target right) -> turn right
+            # Simulator convention: negative rudder -> turn right (clockwise), positive rudder -> turn left (counter-clockwise)
+            # So: rudder = -gain * (error / full_scale) to match simulator convention
+            cmd_rudder = -self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
             cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
             
-            # Log control calculations periodically for diagnostics (every 2 seconds)
-            if not hasattr(self, '_last_control_log_time'):
-                self._last_control_log_time = 0.0
-            current_time = time.time()
-            if current_time - self._last_control_log_time > 2.0:
-                if self.logger:
-                    self.logger.info(
-                        f"Patrol control: mode={self.patrol_mode}, "
-                        f"current={state.compass_heading:.1f}°, target={target_heading:.1f}°, "
-                        f"error={compass_err:.1f}°, rudder_cmd={cmd_rudder:.3f}, "
-                        f"wind_angle={state.wind_angle if state.wind_angle is not None else 'N/A'}, "
-                        f"distance_to_boundary={state.distance_to_boundary if state.distance_to_boundary is not None else 'N/A'}"
-                    )
-                self._last_control_log_time = current_time
-            
-            # Log when in tacking mode to debug control application
-            if self.patrol_mode == 'tacking' and self.logger:
-                self.logger.debug(
-                    f"Tacking: current={state.compass_heading:.1f}°, target={target_heading:.1f}°, "
-                    f"error={compass_err:.1f}°, rudder_cmd={cmd_rudder:.3f}"
-                )
+            # Diagnostic: log if there's a mismatch between local and state target_heading
+            if abs(compass_err - compass_err_state) > 1.0:
+                self.logger.warn(
+                    f"Target heading mismatch: local={target_heading:.1f}°, state={state.target_heading:.1f}°, "
+                    f"error_local={compass_err:.1f}°, error_state={compass_err_state:.1f}°",
+                    throttle_duration_sec=5.0)
         else:
             cmd_rudder = 0.0
+            compass_err = 0.0
         
         # Wind-aware sail control
         cmd_sail = 0.0
+        sail_reason = "no wind data"
         if state.wind_angle is not None:
             # Simple sail control based on wind angle
             # Wind from ahead (0°): pull sail in (-1)
@@ -983,6 +1103,133 @@ class PatrolController(BaseController):
             wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
             wind_sail_cmd = np.clip(wind_sail_cmd, -1.0, 1.0)
             cmd_sail = self.sail_wind_gain * wind_sail_cmd
+            sail_reason = f"wind_angle={state.wind_angle:.1f}° (wind-based control, gain={self.sail_wind_gain:.2f})"
+        
+        # Skip control decision logging if in human control (human is steering, no need to log controller decisions)
+        # BUT: Still return the command so it can be published (even if human has authority)
+        # The bridge will apply it if human_controlled=False
+        # Note: Geofence logging (above) still happens even in human control mode for safety monitoring
+        if state.human_controlled:
+            # Return control command but don't log control decisions (human is in control)
+            # Note: Command is still returned so it can be published, but bridge won't apply it if human_controlled=True
+            return ControlCommand(
+                rudder=cmd_rudder,
+                sail=cmd_sail,
+                timestamp=state.timestamp
+            )
+        
+        # Log control decisions to captain's log (throttled to 1/s or on any change)
+        current_time = time.time()
+        distance_abs = abs(state.distance_to_boundary) if state.distance_to_boundary is not None else None
+        
+        # Check if we should log (1/s rate OR any value changed)
+        should_log = False
+        time_since_last_log = current_time - self._last_captains_log_time
+        
+        # Always log on first call (initialize logging state)
+        if self._last_captains_log_time == 0.0:
+            should_log = True
+        
+        # Log if enough time has passed (1 second) - ALWAYS log at least once per second
+        elif time_since_last_log >= 1.0:
+            should_log = True
+        
+        # Log if any control value changed significantly (even if less than 1 second)
+        if not should_log:
+            rudder_changed = (self._last_logged_rudder is None or 
+                            abs(cmd_rudder - self._last_logged_rudder) > 0.05)
+            sail_changed = (self._last_logged_sail is None or 
+                          abs(cmd_sail - self._last_logged_sail) > 0.05)
+            mode_changed = (self._last_logged_mode != self.patrol_mode)
+            target_changed = (self._last_logged_target_heading is None or 
+                            abs(target_heading - self._last_logged_target_heading) > 5.0)
+            distance_changed = (self._last_logged_distance is None or 
+                              (distance_abs is not None and 
+                               abs(distance_abs - self._last_logged_distance) > 2.0))
+            
+            if rudder_changed or sail_changed or mode_changed or target_changed or distance_changed:
+                should_log = True
+        
+        if should_log:
+            # Build detailed control decision log
+            log_parts = []
+            
+            # Mode and reasoning
+            mode_reason = ""
+            if self.patrol_mode == 'broad_reach':
+                mode_reason = f"maintaining broad reach ({self.broad_reach_angle:.0f}° to wind)"
+            elif self.patrol_mode == 'tacking':
+                if state.distance_to_boundary is not None and abs(state.distance_to_boundary) < self.boundary_turn_threshold:
+                    mode_reason = f"tacking to avoid boundary ({abs(state.distance_to_boundary):.1f}m away)"
+                else:
+                    mode_reason = "tacking (turn in progress)"
+            elif self.patrol_mode == 'jibing':
+                mode_reason = "jibing (downwind turn)"
+            else:
+                mode_reason = f"mode: {self.patrol_mode}"
+            
+            log_parts.append(f"Mode: {self.patrol_mode} ({mode_reason})")
+            
+            # Heading information: current boat heading and target heading controller is steering toward
+            if state.compass_heading is not None:
+                # Clarify: current = boat's current heading, target = heading controller wants to reach
+                heading_info = f"heading: current={state.compass_heading:.1f}°, target={target_heading:.1f}°"
+                
+                # Add mode-specific context
+                if self.patrol_mode == 'broad_reach' and state.wind_angle is not None:
+                    absolute_wind = self._calculate_absolute_wind_direction(state)
+                    if absolute_wind is not None:
+                        # Wind direction is where wind comes from (compass frame, 0°=North)
+                        # This should match bridge's wind_direction parameter (with opposite sign convention)
+                        heading_info += f" | wind_from={absolute_wind:.1f}° (compass, where wind comes from)"
+                elif self.patrol_mode == 'tacking':
+                    # Determine tack direction (port or starboard)
+                    if state.compass_heading is not None and target_heading is not None:
+                        turn_direction = signed_angle_difference_degrees(target_heading, state.compass_heading)
+                        tack_direction = "starboard" if turn_direction > 0 else "port"
+                        heading_info += f" | tacking_{tack_direction} (turn={abs(turn_direction):.1f}°)"
+                    else:
+                        heading_info += f" | tack_angle={self.tack_angle:.0f}°"
+                
+                log_parts.append(f"Heading: {heading_info}")
+            
+            # Rudder command reasoning
+            if state.compass_heading is not None:
+                rudder_reason = f"rudder={cmd_rudder:+.3f}"
+                if abs(cmd_rudder) > 0.01:
+                    direction = "port" if cmd_rudder < 0 else "starboard"
+                    # Calculate raw rudder before clipping to show if it's saturated
+                    # Error = target_heading - current_heading (positive = target is clockwise/right of current)
+                    raw_rudder = -self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
+                    if abs(raw_rudder) > 1.0:
+                        rudder_reason += f" ({direction}, heading_error={compass_err:+.1f}° (target-current), gain={self.rudder_gain:.1f}, CLIPPED from {raw_rudder:+.3f})"
+                    else:
+                        rudder_reason += f" ({direction}, heading_error={compass_err:+.1f}° (target-current), gain={self.rudder_gain:.1f})"
+                else:
+                    rudder_reason += " (neutral, on target)"
+                log_parts.append(f"Rudder: {rudder_reason}")
+            else:
+                log_parts.append(f"Rudder: 0.000 (no heading data)")
+            
+            # Sail command reasoning
+            log_parts.append(f"Sail: {cmd_sail:+.3f} ({sail_reason})")
+            
+            # Distance to boundary
+            if distance_abs is not None:
+                status = "INSIDE" if state.distance_to_boundary < 0 else "OUTSIDE"
+                log_parts.append(f"Boundary: {distance_abs:.1f}m {status}")
+            
+            # Combine and log
+            log_message = " | ".join(log_parts)
+            self.log_entry(log_message, level="INFO")
+            
+            # Update logged values
+            self._last_captains_log_time = current_time
+            self._last_logged_rudder = cmd_rudder
+            self._last_logged_sail = cmd_sail
+            self._last_logged_mode = self.patrol_mode
+            self._last_logged_target_heading = target_heading
+            self._last_logged_distance = distance_abs
         
         # Periodic state logging (every 30 seconds)
         self.log_periodic_state(state, interval_sec=30.0)
@@ -1190,6 +1437,10 @@ class ControllerNode(ArgoBaseNode):
 
         # Navigation sensors (real-time data)
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
+        # Subscribe to true wind direction from bridge for verification/consistency
+        from std_msgs.msg import Float64
+        self.create_subscription(Float64, '/simulator/true_wind_direction', self.true_wind_callback, 10)
+        self.true_wind_direction_from_bridge = None
         self.create_subscription(
             Float64, '/gps_cog', self.gps_cog_callback, 10)
         self.create_subscription(
@@ -1462,6 +1713,10 @@ class ControllerNode(ArgoBaseNode):
                 self.data_collector.start_session()
             elif not self.boat_state.human_controlled:
                 self.data_collector.stop_session()
+            
+            # If human just took control and we have a PatrolController, notify it
+            if self.boat_state.human_controlled and isinstance(self.controller, PatrolController):
+                self.controller.on_human_control_started(self.boat_state)
 
     def control_authority_callback(self, msg):
         """Receive detailed control authority info from rudder_sail_radio.py."""
@@ -1475,10 +1730,17 @@ class ControllerNode(ArgoBaseNode):
         self.boat_state.radio_rudder = msg.x
         self.boat_state.radio_sail = msg.y
 
+    def true_wind_callback(self, msg):
+        """Receive true wind direction from bridge (compass convention, where wind comes from)."""
+        self.true_wind_direction_from_bridge = msg.data
+    
     def pose_callback(self, msg):
         if self.is_paused():
             return
-        self.boat_state.compass_heading = msg.z
+        # Convert from mathematical convention (0°=East, CCW) to compass convention (0°=North, CW)
+        # Same conversion as visualization: compass = (450.0 - math) % 360.0
+        heading_math = float(msg.z) % 360.0
+        self.boat_state.compass_heading = (450.0 - heading_math) % 360.0
 
     def gps_cog_callback(self, msg):
         if self.is_paused():
@@ -1609,146 +1871,169 @@ class ControllerNode(ArgoBaseNode):
 
     def timer_callback(self):
         """Main control loop - generates autonomous control commands."""
-        # Check if ROS2 context is still valid before processing
-        if not is_context_valid(self):
-            return
+        try:
+            # Check if ROS2 context is still valid before processing
+            if not is_context_valid(self):
+                return
+                
+            # Publish controller state even when paused or in human mode (for dashboard display)
+            if self.controller:
+                state_msg = String(data=self.controller.name)
+                safe_publish(self.pub_controller_state, state_msg, self)
             
-        # Publish controller state even when paused or in human mode (for dashboard display)
-        if self.controller:
-            state_msg = String(data=self.controller.name)
-            safe_publish(self.pub_controller_state, state_msg, self)
-        
-        # Check if node is paused - when paused, unconditionally default to human control
-        if self.is_paused():
-            # When paused, no autonomous commands are published, which causes
-            # rudder_sail_radio.py to default to human control due to stale auto commands.
-            # This effectively hands control back to the human operator immediately.
-            return  # Skip processing when paused
+            # Check if node is paused - when paused, unconditionally default to human control
+            if self.is_paused():
+                # When paused, no autonomous commands are published, which causes
+                # rudder_sail_radio.py to default to human control due to stale auto commands.
+                # This effectively hands control back to the human operator immediately.
+                return  # Skip processing when paused
 
-        self.boat_state.timestamp = time.time()
+            self.boat_state.timestamp = time.time()
 
-        # CPU monitoring (periodic check)
-        if self.cpu_monitor_enabled and (time.time() - self.last_cpu_check) > self.cpu_check_interval:
-            try:
-                process = psutil.Process()
-                cpu_percent = process.cpu_percent()
-                memory_info = process.memory_info()
-                self.get_logger().info(
-                    f"Controller CPU: {cpu_percent:.1f}%, Memory: {memory_info.rss/1024/1024:.1f}MB")
-                self.last_cpu_check = time.time()
-            except Exception as e:
-                self.get_logger().debug(f"CPU monitoring error: {e}")
+            # CPU monitoring (periodic check)
+            if self.cpu_monitor_enabled and (time.time() - self.last_cpu_check) > self.cpu_check_interval:
+                try:
+                    process = psutil.Process()
+                    cpu_percent = process.cpu_percent()
+                    memory_info = process.memory_info()
+                    self.get_logger().info(
+                        f"Controller CPU: {cpu_percent:.1f}%, Memory: {memory_info.rss/1024/1024:.1f}MB")
+                    self.last_cpu_check = time.time()
+                except Exception as e:
+                    self.get_logger().debug(f"CPU monitoring error: {e}")
 
-        # Log human control state changes
-        if self.boat_state.human_controlled != self.last_logged_human_control:
-            if self.boat_state.human_controlled:
-                self.get_logger().info("Human has control authority.")
-            else:
-                self.get_logger().info("Robot has control authority.")
-            self.last_logged_human_control = self.boat_state.human_controlled
-
-        # Check for minimum required data
-        if self.boat_state.compass_heading is None:
-            self.get_logger().debug("Waiting for initial compass heading...", throttle_duration_sec=5)
-            return
-
-        if self.boat_state.human_controlled:
-            # Human control mode - update target heading for when robot takes over
-            self.boat_state.target_heading = self.boat_state.compass_heading
-
-            # Collect training data if enabled
-            if (self.data_collector.enabled and
-                self.boat_state.radio_rudder is not None and
-                    self.boat_state.radio_sail is not None):
-
-                human_action = ControlCommand(
-                    rudder=self.boat_state.radio_rudder,
-                    sail=self.boat_state.radio_sail,
-                    timestamp=self.boat_state.timestamp
-                )
-                self.data_collector.record_sample(
-                    self.boat_state, human_action)
-
-            # No autonomous command published - rudder_sail_radio.py handles human input
-
-        else:
-            # Autonomous control mode
-            # For patrol controller, it sets target_heading internally, so allow it to run even if None initially
-            # For other controllers, target_heading must be set (from human control handoff)
-            if self.boat_state.target_heading is None:
-                if isinstance(self.controller, PatrolController):
-                    # Patrol controller will set target_heading in generate_control()
-                    # Initialize to current heading as fallback
-                    if self.boat_state.compass_heading is not None:
-                        self.boat_state.target_heading = self.boat_state.compass_heading
-                        self.get_logger().info(f"Patrol controller: Initializing target_heading to current heading {self.boat_state.target_heading:.1f}°")
-                    else:
-                        self.get_logger().warn("Patrol controller: No compass heading available yet, waiting...",
-                                               throttle_duration_sec=5)
-                        return
+            # Log human control state changes
+            if self.boat_state.human_controlled != self.last_logged_human_control:
+                if self.boat_state.human_controlled:
+                    self.get_logger().info("Human has control authority.")
                 else:
-                    # Other controllers need target_heading from human control handoff
-                    self.get_logger().warn("Robot control active, but no target heading. Waiting for human to set a course.",
-                                           throttle_duration_sec=5)
-                    return
+                    self.get_logger().info("Robot has control authority.")
+                self.last_logged_human_control = self.boat_state.human_controlled
 
-            if self.controller is None:
-                self.get_logger().error("No controller initialized!", throttle_duration_sec=5)
+            # Check for minimum required data
+            if self.boat_state.compass_heading is None:
+                self.get_logger().debug("Waiting for initial compass heading...", throttle_duration_sec=5)
                 return
 
-            # Check for critical alerts that should modify autonomous behavior
-            if self.boat_state.has_critical_alerts():
-                if self.boat_state.battery_low_alert:
-                    self.get_logger().warn("🔋 BATTERY LOW - Autonomous control may be limited",
-                                           throttle_duration_sec=10)
-                if self.boat_state.saltwater_alert:
-                    self.get_logger().warn("💧 SALTWATER DETECTED - Consider emergency return",
-                                           throttle_duration_sec=10)
+            if self.boat_state.human_controlled:
+                # Human control mode - update target heading for when robot takes over
+                self.boat_state.target_heading = self.boat_state.compass_heading
 
-            # Check if return-to-home should activate
-            if isinstance(self.controller, ReturnToHomeController):
-                if self.controller.should_activate(self.boat_state):
-                    # Log RTH status periodically
-                    distance = self.boat_state.get_distance_to_home()
-                    bearing = self.boat_state.get_bearing_to_home()
-                    if distance is not None and bearing is not None:
-                        self.get_logger().info(
-                            f"🏠 RETURN TO HOME - Distance: {distance:.2f}nm, Bearing: {bearing:.1f}°, "
-                            f"Current heading: {self.boat_state.compass_heading:.1f}°",
-                            throttle_duration_sec=10)
-            elif hasattr(self.controller, 'should_activate'):
-                # For any controller with should_activate method, check if RTH needed
-                if isinstance(self.controller, ReturnToHomeController) == False:
-                    # Create temporary RTH controller to check
-                    rth_config = {
-                        'rudder_gain': self.get_parameter('rudder_gain').get_parameter_value().double_value,
-                        'rudder_full_scale_deg': self.get_parameter('rudder_full_scale_deg').get_parameter_value().double_value,
-                        'sail_wind_gain': 0.5,
-                        'shore_connection_timeout': 120.0,
-                        'arrival_distance_nm': 0.05
-                    }
-                    temp_rth = ReturnToHomeController(rth_config, logger=self.get_logger(), parent_node=self)
-                    if temp_rth.should_activate(self.boat_state):
-                        self.get_logger().warn(
-                            "🏠 Switching to RETURN TO HOME mode due to connectivity loss",
-                            throttle_duration_sec=5)
-                        self.controller = temp_rth
+                # Collect training data if enabled
+                if (self.data_collector.enabled and
+                    self.boat_state.radio_rudder is not None and
+                        self.boat_state.radio_sail is not None):
 
-            # **THE CORE ARCHITECTURE: Single generate_control function**
-            control_command = self.controller.generate_control(self.boat_state)
+                    human_action = ControlCommand(
+                        rudder=self.boat_state.radio_rudder,
+                        sail=self.boat_state.radio_sail,
+                        timestamp=self.boat_state.timestamp
+                    )
+                    self.data_collector.record_sample(
+                        self.boat_state, human_action)
 
-            # Publish control command to rudder_sail_radio.py
-            if control_command:
-                safe_publish(self.pub_rudder_sail_cmd, control_command.to_vector3(), self)
+                # No autonomous command published - rudder_sail_radio.py handles human input
+
+            else:
+                # Autonomous control mode
+                # For patrol controller, it sets target_heading internally, so allow it to run even if None initially
+                # For other controllers, target_heading must be set (from human control handoff)
+                if self.boat_state.target_heading is None:
+                    if isinstance(self.controller, PatrolController):
+                        # Patrol controller will set target_heading in generate_control()
+                        # Initialize to current heading as fallback
+                        if self.boat_state.compass_heading is not None:
+                            self.boat_state.target_heading = self.boat_state.compass_heading
+                            self.get_logger().info(f"Patrol controller: Initializing target_heading to current heading {self.boat_state.target_heading:.1f}°")
+                        else:
+                            self.get_logger().warn("Patrol controller: No compass heading available yet, waiting...",
+                                                   throttle_duration_sec=5)
+                            return
+                    else:
+                        # Other controllers need target_heading from human control handoff
+                        self.get_logger().warn("Robot control active, but no target heading. Waiting for human to set a course.",
+                                               throttle_duration_sec=5)
+                        return
+
+                if self.controller is None:
+                    self.get_logger().error("No controller initialized!", throttle_duration_sec=5)
+                    return
+
+                # Check for critical alerts that should modify autonomous behavior
+                if self.boat_state.has_critical_alerts():
+                    if self.boat_state.battery_low_alert:
+                        self.get_logger().warn("🔋 BATTERY LOW - Autonomous control may be limited",
+                                               throttle_duration_sec=10)
+                    if self.boat_state.saltwater_alert:
+                        self.get_logger().warn("💧 SALTWATER DETECTED - Consider emergency return",
+                                               throttle_duration_sec=10)
+
+                # Check if return-to-home should activate
+                if isinstance(self.controller, ReturnToHomeController):
+                    if self.controller.should_activate(self.boat_state):
+                        # Log RTH status periodically
+                        distance = self.boat_state.get_distance_to_home()
+                        bearing = self.boat_state.get_bearing_to_home()
+                        if distance is not None and bearing is not None:
+                            self.get_logger().info(
+                                f"🏠 RETURN TO HOME - Distance: {distance:.2f}nm, Bearing: {bearing:.1f}°, "
+                                f"Current heading: {self.boat_state.compass_heading:.1f}°",
+                                throttle_duration_sec=10)
+                elif hasattr(self.controller, 'should_activate'):
+                    # For any controller with should_activate method, check if RTH needed
+                    if isinstance(self.controller, ReturnToHomeController) == False:
+                        # Create temporary RTH controller to check
+                        rth_config = {
+                            'rudder_gain': self.get_parameter('rudder_gain').get_parameter_value().double_value,
+                            'rudder_full_scale_deg': self.get_parameter('rudder_full_scale_deg').get_parameter_value().double_value,
+                            'sail_wind_gain': 0.5,
+                            'shore_connection_timeout': 120.0,
+                            'arrival_distance_nm': 0.05
+                        }
+                        temp_rth = ReturnToHomeController(rth_config, logger=self.get_logger(), parent_node=self)
+                        if temp_rth.should_activate(self.boat_state):
+                            self.get_logger().warn(
+                                "🏠 Switching to RETURN TO HOME mode due to connectivity loss",
+                                throttle_duration_sec=5)
+                            self.controller = temp_rth
+
+                # **THE CORE ARCHITECTURE: Single generate_control function**
+                # Skip if paused (prevents controller from logging when paused)
+                if self.is_paused():
+                    return
+                control_command = self.controller.generate_control(self.boat_state)
+
+                # Publish control command to rudder_sail_radio.py
+                if control_command:
+                    safe_publish(self.pub_rudder_sail_cmd, control_command.to_vector3(), self)
+                
+                # Note: Controller state is already published at the start of timer_callback
+                # so it's available even when in human mode or paused
+                
+                # Only format debug string if debug logging is enabled (CPU optimization)
+                if self.get_logger().get_effective_level() <= 10:  # DEBUG level
+                    debug_msg = (f"Target: {self.boat_state.target_heading:.1f}, Current: {self.boat_state.compass_heading:.1f}, "
+                                f"Controller: {self.controller.name}, Rudder: {control_command.rudder:.2f}, Sail: {control_command.sail:.2f}")
+                    safe_log(self, 'debug', debug_msg)
+        
+        except Exception as e:
+            # FATAL ERROR: Log error and shut down node to stop simulation
+            error_msg = f"FATAL ERROR in controller timer_callback: {e}"
+            self.get_logger().error(error_msg)
+            import traceback
+            tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+            self.get_logger().error(f"Traceback:\n{tb_str}")
             
-            # Note: Controller state is already published at the start of timer_callback
-            # so it's available even when in human mode or paused
+            # Log to captain's log for visibility
+            if self.controller:
+                self.controller.log_entry(f"FATAL ERROR: {e}", level="ERROR")
             
-            # Only format debug string if debug logging is enabled (CPU optimization)
-            if self.get_logger().get_effective_level() <= 10:  # DEBUG level
-                debug_msg = (f"Target: {self.boat_state.target_heading:.1f}, Current: {self.boat_state.compass_heading:.1f}, "
-                            f"Controller: {self.controller.name}, Rudder: {control_command.rudder:.2f}, Sail: {control_command.sail:.2f}")
-                safe_log(self, 'debug', debug_msg)
+            # Shut down the node to stop the simulation
+            self.get_logger().error("Shutting down controller node due to fatal error - simulation will stop")
+            if rclpy.ok():
+                rclpy.shutdown()
+            import sys
+            sys.exit(1)
 
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""

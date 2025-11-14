@@ -69,6 +69,10 @@ class KeyboardControlNode(Node):
         self.running = True
         self.simulation_paused = False
         
+        # Keyboard activity tracking - only publish when keys are actively pressed
+        self.last_keyboard_activity = 0.0  # Timestamp of last keyboard activity
+        self.keyboard_timeout = 0.5  # Stop publishing 0.5 seconds after last key press
+        
         # Status from simulator (for display)
         self.simulator_heading = 0.0
         self.simulator_speed = 0.0
@@ -88,7 +92,7 @@ class KeyboardControlNode(Node):
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGWINCH, self._signal_handler)
         
-        # Control loop timer (publishes current control state)
+        # Control loop timer (publishes only when keyboard is active)
         self.control_timer = self.create_timer(0.1, self.publish_control)
         
         # Display update timer
@@ -251,16 +255,25 @@ class KeyboardControlNode(Node):
         """Adjust rudder position by one step."""
         self.rudder_position += direction * self.step_size
         self.rudder_position = max(-1.0, min(1.0, self.rudder_position))
+        self.last_keyboard_activity = time.time()  # Mark keyboard activity
+        # Publish immediately when key is pressed
+        self.publish_control()
     
     def adjust_sail(self, direction):
         """Adjust sail position by one step."""
         self.sail_position += direction * self.step_size
         self.sail_position = max(-1.0, min(1.0, self.sail_position))
+        self.last_keyboard_activity = time.time()  # Mark keyboard activity
+        # Publish immediately when key is pressed
+        self.publish_control()
     
     def center_controls(self):
         """Center both rudder and sail."""
         self.rudder_position = 0.0
         self.sail_position = 0.0
+        self.last_keyboard_activity = time.time()  # Mark keyboard activity
+        # Publish immediately when key is pressed
+        self.publish_control()
     
     def toggle_simulation_pause(self):
         """Toggle simulation pause state and publish."""
@@ -332,16 +345,23 @@ class KeyboardControlNode(Node):
             self.get_logger().warn("⚠️  Reset service call timed out")
     
     def publish_control(self):
-        """Publish current control commands to /rudder_sail_radio."""
+        """Publish current control commands to /rudder_sail_radio only when keyboard is active."""
         if not self.running:
             return
         
-        control_msg = Vector3()
-        control_msg.x = self.rudder_position  # Rudder: -1=left, +1=right
-        control_msg.y = self.sail_position    # Sail: -1=in, +1=out
-        control_msg.z = 0.0                   # Reserved
+        current_time = time.time()
+        time_since_activity = current_time - self.last_keyboard_activity
         
-        self.pub_rudder_sail_radio.publish(control_msg)
+        # Only publish if keyboard was active recently (within timeout period)
+        # This prevents continuous publishing from interfering with controller
+        if time_since_activity <= self.keyboard_timeout:
+            control_msg = Vector3()
+            control_msg.x = self.rudder_position  # Rudder: -1=left, +1=right
+            control_msg.y = self.sail_position    # Sail: -1=in, +1=out
+            control_msg.z = 0.0                   # Reserved
+            
+            self.pub_rudder_sail_radio.publish(control_msg)
+        # If timeout expired, don't publish (controller takes over)
     
     def create_control_bar(self, value, width=20, control="generic"):
         """Create ASCII bar visualization for control position."""

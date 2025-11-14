@@ -326,6 +326,11 @@ class ArgoUnifiedSimulatorBridge(Node):
         # This allows the controller to start publishing commands immediately
         # Human control will take over as soon as any human activity is detected
         self.human_controlled = False
+        
+        # Load human_override_timeout from argo.yaml (same as rudder_sail_radio_node uses)
+        self.human_override_timeout = self._load_human_override_timeout()
+        self.get_logger().info(f'Human override timeout: {self.human_override_timeout:.1f}s (from argo.yaml)')
+        
         self.control_arbitration_timer = self.create_timer(0.1, self.publish_control_arbitration)
         
         # Subscribe to autonomous commands (from controller.py)
@@ -353,7 +358,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         else:
             time_since_auto_update = float('inf')  # No auto commands received yet
         
-        human_override_timeout = 2.0  # seconds
+        # Use the configured timeout (loaded from argo.yaml)
+        human_override_timeout = self.human_override_timeout
         
         # Determine new control state
         old_human_controlled = self.human_controlled
@@ -378,6 +384,17 @@ class ArgoUnifiedSimulatorBridge(Node):
                 # Switch to robot control to allow controller to start publishing
                 # This breaks the chicken-and-egg problem
                 self.human_controlled = False
+        
+        # CRITICAL FIX: When switching to robot control, apply latest auto commands immediately
+        # This ensures smooth handover from human to robot control in simulation
+        if old_human_controlled and not self.human_controlled:
+            # Just switched to robot control - apply latest auto commands if available
+            if self.last_auto_update > 0.0 and hasattr(self, 'auto_rudder') and hasattr(self, 'auto_sail'):
+                self._apply_control_to_simulator(self.auto_rudder, self.auto_sail)
+                self.get_logger().info(
+                    f'🤖 Applied auto commands on switch to robot control: '
+                    f'rudder={self.auto_rudder:.3f}, sail={self.auto_sail:.3f}'
+                )
         
         # Debug logging when state changes or periodically
         if not hasattr(self, '_last_arbitration_log_time'):
@@ -436,6 +453,13 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Store autonomous commands for potential use
         self.auto_rudder = msg.x
         self.auto_sail = msg.y
+        
+        # CRITICAL FIX: In simulation mode, rudder_sail_radio.py is NOT running,
+        # so we must apply auto commands directly to the simulator when in robot control mode.
+        # On physical boat, rudder_sail_radio.py handles this via /rudder_sail_servo topic.
+        if not self.human_controlled:
+            # Apply commands directly to simulator (bypasses /rudder_sail_servo topic)
+            self._apply_control_to_simulator(self.auto_rudder, self.auto_sail)
         
         # Debug logging for auto commands
         if not hasattr(self, '_last_auto_log_time'):
@@ -1395,6 +1419,31 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.get_logger().warn(f"Failed to load wind_speed from argo.yaml: {e}, using default 1.0 m/s")
             return 1.0
     
+    def _load_human_override_timeout(self):
+        """Load human_override_timeout from argo.yaml configuration file.
+        
+        Returns:
+            float: Human override timeout in seconds, or 2.0 if not found (default)
+        """
+        try:
+            # Try to read directly from argo.yaml file
+            argo_yaml_path = "nodes/argo.yaml"
+            if os.path.exists(argo_yaml_path):
+                with open(argo_yaml_path, 'r') as f:
+                    import yaml
+                    config = yaml.safe_load(f)
+                    # Navigate through the YAML structure: rudder_sail_radio_node/ros__parameters/human_override_timeout
+                    timeout = config.get('rudder_sail_radio_node', {}).get('ros__parameters', {}).get('human_override_timeout', 2.0)
+                    if timeout is not None and timeout > 0:
+                        self.get_logger().info(f"Loaded human_override_timeout from {argo_yaml_path}: {timeout:.1f}s")
+                        return float(timeout)
+            
+            self.get_logger().warn(f"Human override timeout not found in argo.yaml, using default 2.0s")
+            return 2.0
+        except Exception as e:
+            self.get_logger().warn(f"Failed to load human_override_timeout from argo.yaml: {e}, using default 2.0s")
+            return 2.0
+    
     def _apply_wind_direction_to_simulator(self, wind_direction_deg):
         """Apply wind direction change to the simulator's environment.
         
@@ -1687,53 +1736,26 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.external_rudder = msg.x  # -1 to +1
         self.external_sail = msg.y    # -1 to +1
         
-        # Check for significant changes to update human activity (deadband threshold)
-        # Use same deadband logic as rudder_sail_radio.py to prevent noise from triggering activity
-        deadband_threshold = 0.1875  # Same as rudder_sail_radio.py default (5σ measured)
+        # CRITICAL FIX: For keyboard control, update activity on EVERY message
+        # Keyboard only publishes when keys are actively pressed (0.5s timeout),
+        # so any message from keyboard indicates active human control.
+        # For other inputs (joystick), we still use deadband to prevent noise.
+        # Since keyboard control now has its own timeout, we can safely update on every message.
+        old_activity_time = self.last_human_activity
+        self.last_human_activity = current_time
+        self.human_controlled = True
         
-        # Initialize previous values if not set
+        # Log first message or when activity resumes after timeout
+        if old_activity_time == 0.0 or (current_time - old_activity_time) > self.human_override_timeout:
+            self.get_logger().info(
+                f'📡 External control active: rudder={self.external_rudder:.3f}, sail={self.external_sail:.3f} | '
+                f'Setting last_human_activity (was {old_activity_time:.2f}, now {self.last_human_activity:.2f})'
+            )
+        
+        # Initialize previous values for display/debugging (not used for activity detection anymore)
         if not hasattr(self, 'prev_external_rudder'):
             self.prev_external_rudder = self.external_rudder
             self.prev_external_sail = self.external_sail
-            # First message counts as activity (user just started controlling)
-            old_activity_time = self.last_human_activity
-            self.last_human_activity = current_time
-            self.human_controlled = True
-            self.get_logger().info(
-                f'📡 First external control message received: rudder={self.external_rudder:.3f}, sail={self.external_sail:.3f} | '
-                f'Setting last_human_activity (was {old_activity_time:.2f}, now {self.last_human_activity:.2f})'
-            )
-        else:
-            # Calculate change from previous values
-            rudder_change = abs(self.external_rudder - self.prev_external_rudder)
-            sail_change = abs(self.external_sail - self.prev_external_sail)
-            
-            # Only update human activity if there's significant change (above deadband threshold)
-            # This prevents continuous publishing from keyboard control from keeping human control active
-            if rudder_change > deadband_threshold or sail_change > deadband_threshold:
-                old_activity_time = self.last_human_activity
-                self.last_human_activity = current_time
-                self.human_controlled = True
-                self.get_logger().info(
-                    f'📡 Human activity detected: rudder_change={rudder_change:.3f}, sail_change={sail_change:.3f}, '
-                    f'threshold={deadband_threshold:.3f} | '
-                    f'Updating last_human_activity (was {old_activity_time:.2f}, now {self.last_human_activity:.2f})'
-                )
-            else:
-                # No significant change - don't update activity timestamp
-                time_since_last_activity = current_time - self.last_human_activity
-                if not hasattr(self, '_last_no_activity_log_time'):
-                    self._last_no_activity_log_time = 0.0
-                
-                # Log occasionally when no activity detected (every 2 seconds max)
-                if (current_time - self._last_no_activity_log_time) > 2.0:
-                    self.get_logger().debug(
-                        f'📡 No significant change: rudder_change={rudder_change:.3f}, sail_change={sail_change:.3f}, '
-                        f'threshold={deadband_threshold:.3f} | '
-                        f'NOT updating last_human_activity (still {self.last_human_activity:.2f}, '
-                        f'{time_since_last_activity:.2f}s ago)'
-                    )
-                    self._last_no_activity_log_time = current_time
         
         # Store for next comparison
         self.prev_external_rudder = self.external_rudder

@@ -440,6 +440,22 @@ def run_simulation_test(duration_sec=60.0):
     last_print = -1
     try:
         while time.time() - start_time < duration_sec:
+            # Check if nodes are still running
+            if sim_proc.poll() is not None:
+                # Simulator process exited
+                stdout, stderr = sim_proc.communicate()
+                print(f"\n❌ FATAL ERROR: Simulator node crashed with exit code {sim_proc.returncode}")
+                if stderr:
+                    print(f"   Error output:\n{stderr.decode('utf-8', errors='ignore')}")
+                break
+            if ctrl_proc.poll() is not None:
+                # Controller process exited
+                stdout, stderr = ctrl_proc.communicate()
+                print(f"\n❌ FATAL ERROR: Controller node crashed with exit code {ctrl_proc.returncode}")
+                if stderr:
+                    print(f"   Error output:\n{stderr.decode('utf-8', errors='ignore')}")
+                break
+            
             try:
                 executor.spin_once(timeout_sec=0.1)
             except ExternalShutdownException:

@@ -7,7 +7,6 @@
   ros__parameters:
     argo:
       mode: autonomous
-      rudder_gain: 2
     # Simulation parameters (shared across simulator bridge, transform publisher, and visualization)
     # These are accessible to all nodes via the simulation.* namespace
     simulation:
@@ -33,12 +32,12 @@ controller_node:
   ros__parameters:
     controller_type: "patrol"  # Options: "proportional", "wind_aware", "return_to_home", "patrol"
     data_collection_enabled: false
-    rudder_gain: 2.0
+    rudder_gain: 0.3
     rudder_full_scale_deg: 60.0
     param_file_path: "argo.yaml"
     # Patrol controller parameters (used when controller_type: "patrol")
-    patrol_lookahead_time: 15.0      # Seconds to predict ahead for boundary crossing
-    boundary_turn_threshold: 15.0     # Distance to boundary to trigger turn (meters)
+    patrol_lookahead_time: 10.0      # Seconds to predict ahead for boundary crossing
+    boundary_turn_threshold: 5.0     # Distance to boundary to trigger turn (meters)
     tack_angle: 90.0                  # Degrees to turn during tack maneuver
     broad_reach_angle: 110.0          # Preferred angle to wind for patrol (degrees)
     geofence_map_name: "Argo Irchel pond sailing area"  # GeoJSON map name (without .geojson extension)
