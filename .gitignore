@@ -141,3 +141,4 @@ power_control/sys_heartbeat/argo-ph4-led-overlay-overlay.dts.preprocessed
 scripts/nohup.out
 a.out
 pcb/datasheets/Molex SL connectors I2C 987651-0406.pdf
+patrol_test_result.png
