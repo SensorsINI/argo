@@ -407,6 +407,22 @@ class RudderSailRadioNode(ArgoBaseNode):
         self.radio_rudder = 0.0
         self.radio_sail = 0.0
         self.last_radio_update = 0.0
+        
+        # Check if hardware radio is available (physical boat) or we're in simulation
+        # If hardware radio files are accessible, we're on physical boat - external control disabled for safety
+        self.hardware_radio_available = self._check_hardware_radio_available()
+        if self.hardware_radio_available:
+            self.get_logger().info("Hardware radio detected - external (keyboard) control DISABLED for safety")
+        else:
+            self.get_logger().info("No hardware radio detected - external (keyboard) control ENABLED for simulation")
+        
+        # External control input (from keyboard control or other sources via /rudder_sail_radio topic)
+        # ONLY used in simulation mode (when hardware_radio_available is False)
+        self.external_rudder = None  # None = no external input, otherwise use this value
+        self.external_sail = None
+        self.last_external_update = 0.0
+        self.prev_external_rudder = 0.0
+        self.prev_external_sail = 0.0
 
         # Autonomous control input (from controller.py)
         self.auto_rudder = 0.0
@@ -495,6 +511,12 @@ class RudderSailRadioNode(ArgoBaseNode):
         # From controller.py (autonomous commands)
         self.create_subscription(
             Vector3, '/rudder_sail_cmd', self.auto_control_callback, 10)
+        
+        # From keyboard control or other external sources (treated as human input)
+        # Note: This node also publishes to this topic, so we need to distinguish
+        # between our own messages and external ones in the callback
+        self.create_subscription(
+            Vector3, '/rudder_sail_radio', self.external_control_callback, 10)
 
         # --- Timers ---
         self.control_loop_period = DEFAULT_CONTROL_LOOP_PERIOD  # 20 Hz for responsive control
@@ -545,6 +567,22 @@ class RudderSailRadioNode(ArgoBaseNode):
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
         atexit.register(self._ensure_safe_exit)
+    
+    def _check_hardware_radio_available(self):
+        """Check if hardware radio is available by testing if sysfs files are readable.
+        
+        Returns:
+            bool: True if hardware radio is available (physical boat), False if simulation mode
+        """
+        try:
+            # Try to read from radio sysfs files - if they exist and are readable, we have hardware
+            test_rudder = self.read_sysfs_pw(RADIO_RUDDER_PATH)
+            test_sail = self.read_sysfs_pw(RADIO_SAIL_PATH)
+            # If we can read both files, hardware radio is available
+            return True
+        except (IOError, FileNotFoundError, ValueError):
+            # Can't read hardware radio files - we're in simulation mode
+            return False
 
     def read_sysfs_pw(self, path: Path) -> float:
         """Reads a pulse width from a sysfs file using optimized file I/O."""
@@ -735,6 +773,63 @@ class RudderSailRadioNode(ArgoBaseNode):
 
         return True
 
+    def external_control_callback(self, msg):
+        """Receive external control commands (keyboard control, etc.) via /rudder_sail_radio topic.
+        
+        SAFETY: External control is ONLY enabled in simulation mode (when hardware radio is NOT available).
+        On physical boat, hardware radio control is ALWAYS used and external control is IGNORED.
+        
+        In simulation mode, ANY change in external control triggers human control with timeout.
+        """
+        # CRITICAL SAFETY: Ignore external control if hardware radio is available (physical boat)
+        if self.hardware_radio_available:
+            # On physical boat, external control is disabled for safety
+            # Hardware radio control always takes priority
+            return
+        
+        # Simulation mode: Process external control
+        external_rudder = msg.x
+        external_sail = msg.y
+        
+        # Detect ANY change in external input (for human activity detection)
+        external_rudder_change = abs(external_rudder - self.prev_external_rudder)
+        external_sail_change = abs(external_sail - self.prev_external_sail)
+        
+        # ANY change in external control triggers human control (no deadband threshold for external)
+        # This ensures keyboard control always works in simulation
+        has_change = (external_rudder_change > 0.001 or external_sail_change > 0.001)
+        
+        if has_change:
+            # Update external control values
+            self.external_rudder = external_rudder
+            self.external_sail = external_sail
+            self.last_external_update = time.time()
+            
+            # Override radio inputs with external control
+            self.radio_rudder = external_rudder
+            self.radio_sail = external_sail
+            
+            # ANY change triggers human activity (no deadband threshold for keyboard control)
+            self.last_human_activity = time.time()
+            self._last_activity_time = time.time()
+            
+            if external_rudder_change > 0.001 or external_sail_change > 0.001:
+                self.get_logger().info(
+                    f"External control activity detected (rudder: {external_rudder:.3f} change: {external_rudder_change:.3f}, "
+                    f"sail: {external_sail:.3f} change: {external_sail_change:.3f})"
+                )
+            
+            # Update previous values for change detection
+            self.prev_external_rudder = external_rudder
+            self.prev_external_sail = external_sail
+        else:
+            # No change, but keep external control active if it was recently updated
+            if (self.external_rudder is not None and 
+                self.external_sail is not None and
+                (time.time() - self.last_external_update) < 0.5):
+                # Keep using external control (already set)
+                pass
+
     def auto_control_callback(self, msg):
         """Receive autonomous control commands from controller.py."""
         # Always process autonomous commands, even when paused (for safety)
@@ -904,9 +999,34 @@ class RudderSailRadioNode(ArgoBaseNode):
         # Adjust timer frequencies based on activity (reduces executor overhead when idle)
         self._adjust_timer_frequencies(current_time)
 
-        # 1. Read radio inputs from hardware
-        if not self.read_radio_inputs():
-            return  # Skip this cycle if radio inputs are invalid
+        # 1. Check for external control (keyboard, etc.) - ONLY in simulation mode
+        # SAFETY: On physical boat (hardware_radio_available=True), external control is IGNORED
+        use_external = (not self.hardware_radio_available and
+                       self.external_rudder is not None and 
+                       self.external_sail is not None and
+                       (current_time - self.last_external_update) < 0.5)  # External input valid for 0.5 seconds
+        
+        if use_external:
+            # Simulation mode: Use external control values (already set in external_control_callback)
+            # Don't read hardware radio inputs when external control is active
+            pass
+        else:
+            # Physical boat mode OR no external control active: read from hardware
+            # Clear external control flag (will be set again if external control callback fires)
+            if not self.hardware_radio_available:
+                # Only clear in simulation mode (in physical mode, external is always None)
+                self.external_rudder = None
+                self.external_sail = None
+            
+            # Read radio inputs from hardware (always read, even if we use external in simulation)
+            # This ensures hardware radio always works independently
+            if not self.read_radio_inputs():
+                # If hardware read fails and we're in simulation, check if external control is available
+                if not self.hardware_radio_available and use_external:
+                    # Use external control as fallback in simulation
+                    pass
+                else:
+                    return  # Skip this cycle if radio inputs are invalid and no external control
 
         # 2. Publish normalized radio inputs (only on significant change or timeout)
         radio_changed = (

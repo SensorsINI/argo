@@ -949,6 +949,21 @@ class PatrolController(BaseController):
             cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
             cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
             
+            # Log control calculations periodically for diagnostics (every 2 seconds)
+            if not hasattr(self, '_last_control_log_time'):
+                self._last_control_log_time = 0.0
+            current_time = time.time()
+            if current_time - self._last_control_log_time > 2.0:
+                if self.logger:
+                    self.logger.info(
+                        f"Patrol control: mode={self.patrol_mode}, "
+                        f"current={state.compass_heading:.1f}°, target={target_heading:.1f}°, "
+                        f"error={compass_err:.1f}°, rudder_cmd={cmd_rudder:.3f}, "
+                        f"wind_angle={state.wind_angle if state.wind_angle is not None else 'N/A'}, "
+                        f"distance_to_boundary={state.distance_to_boundary if state.distance_to_boundary is not None else 'N/A'}"
+                    )
+                self._last_control_log_time = current_time
+            
             # Log when in tacking mode to debug control application
             if self.patrol_mode == 'tacking' and self.logger:
                 self.logger.debug(
@@ -1658,10 +1673,24 @@ class ControllerNode(ArgoBaseNode):
 
         else:
             # Autonomous control mode
+            # For patrol controller, it sets target_heading internally, so allow it to run even if None initially
+            # For other controllers, target_heading must be set (from human control handoff)
             if self.boat_state.target_heading is None:
-                self.get_logger().warn("Robot control active, but no target heading. Waiting for human to set a course.",
-                                       throttle_duration_sec=5)
-                return
+                if isinstance(self.controller, PatrolController):
+                    # Patrol controller will set target_heading in generate_control()
+                    # Initialize to current heading as fallback
+                    if self.boat_state.compass_heading is not None:
+                        self.boat_state.target_heading = self.boat_state.compass_heading
+                        self.get_logger().info(f"Patrol controller: Initializing target_heading to current heading {self.boat_state.target_heading:.1f}°")
+                    else:
+                        self.get_logger().warn("Patrol controller: No compass heading available yet, waiting...",
+                                               throttle_duration_sec=5)
+                        return
+                else:
+                    # Other controllers need target_heading from human control handoff
+                    self.get_logger().warn("Robot control active, but no target heading. Waiting for human to set a course.",
+                                           throttle_duration_sec=5)
+                    return
 
             if self.controller is None:
                 self.get_logger().error("No controller initialized!", throttle_duration_sec=5)

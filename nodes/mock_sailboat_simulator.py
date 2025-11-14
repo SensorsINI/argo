@@ -37,11 +37,17 @@ class MockSimulatorState:
 class MockSailboatSimulator:
     """Mock simulator for testing when sailboat-playground is not available."""
 
-    def __init__(self):
+    def __init__(self, dt=0.1):
+        """Initialize mock simulator.
+        
+        Args:
+            dt: Time step in seconds per integration step (default: 0.1 = 10 Hz)
+                Should match the simulation rate from the bridge (1.0 / simulation_rate)
+        """
         self.state = MockSimulatorState()
 
         # Physics parameters
-        self.dt = 0.1  # seconds per integration step
+        self.dt = float(dt)  # seconds per integration step
         self.max_turn_rate = 30.0  # degrees per second at full rudder and speed
         self.max_speed = 1.5  # metres / second (approximate hull speed)
         self.no_go_angle_deg = 40.0  # approximate close-hauled limit

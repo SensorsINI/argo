@@ -11,9 +11,22 @@
     # Simulation parameters (shared across simulator bridge, transform publisher, and visualization)
     # These are accessible to all nodes via the simulation.* namespace
     simulation:
-      publish_rate: 5.0         # Standard publishing rate for sensors, transforms, and visualization (Hz) - 2Hz sufficient for visualization
+      publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz) - 2Hz sufficient for visualization
       simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics simulation
       heading_trail_limit: 20   # Number of historical heading markers to display in visualization
+      # Wind characteristics (runtime configurable via ROS2 parameters)
+      wind:
+        wind_min_speed: 7.0       # Minimum wind speed in m/s (used for mock simulator, placeholder for real simulator)
+        wind_max_speed: 7.0       # Maximum wind speed in m/s (placeholder for real simulator variable wind)
+        wind_direction: 0.0       # Wind direction in degrees (compass convention, 0°=North, where wind comes FROM)
+        # Placeholder parameters for future wind variability features:
+        wind_max_delta_percent: 0.0        # Maximum wind speed variation percentage (placeholder)
+        wind_gust_probability: 0.0         # Probability of wind gusts (0.0-1.0, placeholder)
+        wind_gust_min_duration: 3.0        # Minimum gust duration in seconds (placeholder)
+        wind_gust_max_duration: 20.0       # Maximum gust duration in seconds (placeholder)
+        wind_gust_min_speed: 4.0           # Minimum gust speed in m/s (placeholder)
+        wind_gust_max_speed: 7.0           # Maximum gust speed in m/s (placeholder)
+        wind_gust_max_delta_percent: 10.0  # Maximum gust speed variation percentage (placeholder)
 
 # High-level controller (controller.py)
 controller_node:

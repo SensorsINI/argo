@@ -52,7 +52,7 @@ class KeyboardControlNode(Node):
         # Publisher for control commands
         self.pub_rudder_sail_radio = self.create_publisher(Vector3, '/rudder_sail_radio', 10)
         self.pub_simulation_paused = self.create_publisher(Bool, '/simulation_paused', 10)
-        self.wind_param_name = 'simulation.wind_direction'
+        self.wind_param_name = 'simulation.wind.wind_direction'
         self.wind_param_target = '/argo_unified_simulator_bridge'
         self.wind_get_client = self.create_client(GetParameters, f'{self.wind_param_target}/get_parameters')
         self.wind_set_client = self.create_client(SetParameters, f'{self.wind_param_target}/set_parameters')
@@ -402,7 +402,7 @@ class KeyboardControlNode(Node):
             self.stdscr.addstr(6, 2, status_line)
             
             wind_value = self.wind_direction_deg if self.wind_direction_deg is not None else float('nan')
-            wind_line = f"Wind Dir: {wind_value:.1f}°"
+            wind_line = f"Wind Dir: {wind_value:.1f}° (absolute, compass, from)"
             if len(wind_line) > width - 4:
                 wind_line = wind_line[:width - 7] + "..."
             self.stdscr.addstr(7, 2, wind_line)

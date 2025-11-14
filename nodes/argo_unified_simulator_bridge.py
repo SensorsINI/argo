@@ -143,16 +143,30 @@ class ArgoUnifiedSimulatorBridge(Node):
         if map_name:
             self._load_map_home_location(map_name)
         
-        # --- Load initial wind_direction from playground.json before simulator creation ---
-        # This allows us to use it as the default parameter value
+        # --- Load initial wind parameters from argo.yaml before simulator creation ---
+        # This allows us to use them as default parameter values
         initial_wind_direction = self._load_initial_wind_direction()
+        initial_wind_speed = self._load_initial_wind_speed()
         
-        # --- Declare wind_direction parameter (can be changed dynamically via Foxglove) ---
-        # Declare it early so it's available throughout initialization
-        self.declare_parameter('simulation.wind_direction', float(initial_wind_direction))
-        self.wind_direction = self.get_parameter('simulation.wind_direction').get_parameter_value().double_value
+        # --- Declare wind parameters (can be changed dynamically via Foxglove/ros2 param) ---
+        # Declare them early so they're available throughout initialization
+        self.declare_parameter('simulation.wind.wind_direction', float(initial_wind_direction))
+        self.wind_direction = self.get_parameter('simulation.wind.wind_direction').get_parameter_value().double_value
         # Normalize to 0-360 range
         self.wind_direction = self.wind_direction % 360.0
+        
+        self.declare_parameter('simulation.wind.wind_min_speed', float(initial_wind_speed))
+        self.wind_speed = self.get_parameter('simulation.wind.wind_min_speed').get_parameter_value().double_value
+        # Ensure wind speed is positive
+        if self.wind_speed < 0:
+            self.wind_speed = 0.0
+        
+        # --- Simulation Parameters (declare early so available during simulator creation) ---
+        # Read simulation rate from shared simulation parameters (argo.yaml)
+        self.declare_parameter('simulation.simulation_rate', 10.0)
+        self.simulation_rate = self.get_parameter('simulation.simulation_rate').get_parameter_value().double_value
+        if self.simulation_rate <= 0:
+            self.simulation_rate = 10.0
         
         # Initialize simulator based on mode
         if mode == 'local':
@@ -163,7 +177,9 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Common state
         self.last_control_time = time.time()
         self.simulation_running = True
-        self.human_controlled = True  # Start in human control
+        # Note: human_controlled will be set by control arbitration timer (starts False for robot control)
+        # This allows autonomous controller to take control immediately in simulation
+        self.human_controlled = False  # Start in robot control for autonomous testing
         self.mock_human_input = False  # Disable mock input - use real control
         self.human_input_time = 0.0
         
@@ -277,15 +293,12 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.initial_boat_state = None
         self.initial_boat_heading = 0.0  # Will be set when initial state is calculated
         
-        # --- Simulation Parameters ---
-        # Read simulation rate from shared simulation parameters (argo.yaml)
-        self.declare_parameter('simulation.simulation_rate', 10.0)
-        self.simulation_rate = self.get_parameter('simulation.simulation_rate').get_parameter_value().double_value
-        if self.simulation_rate <= 0:
-            self.simulation_rate = 10.0
-        
+        # Log simulation parameters (already declared and set earlier)
         self.get_logger().info(f"Simulation rate: {self.simulation_rate:.1f} Hz")
-        self.get_logger().info(f"Initial wind direction: {self.wind_direction:.1f}° (loaded from playground.json, can be changed via parameter)")
+        self.get_logger().info(
+            f"Initial wind parameters: direction={self.wind_direction:.1f}° (compass), "
+            f"speed={self.wind_speed:.1f} m/s (loaded from argo.yaml, can be changed via parameters)"
+        )
         
         # Add parameter callback to handle runtime parameter changes (e.g., from Foxglove)
         self.add_on_set_parameters_callback(self._on_parameter_change)
@@ -513,15 +526,32 @@ class ArgoUnifiedSimulatorBridge(Node):
                 # Fall through to mock simulator creation
         
         # Create mock simulator
-        self.get_logger().info('Creating mock simulator...')
-        simulator = MockSailboatSimulator()
+        # Calculate dt from simulation_rate to ensure physics matches timer frequency
+        dt = 1.0 / self.simulation_rate
+        self.get_logger().info(f'Creating mock simulator with dt={dt:.3f}s (simulation_rate={self.simulation_rate:.1f} Hz)...')
+        simulator = MockSailboatSimulator(dt=dt)
         # Mock simulator initializes at (0, 0) with heading 0, so we need to set it
         if hasattr(simulator, 'boat_x'):
             simulator.boat_x = 0.0
             simulator.boat_y = 0.0
             simulator.boat_heading = boat_heading
             simulator.boat_speed = 0.0
-        self.get_logger().info(f'Mock simulator created: position=(0.0, 0.0), heading={boat_heading:.1f}°')
+        # Apply wind speed and direction from parameters
+        if hasattr(self, 'wind_speed'):
+            simulator.wind_speed = float(self.wind_speed)
+        if hasattr(self, 'wind_direction'):
+            # Convert wind_direction from compass convention to simulator convention
+            # Compass: 0°=North (wind coming from), Simulator: 0°=East (wind going to)
+            # Step 1: Convert coordinate system: compass to simulator
+            wind_dir_sim_temp = (90.0 - self.wind_direction) % 360.0
+            # Step 2: Convert convention: "coming from" to "going to" (add 180°)
+            wind_dir_sim = (wind_dir_sim_temp + 180.0) % 360.0
+            simulator.wind_direction = float(wind_dir_sim)
+        self.get_logger().info(
+            f'Mock simulator created: position=(0.0, 0.0), heading={boat_heading:.1f}°, '
+            f'wind_speed={getattr(simulator, "wind_speed", "N/A")} m/s, '
+            f'wind_direction={getattr(simulator, "wind_direction", "N/A")}° (simulator), dt={dt:.3f}s'
+        )
         
         return simulator, True
     
@@ -554,10 +584,12 @@ class ArgoUnifiedSimulatorBridge(Node):
             if self.debug_position_trace:
                 self.get_logger().info(f"[POS_TRACE:INIT] sim_manager set - sim_mgr_id={id(self.sim_manager)}")
         
-        # Apply initial wind_direction parameter to simulator (after creation)
-        # This ensures the parameter value (which may have been loaded from playground.json) is applied
+        # Apply initial wind parameters to simulator (after creation)
+        # This ensures the parameter values (which may have been loaded from argo.yaml) are applied
         if hasattr(self, 'wind_direction'):
             self._apply_wind_direction_to_simulator(self.wind_direction)
+        if hasattr(self, 'wind_speed'):
+            self._apply_wind_speed_to_simulator(self.wind_speed)
     
     def _init_remote_simulator(self):
         """Initialize remote simulator connection."""
@@ -604,6 +636,20 @@ class ArgoUnifiedSimulatorBridge(Node):
                     current_rudder = self.last_rudder_angle / 30.0  # Convert back from degrees
                     current_sail = self.last_sail_angle / 45.0     # Convert back from degrees
                     control_source = "robot_servo"
+            
+            # Log control source periodically for diagnostics (every 2 seconds)
+            if not hasattr(self, '_last_control_log_time'):
+                self._last_control_log_time = 0.0
+            current_time = time.time()
+            if current_time - self._last_control_log_time > 2.0:
+                self.get_logger().info(
+                    f"Control: source={control_source}, human_controlled={self.human_controlled}, "
+                    f"rudder={current_rudder:.3f}, sail={current_sail:.3f}, "
+                    f"auto_rudder={getattr(self, 'auto_rudder', 'N/A')}, "
+                    f"auto_sail={getattr(self, 'auto_sail', 'N/A')}, "
+                    f"last_auto_update={getattr(self, 'last_auto_update', 0.0):.2f}"
+                )
+                self._last_control_log_time = current_time
             
             if self.debug_position_trace:
                 self.get_logger().info(f"[POS_TRACE:{trace_id}] Control: source={control_source}, rudder={current_rudder:.3f}, sail={current_sail:.3f}")
@@ -786,9 +832,23 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.pub_gps_velocity.publish(gps_vel_msg)
         
         # Wind data (speed, angle relative to boat, temperature)
+        # Calculate relative wind angle from absolute wind direction and boat heading
+        # wind_direction is absolute (direction wind is blowing toward, 0° = East in simulator convention)
+        # We need relative wind angle (degrees CW from front of boat)
+        heading_compass = self.boat_state.get('heading', 0.0)
+        # Convert heading from compass (0°=North) to simulator convention (0°=East)
+        heading_sim = (90.0 - heading_compass) % 360.0
+        # Calculate wind direction coming FROM (add 180°)
+        wind_from_direction = (self.boat_state['wind_direction'] + 180.0) % 360.0
+        # Calculate relative wind angle (wind from direction - boat heading)
+        wind_relative_angle = (wind_from_direction - heading_sim) % 360.0
+        # Normalize to -180 to +180 range (CW from front of boat)
+        if wind_relative_angle > 180.0:
+            wind_relative_angle -= 360.0
+        
         wind_msg = Vector3(
             x=self.boat_state['wind_speed'],     # m/s
-            y=self.boat_state['wind_direction'], # degrees relative to boat
+            y=wind_relative_angle,                # degrees relative to boat (CW from front)
             z=22.5                               # temperature (mock)
         )
         self.pub_wind.publish(wind_msg)
@@ -1264,44 +1324,76 @@ class ArgoUnifiedSimulatorBridge(Node):
             return response
     
     def _load_initial_wind_direction(self):
-        """Load initial wind_direction from playground.json configuration file.
+        """Load initial wind_direction from argo.yaml configuration file.
         
         Returns:
             float: Initial wind direction in degrees (0-360) in COMPASS convention (0° = North), or 0.0 if not found
             This represents where the wind is COMING FROM (nautical convention).
-            
-        Note:
-            The playground.json file uses simulator convention (0° = East, 90° = North) and represents
-            wind direction as where the wind is GOING TO (opposite of nautical convention).
-            
-            Conversion requires two steps:
-            1. Convention: "going to" to "coming from": subtract 180°
-            2. Coordinate system: simulator (0°=E) to compass (0°=N): (90 - simulator) % 360
-            
-            Combined: compass = (90 - simulator + 180) % 360 = (270 - simulator) % 360
         """
         try:
-            env_config = "simulator/customizations/sailboat-playground/environments/playground.json"
-            if os.path.exists(env_config):
-                with open(env_config, 'r') as f:
-                    config = json.load(f)
-                    wind_dir_simulator = config.get('wind_direction', 0.0)
-                    # Convert from simulator convention (where wind goes to) to compass convention (where wind comes from)
-                    # Step 1: Convert convention: "going to" to "coming from" (subtract 180°)
-                    wind_dir_compass_temp = (wind_dir_simulator - 180.0) % 360.0
-                    # Step 2: Convert coordinate system: simulator to compass
-                    wind_dir_compass = (90.0 - wind_dir_compass_temp) % 360.0
-                    self.get_logger().info(
-                        f"Loaded initial wind_direction from {env_config}: "
-                        f"{wind_dir_simulator:.1f}° (simulator) = {wind_dir_compass:.1f}° (compass)"
-                    )
-                    return float(wind_dir_compass)
-            else:
-                self.get_logger().warn(f"Environment config file not found: {env_config}, using default wind_direction=0.0°")
-                return 0.0
-        except Exception as e:
-            self.get_logger().warn(f"Failed to load wind_direction from playground.json: {e}, using default 0.0°")
+            # Try to read from ROS2 parameter (from argo.yaml)
+            # Use a temporary node context to read the parameter before it's declared
+            # If parameter file is loaded, it should be available
+            try:
+                # Try to get parameter value (may not be available yet, so use default)
+                param_value = self.get_parameter('simulation.wind.wind_direction').get_parameter_value().double_value
+                if param_value is not None and param_value != 0.0:
+                    self.get_logger().info(f"Loaded initial wind_direction from argo.yaml: {param_value:.1f}° (compass)")
+                    return float(param_value)
+            except:
+                pass
+            
+            # Fallback: try to read directly from argo.yaml file
+            argo_yaml_path = "nodes/argo.yaml"
+            if os.path.exists(argo_yaml_path):
+                with open(argo_yaml_path, 'r') as f:
+                    import yaml
+                    config = yaml.safe_load(f)
+                    # Navigate through the YAML structure: /**/ros__parameters/simulation/wind/wind_direction
+                    wind_dir = config.get('/**', {}).get('ros__parameters', {}).get('simulation', {}).get('wind', {}).get('wind_direction', 0.0)
+                    if wind_dir is not None:
+                        self.get_logger().info(f"Loaded initial wind_direction from {argo_yaml_path}: {wind_dir:.1f}° (compass)")
+                        return float(wind_dir)
+            
+            self.get_logger().warn(f"Wind direction not found in argo.yaml, using default 0.0°")
             return 0.0
+        except Exception as e:
+            self.get_logger().warn(f"Failed to load wind_direction from argo.yaml: {e}, using default 0.0°")
+            return 0.0
+    
+    def _load_initial_wind_speed(self):
+        """Load initial wind_min_speed from argo.yaml configuration file.
+        
+        Returns:
+            float: Initial wind speed in m/s, or 1.0 if not found (default for mock simulator)
+        """
+        try:
+            # Try to read from ROS2 parameter (from argo.yaml)
+            try:
+                param_value = self.get_parameter('simulation.wind.wind_min_speed').get_parameter_value().double_value
+                if param_value is not None and param_value > 0:
+                    self.get_logger().info(f"Loaded initial wind_speed from argo.yaml: {param_value:.1f} m/s")
+                    return float(param_value)
+            except:
+                pass
+            
+            # Fallback: try to read directly from argo.yaml file
+            argo_yaml_path = "nodes/argo.yaml"
+            if os.path.exists(argo_yaml_path):
+                with open(argo_yaml_path, 'r') as f:
+                    import yaml
+                    config = yaml.safe_load(f)
+                    # Navigate through the YAML structure: /**/ros__parameters/simulation/wind/wind_min_speed
+                    wind_speed = config.get('/**', {}).get('ros__parameters', {}).get('simulation', {}).get('wind', {}).get('wind_min_speed', 1.0)
+                    if wind_speed is not None and wind_speed > 0:
+                        self.get_logger().info(f"Loaded initial wind_speed from {argo_yaml_path}: {wind_speed:.1f} m/s")
+                        return float(wind_speed)
+            
+            self.get_logger().warn(f"Wind speed not found in argo.yaml, using default 1.0 m/s")
+            return 1.0
+        except Exception as e:
+            self.get_logger().warn(f"Failed to load wind_speed from argo.yaml: {e}, using default 1.0 m/s")
+            return 1.0
     
     def _apply_wind_direction_to_simulator(self, wind_direction_deg):
         """Apply wind direction change to the simulator's environment.
@@ -1368,6 +1460,43 @@ class ArgoUnifiedSimulatorBridge(Node):
                     f"(compass, {simulator_wind_direction:.1f}° simulator)"
                 )
     
+    def _apply_wind_speed_to_simulator(self, wind_speed_ms):
+        """Apply wind speed change to the simulator's environment.
+        
+        Args:
+            wind_speed_ms: Wind speed in m/s (must be >= 0)
+        """
+        # Ensure wind speed is non-negative
+        wind_speed_ms = max(0.0, float(wind_speed_ms))
+        
+        if self.mode == 'local' and not self.use_mock:
+            # Update real simulator's environment config
+            if hasattr(self, 'sim_manager') and self.sim_manager is not None:
+                try:
+                    if hasattr(self.sim_manager, 'environment') and self.sim_manager.environment is not None:
+                        env = self.sim_manager.environment
+                        if hasattr(env, '_config'):
+                            old_wind_speed = env._config.get('wind_min_speed', 0.0)
+                            env._config['wind_min_speed'] = wind_speed_ms
+                            env._config['wind_max_speed'] = wind_speed_ms  # For now, set both to same value
+                            self.get_logger().info(
+                                f"Wind speed changed from {old_wind_speed:.1f} m/s to {wind_speed_ms:.1f} m/s "
+                                f"in real simulator environment"
+                            )
+                        else:
+                            self.get_logger().warn("Simulator environment does not have _config attribute")
+                    else:
+                        self.get_logger().warn("Simulator manager does not have environment attribute")
+                except Exception as e:
+                    self.get_logger().error(f"Failed to update wind speed in simulator: {e}")
+        elif self.mode == 'local' and self.use_mock:
+            # Update mock simulator's wind speed
+            if hasattr(self, 'simulator') and self.simulator is not None:
+                self.simulator.wind_speed = wind_speed_ms
+                self.get_logger().info(
+                    f"Mock simulator wind speed changed to {wind_speed_ms:.1f} m/s"
+                )
+    
     def _on_parameter_change(self, parameters):
         """Handle runtime parameter changes (called when parameters are set via ros2 param set or Foxglove)"""
         from rcl_interfaces.msg import SetParametersResult
@@ -1392,7 +1521,7 @@ class ArgoUnifiedSimulatorBridge(Node):
                 else:
                     result.successful = False
                     result.reason = f"Invalid simulation_rate: {new_rate} (must be > 0)"
-            elif param.name == 'simulation.wind_direction':
+            elif param.name == 'simulation.wind.wind_direction':
                 old_wind_dir = self.wind_direction
                 new_wind_dir = param.get_parameter_value().double_value
                 # Normalize to 0-360 range
@@ -1406,6 +1535,21 @@ class ArgoUnifiedSimulatorBridge(Node):
                     f"Wind direction parameter changed from {old_wind_dir:.1f}° to {new_wind_dir:.1f}° "
                     f"(change via ros2 param set or Foxglove)"
                 )
+            elif param.name == 'simulation.wind.wind_min_speed':
+                old_wind_speed = self.wind_speed
+                new_wind_speed = param.get_parameter_value().double_value
+                if new_wind_speed < 0:
+                    result.successful = False
+                    result.reason = f"Invalid wind_min_speed: {new_wind_speed} (must be >= 0)"
+                else:
+                    self.wind_speed = new_wind_speed
+                    # Apply the change to the simulator
+                    self._apply_wind_speed_to_simulator(new_wind_speed)
+                    
+                    self.get_logger().info(
+                        f"Wind speed parameter changed from {old_wind_speed:.1f} m/s to {new_wind_speed:.1f} m/s "
+                        f"(change via ros2 param set or Foxglove)"
+                    )
             else:
                 # Allow other parameters (don't fail on unknown parameters)
                 pass
