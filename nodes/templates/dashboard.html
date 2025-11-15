@@ -910,9 +910,9 @@
                                     btn.disabled = false;
                                     btn.textContent = originalText;
                                     updateStatus();
-                                }
-                            })
-                            .catch(error => {
+                    }
+                })
+                .catch(error => {
                                 console.error('Error polling progress:', error);
                             });
                     }, 500); // Poll every 500ms

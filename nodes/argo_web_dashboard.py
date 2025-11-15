@@ -1533,12 +1533,12 @@ class ArgoWebDashboard(ArgoBaseNode):
                                 self.state['battery_time_to_full'] = time_to_full
                                 self.state['battery_time_to_empty'] = None
                                 if time_to_full is not None:
-                                    self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
+                                self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
                             elif charging_status is False:
                                 # Discharging: use TTE, clear TTF
                                 self.state['battery_time_to_full'] = None
                                 self.state['battery_time_to_empty'] = time_to_empty
-                                if time_to_empty is not None:
+                            if time_to_empty is not None:
                                     self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
                             else:
                                 # Unknown charging status: update both (let template decide)
@@ -1547,7 +1547,7 @@ class ArgoWebDashboard(ArgoBaseNode):
                                 if time_to_full is not None:
                                     self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
                                 if time_to_empty is not None:
-                                    self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
+                                self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
                     except (json.JSONDecodeError, KeyError) as e:
                         self.get_logger().debug(f"Error parsing battery status response: {e}")
         except Exception as e:
@@ -2031,8 +2031,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                 # Check if restart is already in progress
                 with self.restart_progress_lock:
                     if self.restart_in_progress:
-                        return jsonify({
-                            'success': False,
+                    return jsonify({
+                        'success': False, 
                             'message': 'Restart already in progress'
                         }), 409
                     
