@@ -187,7 +187,8 @@ class BoatState:
 
     # Wind
     wind_speed: Optional[float] = None       # m/s
-    wind_angle: Optional[float] = None       # degrees CW from front of boat
+    wind_angle: Optional[float] = None       # Wind angle: RELATIVE to boat (degrees CW from front) for real anemometer,
+                                             # or ABSOLUTE from North (compass, where wind comes from) for simulation ideal anemometer
     wind_temp: Optional[float] = None        # celsius
 
     # Radio/Human input (from rudder_sail_radio.py)
@@ -361,6 +362,12 @@ class BaseController(ABC):
             message: Log message text (e.g., "Approaching geofence edge, executing starboard tack")
             level: Log level (INFO, WARN, ERROR)
         """
+        # Skip logging if controller is paused (reduces redundant log spam)
+        # Exception: Always log ERROR level messages even when paused (fatal errors are important)
+        if level != "ERROR":
+            if self.parent_node and hasattr(self.parent_node, 'is_paused') and self.parent_node.is_paused():
+                return
+        
         pub = self._get_captains_log_publisher()
         if pub and self.parent_node:
             from std_msgs.msg import String
@@ -369,8 +376,10 @@ class BaseController(ABC):
             log_msg = String(data=f"[{level}] {message}")
             safe_publish(pub, log_msg, self.parent_node)
         
-        # Also log to ROS2 logger if available
+        # Also log to ROS2 logger if available (but skip when paused, except for ERROR)
         if self.logger:
+            if self.parent_node and hasattr(self.parent_node, 'is_paused') and self.parent_node.is_paused() and level != "ERROR":
+                return
             if level == "WARN":
                 self.logger.warn(message)
             elif level == "ERROR":
@@ -647,6 +656,34 @@ class PatrolController(BaseController):
         self.tack_angle = config.get('tack_angle', 90.0)  # degrees to turn during tack
         self.broad_reach_angle = config.get('broad_reach_angle', 110.0)  # preferred angle to wind
         
+        # Grounding behavior: "terminate", "reset", or "continue"
+        # Try to get from parent node's parameters (simulation.grounding_behavior)
+        # The parameter is in the simulation namespace, accessible to all nodes
+        if parent_node:
+            try:
+                # Try to get parameter using ROS2 parameter API
+                # Parameters in /** namespace are accessible directly
+                param_value = parent_node.get_parameter('simulation.grounding_behavior')
+                self.grounding_behavior = param_value.get_parameter_value().string_value
+            except Exception as e:
+                # Fallback: try to get from config dict or use default
+                self.grounding_behavior = config.get('grounding_behavior', 'terminate')
+                if hasattr(self, 'logger') and self.logger:
+                    self.logger.warn(f"Could not read simulation.grounding_behavior parameter: {e}, using default 'terminate'")
+        else:
+            self.grounding_behavior = config.get('grounding_behavior', 'terminate')
+        
+        # Validate grounding behavior
+        if self.grounding_behavior not in ['terminate', 'reset', 'continue']:
+            self.log_entry(f"Invalid grounding_behavior '{self.grounding_behavior}', using 'terminate'", level="WARN")
+            self.grounding_behavior = 'terminate'
+        
+        # Create reset service client if needed
+        self.reset_service_client = None
+        if self.grounding_behavior == 'reset' and parent_node:
+            from std_srvs.srv import Trigger
+            self.reset_service_client = parent_node.create_client(Trigger, '/simulator/reset')
+        
         # Geofence management
         self.geofence_manager = GeofenceManager()
         map_name = config.get('geofence_map_name', 'Argo Irchel pond sailing area')
@@ -680,6 +717,10 @@ class PatrolController(BaseController):
         self.wind_direction_absolute = None  # Absolute wind direction (0-360, 0=North)
         self._last_absolute_wind = None  # Track last absolute wind for target recalculation
         
+        # Stable tacking/jibing targets (set once when entering turn mode, not recalculated every cycle)
+        self._stable_tacking_target = None
+        self._stable_jibing_target = None
+        
         # Geofence status logging
         self.last_geofence_log_time = 0.0
         self.geofence_log_interval = 5.0  # Log geofence status every 5 seconds
@@ -692,8 +733,10 @@ class PatrolController(BaseController):
         self.patrol_mode = 'broad_reach'
         self.last_turn_time = 0.0
         
-        # Reset stable target heading
+        # Reset stable target headings
         self._stable_broad_reach_target = None
+        self._stable_tacking_target = None
+        self._stable_jibing_target = None
         self._broad_reach_target_lock_time = 0.0
         
         # Log controller activation
@@ -721,7 +764,7 @@ class PatrolController(BaseController):
     
     def _calculate_absolute_wind_direction(self, state: BoatState) -> Optional[float]:
         """
-        Calculate absolute wind direction from boat-relative wind angle.
+        Calculate absolute wind direction (compass convention, where wind comes from).
         
         Args:
             state: Current boat state
@@ -730,22 +773,47 @@ class PatrolController(BaseController):
             Absolute wind direction in degrees (0-360, 0=North, compass convention, where wind comes from), 
             or None if unavailable
             
-        Note: If available, uses true_wind_direction_from_bridge for verification/consistency.
-        This should match the bridge's wind_direction parameter (compass convention, where wind comes from).
+        Note: 
+        - In simulation: bridge publishes ABSOLUTE wind direction directly (ideal anemometer)
+        - On real boat: anemometer publishes RELATIVE wind angle, must convert to absolute
+        - Always prefers true_wind_direction_from_bridge if available (most accurate)
         """
-        # Prefer bridge's true wind direction if available (more accurate, already in compass convention)
+        # Prefer bridge's true wind direction if available (most accurate, already in compass convention)
+        # In simulation, bridge publishes this via /simulator/true_wind_direction topic
         if hasattr(self, 'true_wind_direction_from_bridge') and self.true_wind_direction_from_bridge is not None:
             return self.true_wind_direction_from_bridge
         
-        # Fallback: calculate from relative wind angle and boat heading
+        # Fallback: determine if wind_angle is absolute or relative
         if state.wind_angle is None or state.compass_heading is None:
             return None
         
+        # In simulation: bridge publishes ABSOLUTE wind direction directly to /anem_speed_angle_temp (y component)
+        # On real boat: anemometer publishes RELATIVE wind angle (affected by boat motion)
+        # 
+        # Detection heuristic: If wind_angle is already absolute (simulation), it will be in 0-360 range
+        # and won't change much as the boat turns. If it's relative, it changes with boat heading.
+        # 
+        # Simple check: If wind_angle is close to a previously calculated absolute wind (when available),
+        # or if calculating relative->absolute gives an unreasonable result (wind_from matches current heading),
+        # then wind_angle is likely already absolute.
+        
+        # Calculate what absolute wind would be if wind_angle is relative
+        calculated_abs_from_relative = (state.compass_heading + state.wind_angle) % 360.0
+        
+        # Check if this calculation gives a suspicious result (wind_from = current heading)
+        # This happens when wind_angle is actually absolute (0.0° in simulation) and we're treating it as relative
+        heading_match_threshold = 5.0  # degrees
+        if abs(signed_angle_difference_degrees(calculated_abs_from_relative, state.compass_heading)) < heading_match_threshold:
+            # Suspicious: calculated absolute wind equals current heading
+            # This suggests wind_angle is already absolute (simulation case)
+            # Use wind_angle directly as absolute wind direction
+            return state.wind_angle % 360.0
+        
+        # Otherwise, assume wind_angle is RELATIVE (real boat convention) and convert
         # Wind angle is degrees CW from front of boat (0° = wind from front)
         # Compass heading is boat's heading (0-360, 0=North, compass convention)
         # Absolute wind (where wind comes from) = boat heading + wind angle (relative to boat)
-        absolute_wind = (state.compass_heading + state.wind_angle) % 360.0
-        return absolute_wind
+        return calculated_abs_from_relative
     
     def _determine_sailing_mode(self, state: BoatState) -> str:
         """
@@ -756,44 +824,53 @@ class PatrolController(BaseController):
         """
         current_time = time.time()
         
+        # Check if we have required data
+        if (state.current_latitude is None or state.current_longitude is None or
+            state.compass_heading is None):
+            return 'broad_reach'  # Default mode
+        
+        # Calculate distance to boundary (needed for grounding check and cooldown logic)
+        distance = self.geofence_manager.distance_to_boundary_lonlat(
+            state.current_longitude, state.current_latitude)
+        
         # Check if we're in cooldown period after last turn
-        # BUT: if we're far from boundary and in tacking mode, allow exit from tacking
+        # BUT: if we're far from boundary and in tacking/jibing mode, allow exit
         if current_time - self.last_turn_time < self.turn_cooldown:
-            # If we're in tacking mode but far from boundary, allow exit
-            if self.patrol_mode == 'tacking':
-                distance = self.geofence_manager.distance_to_boundary_lonlat(
-                    state.current_longitude, state.current_latitude) if (
-                    state.current_latitude is not None and state.current_longitude is not None) else None
+            # If we're in tacking/jibing mode but far from boundary, allow exit
+            if self.patrol_mode in ['tacking', 'jibing']:
                 if distance is not None and abs(distance) > self.boundary_turn_threshold * 2:
-                    # Far from boundary, allow exit from tacking even during cooldown
+                    # Far from boundary, allow exit from turn even during cooldown
                     pass  # Continue to check below
                 else:
                     return self.patrol_mode  # Continue current mode
             else:
                 return self.patrol_mode  # Continue current mode
         
-        # Check if we have required data
-        if (state.current_latitude is None or state.current_longitude is None or
-            state.compass_heading is None):
-            return 'broad_reach'  # Default mode
+        # Check for grounding (boat outside boundary) - for physical boat only
+        # Note: In simulation, grounding is detected and handled by the simulator bridge
+        # This check is kept for physical boat testing (future improvement)
+        if distance is not None and distance >= 1.0:  # 1m or more outside boundary
+            # Log warning but don't take action (simulator bridge handles it in simulation)
+            # For physical boat, this could trigger emergency stop or recovery maneuvers
+            self.log_entry(f"⚠️ Geofence violation detected: {distance:.1f}m outside boundary | Position: ({state.current_latitude:.6f}, {state.current_longitude:.6f})", level="WARN")
+            # Continue with normal control - let simulator bridge handle termination/reset in simulation
         
-        # Calculate distance to boundary
-        distance = self.geofence_manager.distance_to_boundary_lonlat(
-            state.current_longitude, state.current_latitude)
-        
-        # If currently in tacking mode, check if we've completed the tack
-        if self.patrol_mode == 'tacking':
-            # Check if we're far enough from boundary to exit tacking
+        # If currently in tacking or jibing mode, check if we've completed the turn
+        if self.patrol_mode in ['tacking', 'jibing']:
+            # Check if we're far enough from boundary to exit turn
             if abs(distance) > self.boundary_turn_threshold * 2:
-                # Far from boundary - exit tacking mode
+                # Far from boundary - exit turn mode
                 return 'broad_reach'
             
-            # Check if we've reached the target heading (tack complete)
+            # Check if we've reached the target heading (turn complete)
             if state.compass_heading is not None:
-                target_heading = self._calculate_target_heading_tack(state)
+                if self.patrol_mode == 'tacking':
+                    target_heading = self._calculate_target_heading_tack(state)
+                else:  # jibing
+                    target_heading = self._calculate_target_heading_jibe(state)
                 if target_heading is not None:
                     heading_error = abs(signed_angle_difference_degrees(target_heading, state.compass_heading))
-                    # If we're within 10 degrees of target and far from boundary, exit tacking
+                    # If we're within 10 degrees of target and far from boundary, exit turn
                     if heading_error < 10.0 and abs(distance) > self.boundary_turn_threshold:
                         return 'broad_reach'
         
@@ -810,14 +887,31 @@ class PatrolController(BaseController):
                 state.compass_heading, speed_ms, self.patrol_lookahead_time)
             
             if crossing_time is not None and crossing_time < self.patrol_lookahead_time:
-                # Determine whether to tack or jibe based on wind direction
-                absolute_wind = self._calculate_absolute_wind_direction(state)
+                # Determine whether to tack or jibe based on wind direction relative to boat heading
+                wind_direction_abs_from_north_compass = self._calculate_absolute_wind_direction(state)
                 
-                if absolute_wind is not None:
-                    # Determine if we should tack (into wind) or jibe (away from wind)
-                    # For now, prefer tacking when approaching boundary
-                    # More sophisticated logic could consider which side of area we're on
-                    return 'tacking'
+                if wind_direction_abs_from_north_compass is not None and state.compass_heading is not None:
+                    # Calculate relative wind angle (0-180°, where 0° = head to wind, 180° = downwind)
+                    relative_wind_angle = abs(signed_angle_difference_degrees(
+                        wind_direction_abs_from_north_compass, state.compass_heading))
+                    
+                    # Determine if sailing upwind or downwind
+                    # Use a threshold of 80° to ensure we jibe when clearly downwind
+                    # (accounts for beam reach ambiguity at exactly 90°)
+                    # If sailing downwind (wind angle > 80°), jibe (turn away from wind)
+                    # If sailing upwind (wind angle <= 80°), tack (turn into wind)
+                    if relative_wind_angle > 80.0:
+                        if self.logger:
+                            self.logger.info(
+                                f"Approaching boundary: sailing downwind (wind_angle={relative_wind_angle:.1f}°) → JIBING"
+                            )
+                        return 'jibing'  # Downwind - jibe away from wind
+                    else:
+                        if self.logger:
+                            self.logger.info(
+                                f"Approaching boundary: sailing upwind (wind_angle={relative_wind_angle:.1f}°) → TACKING"
+                            )
+                        return 'tacking'  # Upwind - tack into wind
                 else:
                     # Default to tacking if wind direction unknown
                     return 'tacking'
@@ -825,8 +919,8 @@ class PatrolController(BaseController):
         # Check if we're on the downwind side and need to tack upwind
         # This is a simplified check - could be enhanced with area analysis
         if distance < -5.0:  # Inside area, but close to downwind edge
-            absolute_wind = self._calculate_absolute_wind_direction(state)
-            if absolute_wind is not None:
+            wind_direction_abs_from_north_compass = self._calculate_absolute_wind_direction(state)
+            if wind_direction_abs_from_north_compass is not None:
                 # If we're sailing downwind relative to the area center, tack upwind
                 return 'tacking'
         
@@ -848,9 +942,9 @@ class PatrolController(BaseController):
         if state.wind_angle is None or state.compass_heading is None:
             return None
         
-        # Calculate absolute wind direction
-        absolute_wind = self._calculate_absolute_wind_direction(state)
-        if absolute_wind is None:
+        # Calculate absolute wind direction (compass convention, where wind comes from)
+        wind_direction_abs_from_north_compass = self._calculate_absolute_wind_direction(state)
+        if wind_direction_abs_from_north_compass is None:
             return None
         
         current_time = time.time()
@@ -864,7 +958,7 @@ class PatrolController(BaseController):
             # Human control just ended - use the handoff target heading as stable target
             self._stable_broad_reach_target = state.target_heading
             self._broad_reach_target_lock_time = current_time
-            self._last_absolute_wind = absolute_wind
+            self._last_absolute_wind = wind_direction_abs_from_north_compass
             if self.logger:
                 self.logger.info(
                     f"Using human control handoff target heading: {state.target_heading:.1f}° "
@@ -878,35 +972,71 @@ class PatrolController(BaseController):
         elif (current_time - self._broad_reach_target_lock_time) > self._broad_reach_target_lock_duration:
             # Lock expired - recalculate
             should_recalculate = True
-        elif self._last_absolute_wind is not None and abs(absolute_wind - self._last_absolute_wind) > 15.0:
+        elif self._last_absolute_wind is not None and abs(wind_direction_abs_from_north_compass - self._last_absolute_wind) > 15.0:
             # Wind direction changed significantly - recalculate
             should_recalculate = True
         
         if should_recalculate:
-            # Target heading for broad reach: wind direction + broad_reach_angle
-            # We want to sail at broad_reach_angle to the wind
-            # If wind is from North (0°), and we want 110° to wind, we can sail at 110° or 250°
-            # Choose the direction that's closer to current heading
+            # Target heading for broad reach: sail at broad_reach_angle to the wind
+            # Wind is coming FROM wind_direction_abs_from_north_compass
+            # We want to sail at broad_reach_angle degrees to the wind
+            # This means we can sail at (wind + broad_reach_angle) or (wind - broad_reach_angle)
+            # But we need to ensure we're sailing DOWNWIND (away from wind), not upwind
             
-            # Calculate two possible headings
-            heading1 = (absolute_wind + self.broad_reach_angle) % 360.0
-            heading2 = (absolute_wind - self.broad_reach_angle) % 360.0
+            # Calculate downwind direction (opposite of where wind comes from)
+            downwind_direction = (wind_direction_abs_from_north_compass + 180.0) % 360.0
             
-            # Choose the one closer to current heading
+            # Calculate two possible headings at broad_reach_angle to wind
+            # Option 1: Wind direction + broad_reach_angle (clockwise from wind)
+            heading1 = (wind_direction_abs_from_north_compass + self.broad_reach_angle) % 360.0
+            # Option 2: Wind direction - broad_reach_angle (counter-clockwise from wind)
+            heading2 = (wind_direction_abs_from_north_compass - self.broad_reach_angle) % 360.0
+            
+            # Verify both headings are on the downwind side (away from wind)
+            # Calculate angle from each heading to downwind direction
+            angle1_to_downwind = abs(signed_angle_difference_degrees(heading1, downwind_direction))
+            angle2_to_downwind = abs(signed_angle_difference_degrees(heading2, downwind_direction))
+            
+            # Prefer headings that are closer to downwind (but still at broad_reach_angle to wind)
+            # Also consider which is closer to current heading to avoid large turns
             err1 = abs(signed_angle_difference_degrees(heading1, state.compass_heading))
             err2 = abs(signed_angle_difference_degrees(heading2, state.compass_heading))
             
-            old_target = self._stable_broad_reach_target
-            self._stable_broad_reach_target = heading1 if err1 < err2 else heading2
+            # Choose heading that's closer to current heading, but prefer downwind side
+            # If both are on downwind side, choose closer to current
+            # If one is upwind, prefer the downwind one
+            if angle1_to_downwind < 90.0 and angle2_to_downwind < 90.0:
+                # Both are downwind - choose closer to current heading
+                old_target = self._stable_broad_reach_target
+                self._stable_broad_reach_target = heading1 if err1 < err2 else heading2
+            elif angle1_to_downwind < 90.0:
+                # Only heading1 is downwind
+                old_target = self._stable_broad_reach_target
+                self._stable_broad_reach_target = heading1
+            elif angle2_to_downwind < 90.0:
+                # Only heading2 is downwind
+                old_target = self._stable_broad_reach_target
+                self._stable_broad_reach_target = heading2
+            else:
+                # Both might be upwind - choose the one closer to current (fallback)
+                old_target = self._stable_broad_reach_target
+                self._stable_broad_reach_target = heading1 if err1 < err2 else heading2
+                if self.logger:
+                    self.logger.warn(
+                        f"Broad reach target may be upwind: heading={self._stable_broad_reach_target:.1f}°, "
+                        f"wind={wind_direction_abs_from_north_compass:.1f}°, downwind={downwind_direction:.1f}°"
+                    )
+            
             self._broad_reach_target_lock_time = current_time
-            self._last_absolute_wind = absolute_wind
+            self._last_absolute_wind = wind_direction_abs_from_north_compass
             
             # Log target heading change if significant
             if old_target is not None and abs(signed_angle_difference_degrees(self._stable_broad_reach_target, old_target)) > 5.0:
                 if self.logger:
                     self.logger.info(
                         f"Broad reach target heading changed: {old_target:.1f}° -> {self._stable_broad_reach_target:.1f}° "
-                        f"(wind={absolute_wind:.1f}°, closer to current={state.compass_heading:.1f}°)"
+                        f"(wind={wind_direction_abs_from_north_compass:.1f}°, downwind={downwind_direction:.1f}°, "
+                        f"closer to current={state.compass_heading:.1f}°)"
                     )
         
         return self._stable_broad_reach_target
@@ -914,6 +1044,9 @@ class PatrolController(BaseController):
     def _calculate_target_heading_tack(self, state: BoatState) -> Optional[float]:
         """
         Calculate target heading for tacking maneuver.
+        
+        Uses a stable target heading that doesn't change every cycle, preventing
+        the target from "chasing" the boat and keeping error constant.
         
         Args:
             state: Current boat state
@@ -924,28 +1057,85 @@ class PatrolController(BaseController):
         if state.compass_heading is None:
             return None
         
-        absolute_wind = self._calculate_absolute_wind_direction(state)
-        if absolute_wind is None:
-            # Default tack: turn 90 degrees
-            return (state.compass_heading + self.tack_angle) % 360.0
+        # If we already have a stable tacking target, use it (don't recalculate)
+        if self._stable_tacking_target is not None:
+            return self._stable_tacking_target
+        
+        # Calculate new stable tacking target (only once when entering tacking mode)
+        wind_direction_abs_from_north_compass = self._calculate_absolute_wind_direction(state)
+        if wind_direction_abs_from_north_compass is None:
+            # Default tack: turn 90 degrees from current heading
+            self._stable_tacking_target = (state.compass_heading + self.tack_angle) % 360.0
+            return self._stable_tacking_target
         
         # Tack: turn toward the wind (into the wind)
         # Calculate heading that's closer to wind direction
         # We want to turn so we're sailing closer to upwind
         
         # Determine which direction to turn based on current heading relative to wind
-        wind_relative_to_boat = state.wind_angle  # Already relative to boat
+        # Calculate relative wind angle from absolute wind and boat heading
+        # Relative wind = absolute_wind - boat_heading (wrapped)
+        relative_wind_angle = signed_angle_difference_degrees(wind_direction_abs_from_north_compass, state.compass_heading)
         
-        # If wind is on port side, tack to starboard (turn right)
-        # If wind is on starboard side, tack to port (turn left)
-        if wind_relative_to_boat > 180:
-            # Wind on port side, turn right
-            new_heading = (state.compass_heading + self.tack_angle) % 360.0
+        # If wind is on port side (relative > 0), tack to starboard (turn right, positive)
+        # If wind is on starboard side (relative < 0), tack to port (turn left, negative)
+        if relative_wind_angle > 0:
+            # Wind on port side, turn right (starboard)
+            self._stable_tacking_target = (state.compass_heading + self.tack_angle) % 360.0
         else:
-            # Wind on starboard side, turn left
-            new_heading = (state.compass_heading - self.tack_angle) % 360.0
+            # Wind on starboard side, turn left (port)
+            self._stable_tacking_target = (state.compass_heading - self.tack_angle) % 360.0
         
-        return new_heading
+        return self._stable_tacking_target
+    
+    def _calculate_target_heading_jibe(self, state: BoatState) -> Optional[float]:
+        """
+        Calculate target heading for jibing maneuver (downwind turn).
+        
+        Uses a stable target heading that doesn't change every cycle, preventing
+        the target from "chasing" the boat and keeping error constant.
+        
+        Args:
+            state: Current boat state
+            
+        Returns:
+            Target heading in degrees, or None if unavailable
+        """
+        if state.compass_heading is None:
+            return None
+        
+        # If we already have a stable jibing target, use it (don't recalculate)
+        if hasattr(self, '_stable_jibing_target') and self._stable_jibing_target is not None:
+            return self._stable_jibing_target
+        
+        # Calculate new stable jibing target (only once when entering jibing mode)
+        wind_direction_abs_from_north_compass = self._calculate_absolute_wind_direction(state)
+        if wind_direction_abs_from_north_compass is None:
+            # Default jibe: turn 90 degrees from current heading
+            self._stable_jibing_target = (state.compass_heading + self.tack_angle) % 360.0
+            return self._stable_jibing_target
+        
+        # Jibe: turn away from the wind (downwind)
+        # Calculate heading that's further from wind direction
+        # We want to turn so we're sailing more downwind
+        
+        # Determine which direction to turn based on current heading relative to wind
+        # Calculate relative wind angle from absolute wind and boat heading
+        # Relative wind = absolute_wind - boat_heading (wrapped)
+        relative_wind_angle = signed_angle_difference_degrees(wind_direction_abs_from_north_compass, state.compass_heading)
+        
+        # For jibing (downwind turn), we want to turn away from the wind
+        # If wind is on port side (relative > 0), jibe to port (turn left, negative)
+        # If wind is on starboard side (relative < 0), jibe to starboard (turn right, positive)
+        # This is opposite of tacking
+        if relative_wind_angle > 0:
+            # Wind on port side, jibe to port (turn left, away from wind)
+            self._stable_jibing_target = (state.compass_heading - self.tack_angle) % 360.0
+        else:
+            # Wind on starboard side, jibe to starboard (turn right, away from wind)
+            self._stable_jibing_target = (state.compass_heading + self.tack_angle) % 360.0
+        
+        return self._stable_jibing_target
     
     def generate_control(self, state: BoatState) -> ControlCommand:
         """Generate control commands for patrol sailing."""
@@ -960,6 +1150,22 @@ class PatrolController(BaseController):
         if state.current_latitude is not None and state.current_longitude is not None:
             state.distance_to_boundary = self.geofence_manager.distance_to_boundary_lonlat(
                 state.current_longitude, state.current_latitude)
+            
+            # Publish geofence state to topics (for simulator bridge and monitoring)
+            # Float64 and Bool are already imported at top of file
+            if self.parent_node and hasattr(self.parent_node, 'pub_geofence_distance'):
+                distance_msg = Float64(data=state.distance_to_boundary if state.distance_to_boundary is not None else 0.0)
+                safe_publish(self.parent_node.pub_geofence_distance, distance_msg, self.parent_node)
+                
+                # Publish violation status (True if outside boundary)
+                is_violation = state.distance_to_boundary is not None and state.distance_to_boundary > 0
+                violation_msg = Bool(data=is_violation)
+                safe_publish(self.parent_node.pub_geofence_violation, violation_msg, self.parent_node)
+                
+                # Publish grounding status (True if 1m or more outside boundary)
+                is_grounded = state.distance_to_boundary is not None and state.distance_to_boundary >= 1.0
+                grounding_msg = Bool(data=is_grounded)
+                safe_publish(self.parent_node.pub_grounding, grounding_msg, self.parent_node)
             
             # Log geofence status periodically
             current_time = time.time()
@@ -1005,15 +1211,8 @@ class PatrolController(BaseController):
                     state.current_latitude, state.current_longitude,
                     state.compass_heading, speed_ms, self.patrol_lookahead_time)
                 
-                # Log predicted crossing time if approaching boundary
-                if (state.predicted_boundary_crossing_time is not None and 
-                    state.predicted_boundary_crossing_time < self.patrol_lookahead_time and
-                    state.distance_to_boundary is not None and 
-                    abs(state.distance_to_boundary) < self.boundary_turn_threshold * 2):
-                    self.log_entry(
-                        f"Predicted boundary crossing in {state.predicted_boundary_crossing_time:.1f}s",
-                        level="INFO"
-                    )
+                # Store predicted crossing time for detailed log (don't log here to avoid cluttering captain's log)
+                # This will be included in the detailed control decision log below
         
         # Determine sailing mode
         new_mode = self._determine_sailing_mode(state)
@@ -1021,6 +1220,17 @@ class PatrolController(BaseController):
             old_mode = self.patrol_mode
             self.patrol_mode = new_mode
             self.last_turn_time = time.time()
+            
+            # Reset stable target when mode changes
+            if new_mode == 'tacking':
+                # Clear stable tacking target so it gets recalculated for new tack
+                self._stable_tacking_target = None
+            elif new_mode == 'jibing':
+                # Clear stable jibing target so it gets recalculated for new jibe
+                self._stable_jibing_target = None
+            elif old_mode in ['tacking', 'jibing'] and new_mode == 'broad_reach':
+                # Clear stable broad reach target when exiting turn (will recalculate)
+                self._stable_broad_reach_target = None
             
             # Publish state change and log entry
             self.publish_state(new_mode)
@@ -1042,12 +1252,17 @@ class PatrolController(BaseController):
                     context_parts.append(f"{dist_abs:.1f}m from boundary")
             
             if state.wind_angle is not None:
-                # Determine tack direction
+                # Determine tack/jibe direction
                 if new_mode == 'tacking':
                     if state.wind_angle > 180:
                         context_parts.append("starboard tack")
                     else:
                         context_parts.append("port tack")
+                elif new_mode == 'jibing':
+                    if state.wind_angle > 180:
+                        context_parts.append("port jibe")
+                    else:
+                        context_parts.append("starboard jibe")
             
             context = f" ({', '.join(context_parts)})" if context_parts else ""
             self.log_entry(f"{description}{context}", level="INFO")
@@ -1057,6 +1272,8 @@ class PatrolController(BaseController):
             target_heading = self._calculate_target_heading_broad_reach(state)
         elif self.patrol_mode == 'tacking':
             target_heading = self._calculate_target_heading_tack(state)
+        elif self.patrol_mode == 'jibing':
+            target_heading = self._calculate_target_heading_jibe(state)
         else:
             # Default: maintain current heading
             target_heading = state.compass_heading
@@ -1076,10 +1293,11 @@ class PatrolController(BaseController):
             # Verify consistency: also calculate error using state.target_heading for comparison
             compass_err_state = signed_angle_difference_degrees(state.target_heading, state.compass_heading)
             
-            # Rudder control: positive error (target right) -> turn right
-            # Simulator convention: negative rudder -> turn right (clockwise), positive rudder -> turn left (counter-clockwise)
-            # So: rudder = -gain * (error / full_scale) to match simulator convention
-            cmd_rudder = -self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
+            # Rudder control: Positive error (target right) -> turn right -> starboard rudder (positive)
+            # Error = signed_angle_difference_degrees(target, current) = target - current
+            # When error > 0: target is to the right, need positive rudder to turn right
+            # When error < 0: target is to the left, need negative rudder to turn left
+            cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
             cmd_rudder = np.clip(cmd_rudder, -1.0, 1.0)
             
             # Diagnostic: log if there's a mismatch between local and state target_heading
@@ -1154,21 +1372,31 @@ class PatrolController(BaseController):
             # Build detailed control decision log
             log_parts = []
             
-            # Mode and reasoning
+            # Mode and reasoning (multi-line for clarity)
             mode_reason = ""
+            tacking_reason = ""
             if self.patrol_mode == 'broad_reach':
                 mode_reason = f"maintaining broad reach ({self.broad_reach_angle:.0f}° to wind)"
             elif self.patrol_mode == 'tacking':
+                mode_reason = "tacking (turn in progress)"
+                # Add reason why tacking started
                 if state.distance_to_boundary is not None and abs(state.distance_to_boundary) < self.boundary_turn_threshold:
-                    mode_reason = f"tacking to avoid boundary ({abs(state.distance_to_boundary):.1f}m away)"
+                    if state.predicted_boundary_crossing_time is not None:
+                        tacking_reason = f"Reason: approaching boundary ({abs(state.distance_to_boundary):.1f}m away, crossing in {state.predicted_boundary_crossing_time:.1f}s)"
+                    else:
+                        tacking_reason = f"Reason: approaching boundary ({abs(state.distance_to_boundary):.1f}m away)"
+                elif state.distance_to_boundary is not None and state.distance_to_boundary < -5.0:
+                    tacking_reason = "Reason: downwind recovery (inside area, close to downwind edge)"
                 else:
-                    mode_reason = "tacking (turn in progress)"
+                    tacking_reason = "Reason: turn in progress"
             elif self.patrol_mode == 'jibing':
                 mode_reason = "jibing (downwind turn)"
             else:
                 mode_reason = f"mode: {self.patrol_mode}"
             
             log_parts.append(f"Mode: {self.patrol_mode} ({mode_reason})")
+            if tacking_reason:
+                log_parts.append(tacking_reason)
             
             # Heading information: current boat heading and target heading controller is steering toward
             if state.compass_heading is not None:
@@ -1177,11 +1405,11 @@ class PatrolController(BaseController):
                 
                 # Add mode-specific context
                 if self.patrol_mode == 'broad_reach' and state.wind_angle is not None:
-                    absolute_wind = self._calculate_absolute_wind_direction(state)
-                    if absolute_wind is not None:
+                    wind_direction_abs_from_north_compass = self._calculate_absolute_wind_direction(state)
+                    if wind_direction_abs_from_north_compass is not None:
                         # Wind direction is where wind comes from (compass frame, 0°=North)
-                        # This should match bridge's wind_direction parameter (with opposite sign convention)
-                        heading_info += f" | wind_from={absolute_wind:.1f}° (compass, where wind comes from)"
+                        # This should match bridge's wind_direction parameter (compass convention, where wind comes from)
+                        heading_info += f" | wind_from={wind_direction_abs_from_north_compass:.1f}° (compass, where wind comes from)"
                 elif self.patrol_mode == 'tacking':
                     # Determine tack direction (port or starboard)
                     if state.compass_heading is not None and target_heading is not None:
@@ -1199,8 +1427,9 @@ class PatrolController(BaseController):
                 if abs(cmd_rudder) > 0.01:
                     direction = "port" if cmd_rudder < 0 else "starboard"
                     # Calculate raw rudder before clipping to show if it's saturated
-                    # Error = target_heading - current_heading (positive = target is clockwise/right of current)
-                    raw_rudder = -self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
+                    # Error = signed_angle_difference_degrees(target, current)
+                    # Rudder = gain * (-error / full_scale) to match upwind example convention
+                    raw_rudder = self.rudder_gain * (-compass_err / self.rudder_full_scale_deg)
                     if abs(raw_rudder) > 1.0:
                         rudder_reason += f" ({direction}, heading_error={compass_err:+.1f}° (target-current), gain={self.rudder_gain:.1f}, CLIPPED from {raw_rudder:+.3f})"
                     else:
@@ -1217,10 +1446,18 @@ class PatrolController(BaseController):
             # Distance to boundary
             if distance_abs is not None:
                 status = "INSIDE" if state.distance_to_boundary < 0 else "OUTSIDE"
-                log_parts.append(f"Boundary: {distance_abs:.1f}m {status}")
+                boundary_line = f"Boundary: {distance_abs:.1f}m {status}"
+                
+                # Add predicted crossing time to detailed log (not in captain's log to avoid clutter)
+                if (state.predicted_boundary_crossing_time is not None and 
+                    state.predicted_boundary_crossing_time < self.patrol_lookahead_time and
+                    abs(state.distance_to_boundary) < self.boundary_turn_threshold * 2):
+                    boundary_line += f" | Predicted crossing in {state.predicted_boundary_crossing_time:.1f}s"
+                
+                log_parts.append(boundary_line)
             
-            # Combine and log
-            log_message = " | ".join(log_parts)
+            # Combine and log (multi-line for clarity)
+            log_message = "\n  ".join(log_parts)
             self.log_entry(log_message, level="INFO")
             
             # Update logged values
@@ -1356,6 +1593,8 @@ class ControllerNode(ArgoBaseNode):
         self.declare_parameter('param_file_path', 'argo.yaml')
         self.declare_parameter('controller_type', 'proportional')
         self.declare_parameter('data_collection_enabled', False)
+        # Simulation parameters (from /** namespace)
+        self.declare_parameter('simulation.grounding_behavior', 'terminate')
         self.declare_parameter('training_data_dir', '')  # Empty = use default
         self.declare_parameter('rudder_gain', 1.0)
         self.declare_parameter('rudder_full_scale_deg', 60.0)
@@ -1423,6 +1662,15 @@ class ControllerNode(ArgoBaseNode):
         # Controller state for web dashboard
         self.pub_controller_state = self.create_publisher(
             String, '/controller_state', 10)
+        
+        # Geofence and grounding state (for simulator bridge and monitoring)
+        # Bool and Float64 are already imported at top of file
+        self.pub_geofence_distance = self.create_publisher(
+            Float64, '/geofence/distance_to_boundary', 10)
+        self.pub_geofence_violation = self.create_publisher(
+            Bool, '/geofence/violation', 10)
+        self.pub_grounding = self.create_publisher(
+            Bool, '/grounding/detected', 10)
 
         # --- Subscribers ---
         # Control status from rudder_sail_radio.py (use default QoS)
@@ -1438,7 +1686,7 @@ class ControllerNode(ArgoBaseNode):
         # Navigation sensors (real-time data)
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
         # Subscribe to true wind direction from bridge for verification/consistency
-        from std_msgs.msg import Float64
+        # Float64 is already imported at top of file
         self.create_subscription(Float64, '/simulator/true_wind_direction', self.true_wind_callback, 10)
         self.true_wind_direction_from_bridge = None
         self.create_subscription(
@@ -1776,6 +2024,9 @@ class ControllerNode(ArgoBaseNode):
         if self.is_paused():
             return
         self.boat_state.wind_speed = msg.x
+        # In simulation: bridge publishes ABSOLUTE wind direction (0-360, compass, where wind comes from)
+        # On real boat: anemometer publishes RELATIVE wind angle (0-360, CW from front of boat)
+        # The controller will detect which convention is being used based on context
         self.boat_state.wind_angle = msg.y
         self.boat_state.wind_temp = msg.z
 
@@ -1881,12 +2132,13 @@ class ControllerNode(ArgoBaseNode):
                 state_msg = String(data=self.controller.name)
                 safe_publish(self.pub_controller_state, state_msg, self)
             
-            # Check if node is paused - when paused, unconditionally default to human control
+            # Check if node is paused - when paused, skip all processing and logging
             if self.is_paused():
                 # When paused, no autonomous commands are published, which causes
                 # rudder_sail_radio.py to default to human control due to stale auto commands.
                 # This effectively hands control back to the human operator immediately.
-                return  # Skip processing when paused
+                # Also prevents redundant logging (captain's log and terminal log) when paused.
+                return  # Skip all processing and logging when paused
 
             self.boat_state.timestamp = time.time()
 
@@ -1998,9 +2250,7 @@ class ControllerNode(ArgoBaseNode):
                             self.controller = temp_rth
 
                 # **THE CORE ARCHITECTURE: Single generate_control function**
-                # Skip if paused (prevents controller from logging when paused)
-                if self.is_paused():
-                    return
+                # (Pause check already done at start of timer_callback - no need to check again)
                 control_command = self.controller.generate_control(self.boat_state)
 
                 # Publish control command to rudder_sail_radio.py
@@ -2017,23 +2267,22 @@ class ControllerNode(ArgoBaseNode):
                     safe_log(self, 'debug', debug_msg)
         
         except Exception as e:
-            # FATAL ERROR: Log error and shut down node to stop simulation
+            # Log fatal errors but let the exception propagate
+            # The lifecycle manager will detect the node crash and terminate the simulation
             error_msg = f"FATAL ERROR in controller timer_callback: {e}"
             self.get_logger().error(error_msg)
             import traceback
             tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
             self.get_logger().error(f"Traceback:\n{tb_str}")
             
-            # Log to captain's log for visibility
+            # Log to captain's log for visibility (even when paused - fatal errors are important)
             if self.controller:
+                # Fatal errors should always be logged, even when paused
                 self.controller.log_entry(f"FATAL ERROR: {e}", level="ERROR")
             
-            # Shut down the node to stop the simulation
-            self.get_logger().error("Shutting down controller node due to fatal error - simulation will stop")
-            if rclpy.ok():
-                rclpy.shutdown()
-            import sys
-            sys.exit(1)
+            # Re-raise the exception to let the node crash
+            # The lifecycle manager will detect the node failure and terminate the simulation
+            raise
 
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""

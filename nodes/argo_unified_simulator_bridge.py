@@ -168,6 +168,14 @@ class ArgoUnifiedSimulatorBridge(Node):
         if self.simulation_rate <= 0:
             self.simulation_rate = 10.0
         
+        # Grounding behavior for simulation: "terminate", "reset", or "continue"
+        # Grounding detection is now centralized in the controller, which publishes to /grounding/detected
+        self.declare_parameter('simulation.grounding_behavior', 'terminate')
+        self.grounding_behavior = self.get_parameter('simulation.grounding_behavior').get_parameter_value().string_value
+        if self.grounding_behavior not in ['terminate', 'reset', 'continue']:
+            self.get_logger().warn(f"Invalid grounding_behavior '{self.grounding_behavior}', using 'terminate'")
+            self.grounding_behavior = 'terminate'
+        
         # Initialize simulator based on mode
         if mode == 'local':
             self._init_local_simulator()
@@ -241,6 +249,12 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Joystick input (from Foxglove Joystick panel or physical gamepad)
         # Converts Joy messages to rudder/sail control
         self.create_subscription(Joy, '/joy', self.joy_control_callback, 10)
+        
+        # Geofence and grounding state from controller (for simulation control)
+        self.create_subscription(Bool, '/geofence/violation', self.geofence_violation_callback, 10)
+        self.create_subscription(Bool, '/grounding/detected', self.grounding_callback, 10)
+        self.grounding_detected = False  # Track grounding state
+        self.geofence_violation = False  # Track violation state
         
         # Advertise /joy topic so Foxglove can publish to it
         # Publish a few initial messages to help foxglove_bridge learn the schema, then stop
@@ -820,6 +834,12 @@ class ArgoUnifiedSimulatorBridge(Node):
         if not self.boat_state:
             return
         
+        # Grounding detection is now handled via /grounding/detected topic from controller
+        # The grounding_callback handles termination/reset/continue based on grounding_behavior
+        # If grounding was detected and behavior is terminate, rclpy.shutdown() was called
+        # If grounding was detected and behavior is reset, reset was triggered
+        # For 'continue', we just continue publishing normally
+        
         # Convert boat heading from simulator convention (0° = East) to compass convention (0° = North)
         # Simulator: 0° = East, 90° = North, 180° = West, 270° = South
         # Compass: 0° = North, 90° = East, 180° = South, 270° = West
@@ -855,59 +875,56 @@ class ArgoUnifiedSimulatorBridge(Node):
         gps_vel_msg = Vector3(x=vel_north, y=vel_east, z=speed_knots)
         self.pub_gps_velocity.publish(gps_vel_msg)
         
-        # Wind data (speed, angle relative to boat, temperature)
-        # Calculate relative wind angle from absolute wind direction and boat heading
-        # wind_direction is absolute (direction wind is blowing toward, 0° = East in simulator convention)
-        # We need relative wind angle (degrees CW from front of boat)
-        heading_compass = self.boat_state.get('heading', 0.0)
-        # Convert heading from compass (0°=North) to simulator convention (0°=East)
-        heading_sim = (90.0 - heading_compass) % 360.0
-        # Calculate wind direction coming FROM (add 180°)
-        wind_from_direction = (self.boat_state['wind_direction'] + 180.0) % 360.0
-        # Calculate relative wind angle (wind from direction - boat heading)
-        wind_relative_angle = (wind_from_direction - heading_sim) % 360.0
-        # Normalize to -180 to +180 range (CW from front of boat)
-        if wind_relative_angle > 180.0:
-            wind_relative_angle -= 360.0
+        # Wind data: Simulate ideal anemometer for mock simulation
+        # For mock simulation: report ABSOLUTE wind (true wind direction from North, compass convention)
+        # This simulates an ideal anemometer that knows true wind, not affected by boat motion
+        # For real boat: anemometer reports RELATIVE wind (affected by boat motion)
         
-        wind_msg = Vector3(
-            x=self.boat_state['wind_speed'],     # m/s
-            y=wind_relative_angle,                # degrees relative to boat (CW from front)
-            z=22.5                               # temperature (mock)
-        )
-        self.pub_wind.publish(wind_msg)
-
-        # Publish tack status for visualization/diagnostics
-        tack_msg = Bool(data=bool(self.boat_state.get('tacking', False)))
-        self.pub_tacking.publish(tack_msg)
-        
-        # Publish true wind direction (absolute, in compass convention) for monitoring
-        # Get true wind direction from simulator's Environment
-        true_wind_direction_compass = None
+        # Get true wind direction (absolute, compass convention, where wind comes from)
+        wind_direction_abs_from_north_compass = None
         if self.mode == 'local' and not self.use_mock:
             # Real simulator: get from Environment config
             if hasattr(self, 'sim_manager') and self.sim_manager is not None:
                 if hasattr(self.sim_manager, 'environment') and self.sim_manager.environment is not None:
                     env = self.sim_manager.environment
                     if hasattr(env, '_config'):
-                        true_wind_dir_simulator = env._config.get('wind_direction', 0.0)
+                        wind_dir_sim_to = env._config.get('wind_direction', 0.0)
                         # Convert from simulator convention (where wind goes to) to compass convention (where wind comes from)
                         # Step 1: Convert convention: "going to" to "coming from" (subtract 180°)
-                        true_wind_dir_temp = (true_wind_dir_simulator - 180.0) % 360.0
+                        wind_dir_temp = (wind_dir_sim_to - 180.0) % 360.0
                         # Step 2: Convert coordinate system: simulator to compass
-                        true_wind_direction_compass = (90.0 - true_wind_dir_temp) % 360.0
+                        wind_direction_abs_from_north_compass = (90.0 - wind_dir_temp) % 360.0
         elif self.mode == 'local' and self.use_mock:
             # Mock simulator: convert the wind_direction (which is in simulator convention, "going to")
             if hasattr(self, 'simulator') and self.simulator is not None:
-                true_wind_dir_simulator = getattr(self.simulator, 'wind_direction', 0.0)
+                wind_dir_sim_to = getattr(self.simulator, 'wind_direction', 0.0)
                 # Convert from simulator convention (where wind goes to) to compass convention (where wind comes from)
                 # Step 1: Convert convention: "going to" to "coming from" (subtract 180°)
-                true_wind_dir_temp = (true_wind_dir_simulator - 180.0) % 360.0
+                wind_dir_temp = (wind_dir_sim_to - 180.0) % 360.0
                 # Step 2: Convert coordinate system: simulator to compass
-                true_wind_direction_compass = (90.0 - true_wind_dir_temp) % 360.0
+                wind_direction_abs_from_north_compass = (90.0 - wind_dir_temp) % 360.0
         
-        if true_wind_direction_compass is not None:
-            true_wind_msg = Float64(data=true_wind_direction_compass)
+        if wind_direction_abs_from_north_compass is not None:
+            # For mock simulation: simulate ideal anemometer reporting ABSOLUTE wind
+            # x: wind speed (m/s) - true wind speed
+            # y: wind direction ABSOLUTE from North (compass convention, where wind comes from)
+            #    This is different from real anemometer which reports RELATIVE wind angle
+            # z: temperature (mock)
+            wind_msg = Vector3(
+                x=self.boat_state['wind_speed'],                    # m/s (true wind speed)
+                y=wind_direction_abs_from_north_compass,           # degrees ABSOLUTE from North (compass, where wind comes from)
+                z=22.5                                              # temperature (mock)
+            )
+            self.pub_wind.publish(wind_msg)
+
+        # Publish tack status for visualization/diagnostics
+        tack_msg = Bool(data=bool(self.boat_state.get('tacking', False)))
+        self.pub_tacking.publish(tack_msg)
+        
+        # Publish true wind direction (absolute, in compass convention) for monitoring
+        # Reuse the same calculation from above
+        if wind_direction_abs_from_north_compass is not None:
+            true_wind_msg = Float64(data=wind_direction_abs_from_north_compass)
             self.pub_true_wind.publish(true_wind_msg)
 
         # Publish satellite count
@@ -1830,6 +1847,37 @@ class ArgoUnifiedSimulatorBridge(Node):
             sail = msg.y    # -1 to +1
             self._apply_control_to_simulator(rudder, sail)
             self.get_logger().debug(f'Robot control: rudder={rudder:.3f}, sail={sail:.3f}')
+    
+    def geofence_violation_callback(self, msg: Bool):
+        """Handle geofence violation state from controller."""
+        self.geofence_violation = msg.data
+    
+    def grounding_callback(self, msg: Bool):
+        """Handle grounding detection from controller and take action based on grounding_behavior."""
+        was_grounded = self.grounding_detected
+        self.grounding_detected = msg.data
+        
+        # Only act on transitions from False to True (new grounding event)
+        if self.grounding_detected and not was_grounded:
+            if self.grounding_behavior == 'terminate':
+                # Terminate: Log error and exit the node
+                # The lifecycle manager will detect the node exit and terminate the simulation
+                self.get_logger().error("🚨 GROUNDING DETECTED: Boat grounded - terminating simulation")
+                self.get_logger().error("FATAL: Boat grounded - terminating simulation")
+                # Exit the process - lifecycle manager will detect this and terminate simulation
+                import sys
+                sys.exit(1)
+            elif self.grounding_behavior == 'reset':
+                # Reset: Call reset service to return boat to home
+                self.get_logger().warn("⚠️ GROUNDING DETECTED: Resetting to home position")
+                # Trigger reset by calling the reset callback
+                from std_srvs.srv import Trigger
+                request = Trigger.Request()
+                response = Trigger.Response()
+                self.reset_simulation_callback(request, response)
+            else:  # 'continue'
+                # Continue: Just log warning but continue
+                self.get_logger().warn("⚠️ GROUNDING DETECTED: Continuing (grounding_behavior=continue)")
     
     def human_control_callback(self, msg):
         """Monitor human control status."""

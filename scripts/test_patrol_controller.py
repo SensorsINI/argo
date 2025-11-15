@@ -21,7 +21,7 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import NavSatFix
 from geometry_msgs.msg import Vector3
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from collections import deque
 
 # Add nodes directory to path for imports
@@ -38,17 +38,26 @@ class DataRecorder(Node):
         self.heading_data = deque()  # (timestamp, heading_math)
         self.control_data = deque()  # (timestamp, human_controlled, auto_rudder, auto_sail)
         self.start_time = None
+        self.grounding_detected = False  # Flag for grounding detection
         
         # Subscribers
         self.create_subscription(NavSatFix, '/fix', self.gps_callback, 10)
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
         self.create_subscription(Bool, '/human_controlled', self.control_callback, 10)
         self.create_subscription(Vector3, '/rudder_sail_cmd', self.auto_cmd_callback, 10)
+        self.create_subscription(String, '/controller/captains_log', self.captains_log_callback, 10)
         
         self.get_logger().info('Data recorder started - waiting for data...')
         self.human_controlled_samples = 0
         self.robot_controlled_samples = 0
         self.auto_cmd_count = 0
+    
+    def captains_log_callback(self, msg):
+        """Monitor captain's log for FATAL errors (grounding detection)."""
+        log_text = msg.data.lower()
+        if 'fatal' in log_text and 'ground' in log_text:
+            self.grounding_detected = True
+            self.get_logger().error("🚨 GROUNDING DETECTED in captain's log - test should terminate")
     
     def gps_callback(self, msg):
         """Record GPS position."""
@@ -444,17 +453,41 @@ def run_simulation_test(duration_sec=60.0):
             if sim_proc.poll() is not None:
                 # Simulator process exited
                 stdout, stderr = sim_proc.communicate()
-                print(f"\n❌ FATAL ERROR: Simulator node crashed with exit code {sim_proc.returncode}")
+                exit_code = sim_proc.returncode
+                print(f"\n{'='*70}")
+                print(f"❌ FATAL ERROR: Simulator node crashed with exit code {exit_code}")
+                print(f"{'='*70}")
+                if stdout:
+                    stdout_text = stdout.decode('utf-8', errors='ignore')
+                    if 'FATAL ERROR' in stdout_text or 'GROUNDING' in stdout_text:
+                        print(f"\n📋 Simulator output (stdout):")
+                        print(stdout_text)
                 if stderr:
-                    print(f"   Error output:\n{stderr.decode('utf-8', errors='ignore')}")
-                break
+                    stderr_text = stderr.decode('utf-8', errors='ignore')
+                    print(f"\n📋 Simulator error output (stderr):")
+                    print(stderr_text)
+                print(f"{'='*70}\n")
+                # Exit with error code to signal failure
+                sys.exit(1)
             if ctrl_proc.poll() is not None:
                 # Controller process exited
                 stdout, stderr = ctrl_proc.communicate()
-                print(f"\n❌ FATAL ERROR: Controller node crashed with exit code {ctrl_proc.returncode}")
+                exit_code = ctrl_proc.returncode
+                print(f"\n{'='*70}")
+                print(f"❌ FATAL ERROR: Controller node crashed with exit code {exit_code}")
+                print(f"{'='*70}")
+                if stdout:
+                    stdout_text = stdout.decode('utf-8', errors='ignore')
+                    if 'FATAL ERROR' in stdout_text or 'GROUNDING' in stdout_text:
+                        print(f"\n📋 Controller output (stdout):")
+                        print(stdout_text)
                 if stderr:
-                    print(f"   Error output:\n{stderr.decode('utf-8', errors='ignore')}")
-                break
+                    stderr_text = stderr.decode('utf-8', errors='ignore')
+                    print(f"\n📋 Controller error output (stderr):")
+                    print(stderr_text)
+                print(f"{'='*70}\n")
+                # Exit with error code to signal failure
+                sys.exit(1)
             
             try:
                 executor.spin_once(timeout_sec=0.1)
@@ -462,6 +495,14 @@ def run_simulation_test(duration_sec=60.0):
                 # ROS2 context was shut down externally, break out of loop
                 print("\n   ⚠️  ROS2 context shutdown detected")
                 break
+            # Check for grounding detection
+            if recorder.grounding_detected:
+                print(f"\n{'='*70}")
+                print(f"🚨 GROUNDING DETECTED: Boat grounded - terminating test")
+                print(f"{'='*70}\n")
+                # Exit with error code to signal failure
+                sys.exit(1)
+            
             elapsed = time.time() - start_time
             elapsed_int = int(elapsed)
             if elapsed_int % 10 == 0 and elapsed_int != last_print:

@@ -481,7 +481,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker.scale.y = arrow_width
             marker.scale.z = arrow_height
 
-            marker.color = ColorRGBA(r=0.7, g=0.7, b=0.7, a=0.35)
+            marker.color = ColorRGBA(r=0.2, g=0.2, b=1.0, a=0.5)
             marker.lifetime.sec = 0
             marker.lifetime.nanosec = 0
 
