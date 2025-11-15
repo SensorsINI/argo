@@ -342,6 +342,16 @@ CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 # SOS Pattern Configuration
 SOS_PATTERN_DURATION_S = 2.0       # Total duration of one SOS pattern cycle (seconds)
 
+# Charging State LED Pattern Configuration
+# LED to use for charging state indication (easy to change later)
+CHARGE_STATE_LED = 'red'  # Options: 'red', 'green', 'blue' (currently using red due to green LED issues)
+CHARGE_STATE_PERIOD_S = 3.0        # Total period for charge state flash pattern (seconds)
+CHARGE_STATE_DUTY_CYCLE = 0.2      # Duty cycle for charge state flashes (20% on, 80% off) - increased from 0.1 for better visibility
+CHARGE_STATE_LOG_INTERVAL_S = 30.0 # Log charge state pattern every 30 seconds when active
+# Battery voltage range for percentage calculation (2S LiPo typical values)
+BATTERY_VOLTAGE_MIN_V = 6.0        # Fully discharged voltage (2 cells × 3.0V)
+BATTERY_VOLTAGE_MAX_V = 8.4        # Fully charged voltage (2 cells × 4.2V)
+
 # WiFi Monitoring
 WIFI_MONITORING_INTERVAL_S = 10     # Check WiFi status interval (seconds)
 WIFI_CONNECTIVITY_TIMEOUT_S = 5     # Timeout for WiFi connectivity tests (seconds)
@@ -495,6 +505,14 @@ class PowerController(ArgoBaseNode):
         self.sos_led_active = False
         self.last_logged_battery_voltage = None  # Track last logged voltage for throttling
         self.last_battery_voltage = None  # Last valid battery voltage reading
+        
+        # Charging state monitoring
+        self.charging_state_active = False  # True when charging or fully charged
+        self.charge_state_led_active = False  # True when charge state LED pattern is running
+        self.last_charge_state_log_time = 0.0  # Track last charge state log for throttling
+        self.current_charge_percentage = None  # Current battery charge percentage (0-100)
+        self.is_charging = False  # True when actively charging
+        self.is_fully_charged = False  # True when fully charged
 
         # WiFi monitoring state
         self.wifi_connected = True  # Assume connected at startup
@@ -1881,6 +1899,159 @@ class PowerController(ArgoBaseNode):
         self.sos_led_active = False
         self.get_logger().info("SOS LED pattern completed")
 
+    def _calculate_battery_percentage(self, voltage: float) -> float:
+        """Calculate battery percentage from voltage
+        
+        Args:
+            voltage: Battery voltage in volts
+            
+        Returns:
+            Battery percentage (0-100), clamped to valid range
+        """
+        if voltage <= BATTERY_VOLTAGE_MIN_V:
+            return 0.0
+        elif voltage >= BATTERY_VOLTAGE_MAX_V:
+            return 100.0
+        else:
+            # Linear interpolation between min and max voltage
+            percentage = ((voltage - BATTERY_VOLTAGE_MIN_V) / 
+                         (BATTERY_VOLTAGE_MAX_V - BATTERY_VOLTAGE_MIN_V)) * 100.0
+            return max(0.0, min(100.0, percentage))
+
+    def _get_charge_state_led_setter(self):
+        """Get the LED setter function based on CHARGE_STATE_LED constant
+        
+        Returns:
+            Function to set LED state (True/False)
+        """
+        if CHARGE_STATE_LED == 'red':
+            return self.set_red_led
+        elif CHARGE_STATE_LED == 'green':
+            return self.set_green_led
+        elif CHARGE_STATE_LED == 'blue':
+            return self.set_blue_led
+        else:
+            self.get_logger().warning(f"Unknown CHARGE_STATE_LED: {CHARGE_STATE_LED}, defaulting to red")
+            return self.set_red_led
+
+    def _get_flash_count_from_percentage(self, percentage: float) -> int:
+        """Get number of flashes based on battery percentage
+        
+        Args:
+            percentage: Battery percentage (0-100)
+            
+        Returns:
+            Number of flashes: 1 (0-25%), 2 (25-50%), 3 (50-75%), 4 (75-99%), 0 (100% = steady on)
+        """
+        if percentage >= 100.0:
+            return 0  # Steady on for fully charged
+        elif percentage >= 75.0:
+            return 4  # 4 flashes for 75-99%
+        elif percentage >= 50.0:
+            return 3  # 3 flashes for 50-75%
+        elif percentage >= 25.0:
+            return 2  # 2 flashes for 25-50%
+        else:
+            return 1  # 1 flash for 0-25%
+
+    def charge_state_led_pattern(self):
+        """LED pattern for charging state indication
+        
+        Pattern:
+        - Fully charged (100%): Steady ON
+        - 75-99%: 4 flashes over CHARGE_STATE_PERIOD_S
+        - 50-75%: 3 flashes over CHARGE_STATE_PERIOD_S
+        - 25-50%: 2 flashes over CHARGE_STATE_PERIOD_S
+        - 0-25%: 1 flash over CHARGE_STATE_PERIOD_S
+        
+        Uses the LED specified by CHARGE_STATE_LED constant (currently red).
+        """
+        self.get_logger().info("Starting charge state LED pattern")
+        self.charge_state_led_active = True
+        
+        led_setter = self._get_charge_state_led_setter()
+        
+        while self.running and self.charge_state_led_active and self.charging_state_active:
+            try:
+                # Get current charge percentage (updated by battery monitoring thread)
+                percentage = self.current_charge_percentage
+                
+                if percentage is None:
+                    # No percentage data yet - wait a bit
+                    time.sleep(0.5)
+                    continue
+                
+                # Determine flash count based on percentage
+                flash_count = self._get_flash_count_from_percentage(percentage)
+                
+                # Fully charged: steady ON
+                if flash_count == 0:
+                    led_setter(True)
+                    # Sleep for the period, checking periodically for shutdown
+                    sleep_time = 0
+                    while sleep_time < CHARGE_STATE_PERIOD_S and self.running and self.charge_state_led_active and self.charging_state_active:
+                        time.sleep(0.1)
+                        sleep_time += 0.1
+                    continue
+                
+                # Calculate timing for flashes
+                # Each flash cycle: on_time + off_time
+                # Total period divided by number of flashes
+                flash_cycle_time = CHARGE_STATE_PERIOD_S / flash_count
+                on_time = flash_cycle_time * CHARGE_STATE_DUTY_CYCLE
+                off_time = flash_cycle_time * (1.0 - CHARGE_STATE_DUTY_CYCLE)
+                
+                # Log the pattern for debugging
+                self.get_logger().debug(
+                    f"Charge state pattern: {flash_count} flashes, "
+                    f"on_time={on_time*1000:.1f}ms, off_time={off_time*1000:.1f}ms, "
+                    f"percentage={percentage:.1f}%")
+                
+                # Execute flash pattern - complete all flashes in one cycle
+                for flash in range(flash_count):
+                    if not self.running or not self.charge_state_led_active or not self.charging_state_active:
+                        break
+                    
+                    # Flash ON
+                    led_setter(True)
+                    sleep_time = 0
+                    while sleep_time < on_time and self.running and self.charge_state_led_active and self.charging_state_active:
+                        time.sleep(0.01)
+                        sleep_time += 0.01
+                    
+                    if not self.running or not self.charge_state_led_active or not self.charging_state_active:
+                        break
+                    
+                    # Flash OFF (except after last flash)
+                    if flash < flash_count - 1:  # Don't turn off after the last flash until after pause
+                        led_setter(False)
+                        sleep_time = 0
+                        while sleep_time < off_time and self.running and self.charge_state_led_active and self.charging_state_active:
+                            time.sleep(0.01)
+                            sleep_time += 0.01
+                
+                # Turn off LED after completing all flashes
+                led_setter(False)
+                
+                # Pause between cycles - wait for remaining time in period, then add extra pause
+                # This makes the pattern more visible and prevents rapid restarting
+                cycle_elapsed = flash_count * (on_time + off_time)
+                remaining_time = max(0, CHARGE_STATE_PERIOD_S - cycle_elapsed)
+                pause_time = remaining_time + 0.5  # Add 0.5s pause between cycles for visibility
+                
+                sleep_time = 0
+                while sleep_time < pause_time and self.running and self.charge_state_led_active and self.charging_state_active:
+                    time.sleep(0.1)
+                    sleep_time += 0.1
+                    
+            except Exception as e:
+                self.get_logger().error(f"Error in charge state LED pattern: {e}")
+                break
+        
+        # Turn off LED when done
+        led_setter(False)
+        self.charge_state_led_active = False
+        self.get_logger().info("Charge state LED pattern completed")
 
     def shutdown_led_pattern(self):
         """1Hz LED pattern with configurable duty cycle during shutdown sequence"""
@@ -2973,25 +3144,109 @@ class PowerController(ArgoBaseNode):
                             # Stop SOS pattern if running (critical takes priority)
                             if self.sos_led_active:
                                 self.sos_led_active = False
+                            # Stop charge state pattern if running (critical takes priority)
+                            if self.charge_state_led_active:
+                                self.charge_state_led_active = False
+                                self.charging_state_active = False
                             self.initiate_critical_battery_halt(battery_voltage)
 
                     # Check for low battery (SOS warning)
+                    # SOS pattern only shows when AC power is NOT present
                     elif battery_voltage < LOW_BATTERY_THRESHOLD_V:
                         if not self.low_battery_detected:
                             # Always log low battery events regardless of voltage change threshold
                             self.get_logger().warning(
-                                f"LOW BATTERY DETECTED: {battery_voltage:.3f}V < {LOW_BATTERY_THRESHOLD_V}V - Starting SOS LED pattern")
+                                f"LOW BATTERY DETECTED: {battery_voltage:.3f}V < {LOW_BATTERY_THRESHOLD_V}V")
                             self.low_battery_detected = True
-                            # Pause heartbeat to make SOS pattern visible
-                            self.pause_heartbeat(reason="low_battery")
-                            # Start SOS LED pattern in separate thread
-                            threading.Thread(target=self.sos_led_pattern, daemon=True).start()
-                            # Send desktop notification
-                            self.send_desktop_notification(
-                                "Low Battery Warning",
-                                f"Battery voltage low: {battery_voltage:.3f}V\nSOS LED pattern activated\nReturn to shore or charge battery",
-                                "critical"
-                            )
+                        
+                        # Only show SOS pattern if AC power is NOT present
+                        # If AC power is present, charge state pattern will be shown instead
+                        if ac_power_present is not True:
+                            # No AC power - show SOS warning
+                            if not self.sos_led_active:
+                                self.get_logger().warning("Starting SOS LED pattern (no AC power)")
+                                # Pause heartbeat to make SOS pattern visible
+                                self.pause_heartbeat(reason="low_battery")
+                                # Stop charge state pattern if running (SOS takes priority when no AC)
+                                if self.charge_state_led_active:
+                                    self.charge_state_led_active = False
+                                    self.charging_state_active = False
+                                # Start SOS LED pattern in separate thread
+                                threading.Thread(target=self.sos_led_pattern, daemon=True).start()
+                                # Send desktop notification
+                                self.send_desktop_notification(
+                                    "Low Battery Warning",
+                                    f"Battery voltage low: {battery_voltage:.3f}V\nSOS LED pattern activated\nReturn to shore or charge battery",
+                                    "critical"
+                                )
+                        else:
+                            # AC power is present - stop SOS and let charge state pattern handle it
+                            if self.sos_led_active:
+                                self.get_logger().info("AC power detected - stopping SOS pattern, showing charge state instead")
+                                self.sos_led_active = False
+                                # Resume heartbeat so charge state pattern can pause it
+                                self.resume_heartbeat(reason="ac_power_detected")
+                            # Charge state pattern will be started/updated by the charge state check below
+
+                    # Check for charging state (only if not in critical battery state)
+                    # Charging state takes precedence over normal heartbeat and SOS (when AC power is present)
+                    # Charge state can run even when low_battery_detected is True (if AC power is present)
+                    if not self.critical_battery_detected:
+                        # Determine if charging or fully charged
+                        # Consider in charging state if: charging_status is True OR ac_power_present is True
+                        # Fully charged if voltage is >= 98% of max voltage (regardless of charging_status)
+                        is_in_charging_state = (charging_status is True) or (ac_power_present is True)
+                        is_fully_charged_now = battery_voltage >= (BATTERY_VOLTAGE_MAX_V * 0.98)  # ~98% of max = fully charged
+                        is_charging_now = is_in_charging_state and not is_fully_charged_now
+                        
+                        # Calculate battery percentage
+                        percentage = self._calculate_battery_percentage(battery_voltage)
+                        self.current_charge_percentage = percentage
+                        self.is_charging = is_charging_now
+                        self.is_fully_charged = is_fully_charged_now
+                        
+                        # Determine if charge state should be active
+                        charge_state_should_be_active = is_charging_now or is_fully_charged_now
+                        
+                        # Start charge state pattern if needed
+                        if charge_state_should_be_active and not self.charging_state_active:
+                            self.get_logger().info(
+                                f"Charging state detected: charging={is_charging_now}, fully_charged={is_fully_charged_now}, "
+                                f"voltage={battery_voltage:.3f}V, percentage={percentage:.1f}%")
+                            self.charging_state_active = True
+                            # Pause heartbeat to make charge state pattern visible
+                            self.pause_heartbeat(reason="charging_state")
+                            # Start charge state LED pattern in separate thread
+                            if not self.charge_state_led_active:
+                                threading.Thread(target=self.charge_state_led_pattern, daemon=True).start()
+                        
+                        # Update charge state pattern if already active
+                        if self.charging_state_active:
+                            # Periodic logging for debugging
+                            current_time = time.time()
+                            if current_time - self.last_charge_state_log_time >= CHARGE_STATE_LOG_INTERVAL_S:
+                                flash_count = self._get_flash_count_from_percentage(percentage)
+                                if flash_count == 0:
+                                    pattern_desc = "steady ON (fully charged)"
+                                else:
+                                    pattern_desc = f"{flash_count} flash{'es' if flash_count > 1 else ''} ({percentage:.1f}%)"
+                                
+                                self.get_logger().info(
+                                    f"Charge state pattern: {pattern_desc}, "
+                                    f"voltage={battery_voltage:.3f}V, "
+                                    f"charging={is_charging_now}, "
+                                    f"fully_charged={is_fully_charged_now}, "
+                                    f"LED={CHARGE_STATE_LED}")
+                                self.last_charge_state_log_time = current_time
+                        
+                        # Stop charge state pattern if no longer charging/charged
+                        if not charge_state_should_be_active and self.charging_state_active:
+                            self.get_logger().info(
+                                f"Charging state ended: voltage={battery_voltage:.3f}V, percentage={percentage:.1f}%")
+                            self.charging_state_active = False
+                            self.charge_state_led_active = False  # This will stop the pattern thread
+                            # Resume heartbeat now that charging state is inactive
+                            self.resume_heartbeat(reason="charging_state_ended")
 
                     # Battery voltage recovered above low threshold
                     else:
@@ -3692,6 +3947,10 @@ If you take no action within 30 seconds, the system will automatically
 
             # Stop SOS LED pattern if active
             self.sos_led_active = False
+
+            # Stop charge state LED pattern if active
+            self.charge_state_led_active = False
+            self.charging_state_active = False
 
             # Stop service wait pattern if active
             self.service_wait_active = False
