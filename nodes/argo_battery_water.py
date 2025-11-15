@@ -44,6 +44,7 @@ import os
 import csv
 import json
 import math
+import re
 
 # Import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
@@ -747,14 +748,48 @@ class BatteryWaterNode(ArgoBaseNode):
             
             # Only write file if there's an actual change OR if this is the first time (file doesn't exist)
             if not file_exists or charging_changed or discharging_changed:
-                slopes_data = {
-                    'charging_slope_v_per_s': final_charging_slope,
-                    'discharging_slope_v_per_s': final_discharging_slope,
-                    'timestamp': datetime.now().isoformat(),
-                    'sample_count': len(self._voltage_samples)
-                }
+                # Format slope values to 3 significant digits in scientific notation
+                def format_slope_3_sig_digits(value):
+                    """Format a slope value to exactly 3 significant digits in scientific notation"""
+                    if value is None:
+                        return None
+                    try:
+                        num_val = float(value)
+                        if num_val == 0.0:
+                            return '0.0'
+                        
+                        # Use Python's built-in scientific notation with 2 decimal places (3 sig digits: X.XX)
+                        formatted = f'{num_val:.2e}'
+                        
+                        # Remove leading zero from exponent (e.g., e-05 -> e-5, e+03 -> e+3)
+                        if 'e' in formatted:
+                            base, exp_part = formatted.split('e')
+                            # Parse exponent and reformat without leading zero
+                            exp_val = int(exp_part)
+                            exp_str = str(exp_val) if exp_val >= 0 else f'-{abs(exp_val)}'
+                            return f'{base}e{exp_str}'
+                        
+                        return formatted
+                    except (ValueError, AttributeError, OverflowError, ZeroDivisionError):
+                        return str(value) if value is not None else None
+                
+                # Format slope values to strings with 3 significant digits
+                charging_str = format_slope_3_sig_digits(final_charging_slope) if final_charging_slope is not None else None
+                discharging_str = format_slope_3_sig_digits(final_discharging_slope) if final_discharging_slope is not None else None
+                
+                # Build JSON manually to use formatted strings for slopes
+                json_lines = [
+                    '{',
+                    f'  "charging_slope_v_per_s": {charging_str if charging_str is not None else "null"},',
+                    f'  "discharging_slope_v_per_s": {discharging_str if discharging_str is not None else "null"},',
+                    f'  "timestamp": {json.dumps(datetime.now().isoformat())},',
+                    f'  "sample_count": {len(self._voltage_samples)}',
+                    '}'
+                ]
+                json_str = '\n'.join(json_lines)
+                
                 with open(self._slopes_file_path, 'w') as f:
-                    json.dump(slopes_data, f, indent=2)
+                    f.write(json_str)
                 
                 # Build descriptive log message
                 slope_info = []
