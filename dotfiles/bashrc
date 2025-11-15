@@ -15,16 +15,6 @@ if [ -f "$ARGO_DIR/dotfiles/.bash_completion_argo" ]; then
     source "$ARGO_DIR/dotfiles/.bash_completion_argo"
 fi
 
-# Run Argo shutdown status check once per terminal session
-# This provides critical battery and shutdown information for both SSH and desktop terminals
-if [[ -z "$ARGO_MOTD_SHOWN" ]]; then
-    export ARGO_MOTD_SHOWN=1
-    # Check if the shutdown status script exists
-    if [[ -f "$ARGO_DIR/scripts/15-argo-shutdown-status" ]]; then
-        bash "$ARGO_DIR/scripts/15-argo-shutdown-status"
-    fi
-fi
-
 argo_status() {
     python3 "$ARGO_DIR/launch/argo_lifecycle_manager.py" status
 }
@@ -64,7 +54,7 @@ argo_quick_timer() {
     local time_diff=$((current_time - last_check_time))
     
     # Run check if forced or if it's been more than 5 minutes (300 seconds)
-    if [ "$force_check" = true ] || [ $time_diff -ge 300 ]; then
+    if [ "$force_check" = true ] || [ $time_diff -ge 3000 ]; then
         # Show "please wait" message that can be aborted by pressing Enter
         echo -n "🔍 Checking Argo status (press Enter to skip)..."
         
