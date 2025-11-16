@@ -1,87 +1,43 @@
-# Enhanced parameters for argo control with modular controllers
-# Two-node system: controller.py (high-level control) + rudder_sail_radio.py (low-level arbitration)
-
-# Global parameters (applied to all nodes)
-# The /** wildcard is ROS2 parameter syntax that applies these parameters to ALL nodes
 /**:
   ros__parameters:
     argo:
       mode: autonomous
-    # Simulation parameters (shared across simulator bridge, transform publisher, and visualization)
-    # These are accessible to all nodes via the simulation.* namespace
     simulation:
-      publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz) - 2Hz sufficient for visualization
-      simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics simulation
-      heading_trail_limit: 100   # Number of historical heading markers to display in visualization
-      grounding_behavior: "terminate"  # Behavior when boat grounds (goes outside boundary): "terminate" (log FATAL and stop), "reset" (reset to home), "continue" (log warning and continue)
-      exit_confirmation: true    # Require user confirmation before terminating simulation (Ctrl+C or software-triggered exit)
-      # Wind characteristics (runtime configurable via ROS2 parameters)
+      publish_rate: 2.0
+      simulation_rate: 10.0
+      heading_trail_limit: 100
+      grounding_behavior: reset
+      exit_confirmation: true
       wind:
-        wind_min_speed: 2.0       # Minimum wind speed in m/s (used for mock simulator, placeholder for real simulator)
-        wind_max_speed: 10.0       # Maximum wind speed in m/s (placeholder for real simulator variable wind)
-        wind_direction: 90.0       # Wind direction in degrees (compass convention, 0°=North, where wind comes FROM)
-        # Placeholder parameters for future wind variability features:
-        wind_max_delta_percent: 0.0        # Maximum wind speed variation percentage (placeholder)
-        wind_gust_probability: 0.0         # Probability of wind gusts (0.0-1.0, placeholder)
-        wind_gust_min_duration: 3.0        # Minimum gust duration in seconds (placeholder)
-        wind_gust_max_duration: 20.0       # Maximum gust duration in seconds (placeholder)
-        wind_gust_min_speed: 4.0           # Minimum gust speed in m/s (placeholder)
-        wind_gust_max_speed: 7.0           # Maximum gust speed in m/s (placeholder)
-        wind_gust_max_delta_percent: 10.0  # Maximum gust speed variation percentage (placeholder)
-
-# High-level controller (controller.py)
+        wind_min_speed: 2.0
+        wind_max_speed: 10.0
+        wind_direction: 300.0
+        wind_max_delta_percent: 0.0
+        wind_gust_probability: 0.0
+        wind_gust_min_duration: 3.0
+        wind_gust_max_duration: 20.0
+        wind_gust_min_speed: 4.0
+        wind_gust_max_speed: 7.0
+        wind_gust_max_delta_percent: 10.0
 controller_node:
   ros__parameters:
-    controller_type: "patrol"  # Options: "proportional", "wind_aware", "return_to_home", "patrol"
+    controller_type: patrol
     data_collection_enabled: false
     rudder_gain: 0.3
     rudder_full_scale_deg: 60.0
-    param_file_path: "argo.yaml"
-    # Patrol controller parameters (used when controller_type: "patrol")
-    patrol_lookahead_time: 15.0      # Seconds to predict ahead for boundary crossing
-    boundary_turn_threshold: 8.0     # Distance to boundary to trigger turn (meters)
-    tack_angle: 90.0                  # Degrees to turn during tack maneuver
-    broad_reach_angle: 110.0          # Preferred angle to wind for patrol (degrees)
-    geofence_map_name: "Argo Irchel pond sailing area"  # GeoJSON map name (without .geojson extension)
-
-# Low-level arbitration and hardware interface (rudder_sail_radio.py)
+    param_file_path: argo.yaml
+    patrol_lookahead_time: 15.0
+    boundary_turn_threshold: 8.0
+    tack_angle: 90.0
+    broad_reach_angle: 110.0
+    geofence_map_name: Argo Irchel pond sailing area
 rudder_sail_radio_node:
   ros__parameters:
-    human_override_timeout: 5.0      # Seconds after last human activity before robot can take control
-    deadband_threshold: 0.1875          # Minimum change in radio input to count as human activity (5σ measured)
-    safety_max_rudder: 1.0          # Maximum rudder command magnitude
-    safety_max_sail: 1.0            # Maximum sail command magnitude
-    param_file_path: "argo.yaml"
-
-# Boat visualization (argo_boat_visualization.py)
+    human_override_timeout: 5.0
+    deadband_threshold: 0.1875
+    safety_max_rudder: 1.0
+    safety_max_sail: 1.0
+    param_file_path: argo.yaml
 argo_boat_visualization:
   ros__parameters:
-    visualization_scale: 6.0        # Scale factor for boat visualization (1.0 = realistic size, 3.0 = 3x larger for better visibility)
-
-# Example configurations:
-# Wind-aware controller:
-# controller_node:
-#   ros__parameters:
-#     controller_type: "wind_aware"
-#     rudder_gain: 1.5
-#     sail_wind_gain: 0.3  # How much to blend wind-based sail control
-#     data_collection_enabled: true
-
-# Patrol controller:
-# controller_node:
-#   ros__parameters:
-#     controller_type: "patrol"
-#     rudder_gain: 2.0
-#     rudder_full_scale_deg: 60.0
-#     patrol_lookahead_time: 15.0
-#     boundary_turn_threshold: 15.0
-#     tack_angle: 90.0
-#     broad_reach_angle: 110.0
-#     geofence_map_name: "Argo Irchel pond sailing area"
-
-# Conservative human priority:
-# rudder_sail_radio_node:
-#   ros__parameters:
-#     human_override_timeout: 5.0     # Longer timeout
-#     deadband_threshold: 0.3          # Standard threshold (5σ measured)
-#     safety_max_rudder: 0.8          # Conservative limits
+    visualization_scale: 6.0
