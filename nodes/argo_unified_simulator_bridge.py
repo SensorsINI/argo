@@ -317,6 +317,14 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Add parameter callback to handle runtime parameter changes (e.g., from Foxglove)
         self.add_on_set_parameters_callback(self._on_parameter_change)
         
+        # --- Topic-based persistence controls ---
+        # Allow external tools to set wind direction via topic and persist it to argo.yaml
+        # Message type: std_msgs/Float64 (degrees in compass convention, 0-360, where wind comes FROM)
+        self.create_subscription(Float64, '/simulation/wind/wind_direction_set', self._wind_direction_set_callback, 10)
+        # Allow external tools to set wind min speed via topic and persist it to argo.yaml
+        # Message type: std_msgs/Float64 (m/s, clamped to >= 0)
+        self.create_subscription(Float64, '/simulation/wind/wind_min_speed_set', self._wind_min_speed_set_callback, 10)
+        
         # --- Timers ---
         if mode == 'local':
             self.sim_timer = self.create_timer(1.0/self.simulation_rate, self.local_simulation_step)
@@ -1596,6 +1604,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                 self.wind_direction = new_wind_dir
                 # Apply the change to the simulator
                 self._apply_wind_direction_to_simulator(new_wind_dir)
+                # Persist to YAML for next run
+                self._persist_parameter_to_yaml('simulation.wind.wind_direction', new_wind_dir)
                 
                 self.get_logger().info(
                     f"Wind direction parameter changed from {old_wind_dir:.1f}° to {new_wind_dir:.1f}° "
@@ -1611,6 +1621,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                     self.wind_speed = new_wind_speed
                     # Apply the change to the simulator
                     self._apply_wind_speed_to_simulator(new_wind_speed)
+                    # Persist to YAML for next run
+                    self._persist_parameter_to_yaml('simulation.wind.wind_min_speed', new_wind_speed)
                     
                     self.get_logger().info(
                         f"Wind speed parameter changed from {old_wind_speed:.1f} m/s to {new_wind_speed:.1f} m/s "
@@ -1621,6 +1633,100 @@ class ArgoUnifiedSimulatorBridge(Node):
                 pass
         
         return result
+    
+    def _wind_direction_set_callback(self, msg: Float64):
+        """Topic callback to set and persist wind direction (compass degrees)."""
+        try:
+            new_dir = float(msg.data) % 360.0
+        except Exception:
+            self.get_logger().warn(f"Invalid wind direction payload on /simulation/wind/wind_direction_set: {msg.data}")
+            return
+        
+        # Set parameter (this will also trigger _on_parameter_change which applies and persists)
+        try:
+            self.set_parameters([
+                rclpy.parameter.Parameter(
+                    name='simulation.wind.wind_direction',
+                    value=new_dir
+                )
+            ])
+            self.get_logger().info(f"Wind direction set via topic to {new_dir:.1f}° and persisted")
+        except Exception as e:
+            self.get_logger().error(f"Failed setting wind direction parameter via topic: {e}")
+    
+    def _wind_min_speed_set_callback(self, msg: Float64):
+        """Topic callback to set and persist wind minimum speed (m/s)."""
+        try:
+            new_speed = max(0.0, float(msg.data))
+        except Exception:
+            self.get_logger().warn(f"Invalid wind speed payload on /simulation/wind/wind_min_speed_set: {msg.data}")
+            return
+        
+        try:
+            self.set_parameters([
+                rclpy.parameter.Parameter(
+                    name='simulation.wind.wind_min_speed',
+                    value=new_speed
+                )
+            ])
+            self.get_logger().info(f"Wind min speed set via topic to {new_speed:.1f} m/s and persisted")
+        except Exception as e:
+            self.get_logger().error(f"Failed setting wind min speed parameter via topic: {e}")
+    
+    # --- General YAML persistence helpers ---
+    def _persist_parameter_to_yaml(self, param_name: str, value):
+        """Persist supported parameters to nodes/argo.yaml for next run.
+        
+        Currently supported:
+          - simulation.wind.wind_direction -> /**.ros__parameters.simulation.wind.wind_direction
+          - simulation.wind.wind_min_speed -> /**.ros__parameters.simulation.wind.wind_min_speed
+        """
+        try:
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[1]  # nodes -> argo
+            yaml_path = argo_dir / "nodes" / "argo.yaml"
+            
+            if not yaml_path.exists():
+                self.get_logger().warn(f"Cannot persist parameter '{param_name}': YAML not found at {yaml_path}")
+                return
+            
+            with open(yaml_path, 'r') as f:
+                data = yaml.safe_load(f) or {}
+            
+            # Map parameter name to nested YAML keys
+            mapping = {
+                'simulation.wind.wind_direction': ['/**', 'ros__parameters', 'simulation', 'wind', 'wind_direction'],
+                'simulation.wind.wind_min_speed': ['/**', 'ros__parameters', 'simulation', 'wind', 'wind_min_speed'],
+            }
+            keys = mapping.get(param_name)
+            if not keys:
+                # Not a persistable parameter, silently ignore
+                return
+            
+            # Ensure nested dicts exist
+            node = data
+            for k in keys[:-1]:
+                if k not in node or not isinstance(node[k], dict):
+                    node[k] = {}
+                node = node[k]
+            node[keys[-1]] = value
+            
+            # Write atomically: tmp then replace
+            tmp_path = yaml_path.with_suffix('.yaml.tmp')
+            bak_path = yaml_path.with_suffix('.yaml.bak')
+            with open(tmp_path, 'w') as f:
+                yaml.safe_dump(data, f, sort_keys=False)
+            try:
+                # Backup previous
+                if yaml_path.exists():
+                    yaml_path.replace(bak_path)
+            except Exception:
+                # Backup failure should not block persistence
+                pass
+            Path(tmp_path).replace(yaml_path)
+            self.get_logger().info(f"Persisted '{param_name}' to {yaml_path}")
+        except Exception as e:
+            self.get_logger().warn(f"Failed to persist '{param_name}' to argo.yaml: {e}")
     
     def publish_navsat_fix(self, trace_id=None):
         """Publish a NavSatFix message.
