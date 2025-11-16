@@ -513,6 +513,7 @@ class PowerController(ArgoBaseNode):
         self.current_charge_percentage = None  # Current battery charge percentage (0-100)
         self.is_charging = False  # True when actively charging
         self.is_fully_charged = False  # True when fully charged
+        self.ac_power_from_topic = None  # AC power status from topic (for fast updates)
 
         # WiFi monitoring state
         self.wifi_connected = True  # Assume connected at startup
@@ -1973,18 +1974,29 @@ class PowerController(ArgoBaseNode):
         
         while self.running and self.charge_state_led_active and self.charging_state_active:
             try:
-                # Get current charge percentage (updated by battery monitoring thread)
+                # Get current charge percentage and fully charged status (updated by battery monitoring thread)
                 percentage = self.current_charge_percentage
+                is_fully_charged = getattr(self, 'is_fully_charged', False)
                 
                 if percentage is None:
                     # No percentage data yet - wait a bit
                     time.sleep(0.5)
                     continue
                 
-                # Determine flash count based on percentage
+                # If battery service reports fully charged, show steady ON regardless of percentage
+                if is_fully_charged:
+                    led_setter(True)
+                    # Sleep for the period, checking periodically for shutdown
+                    sleep_time = 0
+                    while sleep_time < CHARGE_STATE_PERIOD_S and self.running and self.charge_state_led_active and self.charging_state_active:
+                        time.sleep(0.1)
+                        sleep_time += 0.1
+                    continue
+                
+                # Determine flash count based on percentage (only if not fully charged)
                 flash_count = self._get_flash_count_from_percentage(percentage)
                 
-                # Fully charged: steady ON
+                # Fully charged by percentage (100%): steady ON
                 if flash_count == 0:
                     led_setter(True)
                     # Sleep for the period, checking periodically for shutdown
@@ -2849,6 +2861,10 @@ class PowerController(ArgoBaseNode):
             self.lora_signal_sub = self.create_subscription(
                 Int32, '/lora_signal_strength', self._lora_signal_callback, 10)
             
+            # AC power status monitoring (for fast charge state updates)
+            self.ac_power_sub = self.create_subscription(
+                Bool, '/ac_power_present', self._ac_power_callback, 10)
+            
             # Health monitor service client for comprehensive health status
             self.health_monitor_client = self.create_client(
                 Trigger, '/argo/health/status')
@@ -2863,6 +2879,7 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("  - /argo/power/status (topic)")
             self.get_logger().info("  - /argo/power/button_events (topic)")
             self.get_logger().info("  - /controller_pause_state (subscription)")
+            self.get_logger().info("  - /ac_power_present (subscription - for fast charge state updates)")
         except Exception as e:
             self.get_logger().error(f"Failed to create power services: {e}")
 
@@ -2987,6 +3004,97 @@ class PowerController(ArgoBaseNode):
         if old_healthy != self.lora_healthy:
             self.get_logger().info(f"LoRa health changed: {'HEALTHY' if self.lora_healthy else 'UNHEALTHY'} (signal: {msg.data} dBm)")
 
+    def _ac_power_callback(self, msg):
+        """Receive AC power status updates from topic - triggers immediate charge state update"""
+        import time
+        old_ac_power = self.ac_power_from_topic
+        self.ac_power_from_topic = msg.data
+        
+        # Only trigger update if AC power status actually changed
+        if old_ac_power is not None and old_ac_power != msg.data:
+            self.get_logger().info(f"AC power status changed (from topic): {old_ac_power} -> {msg.data}")
+            
+            # Trigger immediate charge state update by calling battery service
+            # This will update charge state pattern immediately instead of waiting for next polling cycle
+            if self.battery_monitoring_active:
+                # Use a thread to avoid blocking the callback
+                threading.Thread(
+                    target=self._immediate_charge_state_update,
+                    daemon=True
+                ).start()
+        elif old_ac_power is None:
+            # First update - just log
+            self.get_logger().debug(f"AC power status (from topic): {msg.data}")
+
+    def _immediate_charge_state_update(self):
+        """Immediately update charge state based on current AC power and battery status"""
+        try:
+            # Call battery service to get current status
+            battery_data = self._call_battery_service()
+            if battery_data:
+                battery_voltage = battery_data.get('battery_voltage', 0)
+                charging_status = battery_data.get('charging_status', None)
+                ac_power_present = battery_data.get('ac_power_present', None)
+                
+                # Use topic value if available, otherwise use service value
+                ac_power = self.ac_power_from_topic if self.ac_power_from_topic is not None else ac_power_present
+                
+                # Validate voltage
+                if battery_voltage <= 0 or battery_voltage < 3.0 or battery_voltage > 30.0:
+                    return  # Invalid reading, skip update
+                
+                # Calculate percentage
+                percentage = self._calculate_battery_percentage(battery_voltage)
+                self.current_charge_percentage = percentage
+                
+                # Determine charging state
+                is_in_charging_state = (charging_status is True) or (ac_power is True)
+                is_fully_charged_now = battery_voltage >= (BATTERY_VOLTAGE_MAX_V * 0.98)
+                is_charging_now = is_in_charging_state and not is_fully_charged_now
+                
+                self.is_charging = is_charging_now
+                self.is_fully_charged = is_fully_charged_now
+                
+                # Update charge state based on AC power and battery status
+                charge_state_should_be_active = is_charging_now or is_fully_charged_now
+                
+                # Handle low battery + AC power transition
+                if self.low_battery_detected and not self.critical_battery_detected:
+                    if ac_power is not True:
+                        # No AC power - ensure SOS is active
+                        if not self.sos_led_active:
+                            self.get_logger().info("AC power removed - starting SOS pattern")
+                            self.pause_heartbeat(reason="low_battery")
+                            if self.charge_state_led_active:
+                                self.charge_state_led_active = False
+                                self.charging_state_active = False
+                            threading.Thread(target=self.sos_led_pattern, daemon=True).start()
+                    else:
+                        # AC power present - stop SOS, start charge state
+                        if self.sos_led_active:
+                            self.get_logger().info("AC power detected - stopping SOS, starting charge state")
+                            self.sos_led_active = False
+                            self.resume_heartbeat(reason="ac_power_detected")
+                
+                # Update charge state pattern
+                if not self.critical_battery_detected:
+                    if charge_state_should_be_active and not self.charging_state_active:
+                        self.get_logger().info(
+                            f"Immediate charge state update: charging={is_charging_now}, "
+                            f"fully_charged={is_fully_charged_now}, voltage={battery_voltage:.3f}V, "
+                            f"percentage={percentage:.1f}%")
+                        self.charging_state_active = True
+                        self.pause_heartbeat(reason="charging_state")
+                        if not self.charge_state_led_active:
+                            threading.Thread(target=self.charge_state_led_pattern, daemon=True).start()
+                    elif not charge_state_should_be_active and self.charging_state_active:
+                        self.get_logger().info("Immediate charge state update: charging ended")
+                        self.charging_state_active = False
+                        self.charge_state_led_active = False
+                        self.resume_heartbeat(reason="charging_state_ended")
+        except Exception as e:
+            self.get_logger().error(f"Error in immediate charge state update: {e}")
+
     def run_threads(self):
         """Start all background monitoring threads."""
         self.get_logger().info("Power controller starting background threads...")
@@ -3070,6 +3178,8 @@ class PowerController(ArgoBaseNode):
                     battery_voltage = battery_data.get('battery_voltage', 0)
                     charging_status = battery_data.get('charging_status', None)
                     ac_power_present = battery_data.get('ac_power_present', None)
+                    # Prefer topic value if available (faster updates), otherwise use service value
+                    ac_power = self.ac_power_from_topic if self.ac_power_from_topic is not None else ac_power_present
                     self.last_battery_voltage = battery_voltage
                     self.get_logger().debug(
                         f"Battery data received: {battery_voltage:.3f}V (charging={charging_status}, ac_power={ac_power_present})")
@@ -3161,7 +3271,7 @@ class PowerController(ArgoBaseNode):
                         
                         # Only show SOS pattern if AC power is NOT present
                         # If AC power is present, charge state pattern will be shown instead
-                        if ac_power_present is not True:
+                        if ac_power is not True:
                             # No AC power - show SOS warning
                             if not self.sos_led_active:
                                 self.get_logger().warning("Starting SOS LED pattern (no AC power)")
@@ -3193,9 +3303,10 @@ class PowerController(ArgoBaseNode):
                     # Charge state can run even when low_battery_detected is True (if AC power is present)
                     if not self.critical_battery_detected:
                         # Determine if charging or fully charged
-                        # Consider in charging state if: charging_status is True OR ac_power_present is True
+                        # Consider in charging state if: charging_status is True OR ac_power is True
                         # Fully charged if voltage is >= 98% of max voltage (regardless of charging_status)
-                        is_in_charging_state = (charging_status is True) or (ac_power_present is True)
+                        # Use topic value (ac_power) for faster updates
+                        is_in_charging_state = (charging_status is True) or (ac_power is True)
                         is_fully_charged_now = battery_voltage >= (BATTERY_VOLTAGE_MAX_V * 0.98)  # ~98% of max = fully charged
                         is_charging_now = is_in_charging_state and not is_fully_charged_now
                         
@@ -3225,11 +3336,15 @@ class PowerController(ArgoBaseNode):
                             # Periodic logging for debugging
                             current_time = time.time()
                             if current_time - self.last_charge_state_log_time >= CHARGE_STATE_LOG_INTERVAL_S:
-                                flash_count = self._get_flash_count_from_percentage(percentage)
-                                if flash_count == 0:
-                                    pattern_desc = "steady ON (fully charged)"
+                                # If battery service reports fully charged, show steady ON in log
+                                if is_fully_charged_now:
+                                    pattern_desc = "steady ON (fully charged by battery service)"
                                 else:
-                                    pattern_desc = f"{flash_count} flash{'es' if flash_count > 1 else ''} ({percentage:.1f}%)"
+                                    flash_count = self._get_flash_count_from_percentage(percentage)
+                                    if flash_count == 0:
+                                        pattern_desc = "steady ON (fully charged by percentage)"
+                                    else:
+                                        pattern_desc = f"{flash_count} flash{'es' if flash_count > 1 else ''} ({percentage:.1f}%)"
                                 
                                 self.get_logger().info(
                                     f"Charge state pattern: {pattern_desc}, "

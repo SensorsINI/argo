@@ -86,6 +86,10 @@ HUMIDITY_ALERT_THRESHOLD_PCT = 75.0  # %, triggers warning, makes node unhealthy
 # Saltwater alert threshold
 SALTWATER_ALERT_THRESHOLD_V = 1.0  # V, triggers warning, makes node unhealthy
 
+# Charging anomaly detection threshold (negative slope while charging)
+# Considered significant if voltage is falling faster than this while charging
+MIN_DISCHARGING_SLOPE_FOR_ANOMALY_VPH = -0.05  # V/h
+
 try:
     import smbus2 as smbus2
     from smbus2 import i2c_msg
@@ -190,6 +194,11 @@ class BatteryWaterNode(ArgoBaseNode):
         self._latest_charging_status = None
         self._latest_ac_power_present = None
         self._latest_timestamp = None
+        # Derived diagnostics
+        self._latest_voltage_slope_vph = None
+        self._latest_charging_anomaly = False
+        self._latest_anomaly_code = None
+        self._latest_anomaly_reason = None
         
         # Thread-safe double buffer for service responses
         self._service_buffer = {
@@ -206,6 +215,10 @@ class BatteryWaterNode(ArgoBaseNode):
             'ac_power_present': None,
             'time_to_full_hours': None,
             'time_to_empty_hours': None,
+            'voltage_slope_vph': None,
+            'charging_anomaly': False,
+            'anomaly_code': None,
+            'anomaly_reason': None,
             'timestamp': None
         }
         
@@ -453,6 +466,10 @@ class BatteryWaterNode(ArgoBaseNode):
                 'ac_power_present': self._latest_ac_power_present,
                 'time_to_full_hours': self._latest_time_to_full_hours,
                 'time_to_empty_hours': self._latest_time_to_empty_hours,
+                'voltage_slope_vph': self._latest_voltage_slope_vph,
+                'charging_anomaly': self._latest_charging_anomaly,
+                'anomaly_code': self._latest_anomaly_code,
+                'anomaly_reason': self._latest_anomaly_reason,
                 'timestamp': time.monotonic()
             })
 
@@ -600,7 +617,11 @@ class BatteryWaterNode(ArgoBaseNode):
                 'timestamp_sec': now.seconds_nanoseconds()[0],
                 'timestamp_nanosec': now.seconds_nanoseconds()[1],
                 'time_to_full_hours': buffer_copy['time_to_full_hours'],
-                'time_to_empty_hours': buffer_copy['time_to_empty_hours']
+                'time_to_empty_hours': buffer_copy['time_to_empty_hours'],
+                'voltage_slope_vph': buffer_copy.get('voltage_slope_vph'),
+                'charging_anomaly': buffer_copy.get('charging_anomaly', False),
+                'anomaly_code': buffer_copy.get('anomaly_code'),
+                'anomaly_reason': buffer_copy.get('anomaly_reason')
             }
 
             # Format battery summary
@@ -626,6 +647,10 @@ class BatteryWaterNode(ArgoBaseNode):
             for alert_key, description in alert_descriptions.items():
                 if battery_data.get(alert_key) is True:
                     active_alerts.append(description)
+
+            # Charging anomaly alert
+            if battery_data.get('charging_anomaly') is True:
+                active_alerts.append('⚠️ CHARGER POWER FAULT')
 
             critical_alerts = " | ".join(
                 active_alerts) if active_alerts else None
@@ -1704,6 +1729,38 @@ class BatteryWaterNode(ArgoBaseNode):
                     self._latest_battery_lifetime_hours = None
             else:
                 self._latest_battery_lifetime_hours = None
+
+        # Derive voltage slope (V/h) over recent samples and detect anomaly:
+        # "charging" asserted while voltage slope is significantly negative.
+        self._latest_voltage_slope_vph = None
+        self._latest_charging_anomaly = False
+        self._latest_anomaly_code = None
+        self._latest_anomaly_reason = None
+        try:
+            fit = self._linear_least_squares(self._voltage_samples)
+            if fit is not None:
+                slope_v_per_s, _ = fit
+                self._latest_voltage_slope_vph = slope_v_per_s * 3600.0
+        except Exception:
+            self._latest_voltage_slope_vph = None
+
+        if (self._latest_charging_status is True and
+                self._latest_voltage_slope_vph is not None and
+                len(self._voltage_samples) >= self.battery_lifetime_min_samples and
+                self._latest_voltage_slope_vph <= MIN_DISCHARGING_SLOPE_FOR_ANOMALY_VPH):
+            # Charging asserted but voltage is falling noticeably -> anomaly
+            self._latest_charging_anomaly = True
+            self._latest_anomaly_code = "charger_power_fault"
+            self._latest_anomaly_reason = (
+                f"Charging active but voltage falling (slope {self._latest_voltage_slope_vph:.2f} V/h)"
+            )
+            # Prefer time-to-empty estimate; clear time-to-full as it's misleading
+            self._latest_time_to_full_hours = None
+            # Compute TTE if not present
+            if self._latest_time_to_empty_hours is None:
+                self._latest_time_to_empty_hours = self._estimate_battery_lifetime(
+                    battery_voltage, charging=False)
+            self._latest_battery_lifetime_hours = self._latest_time_to_empty_hours
 
         self._process_alerts(battery_voltage, saltwater_voltage, humidity)
         
