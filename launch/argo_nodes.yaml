@@ -197,6 +197,7 @@ simulation_config:
 simulation_nodes:
   - name: argo_unified_simulator_bridge
     executable: nodes/argo_unified_simulator_bridge.py
+    critical: true  # Critical for simulation - if it exits, simulation should terminate
     description: "Unified simulator bridge for simulated sensor data"
     args: ["--mode", "local"]  # Can be "local" or "remote"
     

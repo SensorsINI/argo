@@ -13,6 +13,7 @@ alias mount1="mount | grep -E '^/'|grep -v snapd"
 
 
 # Argo Robot Control Aliases - Improved ROS2 Native Approach
+alias akill='$ARGO_DIR/scripts/akill.sh'
 alias al='$ARGO_DIR/launch/argo_start_standard.sh'      # Start Argo nodes using standard launch
 alias aq='$ARGO_DIR/launch/argo_stop_standard.sh'       # Stop Argo nodes using standard launch
 alias ars='aq && al' # Restart Argo nodes

@@ -37,11 +37,17 @@ class MockSimulatorState:
 class MockSailboatSimulator:
     """Mock simulator for testing when sailboat-playground is not available."""
 
-    def __init__(self):
+    def __init__(self, dt=0.1):
+        """Initialize mock simulator.
+        
+        Args:
+            dt: Time step in seconds per integration step (default: 0.1 = 10 Hz)
+                Should match the simulation rate from the bridge (1.0 / simulation_rate)
+        """
         self.state = MockSimulatorState()
 
         # Physics parameters
-        self.dt = 0.1  # seconds per integration step
+        self.dt = float(dt)  # seconds per integration step
         self.max_turn_rate = 30.0  # degrees per second at full rudder and speed
         self.max_speed = 1.5  # metres / second (approximate hull speed)
         self.no_go_angle_deg = 40.0  # approximate close-hauled limit
@@ -274,10 +280,23 @@ class MockSailboatSimulator:
 
         # Apply rudder-induced turn rate when moving
         if effective_no_go:
-            turn_sign = -1.0 if wind_boat_angle >= 0.0 else 1.0
-            if wind_boat_angle == 0.0:
-                turn_sign = -1.0 if self.state.rudder_angle >= 0.0 else 1.0
-            turn_rate = self.max_turn_rate * 0.4
+            # When in no-go zone, force boat to fall off to downwind side
+            # Calculate which direction is downwind (away from wind)
+            # Wind is coming from wind_from_direction, so downwind is opposite
+            downwind_direction = (wind_from_direction + 180.0) % 360.0
+            # Calculate angle from current heading to downwind direction
+            heading_to_downwind = (downwind_direction - self.state.boat_heading) % 360.0
+            if heading_to_downwind > 180.0:
+                heading_to_downwind -= 360.0
+            
+            # Turn toward downwind direction (fall off)
+            if abs(heading_to_downwind) < 5.0:
+                # Already pointing downwind, just maintain heading
+                turn_rate = 0.0
+            else:
+                # Turn toward downwind
+                turn_sign = 1.0 if heading_to_downwind > 0.0 else -1.0
+                turn_rate = self.max_turn_rate * 0.6  # More aggressive fall-off
             self.state.boat_heading = (self.state.boat_heading + turn_sign * turn_rate * self.dt) % 360.0
         elif self.state.boat_speed >= 0.05:
             speed_ratio = self.state.boat_speed / self.max_speed if self.max_speed > 0 else 0.0

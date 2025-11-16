@@ -24,6 +24,17 @@ Published Topics
 - /visualization_marker (visualization_msgs/Marker): Individual markers
 - /visualization_marker_array (visualization_msgs/MarkerArray): All markers together
 
+Marker Persistence and Inspection
+----------------------------------
+Markers have lifetime=0 (persistent), but they disappear when this node terminates.
+To inspect markers after simulation ends:
+1. Use Ctrl+Z (SIGSTOP) to pause simulation before stopping
+2. Record with ros2 bag and playback for post-analysis
+3. Use Foxglove's recording feature to capture and replay sessions
+
+The heading trail uses incremental publishing (only new markers) for bandwidth
+efficiency, reducing network usage by ~500x compared to republishing all markers.
+
 Subscribed Topics
 -----------------
 - /pose (geometry_msgs/Vector3): Boat heading (z-component)
@@ -100,7 +111,7 @@ import rclpy
 from geometry_msgs.msg import Vector3, PoseStamped, Point
 from sensor_msgs.msg import NavSatFix
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import Bool, ColorRGBA, Header, Float64
+from std_msgs.msg import Bool, ColorRGBA, Header, Float64, String
 from rosgraph_msgs.msg import Clock
 import math
 import numpy as np
@@ -126,9 +137,14 @@ class HeadingTrailEntry:
     y: float
     yaw_rad: float
     compass_deg: float
+    human_controlled: bool = False  # Track control mode for this trail point
+    controller_state: str = ""  # Track controller state (e.g., 'tacking', 'jibing', 'broad_reach')
 
 
 class ArgoBoatVisualization(ArgoBaseNode):
+    # Common text size for all marker text labels (in meters, before visualization scale)
+    TEXT_MARKER_SIZE = 0.05
+    
     def __init__(self, debug_mode=False):
         super().__init__('argo_boat_visualization')
         
@@ -204,6 +220,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(NavSatFix, '/fix', self.gps_callback, 10)
         
+        # Subscribe to human control status and controller state
+        self.create_subscription(Bool, '/human_controlled', self.human_controlled_callback, 10)
+        self.create_subscription(String, '/controller/state', self.controller_state_callback, 10)
+        
         # Subscribe to sailing area markers for 3D visualization
         # Use TRANSIENT_LOCAL QoS to receive last published message even if subscribing late
         from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
@@ -245,6 +265,11 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.heading_trail_clear_needed = False
         self.is_tacking = False
         self._tacking_marker_active = False
+        self.human_controlled = False  # Track if boat is under human control
+        self.controller_state = ""  # Track controller state (e.g., 'tacking', 'jibing', 'broad_reach')
+        
+        # Track how many trail markers have been published (for efficiency)
+        self._published_trail_count = 0
         
         # Timer for publishing markers
         self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
@@ -360,6 +385,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
                         if new_limit == 0:
                             self.heading_trail.clear()
                         self.heading_trail_last_time_s = None
+                        # Reset published count when trail limit changes (need to republish)
+                        self._published_trail_count = 0
                         self.heading_trail_clear_needed = True
             else:
                 # Allow other parameters (don't fail on unknown parameters)
@@ -385,6 +412,14 @@ class ArgoBoatVisualization(ArgoBaseNode):
     def tacking_status_callback(self, msg: Bool):
         """Track whether the simulator reports a tack in progress."""
         self.is_tacking = bool(msg.data)
+    
+    def human_controlled_callback(self, msg: Bool):
+        """Track whether the boat is under human control."""
+        self.human_controlled = bool(msg.data)
+    
+    def controller_state_callback(self, msg: String):
+        """Track controller state (e.g., 'tacking', 'jibing', 'broad_reach')."""
+        self.controller_state = msg.data
     
     def _update_boat_position_from_gps(self):
         """Convert current GPS lat/lon to local map XY offsets."""
@@ -419,7 +454,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
             x=float(pos_x),
             y=float(pos_y),
             yaw_rad=yaw_rad,
-            compass_deg=float(self.boat_heading)
+            compass_deg=float(self.boat_heading),
+            human_controlled=self.human_controlled,
+            controller_state=self.controller_state
         )
 
         if not self.heading_trail:
@@ -433,27 +470,44 @@ class ArgoBoatVisualization(ArgoBaseNode):
         dist = math.hypot(dx, dy)
         heading_delta = self._heading_delta(entry.compass_deg, last_entry.compass_deg)
         time_delta = current_time_s - self.heading_trail_last_time_s if self.heading_trail_last_time_s is not None else float('inf')
+        
+        # Check if control mode or controller state changed
+        control_mode_changed = entry.human_controlled != last_entry.human_controlled
+        controller_state_changed = entry.controller_state != last_entry.controller_state
 
         if (
             dist >= self.heading_trail_spacing_m
             or heading_delta >= self.heading_trail_heading_threshold_deg
             or time_delta >= self.heading_trail_time_spacing_s
+            or control_mode_changed
+            or controller_state_changed
         ):
             self.heading_trail.append(entry)
             self.heading_trail_last_time_s = current_time_s
 
-    def _create_heading_trail_markers(self):
-        """Create markers representing the historical heading trace."""
+    def _create_heading_trail_markers(self, start_idx=0):
+        """Create markers representing the historical heading trace.
+        
+        Args:
+            start_idx: Index to start creating markers from (for efficiency, only create new markers)
+        """
         markers = []
         if self.heading_trail_limit == 0 or not self.heading_trail:
             return markers
 
         base_id = 400
+        text_base_id = 10000
         arrow_length = 0.35 * self.visualization_scale
-        arrow_width = 0.015 * self.visualization_scale
+        arrow_width = 0.02 * self.visualization_scale
         arrow_height = 0.015 * self.visualization_scale
+        
+        # Get previous entry for state change detection
+        prev_entry = None
+        if start_idx > 0 and start_idx <= len(self.heading_trail):
+            prev_entry = self.heading_trail[start_idx - 1]
 
-        for idx, entry in enumerate(self.heading_trail):
+        for idx in range(start_idx, len(self.heading_trail)):
+            entry = self.heading_trail[idx]
             marker = Marker()
             marker.header = Header()
             marker.header.frame_id = "map"
@@ -478,11 +532,103 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker.scale.y = arrow_width
             marker.scale.z = arrow_height
 
-            marker.color = ColorRGBA(r=0.7, g=0.7, b=0.7, a=0.35)
+            # Color based on control mode and controller state at the time of this trail entry
+            marker_color = None
+            label_text = ""
+            
+            if entry.human_controlled:
+                # Human control - red
+                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.5)
+                marker_color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
+                label_text = "HUMAN"
+            else:
+                # Autonomous control - color based on controller state
+                state = entry.controller_state.lower()
+                if 'tacking' in state:
+                    # Tacking - green
+                    marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.5)
+                    marker_color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+                    label_text = "TACKING"
+                elif 'jibing' in state or 'jibe' in state:
+                    # Jibing - orange/yellow
+                    marker.color = ColorRGBA(r=1.0, g=0.6, b=0.0, a=0.5)
+                    marker_color = ColorRGBA(r=1.0, g=0.6, b=0.0, a=1.0)
+                    label_text = "JIBING"
+                elif 'return_to_home' in state:
+                    # Return to home - purple/magenta
+                    marker.color = ColorRGBA(r=0.8, g=0.0, b=0.8, a=0.5)
+                    marker_color = ColorRGBA(r=0.8, g=0.0, b=0.8, a=1.0)
+                    label_text = "RTH"
+                elif 'broad_reach' in state:
+                    # Broad reach - cyan/blue
+                    marker.color = ColorRGBA(r=0.2, g=0.2, b=1.0, a=0.5)
+                    marker_color = ColorRGBA(r=0.2, g=0.2, b=1.0, a=1.0)
+                    label_text = "BROAD REACH"
+                elif 'proportional' in state:
+                    # Proportional - cyan/blue
+                    marker.color = ColorRGBA(r=0.2, g=0.2, b=1.0, a=0.5)
+                    marker_color = ColorRGBA(r=0.2, g=0.2, b=1.0, a=1.0)
+                    label_text = "PROPORTIONAL"
+                elif 'wind_aware' in state:
+                    # Wind aware - cyan/blue
+                    marker.color = ColorRGBA(r=0.2, g=0.2, b=1.0, a=0.5)
+                    marker_color = ColorRGBA(r=0.2, g=0.2, b=1.0, a=1.0)
+                    label_text = "WIND AWARE"
+                else:
+                    # Unknown state - lighter blue/gray
+                    marker.color = ColorRGBA(r=0.5, g=0.5, b=0.8, a=0.5)
+                    marker_color = ColorRGBA(r=0.5, g=0.5, b=0.8, a=1.0)
+                    label_text = entry.controller_state.upper() if entry.controller_state else "AUTO"
+            
             marker.lifetime.sec = 0
             marker.lifetime.nanosec = 0
 
             markers.append(marker)
+            
+            # Check if this is a state change (first marker or state different from previous)
+            is_state_change = False
+            if prev_entry is None:
+                # First marker - always add label
+                is_state_change = True
+            elif (entry.human_controlled != prev_entry.human_controlled or
+                  entry.controller_state != prev_entry.controller_state):
+                # State changed - add label
+                is_state_change = True
+            
+            if is_state_change and label_text:
+                # Create text label marker
+                text_marker = Marker()
+                text_marker.header = Header()
+                text_marker.header.frame_id = "map"
+                text_marker.header.stamp = self.get_current_time()
+                
+                text_marker.ns = "argo_heading_trail_labels"
+                text_marker.id = text_base_id + idx
+                text_marker.type = Marker.TEXT_VIEW_FACING
+                text_marker.action = Marker.ADD
+                text_marker.frame_locked = True
+                
+                # Position above the arrow
+                text_marker.pose.position.x = entry.x
+                text_marker.pose.position.y = entry.y
+                text_marker.pose.position.z = 0.15 * self.visualization_scale  # Above the arrow
+                
+                # Text content
+                text_marker.text = label_text
+                
+                # Scale (text size) - same as boat labels
+                text_marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
+                
+                # Color matching the arrow (but fully opaque for text)
+                text_marker.color = marker_color
+                
+                # Lifetime
+                text_marker.lifetime.sec = 0
+                text_marker.lifetime.nanosec = 0
+                
+                markers.append(text_marker)
+            
+            prev_entry = entry
 
         return markers
 
@@ -772,7 +918,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_sail_indicator_marker(self):
-        """Create sail position indicator as a white rectangular panel on the downwind side"""
+        """Create sail position indicator as a white triangle panel on the downwind side"""
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"  # Use base_link so marker moves with boat
@@ -843,7 +989,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.scale.y = 1.0
         marker.scale.z = 1.0
 
-        marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.8)
+        marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.8) # transparent gray
         # Add overlay arrow for top-down visibility
         overlay = Marker()
         overlay.header = marker.header
@@ -853,15 +999,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         overlay.ns = "argo_boat_overlay"
         overlay.pose.position.x = 0.0
         overlay.pose.position.y = 0.0
-        overlay.pose.position.z = 0.1 * self.visualization_scale
+        overlay.pose.position.z = hull_top_z + 0.1 * self.visualization_scale
         overlay.pose.orientation.w = math.cos(total_sail_angle_rad * 0.5)
         overlay.pose.orientation.x = 0.0
         overlay.pose.orientation.y = 0.0
         overlay.pose.orientation.z = math.sin(total_sail_angle_rad * 0.5)
         overlay.scale.x = boom_length
         overlay.scale.y = 0.02 * self.visualization_scale
-        overlay.scale.z = 0.0 # no head
-        overlay.color = marker.color
+        overlay.scale.z = 0.0 # flat along water
+        overlay.color = marker.color # saame as sail
         self.overlay_markers.append(overlay)
         
         # Lifetime - infinite so marker persists
@@ -1011,7 +1157,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.scale.z = 0.03 * self.visualization_scale
         
         # Color (yellow for velocity)
-        marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
+        marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.5)
         
         # Lifetime - infinite so marker persists
         marker.lifetime.sec = 0
@@ -1052,12 +1198,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.orientation.z = 0.0
         
         # Scale - apply visualization scale
-        marker.scale.x = (1.0 - min(4*self.gps_velocity_speed , 1.0)) * 0.2 * self.visualization_scale  # arrow length
-        marker.scale.y = 0.03 * self.visualization_scale # arrow width
-        marker.scale.z = 0.03 * self.visualization_scale
+        marker.scale.x = self.gps_velocity_speed * 0.2 * self.visualization_scale  # arrow length
+        marker.scale.y = 0.02 * self.visualization_scale # arrow width
+        marker.scale.z = 0.01 * self.visualization_scale
         
-        # Color (cyan for heading)
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
+        # Color (transparent red for human control, cyan for autonomous)
+        if self.human_controlled:
+            marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.5)
+        else:
+            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.5)
         
         # Lifetime - infinite so marker persists
         marker.lifetime.sec = 0
@@ -1087,7 +1236,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Rudder: {rudder_angle_deg:.1f}°"
         
         # Scale (text size) - apply visualization scale
-        marker.scale.z = 0.03 * self.visualization_scale  # Text height in meters
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
         
         # Color matching rudder indicator (red)
         marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
@@ -1120,7 +1269,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Sail: {sail_angle_deg:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.03 * self.visualization_scale
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
         
         # Color matching sail indicator (white, but darker for visibility)
         marker.color = ColorRGBA(r=0.9, g=0.9, b=0.9, a=1.0)
@@ -1132,10 +1281,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_wind_label_marker(self):
-        """Create optional text label for wind vector"""
+        """Create optional text label for wind vector, positioned at the middle of the wind arrow"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "base_link"
+        marker.header.frame_id = "map"  # Use same frame as wind arrow
         marker.header.stamp = self.get_current_time()
         
         marker.id = 12
@@ -1143,16 +1292,36 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.action = Marker.ADD
         marker.ns = "argo_boat_labels"
         
-        # Position near wind vector (above boat) - apply visualization scale
-        marker.pose.position.x = 0.3 * self.visualization_scale  # Offset forward
-        marker.pose.position.y = 0.0
-        marker.pose.position.z = 1.2 * self.visualization_scale  # Above wind arrow
+        # Calculate wind direction for positioning (same calculation as wind arrow)
+        if self.true_wind_direction is not None:
+            absolute_wind_from = self.true_wind_direction
+        else:
+            absolute_wind_from = (self.boat_heading + self.wind_angle) % 360.0
+        
+        # Convert "wind comes from" to "wind goes toward" (add 180°)
+        absolute_wind_to = (absolute_wind_from + 180.0) % 360.0
+        
+        # Calculate arrow length (same as wind arrow marker)
+        wind_scale = min(max(self.wind_speed * 0.5, 0.1), 2.0)
+        arrow_length = wind_scale * self.visualization_scale
+        
+        # Position at middle of wind arrow: start position + half arrow length in wind direction
+        # Wind arrow starts at boat position, points in absolute_wind_to direction
+        # Convert absolute_wind_to (compass: 0°=North) to map frame (0°=East, CCW)
+        wind_yaw_deg = (90.0 - absolute_wind_to) % 360.0
+        wind_yaw_rad = math.radians(wind_yaw_deg)
+        
+        # Calculate midpoint offset (half arrow length in wind direction)
+        midpoint_offset = arrow_length * 0.5
+        marker.pose.position.x = self.boat_pos_x + midpoint_offset * math.cos(wind_yaw_rad)
+        marker.pose.position.y = self.boat_pos_y + midpoint_offset * math.sin(wind_yaw_rad)
+        marker.pose.position.z = 1.0 * self.visualization_scale  # Same height as wind arrow start
         
         # Text content with values
         marker.text = f"Wind: {self.wind_speed:.1f} m/s @ {self.wind_angle:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.05 * self.visualization_scale
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
         
         # Color matching wind vector (green)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
@@ -1184,7 +1353,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.text = f"Heading: {self.boat_heading:.1f}°"
         
         # Scale - apply visualization scale
-        marker.scale.z = 0.03 * self.visualization_scale
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
         
         # Color matching heading arrow (cyan)
         marker.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)
@@ -1213,9 +1382,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
 
         marker.text = "TACKING"
 
-        marker.scale.z = 0.08 * self.visualization_scale
+        marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
 
-        marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=1.0)
+        marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.75)
 
         marker.lifetime.sec = 0
         marker.lifetime.nanosec = 0
@@ -1229,8 +1398,18 @@ class ArgoBoatVisualization(ArgoBaseNode):
             
             self._update_heading_trail()
             
+            # Check if trail was trimmed (deque dropped old entries due to maxlen)
+            # Do this before checking heading_trail_clear_needed
+            if self.heading_trail_limit > 0 and self.heading_trail:
+                num_trail_markers = len(self.heading_trail)
+                if num_trail_markers < self._published_trail_count:
+                    # Trail was trimmed - need to clear and republish all
+                    self.heading_trail_clear_needed = True
+                    self._published_trail_count = 0
+            
             # Add boat visualization markers
             if self.heading_trail_clear_needed:
+                # Clear all trail markers
                 delete_marker = Marker()
                 delete_marker.header = Header()
                 delete_marker.header.frame_id = "map"
@@ -1239,7 +1418,19 @@ class ArgoBoatVisualization(ArgoBaseNode):
                 delete_marker.id = 0
                 delete_marker.action = Marker.DELETEALL
                 marker_array.markers.append(delete_marker)
+                
+                # Also clear trail labels
+                delete_label_marker = Marker()
+                delete_label_marker.header = Header()
+                delete_label_marker.header.frame_id = "map"
+                delete_label_marker.header.stamp = self.get_current_time()
+                delete_label_marker.ns = "argo_heading_trail_labels"
+                delete_label_marker.id = 0
+                delete_label_marker.action = Marker.DELETEALL
+                marker_array.markers.append(delete_label_marker)
+                
                 self.heading_trail_clear_needed = False
+                self._published_trail_count = 0  # Reset counter after clear
 
             marker_array.markers.append(self.create_boat_hull_marker())
             marker_array.markers.append(self.create_mast_marker())
@@ -1247,12 +1438,18 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_rudder_arrow_marker())  # Red arrow
             marker_array.markers.append(self.create_sail_indicator_marker())  # White triangle
             marker_array.markers.append(self.create_wind_vector_marker())
-            marker_array.markers.append(self.create_velocity_vector_marker())
+            # marker_array.markers.append(self.create_velocity_vector_marker())
             marker_array.markers.append(self.create_heading_arrow_marker())
 
-            # Add historical heading markers
+            # Add NEW historical heading markers only (efficiency optimization)
+            # Markers with lifetime=0 are persistent, so we only need to publish new ones
             if self.heading_trail_limit > 0 and self.heading_trail:
-                marker_array.markers.extend(self._create_heading_trail_markers())
+                num_trail_markers = len(self.heading_trail)
+                if num_trail_markers > self._published_trail_count:
+                    # Only create markers for new entries
+                    new_markers = self._create_heading_trail_markers(start_idx=self._published_trail_count)
+                    marker_array.markers.extend(new_markers)
+                    self._published_trail_count = num_trail_markers
 
             # Add overlay markers (e.g., top-down indicators) and clear buffer
             if self.overlay_markers:

@@ -12,6 +12,7 @@ Features:
 - Arrow key control (←→ rudder, ↑↓ sail)
 - Visual display of current control positions
 - Real-time status updates
+- Process-level pause (SIGSTOP/SIGCONT) to freeze simulation and preserve markers
 - Clean shutdown with terminal restoration
 
 Usage:
@@ -25,9 +26,14 @@ Keyboard Controls:
     c  : Center both controls
     w  : Rotate wind +10°
     e  : Rotate wind -10°
-    SPACE : Toggle simulation pause
+    SPACE : Toggle simulation pause (SIGSTOP/SIGCONT - keeps markers visible!)
     r  : Reset simulation
     q  : Quit
+
+Simulation Pause (SPACE):
+    Uses SIGSTOP to literally freeze all simulation processes, keeping them alive
+    so visualization markers remain visible in Foxglove/RViz for inspection.
+    Press SPACE again to resume with SIGCONT.
 """
 
 import rclpy
@@ -42,6 +48,8 @@ import time
 import queue
 import signal
 import sys
+import psutil
+import os
 
 class KeyboardControlNode(Node):
     """ROS2 node for keyboard control of Argo simulator."""
@@ -52,7 +60,7 @@ class KeyboardControlNode(Node):
         # Publisher for control commands
         self.pub_rudder_sail_radio = self.create_publisher(Vector3, '/rudder_sail_radio', 10)
         self.pub_simulation_paused = self.create_publisher(Bool, '/simulation_paused', 10)
-        self.wind_param_name = 'simulation.wind_direction'
+        self.wind_param_name = 'simulation.wind.wind_direction'
         self.wind_param_target = '/argo_unified_simulator_bridge'
         self.wind_get_client = self.create_client(GetParameters, f'{self.wind_param_target}/get_parameters')
         self.wind_set_client = self.create_client(SetParameters, f'{self.wind_param_target}/set_parameters')
@@ -68,6 +76,14 @@ class KeyboardControlNode(Node):
         self.step_size = 1.0 / 8.0  # 8 steps for full scale (0.125)
         self.running = True
         self.simulation_paused = False
+        self.use_process_pause = True  # Use SIGSTOP/SIGCONT instead of topic
+        
+        # Keyboard activity tracking - only publish when keys are actively pressed
+        self.last_keyboard_activity = 0.0  # Timestamp of last keyboard activity
+        self.keyboard_timeout = 0.5  # Stop publishing 0.5 seconds after last key press
+        
+        # Track simulation process PIDs for pause/resume
+        self.simulation_pids = []
         
         # Status from simulator (for display)
         self.simulator_heading = 0.0
@@ -88,7 +104,7 @@ class KeyboardControlNode(Node):
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGWINCH, self._signal_handler)
         
-        # Control loop timer (publishes current control state)
+        # Control loop timer (publishes only when keyboard is active)
         self.control_timer = self.create_timer(0.1, self.publish_control)
         
         # Display update timer
@@ -137,7 +153,7 @@ class KeyboardControlNode(Node):
                 rclpy.shutdown()
     
     def cleanup(self):
-        """Restore terminal to normal state."""
+        """Restore terminal to normal state and resume simulation if paused."""
         try:
             if hasattr(self, 'stdscr') and self.stdscr:
                 self.stdscr.keypad(False)
@@ -149,13 +165,26 @@ class KeyboardControlNode(Node):
             curses.endwin()
         except:
             pass
+        
         # Ensure simulation resumes when exiting
         if self.simulation_paused:
-            self.simulation_paused = False
             try:
-                self.publish_simulation_paused()
-            except Exception:
-                pass
+                if self.use_process_pause and self.simulation_pids:
+                    # Resume frozen processes
+                    self._resume_simulation_processes()
+                    self.get_logger().info('Resumed simulation processes on exit')
+                else:
+                    # Resume via topic
+                    self.simulation_paused = False
+                    self.publish_simulation_paused()
+            except Exception as e:
+                # Try to resume processes even if logging fails
+                if self.simulation_pids:
+                    for pid in self.simulation_pids:
+                        try:
+                            os.kill(pid, signal.SIGCONT)
+                        except:
+                            pass
     def parameter_event_callback(self, event: ParameterEvent):
         """Handle parameter events to track wind direction updates."""
         if event.node != self.wind_param_target:
@@ -251,23 +280,125 @@ class KeyboardControlNode(Node):
         """Adjust rudder position by one step."""
         self.rudder_position += direction * self.step_size
         self.rudder_position = max(-1.0, min(1.0, self.rudder_position))
+        self.last_keyboard_activity = time.time()  # Mark keyboard activity
+        # Publish immediately when key is pressed
+        self.publish_control()
     
     def adjust_sail(self, direction):
         """Adjust sail position by one step."""
         self.sail_position += direction * self.step_size
         self.sail_position = max(-1.0, min(1.0, self.sail_position))
+        self.last_keyboard_activity = time.time()  # Mark keyboard activity
+        # Publish immediately when key is pressed
+        self.publish_control()
     
     def center_controls(self):
         """Center both rudder and sail."""
         self.rudder_position = 0.0
         self.sail_position = 0.0
+        self.last_keyboard_activity = time.time()  # Mark keyboard activity
+        # Publish immediately when key is pressed
+        self.publish_control()
+    
+    def _find_simulation_processes(self):
+        """Find all simulation-related processes (simulator bridge, visualization, etc.)."""
+        sim_processes = []
+        my_pid = os.getpid()
+        
+        # Processes to pause (simulation nodes, but not keyboard control)
+        target_processes = [
+            'argo_unified_simulator_bridge.py',
+            'argo_boat_visualization.py',
+            'argo_transform_publisher.py',
+            'controller.py',
+            # Add other simulation nodes as needed
+        ]
+        
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    # Skip ourselves
+                    if proc.pid == my_pid:
+                        continue
+                    
+                    cmdline = proc.cmdline()
+                    if not cmdline:
+                        continue
+                    
+                    # Check if this is one of our target processes
+                    for target in target_processes:
+                        if any(target in arg for arg in cmdline):
+                            sim_processes.append(proc.pid)
+                            break
+                            
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception as e:
+            self.get_logger().warn(f"Error finding simulation processes: {e}")
+        
+        return sim_processes
+    
+    def _pause_simulation_processes(self):
+        """Pause simulation by sending SIGSTOP to all simulation processes."""
+        self.simulation_pids = self._find_simulation_processes()
+        
+        if not self.simulation_pids:
+            self.get_logger().warn("No simulation processes found to pause")
+            return False
+        
+        paused_count = 0
+        for pid in self.simulation_pids:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+                paused_count += 1
+            except (ProcessLookupError, PermissionError) as e:
+                self.get_logger().warn(f"Could not pause process {pid}: {e}")
+        
+        self.get_logger().info(f"Paused {paused_count}/{len(self.simulation_pids)} simulation processes")
+        return paused_count > 0
+    
+    def _resume_simulation_processes(self):
+        """Resume simulation by sending SIGCONT to all paused processes."""
+        if not self.simulation_pids:
+            self.get_logger().warn("No simulation processes to resume")
+            return False
+        
+        resumed_count = 0
+        for pid in self.simulation_pids:
+            try:
+                os.kill(pid, signal.SIGCONT)
+                resumed_count += 1
+            except (ProcessLookupError, PermissionError) as e:
+                self.get_logger().warn(f"Could not resume process {pid}: {e}")
+        
+        self.get_logger().info(f"Resumed {resumed_count}/{len(self.simulation_pids)} simulation processes")
+        self.simulation_pids = []  # Clear list after resume
+        return resumed_count > 0
     
     def toggle_simulation_pause(self):
-        """Toggle simulation pause state and publish."""
+        """Toggle simulation pause state using process signals or topic."""
         self.simulation_paused = not self.simulation_paused
-        self.publish_simulation_paused()
-        state = "PAUSED" if self.simulation_paused else "RUNNING"
-        self.get_logger().info(f'Simulation {state}')
+        
+        if self.use_process_pause:
+            # Use SIGSTOP/SIGCONT to literally freeze the simulation
+            if self.simulation_paused:
+                success = self._pause_simulation_processes()
+                if success:
+                    self.get_logger().info('🔴 Simulation FROZEN (SIGSTOP) - markers will persist')
+                else:
+                    self.get_logger().warn('⚠️  Could not pause simulation processes')
+                    self.simulation_paused = False  # Revert if failed
+            else:
+                success = self._resume_simulation_processes()
+                if success:
+                    self.get_logger().info('🟢 Simulation RESUMED (SIGCONT)')
+                else:
+                    self.get_logger().warn('⚠️  Could not resume simulation processes')
+        else:
+            # Fallback: use topic-based pause (old behavior)
+            self.publish_simulation_paused()
+            state = "PAUSED" if self.simulation_paused else "RUNNING"
+            self.get_logger().info(f'Simulation {state} (topic-based)')
     
     def publish_simulation_paused(self):
         """Publish current simulation pause state."""
@@ -332,16 +463,23 @@ class KeyboardControlNode(Node):
             self.get_logger().warn("⚠️  Reset service call timed out")
     
     def publish_control(self):
-        """Publish current control commands to /rudder_sail_radio."""
+        """Publish current control commands to /rudder_sail_radio only when keyboard is active."""
         if not self.running:
             return
         
-        control_msg = Vector3()
-        control_msg.x = self.rudder_position  # Rudder: -1=left, +1=right
-        control_msg.y = self.sail_position    # Sail: -1=in, +1=out
-        control_msg.z = 0.0                   # Reserved
+        current_time = time.time()
+        time_since_activity = current_time - self.last_keyboard_activity
         
-        self.pub_rudder_sail_radio.publish(control_msg)
+        # Only publish if keyboard was active recently (within timeout period)
+        # This prevents continuous publishing from interfering with controller
+        if time_since_activity <= self.keyboard_timeout:
+            control_msg = Vector3()
+            control_msg.x = self.rudder_position  # Rudder: -1=left, +1=right
+            control_msg.y = self.sail_position    # Sail: -1=in, +1=out
+            control_msg.z = 0.0                   # Reserved
+            
+            self.pub_rudder_sail_radio.publish(control_msg)
+        # If timeout expired, don't publish (controller takes over)
     
     def create_control_bar(self, value, width=20, control="generic"):
         """Create ASCII bar visualization for control position."""
@@ -402,12 +540,18 @@ class KeyboardControlNode(Node):
             self.stdscr.addstr(6, 2, status_line)
             
             wind_value = self.wind_direction_deg if self.wind_direction_deg is not None else float('nan')
-            wind_line = f"Wind Dir: {wind_value:.1f}°"
+            wind_line = f"Wind Dir: {wind_value:.1f}° (absolute, compass, from)"
             if len(wind_line) > width - 4:
                 wind_line = wind_line[:width - 7] + "..."
             self.stdscr.addstr(7, 2, wind_line)
             
-            pause_line = f"Simulation: {'PAUSED' if self.simulation_paused else 'RUNNING'}"
+            if self.simulation_paused:
+                pause_mode = "SIGSTOP" if self.use_process_pause else "topic"
+                pause_line = f"Simulation: FROZEN ({pause_mode}) - markers persist in Foxglove"
+            else:
+                pause_line = f"Simulation: RUNNING"
+            if len(pause_line) > width - 4:
+                pause_line = pause_line[:width - 7] + "..."
             self.stdscr.addstr(8, 2, pause_line)
             
             # Controls

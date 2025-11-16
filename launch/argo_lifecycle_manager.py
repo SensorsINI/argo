@@ -1793,14 +1793,21 @@ class ArgoLifecycleManager:
 
             if current_stopped:
                 print(
-                    f"\n⚠️  Simulation node failure detected during stabilization: {', '.join(current_stopped)}")
+                    f"\n{'='*70}")
+                print(f"❌ FATAL ERROR: Simulation node failure detected during stabilization: {', '.join(current_stopped)}")
+                print(f"{'='*70}")
                 # Get and display error messages
                 fatal_messages = self._get_fatal_messages_for_nodes()
                 for failed_node in current_stopped:
                     if failed_node in fatal_messages:
-                        print(
-                            f"   {failed_node}: {fatal_messages[failed_node]}")
-                break
+                        print(f"   {failed_node}: {fatal_messages[failed_node]}")
+                    else:
+                        print(f"   {failed_node}: Node crashed (check journal for details)")
+                print(f"{'='*70}\n")
+                # Terminate simulation on node software failure
+                print("🛑 Terminating simulation due to node software failure...")
+                self.stop()
+                return False
 
             time.sleep(1.0)  # Check every second
 
@@ -1808,21 +1815,48 @@ class ArgoLifecycleManager:
         final_node_status = self._get_node_status()
         final_running_nodes = [
             node for node, status in final_node_status.items() if "RUNNING" in status]
+        final_stopped_nodes = [
+            node for node, status in final_node_status.items() if "STOPPED" in status]
 
         # Check for critical nodes - foxglove_bridge is required for simulation
         critical_running = [
             node for node in self.critical_nodes if node in final_running_nodes]
+        critical_stopped = [
+            node for node in self.critical_nodes if node in final_stopped_nodes]
         
         # Also check special nodes (like foxglove_bridge) - these are required for simulation
         special_running = [
             node for node in self.special_nodes if node in final_running_nodes]
         
+        # Check for critical node software failures - terminate simulation
+        if critical_stopped:
+            print(f"\n{'='*70}")
+            print(f"❌ FATAL ERROR: Critical simulation nodes crashed: {', '.join(critical_stopped)}")
+            print(f"{'='*70}")
+            # Get and display error messages
+            fatal_messages = self._get_fatal_messages_for_nodes()
+            for failed_node in critical_stopped:
+                if failed_node in fatal_messages:
+                    print(f"   {failed_node}: {fatal_messages[failed_node]}")
+                else:
+                    print(f"   {failed_node}: Node crashed (check journal for details)")
+            print(f"{'='*70}\n")
+            # Terminate simulation on critical node software failure
+            print("🛑 Terminating simulation due to critical node software failure...")
+            self.stop()
+            return False
+        
         # Simulation requires foxglove_bridge to be running
         if 'foxglove_bridge' in self.special_nodes and 'foxglove_bridge' not in final_running_nodes:
-            print("❌ CRITICAL: foxglove_bridge is not running!")
+            print(f"\n{'='*70}")
+            print("❌ FATAL ERROR: foxglove_bridge is not running!")
             print("   Simulation requires foxglove_bridge for visualization.")
             print("   Please check the error messages above.")
             print("   Try running manually: ros2 run foxglove_bridge foxglove_bridge")
+            print(f"{'='*70}\n")
+            # Terminate simulation
+            print("🛑 Terminating simulation due to missing critical component...")
+            self.stop()
             return False
         
         if len(critical_running) == len(self.critical_nodes):
@@ -1833,9 +1867,13 @@ class ArgoLifecycleManager:
                 f"✅ Sufficient simulation nodes running ({len(final_running_nodes)}/2+)")
             success = True
         else:
-            print(
-                f"❌ Insufficient simulation nodes running ({len(final_running_nodes)}/2+)")
-            success = False
+            print(f"\n{'='*70}")
+            print(f"❌ FATAL ERROR: Insufficient simulation nodes running ({len(final_running_nodes)}/2+)")
+            print(f"{'='*70}\n")
+            # Terminate simulation on insufficient nodes
+            print("🛑 Terminating simulation due to insufficient nodes...")
+            self.stop()
+            return False
 
         if success:
             print("🎉 Argo simulation mode started successfully!")
@@ -1853,7 +1891,7 @@ class ArgoLifecycleManager:
             # Start continuous monitoring with proper cleanup
             try:
                 last_status_check = time.time()
-                status_check_interval = 30.0  # Check status every 30 seconds
+                status_check_interval = 2.0  # Check status every 2 seconds for faster failure detection
                 
                 while not self.shutdown_requested:
                     # Check for shutdown request frequently
@@ -1861,7 +1899,7 @@ class ArgoLifecycleManager:
                     time_since_check = current_time - last_status_check
                     
                     # Sleep in small increments to check shutdown frequently
-                    sleep_interval = min(1.0, status_check_interval - time_since_check)
+                    sleep_interval = min(0.5, status_check_interval - time_since_check)
                     if sleep_interval > 0:
                         time.sleep(sleep_interval)
                     
@@ -1877,9 +1915,6 @@ class ArgoLifecycleManager:
                             node for node, status in node_status.items() if "STOPPED" in status]
 
                         if stopped_nodes:
-                            print(
-                                f"⚠️  {len(stopped_nodes)} simulation nodes stopped: {', '.join(stopped_nodes)}")
-
                             # Check if critical nodes are still running
                             critical_running = [
                                 n for n in self.critical_nodes if n in running_nodes]
@@ -1887,11 +1922,25 @@ class ArgoLifecycleManager:
                                 n for n in self.critical_nodes if n in stopped_nodes]
 
                             if critical_stopped:
-                                print(
-                                    f"❌ CRITICAL SIMULATION NODES STOPPED: {', '.join(critical_stopped)}")
-                                print(
-                                    f"   Simulation will continue with remaining nodes")
+                                # Critical node software failure - terminate simulation immediately
+                                print(f"\n{'='*70}")
+                                print(f"❌ FATAL ERROR: Critical simulation nodes stopped: {', '.join(critical_stopped)}")
+                                print(f"{'='*70}")
+                                # Get error messages for stopped nodes
+                                fatal_messages = self._get_fatal_messages_for_nodes()
+                                for failed_node in critical_stopped:
+                                    if failed_node in fatal_messages:
+                                        print(f"   {failed_node}: {fatal_messages[failed_node]}")
+                                    else:
+                                        print(f"   {failed_node}: Node exited (check journal for details)")
+                                print(f"{'='*70}\n")
+                                print("🛑 Terminating simulation due to critical node software failure...")
+                                self.stop()
+                                return False
                             else:
+                                # Non-critical nodes stopped - log but continue
+                                print(
+                                    f"⚠️  {len(stopped_nodes)} simulation nodes stopped: {', '.join(stopped_nodes)}")
                                 print(
                                     f"✅ Critical simulation nodes operational: {', '.join(critical_running)}")
 
