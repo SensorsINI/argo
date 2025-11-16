@@ -453,7 +453,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
 
         base_id = 400
         arrow_length = 0.35 * self.visualization_scale
-        arrow_width = 0.015 * self.visualization_scale
+        arrow_width = 0.02 * self.visualization_scale
         arrow_height = 0.015 * self.visualization_scale
 
         for idx, entry in enumerate(self.heading_trail):
