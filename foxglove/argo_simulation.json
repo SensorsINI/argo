@@ -11,7 +11,7 @@
           "visible": true,
           "namespaces": {
             "argo_boat_labels": {
-              "visible": false
+              "visible": true
             },
             "argo_boat": {
               "visible": true
@@ -47,18 +47,21 @@
         "c0a2586b-a751-45e2-aa33-b2624a1acd9c": {
           "layerId": "foxglove.Grid",
           "instanceId": "c0a2586b-a751-45e2-aa33-b2624a1acd9c",
-          "visible": false
+          "visible": true,
+          "frameId": "map",
+          "size": 230.729,
+          "divisions": 85
         }
       },
       "cameraState": {
         "perspective": false,
-        "distance": 55.790196350324656,
-        "phi": 17.03302097771284,
-        "thetaOffset": 8.124571886107649,
+        "distance": 72.10076346743637,
+        "phi": 0.00005729577951308232,
+        "thetaOffset": -41.15995514038776,
         "targetOffset": [
-          0,
-          0,
-          0
+          24.33159698453514,
+          24.24448944034744,
+          -1.5414288510071361e-21
         ],
         "target": [
           0,
@@ -81,7 +84,10 @@
         "transforms": {
           "visible": true
         },
-        "backgroundColor": "#d1f3fc"
+        "backgroundColor": "#e1f0ff",
+        "enableStats": false,
+        "labelScaleFactor": 1.06,
+        "ignoreColladaUpAxis": false
       },
       "transforms": {
         "frame:map": {
@@ -104,12 +110,20 @@
         "poseEstimateThetaDeviation": 0.26179939
       },
       "imageMode": {},
-      "followTf": "map",
+      "followTf": "base_link",
       "enuFrameId": "map"
+    },
+    "RawMessages!2ctwmt1": {
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "topicPath": "/controller/captains_log",
+      "fontSize": 12
     },
     "map!4aioxrg": {
       "topic": "/fix",
-      "zoomLevel": 20,
+      "zoomLevel": 19,
       "center": {
         "lat": 47.398154808892414,
         "lon": 8.544838600000308
@@ -139,13 +153,19 @@
           "title": "Overview",
           "layout": {
             "direction": "column",
-            "first": "3D!1ldu0mf",
+            "first": {
+              "first": "3D!1ldu0mf",
+              "second": "RawMessages!2ctwmt1",
+              "direction": "column",
+              "splitPercentage": 73.53383458646616
+            },
             "second": {
               "first": "map!4aioxrg",
               "second": "Parameters!1f5pa9",
-              "direction": "row"
+              "direction": "row",
+              "splitPercentage": 36.3031914893617
             },
-            "splitPercentage": 44.2468263227576
+            "splitPercentage": 78.69822485207101
           }
         }
       ]
