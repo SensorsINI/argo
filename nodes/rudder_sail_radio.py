@@ -126,6 +126,45 @@ SERVO_SAIL_PATH = SYS_BASE_PATH / "servo_sail_pw_us"
 SERVO_MIN_PW_US = 900
 SERVO_MAX_PW_US = 2100
 
+# Rudder servos (rotation reference: looking down from top of servo and rudder):
+# - Radio mapping: RIGHT stick -> higher normalized command (+1). The resulting PW depends on
+#   RUDDER_SERVO_DIRECTION: +1 => higher PW; -1 => lower PW (after direction is applied).
+# - Rudder sign convention: -1 = left (rudder deflects to port), +1 = right (rudder to starboard)
+#
+# Currently installed servo (opposite-rotation):
+# - Model: JR DS287MGHV (high voltage ultra speed sub-micro metal gear)
+# - URL: https://www.jungheinrich.com/en/products/servos/servos-metal-gear/ds287mghv/
+# - Behavior: Increasing PW -> Servo rotates CCW
+# - Linkage effect: Servo CCW -> Rudder rotates CW -> Boat turns LEFT
+#
+# Stock (normal) DF65 rudder servo:
+# - URL: https://www.dragonforce.com/products/sailboat-servos/df65-servo/
+# - Behavior: Increasing PW -> Servo rotates CW
+# - Linkage effect: Servo CW -> Rudder rotates CCW -> Boat turns RIGHT (intended for radio RIGHT)
+
+# Rudder servo direction constant:
+# +1 = normal (radio right -> rudder right/boat turns right)
+# -1 = reversed (radio RIGHT -> rudder LEFT/boat turns LEFT)
+# Set to -1 for the currently installed opposite-rotation servo:
+#   - Radio RIGHT -> normalized +1 -> after direction (-1) -> lower PW
+#   - Lower PW -> servo rotates CW (for this servo) -> via linkage, rudder CCW -> boat RIGHT (corrected)
+# Change back to +1 when the stock servo is reinstalled:
+#   - Radio RIGHT -> normalized +1 -> after direction (+1) -> higher PW
+#   - Higher PW -> servo rotates CW (stock) -> rudder CCW -> boat RIGHT (intended)
+RUDDER_SERVO_DIRECTION = -1
+
+# NOTE with replacement JR DS287MGHV servo, the servo direction is reversed, 
+# so that when rudder_sail_radio node
+# is not running, the boat will turn in opposite direction of intended.
+
+# Observation (looking down from top, current JR DS287MGHV hardware):
+# - Radio RIGHT -> higher PW -> servo CCW
+# - Linkage: servo CCW -> rudder CW
+# - Outcome: Boat turns LEFT when radio commands RIGHT (opposite of intended)
+# Correction during this servo swap: RUDDER_SERVO_DIRECTION = -1
+# After reinstalling stock servo: RUDDER_SERVO_DIRECTION = +1 so
+# - Radio RIGHT -> higher PW -> servo CW -> rudder CCW -> boat RIGHT (intended)
+
 # Throttle logging for clamped values to once per minute
 CLAMP_LOG_THROTTLE_S = 60.0
 
@@ -1096,9 +1135,11 @@ class RudderSailRadioNode(ArgoBaseNode):
         # 6. Apply safety limits
         cmd_rudder, cmd_sail = self.apply_safety_limits(cmd_rudder, cmd_sail)
 
-        # 7. Convert commands to pulse widths and write to hardware
-        servo_rudder_pw_us = cmd_to_pw_us(cmd_rudder)
-        servo_sail_pw_us = cmd_to_pw_us(cmd_sail)
+        # 7. Apply hardware direction and convert to pulse widths, then write to hardware
+        final_cmd_rudder = cmd_rudder * RUDDER_SERVO_DIRECTION
+        final_cmd_sail = cmd_sail
+        servo_rudder_pw_us = cmd_to_pw_us(final_cmd_rudder)
+        servo_sail_pw_us = cmd_to_pw_us(final_cmd_sail)
 
         self.write_sysfs_pw(SERVO_RUDDER_PATH, servo_rudder_pw_us)
         self.write_sysfs_pw(SERVO_SAIL_PATH, servo_sail_pw_us)
@@ -1106,18 +1147,18 @@ class RudderSailRadioNode(ArgoBaseNode):
         # 8. Publish actual servo commands (only on significant change or timeout)
         servo_changed = (
             self.prev_published_servo_rudder is None or
-            abs(cmd_rudder - self.prev_published_servo_rudder) > self.PUBLISH_CHANGE_THRESHOLD or
-            abs(cmd_sail - self.prev_published_servo_sail) > self.PUBLISH_CHANGE_THRESHOLD or
+            abs(final_cmd_rudder - self.prev_published_servo_rudder) > self.PUBLISH_CHANGE_THRESHOLD or
+            abs(final_cmd_sail - self.prev_published_servo_sail) > self.PUBLISH_CHANGE_THRESHOLD or
             (current_time - self.last_servo_publish_time) > self.MAX_PUBLISH_INTERVAL
         )
         
         if servo_changed:
-            self._servo_msg_cache.x = cmd_rudder
-            self._servo_msg_cache.y = cmd_sail
+            self._servo_msg_cache.x = final_cmd_rudder
+            self._servo_msg_cache.y = final_cmd_sail
             self._servo_msg_cache.z = 0.0
             self.pub_rudder_sail_servo.publish(self._servo_msg_cache)
-            self.prev_published_servo_rudder = cmd_rudder
-            self.prev_published_servo_sail = cmd_sail
+            self.prev_published_servo_rudder = final_cmd_rudder
+            self.prev_published_servo_sail = final_cmd_sail
             self.last_servo_publish_time = current_time
             self._last_activity_time = current_time  # Track activity for adaptive timers
 
