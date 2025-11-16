@@ -449,11 +449,10 @@ class BNO085Bridge(Node):
 class BNO085Calibrator(Node):
     """Interactive calibration tool with real-time guidance and visual feedback."""
     
-    def __init__(self, duration=60, save_interval=30):
+    def __init__(self, duration=30, save_interval=30):
         super().__init__('bno085_calibrator')
         self.calibration_duration = duration
         self.save_interval = save_interval
-        self.start_time = time.time()
         
         # Calibration tracking
         self.mag_accuracy = self.accel_accuracy = self.gyro_accuracy = 0
@@ -485,6 +484,7 @@ class BNO085Calibrator(Node):
         self.print_header()
         self.get_logger().info(f"Calibration started: {duration}s duration")
         self.get_logger().info("Press Ctrl+C at any time to finish calibration early")
+        self.start_time = time.time()
     
     def print_header(self):
         print("\n" + "=" * 80)
@@ -1196,6 +1196,8 @@ def main():
                 # Determine if interrupted or completed
                 interrupted = isinstance(e, KeyboardInterrupt)
                 success_level = node.final_report(interrupted=interrupted)
+                # Clean up current node
+                node.destroy_node()
                 
                 # Offer to run verify
                 print("\nWould you like to verify the calibration results?")
@@ -1205,8 +1207,6 @@ def main():
                         print("\n🔄 Starting verification display...Ctrl-C to exit\n")
                         time.sleep(3)
                         
-                        # Clean up current node
-                        node.destroy_node()
                         
                         # Start verify node
                         verify_node = RotationVectorVerifier(duration=0) # indefinite duration
@@ -1234,4 +1234,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
