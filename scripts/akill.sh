@@ -1,85 +1,122 @@
 #!/usr/bin/env bash
 # akill.sh - Forcefully kill Argo simulation/process groups by pattern (with PGID handling)
-# Usage:
-#   akill.sh                  # default: kill /argo/ and foxglove_bridge groups with -9
-#   akill.sh -TERM            # graceful terminate default patterns
-#   akill.sh 9                # numeric signal converted to -9 for default patterns
-#   akill.sh -9 python3       # kill groups matching 'python3'
-#   akill.sh -TERM '/home/tobi/argo/nodes/controller.py' '/home/tobi/argo/nodes/sailing_area_publisher.py'
+
 set -euo pipefail
 
 log() { printf '%s\n' "$*" >&2; }
 
 # No-arg killer: always target the full simulation set and ensure complete shutdown
 patterns=(
-  "/home/tobi/argo/launch/argo_lifecycle_manager.py"
-  "/home/tobi/argo/nodes/.*\\.py"
   "foxglove_bridge"
   "/argo/"
 )
 
-# Collect PIDs for all patterns
-declare -a pids
-for pat in "${patterns[@]}"; do
-  while IFS= read -r pid; do
-    [[ -n "${pid:-}" ]] && pids+=("$pid")
-  done < <(pgrep -f -- "$pat" 2>/dev/null || true)
-done
+# Find all matching processes (excluding this script and its parent shells)
+find_matching_pids() {
+  local current_pid=$$
+  local parent_pid=$PPID
+  local combined_pattern=""
+  
+  # Build a combined regex pattern for pgrep
+  for i in "${!patterns[@]}"; do
+    if [[ $i -eq 0 ]]; then
+      combined_pattern="${patterns[$i]}"
+    else
+      combined_pattern="${combined_pattern}|${patterns[$i]}"
+    fi
+  done
+  
+  # Use single pgrep call with combined pattern
+  local all_pids
+  all_pids=$(pgrep -f "$combined_pattern" 2>/dev/null || true)
+  
+  # Filter out this script, parent shell, and any process containing "akill"
+  if [[ -n "$all_pids" ]]; then
+    echo "$all_pids" | while read -r pid; do
+      if [[ "$pid" != "$current_pid" && "$pid" != "$parent_pid" ]]; then
+        # Check if the process command contains "akill"
+        local cmd
+        cmd=$(ps -p "$pid" -o cmd= 2>/dev/null || true)
+        if [[ -n "$cmd" && ! "$cmd" =~ akill ]]; then
+          echo "$pid"
+        fi
+      fi
+    done
+  fi
+}
+
+# Get process command lines
+show_processes() {
+  local pids=("$@")
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    return
+  fi
+  log "Found ${#pids[@]} process(es):"
+  for pid in "${pids[@]}"; do
+    if ps -p "$pid" >/dev/null 2>&1; then
+      local cmd
+      cmd=$(ps -p "$pid" -o pid=,cmd= 2>/dev/null || echo "$pid <no info>")
+      log "  $cmd"
+    fi
+  done
+}
+
+# Main execution
+log "Searching for Argo processes..."
+pids=($(find_matching_pids))
 
 if [[ ${#pids[@]} -eq 0 ]]; then
-  log "Patterns: ${patterns[*]}"
-  echo "✅ No matching processes."
+  log "✓ No Argo processes found"
   exit 0
 fi
 
-# Unique PIDs
-mapfile -t upids < <(printf "%s\n" "${pids[@]}" | awk 'NF && !seen[$0]++')
-log "Matched patterns: ${patterns[*]}"
-log "Matched PIDs: ${upids[*]:-<none>}"
+# Show what we found
+show_processes "${pids[@]}"
 
-# Map to PGIDs
-declare -a pgids
-for pid in "${upids[@]}"; do
-  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
-  [[ -n "${pgid:-}" ]] && pgids+=("$pgid")
+# Attempt graceful termination with SIGTERM (15)
+log ""
+log "Sending SIGTERM (15) to ${#pids[@]} process(es)..."
+for pid in "${pids[@]}"; do
+  if kill -15 "$pid" 2>/dev/null; then
+    log "  Sent SIGTERM to $pid"
+  fi
 done
 
-if [[ ${#pgids[@]} -eq 0 ]]; then
-  log "Patterns: ${patterns[*]}"
-  log "PIDs: ${upids[*]:-<none>}"
-  echo "⚠️  Found PIDs but could not resolve process groups. Proceeding with PID-based termination."
-  # SIGCONT -> SIGTERM -> wait -> SIGKILL on direct PIDs
-  for pid in "${upids[@]}"; do kill -CONT "$pid" 2>/dev/null || true; done
-  sleep 0.05
-  for pid in "${upids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
-  sleep 2
-  for pid in "${upids[@]}"; do kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true; done
-else
-  # Unique PGIDs
-  mapfile -t upgids < <(printf "%s\n" "${pgids[@]}" | awk 'NF && !seen[$0]++')
-  log "PGIDs: ${upgids[*]:-<none>}"
-  # Resume stopped groups and individual PIDs
-  for pid in "${upids[@]}"; do kill -CONT "$pid" 2>/dev/null || true; done
-  for pgid in "${upgids[@]}"; do kill -CONT -"$pgid" 2>/dev/null || true; done
-  sleep 0.05
-  # 1) Graceful termination
-  for pid in "${upids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; endone=true; done
-  for pgid in "${upgids[@]}"; do kill -TERM -"$pgid" 2>/dev/null || true; done
-  echo "⏳ Sent SIGTERM to ${#upgids[@]} groups / ${#upids[@]} processes. Waiting 2s..."
-  sleep 2
-  # 2) Force-kill survivors
-  for pid in "${upids[@]}"; do kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true; done
-  for pgid in "${upgids[@]}"; do kill -0 -"$pgid" 2>/dev/null && kill -KILL -"$pgid" 2>/dev/null || true; done
+# Wait for processes to terminate
+log "Waiting 2 seconds for graceful shutdown..."
+sleep 2
+
+# Check for survivors
+survivors=($(find_matching_pids))
+
+if [[ ${#survivors[@]} -gt 0 ]]; then
+  log ""
+  log "⚠ ${#survivors[@]} process(es) did not terminate gracefully:"
+  show_processes "${survivors[@]}"
+  
+  # Force kill with SIGKILL (9)
+  log ""
+  log "Sending SIGKILL (9) to ${#survivors[@]} process(es)..."
+  for pid in "${survivors[@]}"; do
+    if kill -9 "$pid" 2>/dev/null; then
+      log "  Sent SIGKILL to $pid"
+    fi
+  done
+  
+  # Brief wait for force kill to complete
+  sleep 0.5
 fi
 
-# Display leftovers
-re="$(printf '%s|' "${patterns[@]}")"; re="${re%|}"
-if ps aux | grep -E "$re" | grep -v grep | grep -v cursor | grep -v akill.sh >/dev/null; then
-  echo "⚠️  Some processes still present (showing up to 12):"
-  ps aux | grep -E "$re" | grep -v grep | grep -v cursor | grep -v akill.sh | head -12
+# Final verification
+final_check=($(find_matching_pids))
+
+if [[ ${#final_check[@]} -eq 0 ]]; then
+  log ""
+  log "✓ All Argo processes have been terminated"
+  exit 0
+else
+  log ""
+  log "✗ WARNING: ${#final_check[@]} process(es) still running:"
+  show_processes "${final_check[@]}"
   exit 1
-else
-  echo "✅ All matching processes terminated."
 fi
-
-
