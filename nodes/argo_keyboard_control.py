@@ -39,7 +39,7 @@ Simulation Pause (SPACE):
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Vector3
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float64
 from std_srvs.srv import Trigger
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType, ParameterEvent
@@ -57,15 +57,23 @@ class KeyboardControlNode(Node):
     def __init__(self):
         super().__init__('argo_keyboard_control')
         
+        # Batch successive W/E keypresses and send a single wind update after inactivity
+        self.WIND_BATCH_TIMEOUT_S = 2.0  # seconds without new W/E before flush
+        
         # Publisher for control commands
         self.pub_rudder_sail_radio = self.create_publisher(Vector3, '/rudder_sail_radio', 10)
         self.pub_simulation_paused = self.create_publisher(Bool, '/simulation_paused', 10)
+        # Fast wind-set topic (lower latency than parameter service)
+        self.pub_wind_direction_set = self.create_publisher(Float64, '/simulation/wind/wind_direction_set', 10)
         self.wind_param_name = 'simulation.wind.wind_direction'
         self.wind_param_target = '/argo_unified_simulator_bridge'
         self.wind_get_client = self.create_client(GetParameters, f'{self.wind_param_target}/get_parameters')
         self.wind_set_client = self.create_client(SetParameters, f'{self.wind_param_target}/set_parameters')
         self.wind_direction_deg = None
         self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
+        # Wind batching state
+        self._pending_wind_delta = 0.0
+        self._last_wind_keypress_time = 0.0
         
         # Service client for simulation reset
         self.reset_service_client = self.create_client(Trigger, '/simulator/reset')
@@ -112,6 +120,8 @@ class KeyboardControlNode(Node):
         
         # Keyboard input timer
         self.keyboard_timer = self.create_timer(0.05, self.handle_keyboard_input)
+        # Wind flush timer
+        self.wind_flush_timer = self.create_timer(0.05, self._flush_wind_adjustment)
         
         self.publish_simulation_paused()
         self._initialize_wind_direction()
@@ -407,36 +417,31 @@ class KeyboardControlNode(Node):
         self.pub_simulation_paused.publish(msg)
 
     def adjust_wind_direction(self, delta_deg: float):
-        """Adjust simulator wind direction parameter."""
+        """Accumulate wind direction adjustments; flush later as one publish."""
         if self.wind_direction_deg is None:
             self.get_logger().warn("Wind direction unknown; awaiting parameter event before adjusting")
             return
-        new_value = (self.wind_direction_deg + delta_deg) % 360.0
-
-        if not self.wind_set_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().warn("Wind direction service unavailable")
+        self._pending_wind_delta += float(delta_deg)
+        self._last_wind_keypress_time = time.time()
+        # Update preview immediately for UI
+        self.wind_direction_deg = (self.wind_direction_deg + float(delta_deg)) % 360.0
+    
+    def _flush_wind_adjustment(self):
+        """Publish a single wind direction update if inactivity window elapsed."""
+        if self._pending_wind_delta == 0.0:
             return
-
-        param = Parameter()
-        param.name = self.wind_param_name
-        value = ParameterValue()
-        value.type = ParameterType.PARAMETER_DOUBLE
-        value.double_value = new_value
-        param.value = value
-
-        request = SetParameters.Request()
-        request.parameters.append(param)
-        future = self.wind_set_client.call_async(request)
-        if rclpy.spin_until_future_complete(self, future, timeout_sec=2.0) is None or not future.done():
-            self.get_logger().warn("Failed to set wind direction parameter (timeout)")
+        if (time.time() - self._last_wind_keypress_time) < self.WIND_BATCH_TIMEOUT_S:
             return
-        result = future.result()
-        if result is None or not result.results or not result.results[0].successful:
-            self.get_logger().warn("Failed to set wind direction parameter (service error)")
+        if self.wind_direction_deg is None:
+            self._pending_wind_delta = 0.0
             return
-
-        self.wind_direction_deg = new_value
-        self.get_logger().info(f"Wind direction set to {self.wind_direction_deg:.1f}°")
+        try:
+            msg = Float64()
+            msg.data = float(self.wind_direction_deg) % 360.0
+            self.pub_wind_direction_set.publish(msg)
+            self.get_logger().info(f"Wind direction batch set to {msg.data:.1f}° (Δ={self._pending_wind_delta:+.1f}°)")
+        finally:
+            self._pending_wind_delta = 0.0
     
     def reset_simulation(self):
         """Reset simulation to initial state."""

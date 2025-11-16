@@ -122,6 +122,9 @@ logs/
 # Chat transcripts
 chats/
 
+# backup files  
+*.bak
+
 # Large PDF datasheets
 pcb/datasheets/adafruit-9-dof-orientation-imu-fusion-breakout-bno085.pdf
 pcb/datasheets/Ai-Thinker RA-01 datasheet FCC report.pdf

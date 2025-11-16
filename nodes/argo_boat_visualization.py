@@ -254,6 +254,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.gps_velocity_north = 0.0  # knots
         self.gps_velocity_east = 0.0   # knots
         self.gps_velocity_speed = 0.0  # knots
+        self.boat_speed = 0.0  # m/s (derived from GPS speed)
         self.gps_lat = 0.0
         self.gps_lon = 0.0
         self._last_visual_sail_side = 1.0
@@ -643,6 +644,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.gps_velocity_north = msg.x  # knots north
         self.gps_velocity_east = msg.y   # knots east
         self.gps_velocity_speed = msg.z  # total speed knots
+        # Convert knots to meters per second for display
+        self.boat_speed = float(self.gps_velocity_speed) * 0.514444
     
     def gps_callback(self, msg):
         """Update GPS position"""
@@ -1350,7 +1353,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.position.z = 0.2 * self.visualization_scale  # Above heading arrow
         
         # Text content with value
-        marker.text = f"Heading: {self.boat_heading:.1f}°"
+        marker.text = f"{self.boat_heading:.1f}° {self.boat_speed:.1f} m/s"
         
         # Scale - apply visualization scale
         marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
