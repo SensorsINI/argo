@@ -58,7 +58,7 @@ class KeyboardControlNode(Node):
         super().__init__('argo_keyboard_control')
         
         # Batch successive W/E keypresses and send a single wind update after inactivity
-        self.WIND_BATCH_TIMEOUT_S = 0.20  # seconds without new W/E before flush
+        self.WIND_BATCH_TIMEOUT_S = 2.0  # seconds without new W/E before flush
         
         # Publisher for control commands
         self.pub_rudder_sail_radio = self.create_publisher(Vector3, '/rudder_sail_radio', 10)
