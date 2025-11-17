@@ -944,18 +944,32 @@ class ArgoBoatVisualization(ArgoBaseNode):
         stern_x = -hull_half_length  # Back of hull (stern is at negative X)
         
         # Determine downwind side from wind direction
-        # wind_angle: 0° = from front, 90° = from starboard, -90° = from port
+        # wind_angle: 0° to 360° (CW from front of boat, where wind comes from)
+        #   0° = from front, 90° = from starboard, 180° = from back, 270° = from port
         # In base_link (ROS standard): +X = forward, +Y = left (port), -Y = right (starboard)
         # Sail goes to downwind side (opposite of where wind comes from)
         
-        if abs(self.wind_angle) < 0.1:  # Wind from front/back
+        # Normalize wind_angle to 0-360 range
+        wind_angle_norm = self.wind_angle % 360.0
+        
+        # Determine which side wind is coming from
+        # Wind from 0°-180° (front to back, starboard side) → sail goes to port (+Y)
+        # Wind from 180°-360° (back to front, port side) → sail goes to starboard (-Y)
+        # Special cases: 0° (front) and 180° (back) - use last known side
+        if wind_angle_norm < 0.1 or abs(wind_angle_norm - 180.0) < 0.1:
+            # Wind from directly front or back - use last known side
             sail_side = self._last_visual_sail_side
-        else:
-            # wind_angle > 0 means wind from starboard, sail goes to port (+Y)
-            # wind_angle < 0 means wind from port, sail goes to starboard (-Y)
-            sail_side = 1.0 if self.wind_angle > 0 else -1.0  # +1 = port (+Y), -1 = starboard (-Y)
-        if sail_side == 0.0:
+        elif 0.1 <= wind_angle_norm < 180.0:
+            # Wind from starboard side (0°-180°) → sail goes to port (+Y)
             sail_side = 1.0
+        else:  # 180.0 < wind_angle_norm < 360.0
+            # Wind from port side (180°-360°) → sail goes to starboard (-Y)
+            sail_side = -1.0
+        
+        # Ensure we have a valid side
+        if sail_side == 0.0:
+            sail_side = 1.0  # Default to port
+        
         self._last_visual_sail_side = sail_side
         
         # Sail trim angle from sail command (-1 = sheeted in, +1 = fully eased)
