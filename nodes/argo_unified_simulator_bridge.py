@@ -140,6 +140,12 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Load from map GeoJSON if specified, otherwise use default
         self.base_latitude = 47.3769  # Default: Zurich, Switzerland
         self.base_longitude = 8.5417
+        # If map_name not provided, try reading from ROS2 parameters
+        if not map_name:
+            self.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
+            map_name = self.get_parameter('geofence_map_name').get_parameter_value().string_value
+            if map_name:
+                self.map_name = map_name
         if map_name:
             self._load_map_home_location(map_name)
         
@@ -2138,24 +2144,23 @@ class ArgoUnifiedSimulatorBridge(Node):
         """Clean up when node is destroyed."""
         super().destroy_node()
 
-def load_map_from_yaml():
-    """Load map name from argo_nodes.yaml configuration file."""
+def load_map_from_ros2_params():
+    """Load map name from ROS2 parameters (argo.yaml)."""
     try:
-        # Determine path to argo_nodes.yaml (launch/ directory)
-        script_path = Path(__file__).resolve()
-        argo_dir = script_path.parents[1]  # nodes -> argo
-        yaml_path = argo_dir / "launch" / "argo_nodes.yaml"
+        import rclpy
+        from rclpy.node import Node
         
-        if not yaml_path.exists():
-            return None
+        # Initialize ROS2 if not already initialized
+        if not rclpy.ok():
+            rclpy.init()
         
-        with open(yaml_path, 'r') as f:
-            config = yaml.safe_load(f)
+        # Create a temporary node to read parameters
+        temp_node = Node('temp_map_loader')
+        temp_node.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
+        map_name = temp_node.get_parameter('geofence_map_name').get_parameter_value().string_value
+        temp_node.destroy_node()
         
-        # Extract map_name from simulation_config
-        simulation_config = config.get('simulation_config', {})
-        map_name = simulation_config.get('map_name')
-        return map_name
+        return map_name if map_name else None
     except Exception as e:
         # Silently fail - map_name will be None and defaults will be used
         return None
@@ -2224,12 +2229,12 @@ def main(args=None):
         print("       For more information, run with --help")
         sys.exit(1)
     
-    # Load map name from YAML if not provided via command line
+    # Load map name from ROS2 parameters if not provided via command line
     map_name = parsed_args.map
     if not map_name:
-        map_name = load_map_from_yaml()
+        map_name = load_map_from_ros2_params()
         if map_name:
-            print(f"📍 Using map from argo_nodes.yaml: '{map_name}'")
+            print(f"📍 Using map from ROS2 parameters (argo.yaml): '{map_name}'")
     
     print(f"Starting Argo Unified Simulator Bridge in {parsed_args.mode.upper()} mode...")
     print("This node bridges between Argo control system and sailboat simulator")
@@ -2246,7 +2251,7 @@ def main(args=None):
     if parsed_args.debug:
         print("  - Debug tracing ENABLED (--debug)")
     if map_name:
-        print(f"  - Map: {map_name} (config file: nodes/argo_nodes.yaml)")
+        print(f"  - Map: {map_name} (from ROS2 parameters: nodes/argo.yaml)")
         time.sleep(1)
     
     print("\nPublished topics (Simulator → Argo):")
@@ -2266,7 +2271,13 @@ def main(args=None):
     print("     ros2 topic pub /rudder_sail_radio geometry_msgs/msg/Vector3 '{x: 0.5, y: -0.3, z: 0.0}'")
     print("\nPress Ctrl+C to stop\n")
     
-    rclpy.init(args=unknown_args)
+    # Initialize ROS2 if not already initialized (load_map_from_ros2_params may have initialized it)
+    if not rclpy.ok():
+        rclpy.init(args=unknown_args)
+    elif unknown_args:
+        # If ROS2 is already initialized but we have args, we can't pass them now
+        # This is fine - args are typically handled during init
+        pass
     bridge = None
     try:
         bridge = ArgoUnifiedSimulatorBridge(mode=parsed_args.mode, map_name=map_name, test_heading=parsed_args.test_heading, force_mock=parsed_args.force_mock, debug=parsed_args.debug)

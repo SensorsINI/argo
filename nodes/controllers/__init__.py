@@ -8,5 +8,6 @@ from .proportional import ProportionalHeadingController
 from .wind_aware import WindAwareController
 from .return_to_home import ReturnToHomeController
 from .patrol import PatrolController
+from .crosser import CrosserController
 
 

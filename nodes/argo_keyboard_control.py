@@ -78,6 +78,14 @@ class KeyboardControlNode(Node):
         # Service client for simulation reset
         self.reset_service_client = self.create_client(Trigger, '/simulator/reset')
         
+        # Controller switching
+        self.controller_param_target = '/controller_node'
+        self.controller_get_client = self.create_client(GetParameters, f'{self.controller_param_target}/get_parameters')
+        self.controller_set_client = self.create_client(SetParameters, f'{self.controller_param_target}/set_parameters')
+        self.default_controller_type = None  # Will be read from current parameter
+        self.current_controller_type = None  # Track current controller
+        self.is_rth_mode = False  # Track if we're in RTH mode
+        
         # Control state
         self.rudder_position = 0.0  # -1.0 to +1.0
         self.sail_position = 0.0    # -1.0 to +1.0
@@ -97,6 +105,12 @@ class KeyboardControlNode(Node):
         self.simulator_heading = 0.0
         self.simulator_speed = 0.0
         self.simulator_mode = "UNKNOWN"
+        
+        # Diagnostic message storage (preserve last message)
+        self.last_diagnostic_message = ""
+        self.last_diagnostic_time = 0.0
+        self.diagnostic_messages = []  # Store multiple diagnostic messages (with timestamps)
+        self.max_diagnostic_messages = 3  # Keep last 3 messages visible
         
         # Subscribe to status topics for display
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
@@ -125,9 +139,10 @@ class KeyboardControlNode(Node):
         
         self.publish_simulation_paused()
         self._initialize_wind_direction()
+        self._initialize_controller_type()
 
         self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | Q=Quit')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | Q=Quit')
     
     def _setup_curses(self):
         """Setup curses for terminal control."""
@@ -137,6 +152,13 @@ class KeyboardControlNode(Node):
             curses.cbreak()      # Immediate key input
             self.stdscr.keypad(True)  # Enable keypad
             self.stdscr.nodelay(True)  # Non-blocking input
+            # Optimize refresh to reduce tearing
+            self.stdscr.timeout(0)  # Non-blocking for input
+            # Use leaveok to optimize cursor movement (reduces flicker)
+            try:
+                self.stdscr.leaveok(True)  # Don't move cursor after refresh
+            except:
+                pass  # Some terminals don't support this
             
             # Initialize colors if supported
             if curses.has_colors():
@@ -154,8 +176,13 @@ class KeyboardControlNode(Node):
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         if signum == signal.SIGWINCH:
-            # Terminal resize - handled in update_display
-            pass
+            # Terminal resize - trigger display update
+            try:
+                # Force display refresh on resize
+                self.stdscr.clear()
+                self.update_display()
+            except:
+                pass
         else:
             self.running = False
             self.cleanup()
@@ -196,16 +223,35 @@ class KeyboardControlNode(Node):
                         except:
                             pass
     def parameter_event_callback(self, event: ParameterEvent):
-        """Handle parameter events to track wind direction updates."""
-        if event.node != self.wind_param_target:
-            return
-        for param in list(event.changed_parameters) + list(event.new_parameters):
-            if param.name != self.wind_param_name:
-                continue
-            if param.value.type == ParameterType.PARAMETER_DOUBLE:
-                self.wind_direction_deg = param.value.double_value % 360.0
-                self.get_logger().info(f"Wind direction parameter event: {self.wind_direction_deg:.1f}°")
-            return
+        """Handle parameter events to track wind direction and controller type updates."""
+        # Handle wind direction updates
+        if event.node == self.wind_param_target:
+            for param in list(event.changed_parameters) + list(event.new_parameters):
+                if param.name != self.wind_param_name:
+                    continue
+                if param.value.type == ParameterType.PARAMETER_DOUBLE:
+                    self.wind_direction_deg = param.value.double_value % 360.0
+                    self.get_logger().info(f"Wind direction parameter event: {self.wind_direction_deg:.1f}°")
+                return
+        
+        # Handle controller type updates
+        if event.node == self.controller_param_target:
+            for param in list(event.changed_parameters) + list(event.new_parameters):
+                if param.name != 'controller_type':
+                    continue
+                if param.value.type == ParameterType.PARAMETER_STRING:
+                    new_controller = param.value.string_value.strip().lower()
+                    self.current_controller_type = new_controller
+                    was_rth = self.is_rth_mode
+                    self.is_rth_mode = (new_controller == 'return_to_home')
+                    # If switching away from RTH to a non-RTH controller, update default
+                    if was_rth and not self.is_rth_mode:
+                        self.default_controller_type = new_controller
+                    # If we don't have a default yet and this is not RTH, save it
+                    elif not self.is_rth_mode and not self.default_controller_type:
+                        self.default_controller_type = new_controller
+                    self.get_logger().info(f"Controller type parameter event: {new_controller} (RTH mode: {self.is_rth_mode}, default: {self.default_controller_type})")
+                return
 
     def _initialize_wind_direction(self):
         """Fetch current wind direction parameter from simulator (best effort)."""
@@ -229,6 +275,42 @@ class KeyboardControlNode(Node):
                     self.get_logger().info(f"Initial wind direction: {self.wind_direction_deg:.1f}°")
                     return
         self.get_logger().warn("Failed to fetch initial wind direction; waiting for parameter events")
+    
+    def _initialize_controller_type(self):
+        """Fetch current controller type parameter from controller node (best effort)."""
+        attempts = 0
+        while attempts < 5 and not self.controller_get_client.wait_for_service(timeout_sec=1.0):
+            attempts += 1
+            self.get_logger().info("Waiting for controller parameter service...")
+        if attempts == 5:
+            self.get_logger().warn("Could not contact controller parameter service")
+            return
+        
+        request = GetParameters.Request()
+        request.names = ['controller_type']
+        future = self.controller_get_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        if future.done():
+            response = future.result()
+            if response and response.values:
+                value = response.values[0]
+                if value.type == ParameterType.PARAMETER_STRING:
+                    initial_controller = value.string_value.strip().lower()
+                    self.current_controller_type = initial_controller
+                    self.is_rth_mode = (initial_controller == 'return_to_home')
+                    # Save as default only if it's not RTH (RTH is temporary, default is persistent)
+                    if not self.is_rth_mode:
+                        self.default_controller_type = initial_controller
+                    else:
+                        # If starting in RTH mode, we need to fetch the default from argo.yaml
+                        # For now, default to 'crosser' (common default)
+                        self.default_controller_type = 'crosser'
+                    self.get_logger().info(f"Initial controller type: {self.current_controller_type} (default: {self.default_controller_type}, RTH mode: {self.is_rth_mode})")
+                    return
+        self.get_logger().warn("Failed to fetch initial controller type; defaulting to 'crosser'")
+        self.default_controller_type = 'crosser'  # Default from argo.yaml
+        self.current_controller_type = self.default_controller_type
+        self.is_rth_mode = False
 
     def pose_callback(self, msg):
         """Receive heading/pose from simulator."""
@@ -273,6 +355,8 @@ class KeyboardControlNode(Node):
                 self.toggle_simulation_pause()
             elif key == ord('r') or key == ord('R'):
                 self.reset_simulation()
+            elif key == ord('h') or key == ord('H'):
+                self.toggle_rth_controller()
             elif key == ord('q') or key == ord('Q'):
                 self.running = False
                 self.cleanup()
@@ -452,20 +536,101 @@ class KeyboardControlNode(Node):
         request = Trigger.Request()
         future = self.reset_service_client.call_async(request)
         
-        # Wait for the response with timeout
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        # Wait for the response with timeout (increased to allow for reset processing time)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
         
         if future.done():
             try:
                 response = future.result()
                 if response.success:
-                    self.get_logger().info(f"✅ {response.message}")
+                    message = f"✅ {response.message}"
+                    self.get_logger().info(message)
+                    self._add_diagnostic_message(message)
                 else:
-                    self.get_logger().warn(f"⚠️  Reset service returned: {response.message}")
+                    message = f"⚠️  Reset service returned: {response.message}"
+                    self.get_logger().warn(message)
+                    self._add_diagnostic_message(message)
             except Exception as e:
-                self.get_logger().error(f"❌ Error calling reset service: {e}")
+                message = f"❌ Error calling reset service: {e}"
+                self.get_logger().error(message)
+                self._add_diagnostic_message(message)
         else:
-            self.get_logger().warn("⚠️  Reset service call timed out")
+            # Check if future completed after timeout (service might have succeeded)
+            # Give it a moment to check if it completed
+            import time as time_module
+            time_module.sleep(0.1)  # Brief pause to check if response arrived
+            if future.done():
+                try:
+                    response = future.result()
+                    if response.success:
+                        message = f"✅ Reset completed (slow response): {response.message}"
+                        self.get_logger().info(message)
+                        self._add_diagnostic_message(message)
+                    else:
+                        message = f"⚠️  Reset service returned: {response.message}"
+                        self.get_logger().warn(message)
+                        self._add_diagnostic_message(message)
+                except:
+                    message = "⚠️  Reset service call timed out (check if reset succeeded)"
+                    self.get_logger().warn(message)
+                    self._add_diagnostic_message(message)
+            else:
+                message = "⚠️  Reset service call timed out (check if reset succeeded)"
+                self.get_logger().warn(message)
+                self._add_diagnostic_message(message)
+    
+    def toggle_rth_controller(self):
+        """Toggle between default controller (from argo.yaml) and RTH controller."""
+        if not self.controller_set_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn("Controller parameter service not available")
+            return
+        
+        # Determine target controller
+        if self.is_rth_mode:
+            # Switch back to default controller
+            target_controller = self.default_controller_type if self.default_controller_type else 'crosser'
+            self.is_rth_mode = False
+        else:
+            # Switch to RTH controller
+            target_controller = 'return_to_home'
+            self.is_rth_mode = True
+        
+        # Create parameter set request
+        request = SetParameters.Request()
+        param = Parameter()
+        param.name = 'controller_type'
+        param.value = ParameterValue()
+        param.value.type = ParameterType.PARAMETER_STRING
+        param.value.string_value = target_controller
+        request.parameters = [param]
+        
+        # Call service
+        future = self.controller_set_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        if future.done():
+            try:
+                response = future.result()
+                if response and response.results and response.results[0].successful:
+                    self.current_controller_type = target_controller
+                    mode = "RTH" if self.is_rth_mode else "DEFAULT"
+                    message = f"✅ Controller switched to {target_controller} ({mode} mode)"
+                    self.get_logger().info(message)
+                    # Store diagnostic message for display (with newline)
+                    self._add_diagnostic_message(message)
+                else:
+                    reason = response.results[0].reason if response and response.results else "Unknown error"
+                    message = f"⚠️  Failed to switch controller: {reason}"
+                    self.get_logger().warn(message)
+                    self._add_diagnostic_message(message)
+            except Exception as e:
+                message = f"❌ Error switching controller: {e}"
+                self.get_logger().error(message)
+                self._add_diagnostic_message(message)
+        else:
+            message = "⚠️  Controller switch service call timed out"
+            self.get_logger().warn(message)
+            self._add_diagnostic_message(message)
     
     def publish_control(self):
         """Publish current control commands to /rudder_sail_radio only when keyboard is active."""
@@ -509,16 +674,81 @@ class KeyboardControlNode(Node):
         
         return f"{bar} {direction}"
     
+    def _add_diagnostic_message(self, message):
+        """Add a diagnostic message to the display queue."""
+        current_time = time.time()
+        self.diagnostic_messages.append((message, current_time))
+        # Keep only recent messages
+        if len(self.diagnostic_messages) > self.max_diagnostic_messages * 2:
+            # Keep more in memory, but only display last N
+            self.diagnostic_messages = self.diagnostic_messages[-self.max_diagnostic_messages * 2:]
+        # Also update legacy fields for compatibility
+        self.last_diagnostic_message = message
+        self.last_diagnostic_time = current_time
+    
+    def _split_message(self, message, max_width):
+        """Split a message into multiple lines that fit within max_width."""
+        if len(message) <= max_width:
+            return [message]
+        
+        lines = []
+        words = message.split()
+        current_line = ""
+        
+        for word in words:
+            # Check if adding this word would exceed width
+            test_line = current_line + (" " if current_line else "") + word
+            if len(test_line) <= max_width:
+                current_line = test_line
+            else:
+                # Current line is full, start new line
+                if current_line:
+                    lines.append(current_line)
+                # If single word is too long, truncate it
+                if len(word) > max_width:
+                    current_line = word[:max_width-3] + "..."
+                else:
+                    current_line = word
+        
+        if current_line:
+            lines.append(current_line)
+        
+        return lines if lines else [message[:max_width-3] + "..."]
+    
+    def get_terminal_size(self):
+        """Get terminal size, handling resizing dynamically."""
+        try:
+            import shutil
+            return shutil.get_terminal_size()
+        except:
+            # Fallback: try to get from curses
+            try:
+                height, width = self.stdscr.getmaxyx()
+                return (width, height)
+            except:
+                return (80, 24)
+    
     def update_display(self):
         """Update the curses display."""
         if not self.running:
             return
         
         try:
-            self.stdscr.clear()
+            # Get current terminal size (handles dynamic resizing)
+            term_width, term_height = self.get_terminal_size()
+            
+            # Use erase() instead of clear() to reduce tearing (faster, less flicker)
+            # Only clear if terminal size changed
+            if not hasattr(self, '_last_term_size') or self._last_term_size != (term_width, term_height):
+                self.stdscr.clear()
+                self._last_term_size = (term_width, term_height)
+            else:
+                self.stdscr.erase()  # Faster than clear(), reduces tearing
+            
             self.stdscr.border()
             
-            height, width = self.stdscr.getmaxyx()
+            # Use actual terminal dimensions
+            height, width = term_height, term_width
             
             # Title
             title = "🚢 ARGO KEYBOARD CONTROL"
@@ -538,38 +768,147 @@ class KeyboardControlNode(Node):
             # Empty line
             self.stdscr.addstr(5, 1, " " * (width - 2))
             
-            # Status info
-            status_line = f"Mode: {self.simulator_mode} | Heading: {self.simulator_heading:.1f}° | Speed: {self.simulator_speed:.1f}kt"
-            if len(status_line) > width - 4:
-                status_line = status_line[:width - 7] + "..."
-            self.stdscr.addstr(6, 2, status_line)
+            # Status info - split into multiple lines to prevent clipping
+            line_num = 6
+            mode_line = f"Mode: {self.simulator_mode}"
+            heading_line = f"Heading: {self.simulator_heading:.1f}°"
+            speed_line = f"Speed: {self.simulator_speed:.1f}kt"
+            # Fit on one line if possible, otherwise split
+            status_combined = f"{mode_line} | {heading_line} | {speed_line}"
+            if len(status_combined) <= width - 4:
+                self.stdscr.addstr(line_num, 2, status_combined)
+                line_num += 1
+            else:
+                # Split into multiple lines
+                self.stdscr.addstr(line_num, 2, mode_line)
+                line_num += 1
+                self.stdscr.addstr(line_num, 2, f"{heading_line} | {speed_line}")
+                line_num += 1
             
             wind_value = self.wind_direction_deg if self.wind_direction_deg is not None else float('nan')
             wind_line = f"Wind Dir: {wind_value:.1f}° (absolute, compass, from)"
             if len(wind_line) > width - 4:
-                wind_line = wind_line[:width - 7] + "..."
-            self.stdscr.addstr(7, 2, wind_line)
+                # Split wind line
+                wind_line1 = f"Wind Dir: {wind_value:.1f}°"
+                wind_line2 = "(absolute, compass, from)"
+                self.stdscr.addstr(line_num, 2, wind_line1)
+                line_num += 1
+                if len(wind_line2) <= width - 4:
+                    self.stdscr.addstr(line_num, 2, wind_line2)
+                    line_num += 1
+            else:
+                self.stdscr.addstr(line_num, 2, wind_line)
+                line_num += 1
             
+            # Simulation status
             if self.simulation_paused:
                 pause_mode = "SIGSTOP" if self.use_process_pause else "topic"
-                pause_line = f"Simulation: FROZEN ({pause_mode}) - markers persist in Foxglove"
+                pause_line1 = f"Simulation: FROZEN ({pause_mode})"
+                pause_line2 = "markers persist in Foxglove"
+                self.stdscr.addstr(line_num, 2, pause_line1)
+                line_num += 1
+                if len(pause_line2) <= width - 4:
+                    self.stdscr.addstr(line_num, 2, pause_line2)
+                    line_num += 1
             else:
                 pause_line = f"Simulation: RUNNING"
-            if len(pause_line) > width - 4:
-                pause_line = pause_line[:width - 7] + "..."
-            self.stdscr.addstr(8, 2, pause_line)
+                self.stdscr.addstr(line_num, 2, pause_line)
+                line_num += 1
             
-            # Controls
-            controls_line = "Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | Q=Quit"
-            if len(controls_line) > width - 4:
-                controls_line = controls_line[:width - 7] + "..."
-            self.stdscr.addstr(9, 2, controls_line)
+            # Controller status
+            controller_name = self.current_controller_type.upper() if self.current_controller_type else 'UNKNOWN'
+            controller_status = f"Controller: {controller_name}"
+            if self.is_rth_mode:
+                controller_status += " (RTH MODE)"
+            else:
+                controller_status += " (DEFAULT)"
+            if len(controller_status) > width - 4:
+                # Split controller status
+                self.stdscr.addstr(line_num, 2, f"Controller: {controller_name}")
+                line_num += 1
+                mode_text = "(RTH MODE)" if self.is_rth_mode else "(DEFAULT)"
+                self.stdscr.addstr(line_num, 2, mode_text)
+                line_num += 1
+            else:
+                self.stdscr.addstr(line_num, 2, controller_status)
+                line_num += 1
+            
+            # Controls - split into multiple lines
+            line_num += 1  # Empty line before controls
+            self.stdscr.addstr(line_num, 2, "Controls:")
+            line_num += 1
+            controls_line1 = "  ←→ Rudder | ↑↓ Sail | C=Center"
+            controls_line2 = "  SPACE=Pause | W/E=Wind ±10°"
+            controls_line3 = "  R=Reset | H=Toggle RTH | Q=Quit"
+            self.stdscr.addstr(line_num, 2, controls_line1[:width-4])
+            line_num += 1
+            self.stdscr.addstr(line_num, 2, controls_line2[:width-4])
+            line_num += 1
+            self.stdscr.addstr(line_num, 2, controls_line3[:width-4])
+            line_num += 1
             
             # Topic info
             topic_line = f"Publishing to: /rudder_sail_radio"
-            self.stdscr.addstr(10, 2, topic_line)
+            self.stdscr.addstr(line_num, 2, topic_line[:width-4])
+            line_num += 1
+            
+            # Diagnostic messages (preserve last few messages with newlines)
+            current_time = time.time()
+            # Clean up old messages (older than 10 seconds)
+            self.diagnostic_messages = [
+                (msg, msg_time) for msg, msg_time in self.diagnostic_messages
+                if (current_time - msg_time) < 10.0
+            ]
+            
+            # Display diagnostic messages below main output (always reserve space)
+            # Clear any old message lines first to prevent overwriting
+            messages_start_line = line_num + 1
+            for clear_line in range(messages_start_line, height - 1):
+                try:
+                    # Clear line to prevent old message remnants
+                    self.stdscr.addstr(clear_line, 2, " " * (width - 4))
+                except:
+                    pass
+            
+            # Display diagnostic messages at bottom (after clearing old content)
+            if self.diagnostic_messages and height > 15:
+                # Start diagnostics a few lines from bottom to ensure visibility
+                diag_start_line = max(line_num + 1, height - 8)  # Reserve bottom 8 lines
+                diag_line_num = diag_start_line
+                
+                # Add separator if we have messages
+                if diag_line_num < height - 2:
+                    try:
+                        self.stdscr.addstr(diag_line_num, 2, "─" * min(40, width - 4))
+                        diag_line_num += 1
+                    except:
+                        pass
+                
+                for msg, msg_time in self.diagnostic_messages[-self.max_diagnostic_messages:]:
+                    # Split long messages across multiple lines
+                    msg_lines = self._split_message(msg, width - 4)
+                    for msg_line in msg_lines:
+                        if diag_line_num < height - 2:  # Leave room for border
+                            try:
+                                self.stdscr.addstr(diag_line_num, 2, msg_line)
+                                diag_line_num += 1
+                            except:
+                                break
+                        else:
+                            break
+                    if diag_line_num >= height - 2:
+                        break
             
             self.stdscr.refresh()
+        except curses.error as e:
+            # Handle terminal resize gracefully
+            if "addstr" in str(e).lower() or "waddstr" in str(e).lower():
+                # Terminal was resized - try to recover
+                try:
+                    self.stdscr.clear()
+                    self.stdscr.refresh()
+                except:
+                    pass
         except:
             pass
     

@@ -7,6 +7,11 @@
   ros__parameters:
     argo:
       mode: autonomous
+      geofence_map_name: Argo Irchel North pond sailing area
+      p_heading_gain: 0.6  # Proportional gain for heading control (P controller, can be extended to PID)
+      min_rudder_near_boundary: 0.3  # Minimum rudder command when close to boundary (0.0-1.0)
+      boundary_emergency_threshold: 5.0  # Meters from boundary for emergency turn
+      turn_rudder_gain_multiplier: 2.0  # Multiplier for rudder gain during turns (more aggressive control)
     # ----------------------------------------------------------------------------
     # IMU Yaw Offset (degrees)
     # - Purpose: Fixed rotation about +Z to align BNO085 sensor frame to boat frame
@@ -41,19 +46,19 @@
       yaw_offset_deg: 59.25
 controller_node:
   ros__parameters:
-    controller_type: patrol  # Options: proportional, wind_aware, return_to_home, patrol
+    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser
     data_collection_enabled: false
     rudder_gain: 0.3
     rudder_full_scale_deg: 60.0
     param_file_path: argo.yaml
-    patrol_lookahead_time: 15.0
-    boundary_turn_threshold: 8.0
-    tack_angle: 90.0
+    patrol_lookahead_time: 20.0
+    boundary_turn_threshold: 12.0
+    tack_angle: 100.0  # Increased from 90° to 100° for better tack success (more momentum through wind, less likely to stall)
     broad_reach_angle: 110.0
-    geofence_map_name: Argo Irchel pond sailing area
+
 rudder_sail_radio_node:
   ros__parameters:
-    human_override_timeout: 5.0      # Seconds after last human activity before robot can take control
+    human_override_timeout: 2.5      # Seconds after last human activity before robot can take control
     deadband_threshold: 0.1875        # Minimum change in radio input to count as human activity (5σ measured)
     safety_max_rudder: 1.0            # Maximum rudder command magnitude
     safety_max_sail: 1.0              # Maximum sail command magnitude
