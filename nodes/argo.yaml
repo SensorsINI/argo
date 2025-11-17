@@ -1,26 +1,17 @@
-# Enhanced parameters for argo control with modular controllers
-# Two-node system: controller.py (high-level control) + rudder_sail_radio.py (low-level arbitration)
+# Centralized configuration file for all Argo nodes
+# (there are a few other config files in the nodes directory, but this is the main one, see also README.md)
 
 # Global parameters (applied to all nodes)
 # The /** wildcard is ROS2 parameter syntax that applies these parameters to ALL nodes
 /**:
   ros__parameters:
     argo:
-      mode: autonomous
+      mode: autonomous  # NOTE: Currently unused - launch mode controlled via launch argument (normal/simulation)
       geofence_map_name: Argo Irchel North pond sailing area
       p_heading_gain: 0.6  # Proportional gain for heading control (P controller, can be extended to PID)
       min_rudder_near_boundary: 0.3  # Minimum rudder command when close to boundary (0.0-1.0)
       boundary_emergency_threshold: 5.0  # Meters from boundary for emergency turn
       turn_rudder_gain_multiplier: 2.0  # Multiplier for rudder gain during turns (more aggressive control)
-    # ----------------------------------------------------------------------------
-    # IMU Yaw Offset (degrees)
-    # - Purpose: Fixed rotation about +Z to align BNO085 sensor frame to boat frame
-    # - Sign: Positive rotates COUNTER-CLOCKWISE (mathematical) before publishing
-    #         Final heading and XY data use: (raw_yaw + yaw_offset_deg) % 360
-    # - Typical mounts:
-    #     • Board with +Y forward, +X starboard, +Z up → use about -90°
-    # - Tuning: Adjust so when bow points to true/magnetic North, /compass ≈ 0°
-    # ----------------------------------------------------------------------------
     # Simulation parameters (shared across simulator bridge, transform publisher, and visualization)
     # These are accessible to all nodes via the simulation.* namespace
     simulation:
@@ -42,19 +33,28 @@
         wind_gust_min_speed: 4.0           # Min gust speed (m/s, placeholder)
         wind_gust_max_speed: 7.0           # Max gust speed (m/s, placeholder)
         wind_gust_max_delta_percent: 10.0  # Max gust speed variation percent (placeholder)
+    # ----------------------------------------------------------------------------
+    # IMU Yaw Offset (degrees)
+    # - Purpose: Fixed rotation about +Z to align BNO085 sensor frame to boat frame
+    # - Sign: Positive rotates COUNTER-CLOCKWISE (mathematical) before publishing
+    #         Final heading and XY data use: (raw_yaw + yaw_offset_deg) % 360
+    # - Typical mounts:
+    #     • Board with +Y forward, +X starboard, +Z up → use about -90°
+    # - Tuning: Adjust so when bow points to true/magnetic North, /compass ≈ 0°
+    # ----------------------------------------------------------------------------
     imu:
       yaw_offset_deg: 59.25
 controller_node:
   ros__parameters:
     controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser
-    data_collection_enabled: false
-    rudder_gain: 0.3
-    rudder_full_scale_deg: 60.0
+    data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
+    rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
+    rudder_full_scale_deg: 60.0  # Heading error (degrees) that produces full rudder deflection (-1.0 to +1.0)
     param_file_path: argo.yaml
-    patrol_lookahead_time: 20.0
-    boundary_turn_threshold: 12.0
-    tack_angle: 100.0  # Increased from 90° to 100° for better tack success (more momentum through wind, less likely to stall)
-    broad_reach_angle: 110.0
+    patrol_lookahead_time: 20.0  # Seconds to predict ahead for boundary crossing (used by patrol/crosser controllers)
+    boundary_turn_threshold: 12.0  # Distance to boundary (meters) to trigger turn maneuver
+    tack_angle: 100.0  # Degrees to turn during tack maneuver (increased from 90° for better tack success - more momentum through wind, less likely to stall)
+    broad_reach_angle: 110.0  # Preferred angle to wind (degrees) for patrol mode sailing
 
 rudder_sail_radio_node:
   ros__parameters:
@@ -66,19 +66,3 @@ rudder_sail_radio_node:
 argo_boat_visualization:
   ros__parameters:
     visualization_scale: 6.0        # Scale factor for boat visualization (1.0 realistic)
-
-# Example configurations:
-# Wind-aware controller:
-# controller_node:
-#   ros__parameters:
-#     controller_type: wind_aware
-#     rudder_gain: 1.5
-#     sail_wind_gain: 0.3  # Blend wind-based sail control
-#     data_collection_enabled: true
-
-# Conservative human priority:
-# rudder_sail_radio_node:
-#   ros__parameters:
-#     human_override_timeout: 5.0
-#     deadband_threshold: 0.3
-#     safety_max_rudder: 0.8
