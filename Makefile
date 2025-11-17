@@ -160,9 +160,10 @@ help:
 	@echo "  install-argo-cli - Install Argo CLI (aliases, functions, dotfiles) to ~/.bashrc"
 	@echo ""
 	@echo "Git Submodule Management:"
-	@echo "  submodule-init    - Initialize and checkout sailboat-playground submodule"
-	@echo "  submodule-update  - Update sailboat-playground submodule to latest version"
-	@echo "  submodule-status  - Show submodule status and current commit"
+	@echo "  submodule-init    - Initialize and checkout all submodules (sailboat-playground, bno08x_driver)"
+	@echo "  submodule-update  - Update all submodules to latest version"
+	@echo "  submodule-status  - Show submodule status and current commits"
+	@echo "  submodule-sync    - Show commands to sync submodule references (clean up dirty submodule state)"
 	@echo ""
 	@echo "Quick Commands (after installing CLI):"
 	@echo "  al  - Launch argo service (with 30s monitoring)"
@@ -576,169 +577,230 @@ uninstall-power-control:
 
 SAILBOAT_SUBMODULE_PATH := simulator/sailboat-playground
 SAILBOAT_SUBMODULE_NAME := simulator/sailboat-playground
+BNO08X_SUBMODULE_PATH := nodes/vendor/bno08x_driver
+BNO08X_SUBMODULE_NAME := nodes/vendor/bno08x_driver
+
+# Helper function to initialize a single submodule
+define init_submodule
+	@echo "Initializing $(1) submodule..."
+	@if [ ! -d $(1) ]; then \
+		git submodule update --init --recursive $(1); \
+	fi
+	@submodule_url=$$(git config -f .gitmodules submodule.$(2).url); \
+	if [ -z "$$submodule_url" ]; then \
+		echo "⚠️  Warning: Unable to determine submodule remote URL from .gitmodules for $(1)"; \
+	else \
+		cd $(1) && \
+		current_url=$$(git remote get-url origin 2>/dev/null || echo ""); \
+		if [ -z "$$current_url" ] || [ "$$current_url" != "$$submodule_url" ]; then \
+			git remote set-url origin "$$submodule_url" 2>/dev/null || git remote add origin "$$submodule_url"; \
+			echo "   ➜ Updated origin to $$submodule_url"; \
+		fi; \
+		git fetch origin --prune 2>/dev/null || true; \
+		if git show-ref --verify --quiet refs/remotes/origin/master 2>/dev/null; then \
+			target_branch=master; \
+		elif git show-ref --verify --quiet refs/remotes/origin/main 2>/dev/null; then \
+			target_branch=main; \
+		else \
+			echo "   ⚠️  Warning: origin/master and origin/main not found for $(1)"; \
+			target_branch=""; \
+		fi; \
+		if [ -n "$$target_branch" ]; then \
+			current_commit=$$(git rev-parse HEAD 2>/dev/null || echo ""); \
+			if [ -n "$$current_commit" ]; then \
+				git checkout -B $$target_branch $$current_commit >/dev/null 2>&1 || true; \
+			fi; \
+			if git rev-parse --verify --quiet origin/$$target_branch >/dev/null 2>&1; then \
+				git branch --set-upstream-to=origin/$$target_branch $$target_branch >/dev/null 2>&1 || true; \
+			fi; \
+			echo "   ➜ Checked out $$target_branch tracking origin/$$target_branch"; \
+		fi; \
+		cd ..; \
+	fi
+endef
 
 submodule-init:
-	@echo "Initializing sailboat-playground submodule..."
+	@echo "Initializing all submodules..."
 	@if [ ! -f .gitmodules ]; then \
 		echo "❌ .gitmodules file not found!"; \
 		echo "   This repository doesn't have submodules configured."; \
 		exit 1; \
 	fi
-	@echo "Checking submodule configuration..."
-	@if ! grep -q "simulator/sailboat-playground" .gitmodules; then \
-		echo "❌ 'simulator/sailboat-playground' submodule not found in .gitmodules"; \
-		echo "   Available submodules:"; \
-		grep "path = " .gitmodules | sed 's/.*path = /     - /'; \
-		exit 1; \
-	fi
-	@echo "Initializing and checking out submodule..."
-	git submodule update --init --recursive $(SAILBOAT_SUBMODULE_PATH)
-	@echo "Configuring submodule git remotes and tracking branch..."
-	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
-	if [ -z "$$submodule_url" ]; then \
-		echo "❌ Unable to determine submodule remote URL from .gitmodules"; \
-		exit 1; \
-	fi; \
-	cd $(SAILBOAT_SUBMODULE_PATH) && \
-	current_url=$$(git remote get-url origin); \
-	if [ "$$current_url" != "$$submodule_url" ]; then \
-		git remote set-url origin "$$submodule_url"; \
-		echo "   ➜ Updated origin to $$submodule_url"; \
-	else \
-		echo "   ➜ Origin already set to $$submodule_url"; \
-	fi; \
-	git fetch origin --prune; \
-	if git show-ref --verify --quiet refs/remotes/origin/master; then \
-		target_branch=master; \
-	elif git show-ref --verify --quiet refs/remotes/origin/main; then \
-		target_branch=main; \
-	else \
-		echo "❌ origin/master and origin/main not found. Please verify remote branch names."; \
-		exit 1; \
-	fi; \
-	current_commit=$$(git rev-parse HEAD); \
-	git checkout -B $$target_branch $$current_commit >/dev/null 2>&1 || exit 1; \
-	if git rev-parse --verify --quiet origin/$$target_branch >/dev/null 2>&1; then \
-		git branch --set-upstream-to=origin/$$target_branch $$target_branch >/dev/null 2>&1 || true; \
-	fi; \
-	echo "   ➜ Checked out $$target_branch tracking origin/$$target_branch"
-	@echo "✅ sailboat-playground submodule initialized and configured successfully!"
 	@echo ""
-	@echo "Submodule location: $(SAILBOAT_SUBMODULE_PATH)/"
-	@echo "Customizations location: simulator/customizations/sailboat-playground/"
-	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
-	echo "Source repository: $$submodule_url"
+	$(call init_submodule,$(SAILBOAT_SUBMODULE_PATH),$(SAILBOAT_SUBMODULE_NAME))
+	@echo ""
+	$(call init_submodule,$(BNO08X_SUBMODULE_PATH),$(BNO08X_SUBMODULE_NAME))
+	@echo ""
+	@echo "✅ All submodules initialized and configured successfully!"
+	@echo ""
+	@echo "Submodule locations:"
+	@echo "  - $(SAILBOAT_SUBMODULE_PATH)/"
+	@echo "  - $(BNO08X_SUBMODULE_PATH)/"
 	@echo ""
 	@echo "Next steps:"
-	@echo "  1. Review the submodule code in simulator/sailboat-playground/"
+	@echo "  1. Review the submodule code"
 	@echo "  2. Use 'make submodule-update' to get latest changes"
-	@echo "  3. Use 'make submodule-status' to check current version"
+	@echo "  3. Use 'make submodule-status' to check current versions"
+
+# Helper function to update a single submodule
+define update_submodule
+	@echo "Updating $(1) submodule..."
+	@if [ ! -d $(1) ]; then \
+		echo "⚠️  Submodule not initialized, initializing first..."; \
+		git submodule update --init --recursive $(1) || true; \
+	fi
+	@submodule_url=$$(git config -f .gitmodules submodule.$(2).url); \
+	if [ -z "$$submodule_url" ]; then \
+		echo "⚠️  Warning: Unable to determine submodule remote URL from .gitmodules for $(1)"; \
+	else \
+		cd $(1) && \
+		current_url=$$(git remote get-url origin 2>/dev/null || echo ""); \
+		if [ -z "$$current_url" ] || [ "$$current_url" != "$$submodule_url" ]; then \
+			git remote set-url origin "$$submodule_url" 2>/dev/null || git remote add origin "$$submodule_url"; \
+			echo "   ➜ Updated origin to $$submodule_url"; \
+		fi; \
+		echo "   Fetching latest changes from remote..."; \
+		git fetch origin --prune 2>/dev/null || true; \
+		if git show-ref --verify --quiet refs/remotes/origin/master 2>/dev/null; then \
+			target_branch=master; \
+		elif git show-ref --verify --quiet refs/remotes/origin/main 2>/dev/null; then \
+			target_branch=main; \
+		else \
+			echo "   ⚠️  Warning: origin/master and origin/main not found for $(1)"; \
+			target_branch=""; \
+		fi; \
+		if [ -n "$$target_branch" ]; then \
+			git checkout $$target_branch >/dev/null 2>&1 || git checkout -B $$target_branch origin/$$target_branch >/dev/null 2>&1 || true; \
+			if git rev-parse --verify --quiet origin/$$target_branch >/dev/null 2>&1; then \
+				git branch --set-upstream-to=origin/$$target_branch $$target_branch >/dev/null 2>&1 || true; \
+			fi; \
+			git pull --ff-only origin $$target_branch 2>/dev/null || echo "   ⚠️  Could not fast-forward, submodule may have local changes"; \
+		fi; \
+		cd ..; \
+		echo "✅ $(1) submodule updated successfully!"; \
+	fi
+endef
 
 submodule-update:
-	@echo "Updating sailboat-playground submodule..."
-	@if [ ! -d $(SAILBOAT_SUBMODULE_PATH) ]; then \
-		echo "❌ Submodule not initialized!"; \
-		echo "   Run 'make submodule-init' first."; \
-		exit 1; \
-	fi
-	@echo "Fetching latest changes from remote..."
-	@submodule_url=$$(git config -f .gitmodules submodule.$(SAILBOAT_SUBMODULE_NAME).url); \
-	if [ -z "$$submodule_url" ]; then \
-		echo "❌ Unable to determine submodule remote URL from .gitmodules"; \
-		exit 1; \
-	fi; \
-	cd $(SAILBOAT_SUBMODULE_PATH) && \
-	current_url=$$(git remote get-url origin); \
-	if [ "$$current_url" != "$$submodule_url" ]; then \
-		git remote set-url origin "$$submodule_url"; \
-		echo "   ➜ Updated origin to $$submodule_url"; \
-	fi; \
-	git fetch origin --prune; \
-	if git show-ref --verify --quiet refs/remotes/origin/master; then \
-		target_branch=master; \
-	elif git show-ref --verify --quiet refs/remotes/origin/main; then \
-		target_branch=main; \
-	else \
-		echo "❌ origin/master and origin/main not found. Please verify remote branch names."; \
-		exit 1; \
-	fi; \
-	git checkout $$target_branch >/dev/null 2>&1 || git checkout -B $$target_branch origin/$$target_branch >/dev/null 2>&1 || exit 1; \
-	if git rev-parse --verify --quiet origin/$$target_branch >/dev/null 2>&1; then \
-		git branch --set-upstream-to=origin/$$target_branch $$target_branch >/dev/null 2>&1 || true; \
-	fi; \
-	git pull --ff-only origin $$target_branch
-	@echo "✅ sailboat-playground submodule updated successfully!"
-	@echo ""
-	@echo "Current submodule status:"
-	@git submodule status $(SAILBOAT_SUBMODULE_PATH)
-	@echo ""
-	@echo "Note: The submodule has been updated to the latest version."
-	@echo "      Commit this change to lock the submodule to this version:"
-	@echo "      git add $(SAILBOAT_SUBMODULE_PATH)"
-	@echo "      git commit -m 'Update sailboat-playground submodule'"
-
-submodule-status:
-	@echo "Sailboat-Playground Submodule Status"
-	@echo "===================================="
-	@echo ""
+	@echo "Updating all submodules..."
 	@if [ ! -f .gitmodules ]; then \
 		echo "❌ .gitmodules file not found!"; \
 		echo "   This repository doesn't have submodules configured."; \
 		exit 1; \
 	fi
-	@echo "🔍 Submodule Configuration:"
-	@if grep -q "simulator/sailboat-playground" .gitmodules; then \
-		echo "✅ simulator/sailboat-playground submodule configured"; \
-		url=$$(grep -A1 "simulator/sailboat-playground" .gitmodules | grep "url" | cut -d'=' -f2 | tr -d ' \t'); \
+	@echo ""
+	$(call update_submodule,$(SAILBOAT_SUBMODULE_PATH),$(SAILBOAT_SUBMODULE_NAME))
+	@echo ""
+	$(call update_submodule,$(BNO08X_SUBMODULE_PATH),$(BNO08X_SUBMODULE_NAME))
+	@echo ""
+	@echo "Current submodule status:"
+	@echo "   $(SAILBOAT_SUBMODULE_PATH):"
+	@cd $(SAILBOAT_SUBMODULE_PATH) && git rev-parse --short HEAD 2>/dev/null | sed 's/^/     Commit: /' && cd ../.. || echo "     (not initialized)"
+	@echo "   $(BNO08X_SUBMODULE_PATH):"
+	@cd $(BNO08X_SUBMODULE_PATH) && git rev-parse --short HEAD 2>/dev/null | sed 's/^/     Commit: /' && cd ../.. || echo "     (not initialized)"
+	@echo ""
+	@echo "Note: Submodules have been updated to the latest version."
+	@echo "      Commit these changes to lock the submodules to these versions:"
+	@echo "      git add $(SAILBOAT_SUBMODULE_PATH) $(BNO08X_SUBMODULE_PATH)"
+	@echo "      git commit -m 'Update submodules'"
+
+# Helper function to show status of a single submodule
+define status_submodule
+	@echo "🔍 $(1) Submodule:"
+	@if grep -q "$(1)" .gitmodules 2>/dev/null; then \
+		echo "✅ $(1) submodule configured"; \
+		url=$$(grep -A1 "$(1)" .gitmodules | grep "url" | cut -d'=' -f2 | tr -d ' \t'); \
 		echo "   URL: $$url"; \
 	else \
-		echo "❌ simulator/sailboat-playground submodule not found in .gitmodules"; \
-		echo "   Available submodules:"; \
-		grep "path = " .gitmodules | sed 's/.*path = /     - /'; \
-		exit 1; \
+		echo "❌ $(1) submodule not found in .gitmodules"; \
 	fi
-	@echo ""
-	@echo "🔍 Submodule Status:"
-	@if [ -d simulator/sailboat-playground ]; then \
-		echo "✅ Submodule directory exists: simulator/sailboat-playground/"; \
-		if [ -f simulator/sailboat-playground/.git ] || [ -d simulator/sailboat-playground/.git ]; then \
+	@if [ -d $(1) ]; then \
+		echo "✅ Submodule directory exists: $(1)/"; \
+		if [ -f $(1)/.git ] || [ -d $(1)/.git ]; then \
 			echo "✅ Submodule is initialized"; \
 			echo ""; \
-			echo "Current commit:"; \
-			cd simulator/sailboat-playground && git log --oneline -1 && cd ../..; \
+			echo "   Current commit:"; \
+			cd $(1) && git log --oneline -1 2>/dev/null | sed 's/^/     /' && cd ../..; \
 			echo ""; \
-			echo "Branch information:"; \
-			cd simulator/sailboat-playground && git branch -v && cd ../..; \
+			echo "   Branch information:"; \
+			cd $(1) && git branch -v 2>/dev/null | sed 's/^/     /' && cd ../..; \
 			echo ""; \
-			echo "Remote status:"; \
-			cd simulator/sailboat-playground && git status -sb && cd ../..; \
+			echo "   Remote status:"; \
+			cd $(1) && git status -sb 2>/dev/null | sed 's/^/     /' && cd ../..; \
 			echo ""; \
-			echo "Remote URL:"; \
-			cd simulator/sailboat-playground && git remote get-url origin && cd ../..; \
+			echo "   Remote URL:"; \
+			cd $(1) && git remote get-url origin 2>/dev/null | sed 's/^/     /' && cd ../..; \
 		else \
 			echo "❌ Submodule directory exists but not initialized"; \
 			echo "   Run 'make submodule-init' to initialize"; \
 		fi; \
 	else \
-		echo "❌ Submodule directory not found: simulator/sailboat-playground/"; \
+		echo "❌ Submodule directory not found: $(1)/"; \
 		echo "   Run 'make submodule-init' to initialize"; \
 	fi
+	@echo ""
+endef
+
+submodule-status:
+	@echo "Argo Submodule Status"
+	@echo "====================="
+	@echo ""
+	@if [ ! -f .gitmodules ]; then \
+		echo "❌ .gitmodules file not found!"; \
+		echo "   This repository doesn't have submodules configured."; \
+		exit 1; \
+	fi
+	@echo "🔍 All Configured Submodules:"
+	@grep "path = " .gitmodules | sed 's/.*path = /     - /'
+	@echo ""
+	@echo "===================================="
+	@echo ""
+	$(call status_submodule,$(SAILBOAT_SUBMODULE_PATH))
+	@echo "===================================="
+	@echo ""
+	$(call status_submodule,$(BNO08X_SUBMODULE_PATH))
+	@echo "===================================="
 	@echo ""
 	@echo "🔍 Local Customization Files:"
 	@if [ -d simulator/customizations/sailboat-playground ]; then \
 		echo "✅ Customizations directory exists: simulator/customizations/sailboat-playground/"; \
 		echo "   This contains Argo-specific configuration files"; \
 		echo "   (separate from the submodule source code)"; \
-		ls -1 simulator/customizations/sailboat-playground/ | sed 's/^/     - /'; \
+		ls -1 simulator/customizations/sailboat-playground/ 2>/dev/null | sed 's/^/     - /' || echo "     (empty)"; \
 	else \
 		echo "❌ Customizations directory not found: simulator/customizations/sailboat-playground/"; \
 		echo "   This may affect simulator functionality"; \
 	fi
 	@echo ""
 	@echo "💡 Usage:"
-	@echo "  make submodule-init    - Initialize submodule (first time setup)"
-	@echo "  make submodule-update  - Update to latest version"
+	@echo "  make submodule-init    - Initialize all submodules (first time setup)"
+	@echo "  make submodule-update  - Update all submodules to latest version"
 	@echo "  make submodule-status  - Show this status information"
+	@echo "  make submodule-sync    - Sync submodule references (record current commits in parent repo)"
+
+submodule-sync:
+	@echo "Syncing submodule references..."
+	@echo "This will record the current submodule commits in the parent repository."
+	@echo ""
+	@if [ ! -f .gitmodules ]; then \
+		echo "❌ .gitmodules file not found!"; \
+		exit 1; \
+	fi
+	@echo "Current submodule status:"
+	@for submod in $(SAILBOAT_SUBMODULE_PATH) $(BNO08X_SUBMODULE_PATH); do \
+		if [ -d "$$submod" ]; then \
+			commit=$$(cd "$$submod" && git rev-parse HEAD 2>/dev/null); \
+			if [ -n "$$commit" ]; then \
+				echo "   $$submod: $$commit"; \
+			fi; \
+		fi; \
+	done
+	@echo ""
+	@echo "To sync submodule references, run:"
+	@echo "  git add $(SAILBOAT_SUBMODULE_PATH) $(BNO08X_SUBMODULE_PATH)"
+	@echo "  git commit -m 'Sync submodule references'"
+	@echo ""
+	@echo "This will lock the submodules to their current commits."
 
 # ==================== MOTD CUSTOMIZATION ====================
 
