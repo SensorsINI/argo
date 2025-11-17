@@ -165,6 +165,7 @@ from controllers import (
     WindAwareController,
     ReturnToHomeController,
     PatrolController,
+    CrosserController,
     BoatState,
     ControlCommand,
 )
@@ -290,13 +291,19 @@ class ControllerNode(ArgoBaseNode):
         self.declare_parameter('training_data_dir', '')  # Empty = use default
         self.declare_parameter('rudder_gain', 1.0)
         self.declare_parameter('rudder_full_scale_deg', 60.0)
+        self.declare_parameter('p_heading_gain', 0.3)  # Proportional gain for heading control (P controller, can be extended to PID)
         # Allow disabling param file monitoring
         self.declare_parameter('enable_param_reload', True)
         # Patrol controller parameters
         self.declare_parameter('patrol_lookahead_time', 15.0)
         self.declare_parameter('boundary_turn_threshold', 15.0)
         self.declare_parameter('tack_angle', 90.0)
+        self.declare_parameter('tack_min_angle_from_wind', 50.0)  # Minimum angle from wind during tack to avoid stays
+        self.declare_parameter('min_rudder_near_boundary', 0.3)  # Minimum rudder command when close to boundary
+        self.declare_parameter('boundary_emergency_threshold', 5.0)  # Meters from boundary for emergency turn
+        self.declare_parameter('turn_rudder_gain_multiplier', 2.0)  # Multiplier for rudder gain during turns (more aggressive)
         self.declare_parameter('broad_reach_angle', 110.0)
+        self.declare_parameter('no_go_zone_angle', 45.0)  # Degrees from wind where sailing is impossible
         self.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
 
         self.param_file = Path(self.get_parameter(
@@ -475,6 +482,19 @@ class ControllerNode(ArgoBaseNode):
             config['broad_reach_angle'] = self.get_parameter('broad_reach_angle').get_parameter_value().double_value
             config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
             self.controller = PatrolController(config, logger=logger, parent_node=parent_node)
+        elif controller_type == 'crosser':
+            config['sail_wind_gain'] = 0.5
+            config['p_heading_gain'] = self.get_parameter('p_heading_gain').get_parameter_value().double_value if self.has_parameter('p_heading_gain') else 0.3
+            config['arrival_distance_m'] = self.get_parameter('arrival_distance_m').get_parameter_value().double_value if self.has_parameter('arrival_distance_m') else 10.0
+            config['boundary_turn_threshold'] = self.get_parameter('boundary_turn_threshold').get_parameter_value().double_value if self.has_parameter('boundary_turn_threshold') else 15.0
+            config['tack_angle'] = self.get_parameter('tack_angle').get_parameter_value().double_value if self.has_parameter('tack_angle') else 90.0
+            config['tack_min_angle_from_wind'] = self.get_parameter('tack_min_angle_from_wind').get_parameter_value().double_value if self.has_parameter('tack_min_angle_from_wind') else 50.0
+            config['no_go_zone_angle'] = self.get_parameter('no_go_zone_angle').get_parameter_value().double_value if self.has_parameter('no_go_zone_angle') else 45.0
+            config['min_rudder_near_boundary'] = self.get_parameter('min_rudder_near_boundary').get_parameter_value().double_value if self.has_parameter('min_rudder_near_boundary') else 0.3
+            config['boundary_emergency_threshold'] = self.get_parameter('boundary_emergency_threshold').get_parameter_value().double_value if self.has_parameter('boundary_emergency_threshold') else 5.0
+            config['turn_rudder_gain_multiplier'] = self.get_parameter('turn_rudder_gain_multiplier').get_parameter_value().double_value if self.has_parameter('turn_rudder_gain_multiplier') else 2.0
+            config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
+            self.controller = CrosserController(config, logger=logger, parent_node=parent_node)
         else:
             self.get_logger().warn(
                 f"Unknown controller type '{controller_type}', using proportional")
@@ -527,7 +547,7 @@ class ControllerNode(ArgoBaseNode):
                 self.get_logger().debug(f"Parameter callback: controller_type set to '{new_controller_type}' (current: {self.controller.name if self.controller else 'None'})")
                 
                 # Validate controller type
-                valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol']
+                valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol', 'crosser']
                 if new_controller_type not in valid_types:
                     result.successful = False
                     result.reason = f"Invalid controller type '{new_controller_type}'. Valid types: {', '.join(valid_types)}"
@@ -539,7 +559,8 @@ class ControllerNode(ArgoBaseNode):
                 if (new_controller_type == 'proportional' and current_controller_name == 'ProportionalHeadingController') or \
                    (new_controller_type == 'wind_aware' and current_controller_name == 'WindAwareController') or \
                    (new_controller_type == 'return_to_home' and current_controller_name == 'ReturnToHomeController') or \
-                   (new_controller_type == 'patrol' and current_controller_name == 'PatrolController'):
+                   (new_controller_type == 'patrol' and current_controller_name == 'PatrolController') or \
+                   (new_controller_type == 'crosser' and current_controller_name == 'CrosserController'):
                     self.get_logger().debug(f"Controller is already {current_controller_name} (requested: {new_controller_type}), no switch needed")
                     return result
                 
