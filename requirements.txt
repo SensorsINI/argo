@@ -29,6 +29,7 @@ numpy                    # Numerical computations for sensor data processing
 # ==================== CONFIGURATION & UTILITIES ====================
 # Configuration file parsing and path handling
 PyYAML                   # YAML configuration file parsing (control.py)
+ruamel.yaml>=0.17,<0.18 # Comment-preserving YAML round-trips (persisting params safely)
 
 # ==================== SYSTEM MONITORING ====================
 # Process and system resource monitoring

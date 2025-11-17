@@ -1680,6 +1680,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         Currently supported:
           - simulation.wind.wind_direction -> /**.ros__parameters.simulation.wind.wind_direction
           - simulation.wind.wind_min_speed -> /**.ros__parameters.simulation.wind.wind_min_speed
+        
+        Uses ruamel.yaml to preserve comments when available, falls back to PyYAML otherwise.
         """
         try:
             script_path = Path(__file__).resolve()
@@ -1689,9 +1691,6 @@ class ArgoUnifiedSimulatorBridge(Node):
             if not yaml_path.exists():
                 self.get_logger().warn(f"Cannot persist parameter '{param_name}': YAML not found at {yaml_path}")
                 return
-            
-            with open(yaml_path, 'r') as f:
-                data = yaml.safe_load(f) or {}
             
             # Map parameter name to nested YAML keys
             mapping = {
@@ -1703,28 +1702,66 @@ class ArgoUnifiedSimulatorBridge(Node):
                 # Not a persistable parameter, silently ignore
                 return
             
-            # Ensure nested dicts exist
-            node = data
-            for k in keys[:-1]:
-                if k not in node or not isinstance(node[k], dict):
-                    node[k] = {}
-                node = node[k]
-            node[keys[-1]] = value
-            
-            # Write atomically: tmp then replace
-            tmp_path = yaml_path.with_suffix('.yaml.tmp')
-            bak_path = yaml_path.with_suffix('.yaml.bak')
-            with open(tmp_path, 'w') as f:
-                yaml.safe_dump(data, f, sort_keys=False)
+            # Try to preserve comments using ruamel.yaml if available
             try:
-                # Backup previous
+                from ruamel.yaml import YAML
+                rt_yaml = YAML()
+                rt_yaml.preserve_quotes = True
+                data = {}
                 if yaml_path.exists():
-                    yaml_path.replace(bak_path)
-            except Exception:
-                # Backup failure should not block persistence
-                pass
-            Path(tmp_path).replace(yaml_path)
-            self.get_logger().info(f"Persisted '{param_name}' to {yaml_path}")
+                    with open(yaml_path, 'r') as f:
+                        data = rt_yaml.load(f) or {}
+                
+                # Ensure nested dicts exist
+                node = data
+                for k in keys[:-1]:
+                    if k not in node or not isinstance(node[k], dict):
+                        node[k] = {}
+                    node = node[k]
+                node[keys[-1]] = value
+                
+                # Write atomically: tmp then replace
+                tmp_path = yaml_path.with_suffix('.yaml.tmp')
+                bak_path = yaml_path.with_suffix('.yaml.bak')
+                with open(tmp_path, 'w') as f:
+                    rt_yaml.dump(data, f)
+                try:
+                    # Backup previous
+                    if yaml_path.exists():
+                        yaml_path.replace(bak_path)
+                except Exception:
+                    # Backup failure should not block persistence
+                    pass
+                Path(tmp_path).replace(yaml_path)
+                self.get_logger().info(f"Persisted '{param_name}' to {yaml_path} (comments preserved)")
+            except ImportError:
+                # Fallback to PyYAML (comments may be lost)
+                with open(yaml_path, 'r') as f:
+                    data = yaml.safe_load(f) or {}
+                
+                # Ensure nested dicts exist
+                node = data
+                for k in keys[:-1]:
+                    if k not in node or not isinstance(node[k], dict):
+                        node[k] = {}
+                    node = node[k]
+                node[keys[-1]] = value
+                
+                # Write atomically: tmp then replace
+                tmp_path = yaml_path.with_suffix('.yaml.tmp')
+                bak_path = yaml_path.with_suffix('.yaml.bak')
+                with open(tmp_path, 'w') as f:
+                    yaml.safe_dump(data, f, sort_keys=False)
+                try:
+                    # Backup previous
+                    if yaml_path.exists():
+                        yaml_path.replace(bak_path)
+                except Exception:
+                    # Backup failure should not block persistence
+                    pass
+                Path(tmp_path).replace(yaml_path)
+                self.get_logger().warn('ruamel.yaml not available; YAML comments may not be preserved')
+                self.get_logger().info(f"Persisted '{param_name}' to {yaml_path}")
         except Exception as e:
             self.get_logger().warn(f"Failed to persist '{param_name}' to argo.yaml: {e}")
     

@@ -1,27 +1,47 @@
+# Enhanced parameters for argo control with modular controllers
+# Two-node system: controller.py (high-level control) + rudder_sail_radio.py (low-level arbitration)
+
+# Global parameters (applied to all nodes)
+# The /** wildcard is ROS2 parameter syntax that applies these parameters to ALL nodes
 /**:
   ros__parameters:
     argo:
       mode: autonomous
+    # ----------------------------------------------------------------------------
+    # IMU Yaw Offset (degrees)
+    # - Purpose: Fixed rotation about +Z to align BNO085 sensor frame to boat frame
+    # - Sign: Positive rotates COUNTER-CLOCKWISE (mathematical) before publishing
+    #         Final heading and XY data use: (raw_yaw + yaw_offset_deg) % 360
+    # - Typical mounts:
+    #     • Board with +Y forward, +X starboard, +Z up → use about -90°
+    # - Tuning: Adjust so when bow points to true/magnetic North, /compass ≈ 0°
+    # ----------------------------------------------------------------------------
+    # Simulation parameters (shared across simulator bridge, transform publisher, and visualization)
+    # These are accessible to all nodes via the simulation.* namespace
     simulation:
-      publish_rate: 2.0
-      simulation_rate: 10.0
-      heading_trail_limit: 100
-      grounding_behavior: reset
+      publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz)
+      simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics
+      heading_trail_limit: 100  # Number of historical heading markers to display in visualization
+      grounding_behavior: reset # Behavior on grounding in local simulation: reset|terminate|continue
       exit_confirmation: true
+      # Wind characteristics (runtime configurable via ROS2 parameters)
       wind:
-        wind_min_speed: 2.0
-        wind_max_speed: 10.0
-        wind_direction: 300.0
-        wind_max_delta_percent: 0.0
-        wind_gust_probability: 0.0
-        wind_gust_min_duration: 3.0
-        wind_gust_max_duration: 20.0
-        wind_gust_min_speed: 4.0
-        wind_gust_max_speed: 7.0
-        wind_gust_max_delta_percent: 10.0
+        wind_min_speed: 2.0         # Minimum wind speed in m/s (used for mock simulator)
+        wind_max_speed: 10.0        # Maximum wind speed in m/s (placeholder for variable wind)
+        wind_direction: 300.0       # Degrees (compass, 0°=North), where wind COMES FROM
+        # Placeholder parameters for future wind variability features:
+        wind_max_delta_percent: 0.0        # Max wind speed variation percent (placeholder)
+        wind_gust_probability: 0.0         # Probability of gusts (0.0-1.0, placeholder)
+        wind_gust_min_duration: 3.0        # Min gust duration (s, placeholder)
+        wind_gust_max_duration: 20.0       # Max gust duration (s, placeholder)
+        wind_gust_min_speed: 4.0           # Min gust speed (m/s, placeholder)
+        wind_gust_max_speed: 7.0           # Max gust speed (m/s, placeholder)
+        wind_gust_max_delta_percent: 10.0  # Max gust speed variation percent (placeholder)
+    imu:
+      yaw_offset_deg: 59.25
 controller_node:
   ros__parameters:
-    controller_type: patrol
+    controller_type: patrol  # Options: proportional, wind_aware, return_to_home, patrol
     data_collection_enabled: false
     rudder_gain: 0.3
     rudder_full_scale_deg: 60.0
@@ -33,11 +53,27 @@ controller_node:
     geofence_map_name: Argo Irchel pond sailing area
 rudder_sail_radio_node:
   ros__parameters:
-    human_override_timeout: 5.0
-    deadband_threshold: 0.1875
-    safety_max_rudder: 1.0
-    safety_max_sail: 1.0
+    human_override_timeout: 5.0      # Seconds after last human activity before robot can take control
+    deadband_threshold: 0.1875        # Minimum change in radio input to count as human activity (5σ measured)
+    safety_max_rudder: 1.0            # Maximum rudder command magnitude
+    safety_max_sail: 1.0              # Maximum sail command magnitude
     param_file_path: argo.yaml
 argo_boat_visualization:
   ros__parameters:
-    visualization_scale: 6.0
+    visualization_scale: 6.0        # Scale factor for boat visualization (1.0 realistic)
+
+# Example configurations:
+# Wind-aware controller:
+# controller_node:
+#   ros__parameters:
+#     controller_type: wind_aware
+#     rudder_gain: 1.5
+#     sail_wind_gain: 0.3  # Blend wind-based sail control
+#     data_collection_enabled: true
+
+# Conservative human priority:
+# rudder_sail_radio_node:
+#   ros__parameters:
+#     human_override_timeout: 5.0
+#     deadband_threshold: 0.3
+#     safety_max_rudder: 0.8

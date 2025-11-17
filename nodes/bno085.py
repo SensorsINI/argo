@@ -194,6 +194,7 @@ import subprocess
 from datetime import datetime
 import collections
 from pathlib import Path
+import yaml
 
 # ============================================================================
 # BRIDGE MODE: Convert C++ driver output to Argo format
@@ -246,6 +247,119 @@ class BNO085Bridge(Node):
         # Determine Argo repo dir for subprocess calls
         script_path = Path(__file__).resolve()
         self.argo_dir = str(script_path.parents[1])  # nodes -> argo
+        
+        # Load yaw offset from configuration (argo.yaml), with hardware-mount default
+        # Hardware default: board mounted +Y forward, +X starboard, +Z up → -90° about +Z
+        default_mount_offset = -90.0
+        initial_offset = self._load_initial_yaw_offset(default_mount_offset)
+        # Declare parameter and read final value
+        self.declare_parameter('imu.yaw_offset_deg', float(initial_offset))
+        self.yaw_offset_deg = self.get_parameter('imu.yaw_offset_deg').get_parameter_value().double_value % 360.0
+        # Persist back if argo.yaml differs from declared value (e.g., first run)
+        if abs(self.yaw_offset_deg - initial_offset) > 1e-6:
+            self._persist_yaw_offset_to_yaml(self.yaw_offset_deg)
+        
+        # Allow runtime updates via parameter callback (and persist to argo.yaml)
+        self.add_on_set_parameters_callback(self._on_parameter_change)
+        
+        # Apply XY rotation to accel/gyro to keep frames consistent with yaw
+        self.apply_axis_rotation = True
+    
+    def _argo_yaml_path(self) -> Path:
+        """Return absolute path to nodes/argo.yaml."""
+        return Path(self.argo_dir) / 'nodes' / 'argo.yaml'
+    
+    def _load_initial_yaw_offset(self, fallback: float) -> float:
+        """Load initial yaw offset from nodes/argo.yaml; create section if missing."""
+        try:
+            yaml_path = self._argo_yaml_path()
+            if not yaml_path.exists():
+                return float(fallback)
+            with open(yaml_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+            # Navigate: /** -> ros__parameters -> imu -> yaw_offset_deg
+            root = cfg.get('/**', {}).get('ros__parameters', {})
+            imu_cfg = root.get('imu', {})
+            val = imu_cfg.get('yaw_offset_deg', None)
+            if val is None:
+                return float(fallback)
+            return float(val)
+        except Exception:
+            return float(fallback)
+    
+    def _persist_yaw_offset_to_yaml(self, value: float) -> None:
+        """Persist yaw offset into nodes/argo.yaml under /**/ros__parameters/imu."""
+        try:
+            yaml_path = self._argo_yaml_path()
+            # Try to preserve comments using ruamel.yaml if available
+            try:
+                from ruamel.yaml import YAML
+                rt_yaml = YAML()
+                rt_yaml.preserve_quotes = True
+                data = {}
+                if yaml_path.exists():
+                    with open(yaml_path, 'r') as f:
+                        data = rt_yaml.load(f) or {}
+                # Ensure nested structure exists
+                if '/**' not in data:
+                    data['/**'] = {}
+                if 'ros__parameters' not in data['/**']:
+                    data['/**']['ros__parameters'] = {}
+                if 'imu' not in data['/**']['ros__parameters']:
+                    data['/**']['ros__parameters']['imu'] = {}
+                data['/**']['ros__parameters']['imu']['yaw_offset_deg'] = float(value)
+                # Write back (ruamel preserves existing comments)
+                tmp_path = yaml_path.with_suffix('.yaml.tmp')
+                with open(tmp_path, 'w') as f:
+                    rt_yaml.dump(data, f)
+                tmp_path.replace(yaml_path)
+            except Exception:
+                # Fallback to PyYAML (comments may be lost)
+                cfg = {}
+                if yaml_path.exists():
+                    with open(yaml_path, 'r') as f:
+                        cfg = yaml.safe_load(f) or {}
+                if '/**' not in cfg:
+                    cfg['/**'] = {}
+                if 'ros__parameters' not in cfg['/**']:
+                    cfg['/**']['ros__parameters'] = {}
+                if 'imu' not in cfg['/**']['ros__parameters']:
+                    cfg['/**']['ros__parameters']['imu'] = {}
+                cfg['/**']['ros__parameters']['imu']['yaw_offset_deg'] = float(value)
+                tmp_path = yaml_path.with_suffix('.yaml.tmp')
+                with open(tmp_path, 'w') as f:
+                    yaml.safe_dump(cfg, f, sort_keys=False)
+                tmp_path.replace(yaml_path)
+                self.get_logger().warn('ruamel.yaml not available; YAML comments may not be preserved')
+            self.get_logger().info(f'Persisted imu.yaw_offset_deg={value:.3f}° to {yaml_path}')
+        except Exception as e:
+            self.get_logger().warn(f'Failed to persist imu.yaw_offset_deg to argo.yaml: {e}')
+    
+    def _on_parameter_change(self, parameters):
+        """Handle runtime parameter updates and persist yaw offset changes."""
+        from rcl_interfaces.msg import SetParametersResult
+        result = SetParametersResult()
+        result.successful = True
+        for param in parameters:
+            if param.name == 'imu.yaw_offset_deg':
+                try:
+                    new_val = param.get_parameter_value().double_value % 360.0
+                    self.yaw_offset_deg = new_val
+                    self._persist_yaw_offset_to_yaml(new_val)
+                    self.get_logger().info(f'imu.yaw_offset_deg updated to {new_val:.3f}° (persisted)')
+                except Exception as e:
+                    result.successful = False
+                    result.reason = f'Invalid imu.yaw_offset_deg: {e}'
+        return result
+    
+    def _rotate_xy(self, x: float, y: float, degrees: float):
+        """Rotate a 2D vector (x,y) in the XY plane by 'degrees' about +Z."""
+        rad = math.radians(degrees)
+        c = math.cos(rad)
+        s = math.sin(rad)
+        xr = c * x - s * y
+        yr = s * x + c * y
+        return xr, yr
     
     def quaternion_to_euler(self, w, x, y, z):
         """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees."""
@@ -285,25 +399,30 @@ class BNO085Bridge(Node):
             msg.orientation.y, msg.orientation.z
         )
         
+        # Apply fixed yaw offset for mounting (rotate +90° about Z)
+        yaw = (yaw + self.yaw_offset_deg) % 360.0
+        
         # Publish compass/pose (heading)
         heading_msg = Vector3(x=0.0, y=0.0, z=yaw)
         self.pub_compass.publish(heading_msg)
         self.pub_pose.publish(heading_msg)
         
         # Publish gyroscope (rad/s → deg/s)
-        gyro_msg = Vector3(
-            x=math.degrees(msg.angular_velocity.x),
-            y=math.degrees(msg.angular_velocity.y),
-            z=math.degrees(msg.angular_velocity.z)
-        )
+        gx = math.degrees(msg.angular_velocity.x)
+        gy = math.degrees(msg.angular_velocity.y)
+        gz = math.degrees(msg.angular_velocity.z)
+        if self.apply_axis_rotation:
+            gx, gy = self._rotate_xy(gx, gy, self.yaw_offset_deg)
+        gyro_msg = Vector3(x=gx, y=gy, z=gz)
         self.pub_gyro.publish(gyro_msg)
         
         # Publish accelerometer (m/s² → g)
-        accel_msg = Vector3(
-            x=msg.linear_acceleration.x / 9.81,
-            y=msg.linear_acceleration.y / 9.81,
-            z=msg.linear_acceleration.z / 9.81
-        )
+        ax = msg.linear_acceleration.x / 9.81
+        ay = msg.linear_acceleration.y / 9.81
+        az = msg.linear_acceleration.z / 9.81
+        if self.apply_axis_rotation:
+            ax, ay = self._rotate_xy(ax, ay, self.yaw_offset_deg)
+        accel_msg = Vector3(x=ax, y=ay, z=az)
         self.pub_accel.publish(accel_msg)
     
     def mag_callback(self, msg: MagneticField):
