@@ -143,30 +143,20 @@ class ArgoTransformPublisher(ArgoBaseNode):
         return self.get_clock().now().to_msg()
     
     def _load_map_origin_from_config(self):
-        """Load map name from config and set map origin from map's 'home' waypoint.
+        """Load map name from ROS2 parameters and set map origin from map's 'home' waypoint.
         This ensures the transform publisher uses the same coordinate system as sailing_area_publisher."""
         try:
-            # Determine path to argo_nodes.yaml (launch/ directory)
-            script_path = Path(__file__).resolve()
-            argo_dir = script_path.parents[1]  # nodes -> argo
-            yaml_path = argo_dir / "launch" / "argo_nodes.yaml"
-            
-            if not yaml_path.exists():
-                self.get_logger().debug("argo_nodes.yaml not found, will use first GPS fix for map origin")
-                return
-            
-            # Load map name from config
-            with open(yaml_path, 'r') as f:
-                config = yaml.safe_load(f)
-            
-            simulation_config = config.get('simulation_config', {})
-            map_name = simulation_config.get('map_name')
+            # Read map name from ROS2 parameters (argo.yaml)
+            self.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
+            map_name = self.get_parameter('geofence_map_name').get_parameter_value().string_value
             
             if not map_name:
-                self.get_logger().debug("No map_name in config, will use first GPS fix for map origin")
+                self.get_logger().debug("No geofence_map_name parameter, will use first GPS fix for map origin")
                 return
             
             # Load the map's GeoJSON file to find the "home" waypoint
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[1]  # nodes -> argo
             maps_dir = argo_dir / "foxglove" / "maps"
             geojson_path = maps_dir / f"{map_name}.geojson"
             

@@ -189,10 +189,8 @@ services:
     special: true  # Launched via shell script, not direct Python
 
 # Simulation Mode Configuration
-simulation_config:
-  # Map name (without .geojson extension) - start location will be at the "home" waypoint
-  # Maps are converted from maps/*.kmz to foxglove/maps/*.geojson using scripts/kmz_to_geojson.py
-  map_name: "Argo Irchel pond sailing area"  # Options: "Hotel dei Pini", "Argo Irchel pond sailing area"
+# Note: Map configuration is now in nodes/argo.yaml under geofence_map_name parameter
+# This centralizes all configuration in argo.yaml
 
 simulation_nodes:
   - name: argo_unified_simulator_bridge
