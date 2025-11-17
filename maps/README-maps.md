@@ -10,8 +10,10 @@ This directory contains the **source map files** drawn in Google Maps and export
 
 ## Map Files
 
-- `Hotel dei Pini.kmz` - Sailing area map for Hotel dei Pini location
-- `Argo Irchel pond sailing area.kmz` - Sailing area map for Argo Irchel pond
+- `Hotel dei Pini.kmz` - [Hotel dei Pini](https://www.google.com/maps/d/viewer?mid=1YiW7Jl0Miv5geXh6tLaaxXCPSLpgqD0&usp=sharing) - Sailing area map for Hotel dei Pini location; swimming area in front of hotel excluding the boat lane and including the estimated swimming line that must be avoided.
+- `Argo Irchel pond sailing area.kmz` - [Argo Irchel pond sailing area](https://www.google.com/maps/d/viewer?mid=1579Z0YR2ZneAvUGbFDLzg9fJPD2w91Q&usp=sharing) - Sailing area map for Argo Irchel pond; includes rock and complex shape.
+- `Argo Irchel North pond sailing area.kmz` - [Argo Irchel North pond sailing area](https://www.google.com/maps/d/viewer?mid=14-I2RigSZ3UgvEm4Odftd1UoRcAeuW8&usp=sharing) - Sailing area map for Argo Irchel North pond, a simpler map with 'middle' waypoint for crossing controllers.
+
 
 ## Converting Maps for Simulation
 
@@ -19,8 +21,9 @@ This directory contains the **source map files** drawn in Google Maps and export
 
 1. Draw your sailing area in Google Maps (My Maps)
 2. Include a **"home" waypoint** - this will be the boat's start location
-3. Export as KMZ file
-4. Save the `.kmz` file to this directory (`maps/`)
+3. Include a **"middle"** waypoint if you want to customize the point for crosser controller.
+4. Export as KMZ file
+5. Save the `.kmz` file to this directory (`maps/`)
 
 ### Step 2: Convert KMZ to GeoJSON
 
