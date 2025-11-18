@@ -166,6 +166,7 @@ from controllers import (
     ReturnToHomeController,
     PatrolController,
     CrosserController,
+    HumanController,
     BoatState,
     ControlCommand,
 )
@@ -508,6 +509,9 @@ class ControllerNode(ArgoBaseNode):
             config['turn_rudder_gain_multiplier'] = self.get_parameter('turn_rudder_gain_multiplier').get_parameter_value().double_value if self.has_parameter('turn_rudder_gain_multiplier') else 2.0
             config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
             self.controller = CrosserController(config, logger=logger, parent_node=parent_node)
+        elif controller_type == 'human':
+            # Human controller does nothing - allows full manual control
+            self.controller = HumanController(config, logger=logger, parent_node=parent_node)
         else:
             self.get_logger().warn(
                 f"Unknown controller type '{controller_type}', using proportional")
@@ -560,7 +564,7 @@ class ControllerNode(ArgoBaseNode):
                 self.get_logger().debug(f"Parameter callback: controller_type set to '{new_controller_type}' (current: {self.controller.name if self.controller else 'None'})")
                 
                 # Validate controller type
-                valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol', 'crosser']
+                valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol', 'crosser', 'human']
                 if new_controller_type not in valid_types:
                     result.successful = False
                     result.reason = f"Invalid controller type '{new_controller_type}'. Valid types: {', '.join(valid_types)}"
@@ -573,7 +577,8 @@ class ControllerNode(ArgoBaseNode):
                    (new_controller_type == 'wind_aware' and current_controller_name == 'WindAwareController') or \
                    (new_controller_type == 'return_to_home' and current_controller_name == 'ReturnToHomeController') or \
                    (new_controller_type == 'patrol' and current_controller_name == 'PatrolController') or \
-                   (new_controller_type == 'crosser' and current_controller_name == 'CrosserController'):
+                   (new_controller_type == 'crosser' and current_controller_name == 'CrosserController') or \
+                   (new_controller_type == 'human' and current_controller_name == 'HumanController'):
                     self.get_logger().debug(f"Controller is already {current_controller_name} (requested: {new_controller_type}), no switch needed")
                     return result
                 
