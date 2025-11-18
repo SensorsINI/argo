@@ -15,28 +15,35 @@ from .base import BaseController, BoatState, ControlCommand
 
 
 class HumanController(BaseController):
-    """Human controller that does nothing - allows full manual control.
+    """Human controller that passes through keyboard/radio commands.
     
-    This controller generates neutral commands (0, 0) so that no autonomous
-    control actions are taken. Useful for studying simulator dynamics with
-    full manual control via keyboard/radio input.
+    This controller does not generate any autonomous control commands.
+    Instead, it passes through control commands from keyboard/radio input
+    (state.radio_rudder and state.radio_sail). Useful for studying simulator
+    dynamics with full manual control.
+    
+    After human_override_timeout, this controller takes over but continues
+    to pass through keyboard/radio commands, allowing pure manual control.
     """
 
     def __init__(self, config, logger=None, parent_node=None):
         super().__init__(config, logger=logger, parent_node=parent_node)
         if logger:
-            logger.info("HumanController initialized - no autonomous control, manual control only")
+            logger.info("HumanController initialized - passing through keyboard/radio commands only")
 
     def generate_control(self, state: BoatState) -> ControlCommand:
-        """Generate neutral control commands (no autonomous actions)."""
+        """Pass through keyboard/radio commands (no autonomous control)."""
         # Publish controller state
         self.publish_state('human')
         
-        # Return neutral commands - no autonomous control
-        # Manual control via keyboard/radio will still work
+        # Pass through radio/keyboard commands - no autonomous control
+        # If no radio input available, return neutral commands
+        cmd_rudder = state.radio_rudder if state.radio_rudder is not None else 0.0
+        cmd_sail = state.radio_sail if state.radio_sail is not None else 0.0
+        
         return ControlCommand(
-            rudder=0.0,
-            sail=0.0,
+            rudder=cmd_rudder,
+            sail=cmd_sail,
             timestamp=state.timestamp
         )
 
