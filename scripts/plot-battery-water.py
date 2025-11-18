@@ -239,13 +239,19 @@ def load_battery_data(csv_file_paths):
     
     print(f"\nCombined dataset:")
     print(f"  Total data points: {len(combined_df)}")
+    
+    # Check if DataFrame is empty
+    if len(combined_df) == 0:
+        print("  ⚠️  Warning: CSV file(s) contain no data points")
+        return combined_df  # Return empty DataFrame for main() to handle
+    
     print(f"  Date range: {combined_df['timestamp'].min()} to {combined_df['timestamp'].max()}")
     print(f"  Files concatenated: {len(all_dfs)}")
     
     return combined_df
 
 
-def plot_battery_voltage_decay(df, output_dir):
+def plot_battery_voltage_decay(df, output_dir, show_plot=False):
     """Plot battery voltage over time to show decay patterns"""
     # Sample data to prevent OOM
     plot_df = sample_data_for_plotting(df)
@@ -301,16 +307,21 @@ def plot_battery_voltage_decay(df, output_dir):
     plt.tight_layout()
 
     # Save plot
-    output_filename = f"battery_voltage_decay_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    output_filename = f"battery_voltage_decay_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     output_path = os.path.join(output_dir, output_filename)
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, format='pdf', bbox_inches='tight')
     print(f"Battery voltage decay plot saved: {output_path}")
+    
+    # Show plot interactively if requested
+    if show_plot:
+        plt.show()
+    
     plt.close()
     gc.collect()  # Force garbage collection
     return output_path  # Return path for display
 
 
-def plot_critical_battery_analysis(df, output_dir):
+def plot_critical_battery_analysis(df, output_dir, show_plot=False):
     """Plot detailed battery voltage analysis for critical monitoring"""
     # Sample data more aggressively for this memory-intensive plot
     plot_df = sample_data_for_plotting(df, max_points=2000)
@@ -424,15 +435,20 @@ def plot_critical_battery_analysis(df, output_dir):
     plt.tight_layout()
 
     # Save plot
-    output_filename = f"critical_battery_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    output_filename = f"critical_battery_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     output_path = os.path.join(output_dir, output_filename)
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, format='pdf', bbox_inches='tight')
     print(f"Critical battery analysis plot saved: {output_path}")
+    
+    # Show plot interactively if requested
+    if show_plot:
+        plt.show()
+    
     plt.close()
     gc.collect()  # Force garbage collection
 
 
-def plot_sensor_trends(df, output_dir):
+def plot_sensor_trends(df, output_dir, show_plot=False):
     """Plot all sensor trends in a comprehensive view"""
     # Sample data to prevent OOM
     plot_df = sample_data_for_plotting(df)
@@ -492,15 +508,20 @@ def plot_sensor_trends(df, output_dir):
     plt.tight_layout()
 
     # Save plot
-    output_filename = f"sensor_trends_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    output_filename = f"sensor_trends_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     output_path = os.path.join(output_dir, output_filename)
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, format='pdf', bbox_inches='tight')
     print(f"Sensor trends plot saved: {output_path}")
+    
+    # Show plot interactively if requested
+    if show_plot:
+        plt.show()
+    
     plt.close()
     gc.collect()  # Force garbage collection
 
 
-def plot_alerts(df, output_dir):
+def plot_alerts(df, output_dir, show_plot=False):
     """Plot alert patterns over time"""
     # Sample data to prevent OOM
     plot_df = sample_data_for_plotting(df)
@@ -554,10 +575,15 @@ def plot_alerts(df, output_dir):
     plt.tight_layout()
 
     # Save plot
-    output_filename = f"alert_patterns_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    output_filename = f"alert_patterns_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     output_path = os.path.join(output_dir, output_filename)
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, format='pdf', bbox_inches='tight')
     print(f"Alert patterns plot saved: {output_path}")
+    
+    # Show plot interactively if requested
+    if show_plot:
+        plt.show()
+    
     plt.close()
     gc.collect()  # Force garbage collection
 
@@ -569,6 +595,13 @@ def print_data_summary(df):
     print("="*60)
 
     print(f"Data points: {len(df)}")
+    
+    # Check if DataFrame is empty
+    if len(df) == 0:
+        print("\n⚠️  CSV file is empty - no data to display")
+        print("="*60)
+        return
+    
     print(f"Time span: {df['timestamp'].max() - df['timestamp'].min()}")
 
     # Calculate sampling rate, handling single data point case
@@ -640,22 +673,22 @@ def print_data_summary(df):
 
 
 def display_image(image_path):
-    """Display image using available viewer with proper DISPLAY handling"""
+    """Display PDF plot using available viewer with proper DISPLAY handling"""
     try:
         # Get current environment
         env = os.environ.copy()
         
         # Ensure DISPLAY is set for X11 forwarding
         if 'DISPLAY' not in env or not env['DISPLAY']:
-            print(f"No DISPLAY variable set - cannot open image viewer")
+            print(f"No DISPLAY variable set - cannot open PDF viewer")
             print(f"Plot saved to: {image_path}")
             print("To view: Use SSH with X11 forwarding (ssh -X argo) or view file locally")
             return False
         
         print(f"Using DISPLAY={env['DISPLAY']}")
         
-        # Try different image viewers in order of preference
-        viewers = ['eog', 'display', 'feh', 'xdg-open']
+        # Try different PDF viewers in order of preference
+        viewers = ['evince', 'okular', 'xpdf', 'atril', 'xdg-open', 'display']
         for viewer in viewers:
             try:
                 # Check if viewer exists
@@ -675,9 +708,9 @@ def display_image(image_path):
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
                 continue
         
-        print(f"⚠️  No compatible image viewer found")
+        print(f"⚠️  No compatible PDF viewer found")
         print(f"Plot saved to: {image_path}")
-        print("Install an image viewer: sudo apt install eog imagemagick feh")
+        print("Install a PDF viewer: sudo apt install evince okular xpdf")
         return False
     except Exception as e:
         print(f"Error opening image: {e}")
@@ -755,6 +788,11 @@ Examples:
     df = load_battery_data(csv_file_paths)
     if df is None:
         sys.exit(1)
+    
+    # Check if DataFrame is empty
+    if len(df) == 0:
+        print_data_summary(df)  # This will print the empty file message
+        sys.exit(0)
 
     # Print summary
     print_data_summary(df)
@@ -766,23 +804,21 @@ Examples:
         # Generate plots based on options
         print(f"\nGenerating plots in {args.output_dir}...")
         
+        # Determine if we should show plots interactively
+        show_plots = not args.no_display
+        
         # Always generate voltage decay plot (default)
-        voltage_plot = None
-        voltage_plot = plot_battery_voltage_decay(df, args.output_dir)
+        voltage_plot = plot_battery_voltage_decay(df, args.output_dir, show_plot=show_plots)
         
         # Generate optional plots
         if args.all or args.critical:
-            plot_critical_battery_analysis(df, args.output_dir)
+            plot_critical_battery_analysis(df, args.output_dir, show_plot=show_plots)
         if args.all or args.sensors:
-            plot_sensor_trends(df, args.output_dir)
+            plot_sensor_trends(df, args.output_dir, show_plot=show_plots)
         if args.all or args.alerts:
-            plot_alerts(df, args.output_dir)
+            plot_alerts(df, args.output_dir, show_plot=show_plots)
         
         print("Plot generation complete!")
-        
-        # Display the main voltage decay plot
-        if voltage_plot and not args.no_display:
-            display_image(voltage_plot)
 
 
 if __name__ == "__main__":
