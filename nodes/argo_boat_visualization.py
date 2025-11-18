@@ -166,6 +166,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
             int(self.get_parameter('simulation.heading_trail_limit').get_parameter_value().integer_value)
         )
         self.heading_trail_limit = initial_trail_limit
+        
+        # No-go zone angle for sail positioning (read from controller parameters)
+        self.declare_parameter('controller_node.no_go_zone_angle', 45.0)
+        self.no_go_zone_angle = self.get_parameter('controller_node.no_go_zone_angle').get_parameter_value().double_value
         # Use unlimited deque - markers will expire via lifetime instead of deque limit
         self.heading_trail = deque()
         self.heading_trail_spacing_m = 3.0  # Minimum spacing between trail markers
@@ -973,45 +977,90 @@ class ArgoBoatVisualization(ArgoBaseNode):
         hull_top_z = 0.075 * self.visualization_scale  # Half hull height (0.15/2)
         stern_x = -hull_half_length  # Back of hull (stern is at negative X)
         
-        # Determine downwind side from wind direction
-        # wind_angle: 0° to 360° (CW from front of boat, where wind comes from)
-        #   0° = from front, 90° = from starboard, 180° = from back, 270° = from port
-        # In base_link (ROS standard): +X = forward, +Y = left (port), -Y = right (starboard)
-        # Sail goes to downwind side (opposite of where wind comes from)
+        # Determine sail side based on fully extended sail angle relative to wind direction
+        # Sail should be on the side where the fully extended sail aligns best with wind direction
+        # If boat is in stays (no-go zone), sail should align with wind vector
         
-        # Normalize wind_angle to 0-360 range
-        wind_angle_norm = self.wind_angle % 360.0
+        # Get wind direction (where wind goes, downwind)
+        if self.true_wind_direction is not None:
+            # Use true wind direction (compass convention) - more accurate
+            # Calculate where wind goes (downwind direction) in compass frame
+            absolute_wind_to = (self.true_wind_direction + 180.0) % 360.0
+            # Convert to relative to boat heading
+            relative_wind_to_deg = (absolute_wind_to - self.boat_heading) % 360.0
+            if relative_wind_to_deg > 180.0:
+                relative_wind_to_deg -= 360.0  # Normalize to -180 to +180
+        else:
+            # Fallback: use wind_angle from sensor
+            # wind_angle: where wind comes from relative to boat
+            wind_angle_norm = self.wind_angle % 360.0
+            if wind_angle_norm > 180.0:
+                relative_wind_from = wind_angle_norm - 360.0
+            else:
+                relative_wind_from = wind_angle_norm
+            # Calculate where wind goes (downwind direction)
+            relative_wind_to_deg = relative_wind_from + 180.0
         
-        # Determine which side wind is coming from
-        # Wind from 0°-180° (front to back, starboard side) → sail goes to port (+Y)
-        # Wind from 180°-360° (back to front, port side) → sail goes to starboard (-Y)
-        # Special cases: 0° (front) and 180° (back) - use last known side
-        if wind_angle_norm < 0.1 or abs(wind_angle_norm - 180.0) < 0.1:
-            # Wind from directly front or back - use last known side
+        # Check if boat is in stays (no-go zone)
+        # No-go zone is read from argo.yaml parameter (typically 45° on either side of where wind comes from)
+        relative_wind_from_deg = relative_wind_to_deg - 180.0
+        if relative_wind_from_deg > 180.0:
+            relative_wind_from_deg -= 360.0
+        elif relative_wind_from_deg < -180.0:
+            relative_wind_from_deg += 360.0
+        
+        is_in_stays = abs(relative_wind_from_deg) < self.no_go_zone_angle
+        
+        # Determine sail side based on where wind is going (downwind side)
+        # The sail should be on the side where the wind is going, not where it's coming from
+        # In base_link: +Y = port (left), -Y = starboard (right)
+        # 
+        # Note: The angle convention needs to match the coordinate system
+        # If wind is going to port (left/+Y), the angle should be positive (90°)
+        # If wind is going to starboard (right/-Y), the angle should be negative (-90°)
+        # But we need to verify this matches the actual wind_angle convention
+        
+        # Special cases: wind going directly forward or aft - use last known side
+        if abs(relative_wind_to_deg) < 5.0 or abs(abs(relative_wind_to_deg) - 180.0) < 5.0:
             sail_side = self._last_visual_sail_side
-        elif 0.1 <= wind_angle_norm < 180.0:
-            # Wind from starboard side (0°-180°) → sail goes to port (+Y)
+        elif relative_wind_to_deg > 0:
+            # Wind going to port side → sail goes to port (+Y) [INVERTED from previous]
             sail_side = 1.0
-        else:  # 180.0 < wind_angle_norm < 360.0
-            # Wind from port side (180°-360°) → sail goes to starboard (-Y)
+        else:  # relative_wind_to_deg < 0
+            # Wind going to starboard side → sail goes to starboard (-Y) [INVERTED from previous]
             sail_side = -1.0
         
-        # Ensure we have a valid side
-        if sail_side == 0.0:
-            sail_side = 1.0  # Default to port
-        
+        # Store for next time (for special cases)
         self._last_visual_sail_side = sail_side
         
-        # Sail trim angle from sail command (-1 = sheeted in, +1 = fully eased)
-        sheet_fraction = max(0.0, min(1.0, 0.5 * (self.sail_cmd + 1.0)))
+        # Sail angle parameters
         max_sail_angle_deg = 60.0
         max_sail_angle_rad = math.radians(max_sail_angle_deg)
-        
-        # Sail orientation: start centered (straight aft) and ease toward the downwind side
-        # When sheet_fraction=0 (cmd = -1) → straight aft (π rad)
-        # When sheet_fraction=1 (cmd = +1) → π ± max_sail_angle depending on side
         base_aft_rad = math.pi  # 180° = aft direction (-X)
-        total_sail_angle_rad = base_aft_rad + sail_side * sheet_fraction * max_sail_angle_rad
+        
+        # Special case: if in stays, align sail with wind vector
+        if is_in_stays:
+            # In stays: sail should point in the direction wind is going (align with wind vector)
+            # Calculate sail angle to align with wind direction
+            relative_wind_to_rad = math.radians(relative_wind_to_deg)
+            # Sail angle should match wind direction (where wind goes)
+            total_sail_angle_rad = relative_wind_to_rad
+            # Determine sail side based on which side the wind is going to (matching normal case)
+            if relative_wind_to_deg > 0:
+                sail_side = 1.0  # Wind going to port, sail on port [INVERTED]
+            else:
+                sail_side = -1.0  # Wind going to starboard, sail on starboard [INVERTED]
+        else:
+            # Normal sailing: use sail trim based on command
+            self._last_visual_sail_side = sail_side
+            
+            # Sail trim angle from sail command (-1 = sheeted in, +1 = fully eased)
+            sheet_fraction = max(0.0, min(1.0, 0.5 * (self.sail_cmd + 1.0)))
+            
+            # Sail orientation: start centered (straight aft) and ease toward the downwind side
+            # When sheet_fraction=0 (cmd = -1) → straight aft (π rad)
+            # When sheet_fraction=1 (cmd = +1) → π ± max_sail_angle depending on side
+            total_sail_angle_rad = base_aft_rad + sail_side * sheet_fraction * max_sail_angle_rad
         
         boom_length = hull_half_length
 
