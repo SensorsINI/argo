@@ -20,7 +20,7 @@
       publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz)
       simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics
       heading_trail_limit: 10  # Number (roughly) of historical heading markers to display in visualization
-      grounding_behavior: reset # Behavior on grounding in local simulation: reset|terminate|continue
+      grounding_behavior: continue # Behavior on grounding in local simulation: reset|terminate|continue
       exit_confirmation: true
       # Mock simulator physics parameters (used when sailboat-playground is unavailable)
       mock_simulator:
@@ -62,6 +62,7 @@
 controller_node:
   ros__parameters:
     controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser
+    controller_initially_paused: true  # Start controller in paused (manual) mode if true
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
     rudder_full_scale_deg: 60.0  # Heading error (degrees) that produces full rudder deflection (-1.0 to +1.0)

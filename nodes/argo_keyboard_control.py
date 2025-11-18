@@ -86,6 +86,11 @@ class KeyboardControlNode(Node):
         self.current_controller_type = None  # Track current controller
         self.is_rth_mode = False  # Track if we're in RTH mode
         
+        # Controller pause service client
+        from std_srvs.srv import SetBool
+        self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
+        self.controller_paused = False  # Track current pause state
+        
         # Control state
         self.rudder_position = 0.0  # -1.0 to +1.0
         self.sail_position = 0.0    # -1.0 to +1.0
@@ -116,10 +121,11 @@ class KeyboardControlNode(Node):
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(Bool, '/human_controlled', self.control_mode_callback, 10)
+        self.create_subscription(Bool, '/controller_pause_state', self.controller_pause_state_callback, 10)
         
         # Log initialization messages BEFORE curses takes over terminal
         self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | Q=Quit')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Toggle Manual | ENTER=Refresh | Q=Quit')
         
         # Setup curses (after logging to avoid polluting display)
         self.stdscr = curses.initscr()
@@ -329,6 +335,10 @@ class KeyboardControlNode(Node):
         """Receive control mode status."""
         self.simulator_mode = "HUMAN" if msg.data else "ROBOT"
     
+    def controller_pause_state_callback(self, msg):
+        """Receive controller pause state."""
+        self.controller_paused = bool(msg.data)
+    
     def handle_keyboard_input(self):
         """Process keyboard input."""
         if not self.running:
@@ -360,6 +370,10 @@ class KeyboardControlNode(Node):
                 self.reset_simulation()
             elif key == ord('h') or key == ord('H'):
                 self.toggle_rth_controller()
+            elif key == ord('m') or key == ord('M'):
+                self.toggle_controller_pause()
+            elif key == ord('\n') or key == ord('\r') or key == curses.KEY_ENTER:
+                self.clear_and_refresh_display()
             elif key == ord('q') or key == ord('Q'):
                 self.running = False
                 self.cleanup()
@@ -635,6 +649,63 @@ class KeyboardControlNode(Node):
             self.get_logger().warn(message)
             self._add_diagnostic_message(message)
     
+    def toggle_controller_pause(self):
+        """Toggle controller pause state (manual/human control)."""
+        if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn("Controller pause service not available")
+            return
+        
+        # Toggle pause state
+        new_pause_state = not self.controller_paused
+        
+        # Create request
+        request = SetBool.Request()
+        request.data = new_pause_state
+        
+        # Call service
+        future = self.controller_pause_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        if future.done():
+            try:
+                response = future.result()
+                if response.success:
+                    self.controller_paused = new_pause_state
+                    mode = "PAUSED (Manual)" if new_pause_state else "UNPAUSED (Autonomous)"
+                    message = f"✅ Controller {mode}"
+                    self.get_logger().info(message)
+                    self._add_diagnostic_message(message)
+                else:
+                    message = f"⚠️  Failed to toggle controller pause: {response.message}"
+                    self.get_logger().warn(message)
+                    self._add_diagnostic_message(message)
+            except Exception as e:
+                message = f"❌ Error toggling controller pause: {e}"
+                self.get_logger().error(message)
+                self._add_diagnostic_message(message)
+        else:
+            message = "⚠️  Controller pause service call timed out"
+            self.get_logger().warn(message)
+            self._add_diagnostic_message(message)
+    
+    def clear_and_refresh_display(self):
+        """Clear and refresh the display to fix corruption from logging messages."""
+        try:
+            # Force a complete screen clear and refresh
+            self.stdscr.clear()
+            # Reset terminal size tracking to force full redraw
+            if hasattr(self, '_last_term_size'):
+                del self._last_term_size
+            # Immediately update display
+            self.update_display()
+            self._add_diagnostic_message("Display cleared and refreshed")
+        except Exception as e:
+            # If clearing fails, at least try to refresh
+            try:
+                self.stdscr.refresh()
+            except:
+                pass
+    
     def publish_control(self):
         """Publish current control commands to /rudder_sail_radio only when keyboard is active."""
         if not self.running:
@@ -822,7 +893,8 @@ class KeyboardControlNode(Node):
             
             # Controller status
             controller_name = self.current_controller_type.upper() if self.current_controller_type else 'UNKNOWN'
-            controller_status = f"Controller: {controller_name}"
+            pause_status = " [PAUSED]" if self.controller_paused else ""
+            controller_status = f"Controller: {controller_name}{pause_status}"
             if self.is_rth_mode:
                 controller_status += " (RTH MODE)"
             else:
@@ -843,8 +915,8 @@ class KeyboardControlNode(Node):
             self.stdscr.addstr(line_num, 2, "Controls:")
             line_num += 1
             controls_line1 = "  ←→ Rudder | ↑↓ Sail | C=Center"
-            controls_line2 = "  SPACE=Pause | W/E=Wind ±10°"
-            controls_line3 = "  R=Reset | H=Toggle RTH | Q=Quit"
+            controls_line2 = "  SPACE=Sim Pause | W/E=Wind ±10°"
+            controls_line3 = "  R=Reset | H=Toggle RTH | M=Toggle Manual | ENTER=Refresh | Q=Quit"
             self.stdscr.addstr(line_num, 2, controls_line1[:width-4])
             line_num += 1
             self.stdscr.addstr(line_num, 2, controls_line2[:width-4])

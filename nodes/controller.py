@@ -261,7 +261,11 @@ class ControllerNode(ArgoBaseNode):
             self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
 
         # Initialize boolean pause service
-        self._is_paused = False
+        # Read initial pause state from parameter
+        self.declare_parameter('controller_initially_paused', False)
+        initial_pause_state = self.get_parameter('controller_initially_paused').get_parameter_value().bool_value
+        self._is_paused = initial_pause_state
+        
         self.pause_service = self.create_service(
             SetBool,
             f'{self.get_name()}/pause',
@@ -272,6 +276,13 @@ class ControllerNode(ArgoBaseNode):
         self.pause_state_pub = self.create_publisher(
             Bool, '/controller_pause_state', 10
         )
+        
+        # Publish initial pause state
+        self._publish_pause_state()
+        if self._is_paused:
+            self.get_logger().info("Controller started in PAUSED state (manual control)")
+        else:
+            self.get_logger().info("Controller started in UNPAUSED state (autonomous control)")
 
         # Service for controller switching (legacy - kept for backwards compatibility)
         # Controller switching now happens automatically via parameter change callback.
