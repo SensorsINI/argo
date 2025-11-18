@@ -47,6 +47,7 @@ import argcomplete
 import json
 import shlex
 import importlib.util
+import atexit
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import select
@@ -1355,6 +1356,19 @@ class ArgoLifecycleManager:
             # Explicitly exit if shutdown was requested
             if self.shutdown_requested:
                 print("✅ Lifecycle manager shutdown complete - exiting")
+                # Flush stdout/stderr to ensure all messages are written before prompt appears
+                sys.stdout.flush()
+                sys.stderr.flush()
+                # CRITICAL: Wait for any remaining shutdown messages from child processes to flush
+                # Even though we waited in stop(), there might be stragglers
+                # ROS2 nodes write shutdown messages to stderr which is unbuffered
+                time.sleep(3.0)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                # One final wait to ensure everything is flushed
+                time.sleep(1.0)
+                sys.stdout.flush()
+                sys.stderr.flush()
                 sys.exit(0)
         
         return True  # Always return True for clean exit
@@ -1366,11 +1380,65 @@ class ArgoLifecycleManager:
         
         print("🛑 Stopping Argo ROS2 nodes...")
         
-        # New: Terminate the entire process group
+        # Terminate the entire process group
         try:
             os.killpg(self.pgid, signal.SIGTERM)
-            # Wait a moment for processes to terminate
-            time.sleep(2)
+            
+            # Wait for all tracked processes to finish
+            max_wait_per_process = 3.0
+            for proc_info in self.node_processes:
+                if 'proc' in proc_info:
+                    proc = proc_info['proc']
+                    try:
+                        proc.wait(timeout=max_wait_per_process)
+                    except (subprocess.TimeoutExpired, ProcessLookupError):
+                        try:
+                            proc.kill()
+                            proc.wait(timeout=1.0)
+                        except:
+                            pass
+                    except:
+                        pass
+            
+            # Wait for main process if it exists
+            if self.process:
+                try:
+                    self.process.wait(timeout=max_wait_per_process)
+                except (subprocess.TimeoutExpired, ProcessLookupError):
+                    try:
+                        self.process.kill()
+                        self.process.wait(timeout=1.0)
+                    except:
+                        pass
+                except:
+                    pass
+            
+            # Wait for process group to be empty (check every 0.2s for up to 6s)
+            for _ in range(30):  # 30 * 0.2s = 6s max
+                try:
+                    result = subprocess.run(
+                        ['ps', '-o', 'pid=', '-g', str(self.pgid)],
+                        capture_output=True,
+                        timeout=0.5,
+                        text=True
+                    )
+                    pids = [pid.strip() for pid in result.stdout.strip().split('\n') if pid.strip()]
+                    our_pid = os.getpid()
+                    other_pids = [pid for pid in pids if pid != str(our_pid)]
+                    if not other_pids:
+                        break
+                except:
+                    break
+                time.sleep(0.2)
+            
+            # After process group is empty, wait for ROS2 shutdown messages to flush
+            # ROS2 nodes write shutdown messages to stderr when they receive SIGTERM
+            # These messages can be buffered and take time to flush even after process exit
+            # Wait 8 seconds to ensure all buffered stderr output is flushed to terminal
+            time.sleep(8.0)
+            
+            sys.stdout.flush()
+            sys.stderr.flush()
             print("✅ Process group terminated.")
             
             # Also explicitly kill foxglove_bridge processes (they may not be in the same process group)
@@ -1956,6 +2024,7 @@ class ArgoLifecycleManager:
                 print("\n🛑 Stopping simulation and cleaning up all nodes...")
                 self.shutdown_requested = True
                 self.stop()
+                # stop() already waits for all processes and stderr flush
                 print("✅ All simulation nodes terminated")
                 return True
             except Exception as e:
@@ -3214,6 +3283,7 @@ class ArgoLifecycleManager:
             # Stop all nodes first only if they are actually running
             if self._is_launch_running():
                 self.stop()
+                # stop() already waits for all processes and stderr flush, no additional wait needed
             
             # Clean up ROS2 last
             self._cleanup_ros2()
@@ -3224,6 +3294,8 @@ class ArgoLifecycleManager:
             # Explicitly exit if shutdown was requested
             if self.shutdown_requested:
                 print("✅ Lifecycle manager shutdown complete - exiting")
+                sys.stdout.flush()
+                sys.stderr.flush()
                 sys.exit(0)
         
         return True  # Always return True for clean exit
@@ -3238,7 +3310,17 @@ class ArgoLifecycleManager:
             return False
 
 
+def _final_stderr_flush():
+    """Final flush of stderr before process exits to catch any straggler ROS2 shutdown messages"""
+    # Wait 2 seconds for all ROS2 child processes to finish writing shutdown messages
+    time.sleep(2.0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
 def main():
+    # Register final stderr flush to run when process exits
+    atexit.register(_final_stderr_flush)
+    
     parser = argparse.ArgumentParser(
         description='Argo Status and Simulation Manager - Check status and manage simulations for the Argo sailboat.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
