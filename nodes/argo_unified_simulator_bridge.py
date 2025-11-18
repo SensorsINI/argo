@@ -210,6 +210,9 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.mock_human_input = False  # Disable mock input - use real control
         self.human_input_time = 0.0
         
+        # Reset work flag for async reset execution
+        self._reset_pending = False
+        
         # External control state (for Foxglove Teleop, etc.)
         self.external_rudder = 0.0  # -1 to +1
         self.external_sail = 0.0    # -1 to +1
@@ -690,6 +693,11 @@ class ArgoUnifiedSimulatorBridge(Node):
     
     def local_simulation_step(self):
         """Main simulation step for local mode - updates physics and publishes sensor data."""
+        # Check if reset is pending and perform it
+        if self._reset_pending:
+            self._perform_reset_work()
+            return  # Skip normal simulation step this cycle
+        
         try:
             self.position_trace_counter += 1
             trace_id = self.position_trace_counter
@@ -1263,22 +1271,15 @@ class ArgoUnifiedSimulatorBridge(Node):
         response.success = True
         response.message = "Reset initiated (will complete asynchronously)"
         
-        # Schedule actual reset work to happen asynchronously
-        # Use a one-shot timer to perform the reset on the next spin cycle
-        if not hasattr(self, '_reset_timer') or self._reset_timer is None:
-            self._reset_timer = self.create_timer(0.01, self._perform_reset_work)
-            self._reset_timer.cancel()  # Create but don't start yet
-        
-        # Reset the timer to start it (one-shot - will cancel itself after first execution)
-        self._reset_timer.reset()
+        # Set flag to perform reset work on next timer cycle
+        self._reset_pending = True
         
         return response
     
     def _perform_reset_work(self):
-        """Perform the actual reset work asynchronously (called by timer)."""
-        # Cancel timer immediately so it only runs once (one-shot behavior)
-        if hasattr(self, '_reset_timer') and self._reset_timer is not None:
-            self._reset_timer.cancel()
+        """Perform the actual reset work asynchronously (called from simulation timer)."""
+        # Clear the flag immediately
+        self._reset_pending = False
         
         try:
             self.get_logger().info("Resetting simulation to initial state (recreating simulator)...")

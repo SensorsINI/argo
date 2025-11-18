@@ -545,56 +545,18 @@ class KeyboardControlNode(Node):
             self._pending_wind_delta = 0.0
     
     def reset_simulation(self):
-        """Reset simulation to initial state."""
-        if not self.reset_service_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().warn("Reset service not available (simulator bridge may not be running)")
-            return
-        
+        """Reset simulation to initial state (fire-and-forget)."""
+        # Fire-and-forget: just send the request, don't wait for response
         request = Trigger.Request()
-        future = self.reset_service_client.call_async(request)
-        
-        # Wait for the response with timeout (increased to allow for reset processing time)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        
-        if future.done():
-            try:
-                response = future.result()
-                if response.success:
-                    message = f"✅ {response.message}"
-                    self.get_logger().info(message)
-                    self._add_diagnostic_message(message)
-                else:
-                    message = f"⚠️  Reset service returned: {response.message}"
-                    self.get_logger().warn(message)
-                    self._add_diagnostic_message(message)
-            except Exception as e:
-                message = f"❌ Error calling reset service: {e}"
-                self.get_logger().error(message)
-                self._add_diagnostic_message(message)
-        else:
-            # Check if future completed after timeout (service might have succeeded)
-            # Give it a moment to check if it completed
-            import time as time_module
-            time_module.sleep(0.1)  # Brief pause to check if response arrived
-            if future.done():
-                try:
-                    response = future.result()
-                    if response.success:
-                        message = f"✅ Reset completed (slow response): {response.message}"
-                        self.get_logger().info(message)
-                        self._add_diagnostic_message(message)
-                    else:
-                        message = f"⚠️  Reset service returned: {response.message}"
-                        self.get_logger().warn(message)
-                        self._add_diagnostic_message(message)
-                except:
-                    message = "⚠️  Reset service call timed out (check if reset succeeded)"
-                    self.get_logger().warn(message)
-                    self._add_diagnostic_message(message)
-            else:
-                message = "⚠️  Reset service call timed out (check if reset succeeded)"
-                self.get_logger().warn(message)
-                self._add_diagnostic_message(message)
+        try:
+            self.reset_service_client.call_async(request)
+            message = "✅ Reset request sent"
+            self.get_logger().info(message)
+            self._add_diagnostic_message(message)
+        except Exception as e:
+            message = f"⚠️  Error sending reset request: {e}"
+            self.get_logger().warn(message)
+            self._add_diagnostic_message(message)
     
     def toggle_rth_controller(self):
         """Toggle between default controller (from argo.yaml) and RTH controller."""
