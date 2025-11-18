@@ -117,7 +117,11 @@ class KeyboardControlNode(Node):
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(Bool, '/human_controlled', self.control_mode_callback, 10)
         
-        # Setup curses
+        # Log initialization messages BEFORE curses takes over terminal
+        self.get_logger().info('Keyboard control node ready')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | Q=Quit')
+        
+        # Setup curses (after logging to avoid polluting display)
         self.stdscr = curses.initscr()
         self._setup_curses()
         
@@ -140,9 +144,6 @@ class KeyboardControlNode(Node):
         self.publish_simulation_paused()
         self._initialize_wind_direction()
         self._initialize_controller_type()
-
-        self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | Q=Quit')
     
     def _setup_curses(self):
         """Setup curses for terminal control."""
@@ -231,7 +232,8 @@ class KeyboardControlNode(Node):
                     continue
                 if param.value.type == ParameterType.PARAMETER_DOUBLE:
                     self.wind_direction_deg = param.value.double_value % 360.0
-                    self.get_logger().info(f"Wind direction parameter event: {self.wind_direction_deg:.1f}°")
+                    # Use diagnostic message system instead of logger to avoid polluting curses display
+                    self._add_diagnostic_message(f"Wind direction parameter event: {self.wind_direction_deg:.1f}°")
                 return
         
         # Handle controller type updates
@@ -250,7 +252,8 @@ class KeyboardControlNode(Node):
                     # If we don't have a default yet and this is not RTH, save it
                     elif not self.is_rth_mode and not self.default_controller_type:
                         self.default_controller_type = new_controller
-                    self.get_logger().info(f"Controller type parameter event: {new_controller} (RTH mode: {self.is_rth_mode}, default: {self.default_controller_type})")
+                    # Use diagnostic message system instead of logger to avoid polluting curses display
+                    self._add_diagnostic_message(f"Controller type parameter event: {new_controller} (RTH mode: {self.is_rth_mode}, default: {self.default_controller_type})")
                 return
 
     def _initialize_wind_direction(self):
@@ -676,6 +679,8 @@ class KeyboardControlNode(Node):
     
     def _add_diagnostic_message(self, message):
         """Add a diagnostic message to the display queue."""
+        # Strip any trailing newlines to prevent display issues
+        message = message.rstrip('\n\r')
         current_time = time.time()
         self.diagnostic_messages.append((message, current_time))
         # Keep only recent messages
