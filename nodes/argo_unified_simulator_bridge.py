@@ -182,6 +182,19 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.get_logger().warn(f"Invalid grounding_behavior '{self.grounding_behavior}', using 'terminate'")
             self.grounding_behavior = 'terminate'
         
+        # --- Mock Simulator Parameters (declare early so available during simulator creation) ---
+        self.declare_parameter('simulation.mock_simulator.max_turn_rate', 30.0)
+        self.declare_parameter('simulation.mock_simulator.max_speed', 1.5)
+        self.declare_parameter('simulation.mock_simulator.no_go_angle_deg', 40.0)
+        self.declare_parameter('simulation.mock_simulator.stall_decay_rate', 0.5)
+        self.declare_parameter('simulation.mock_simulator.stall_recovery_threshold', 0.1)
+        self.declare_parameter('simulation.mock_simulator.tack_entry_buffer_deg', 12.0)
+        self.declare_parameter('simulation.mock_simulator.tack_exit_buffer_deg', 6.0)
+        self.declare_parameter('simulation.mock_simulator.tack_speed_threshold', 0.35)
+        self.declare_parameter('simulation.mock_simulator.tack_min_speed_to_continue', 0.25)
+        self.declare_parameter('simulation.mock_simulator.tack_time_limit_s', 8.0)
+        self.declare_parameter('simulation.mock_simulator.tack_turn_boost', 1.8)
+        
         # Initialize simulator based on mode
         if mode == 'local':
             self._init_local_simulator()
@@ -581,7 +594,34 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Calculate dt from simulation_rate to ensure physics matches timer frequency
         dt = 1.0 / self.simulation_rate
         self.get_logger().info(f'Creating mock simulator with dt={dt:.3f}s (simulation_rate={self.simulation_rate:.1f} Hz)...')
-        simulator = MockSailboatSimulator(dt=dt)
+        
+        # Read mock simulator parameters from ROS2 parameters
+        max_turn_rate = self.get_parameter('simulation.mock_simulator.max_turn_rate').get_parameter_value().double_value
+        max_speed = self.get_parameter('simulation.mock_simulator.max_speed').get_parameter_value().double_value
+        no_go_angle_deg = self.get_parameter('simulation.mock_simulator.no_go_angle_deg').get_parameter_value().double_value
+        stall_decay_rate = self.get_parameter('simulation.mock_simulator.stall_decay_rate').get_parameter_value().double_value
+        stall_recovery_threshold = self.get_parameter('simulation.mock_simulator.stall_recovery_threshold').get_parameter_value().double_value
+        tack_entry_buffer_deg = self.get_parameter('simulation.mock_simulator.tack_entry_buffer_deg').get_parameter_value().double_value
+        tack_exit_buffer_deg = self.get_parameter('simulation.mock_simulator.tack_exit_buffer_deg').get_parameter_value().double_value
+        tack_speed_threshold = self.get_parameter('simulation.mock_simulator.tack_speed_threshold').get_parameter_value().double_value
+        tack_min_speed_to_continue = self.get_parameter('simulation.mock_simulator.tack_min_speed_to_continue').get_parameter_value().double_value
+        tack_time_limit_s = self.get_parameter('simulation.mock_simulator.tack_time_limit_s').get_parameter_value().double_value
+        tack_turn_boost = self.get_parameter('simulation.mock_simulator.tack_turn_boost').get_parameter_value().double_value
+        
+        simulator = MockSailboatSimulator(
+            dt=dt,
+            max_turn_rate=max_turn_rate,
+            max_speed=max_speed,
+            no_go_angle_deg=no_go_angle_deg,
+            stall_decay_rate=stall_decay_rate,
+            stall_recovery_threshold=stall_recovery_threshold,
+            tack_entry_buffer_deg=tack_entry_buffer_deg,
+            tack_exit_buffer_deg=tack_exit_buffer_deg,
+            tack_speed_threshold=tack_speed_threshold,
+            tack_min_speed_to_continue=tack_min_speed_to_continue,
+            tack_time_limit_s=tack_time_limit_s,
+            tack_turn_boost=tack_turn_boost
+        )
         # Mock simulator initializes at (0, 0) with heading 0, so we need to set it
         if hasattr(simulator, 'boat_x'):
             simulator.boat_x = 0.0
