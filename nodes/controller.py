@@ -297,6 +297,7 @@ class ControllerNode(ArgoBaseNode):
         # Patrol controller parameters
         self.declare_parameter('patrol_lookahead_time', 15.0)
         self.declare_parameter('boundary_turn_threshold', 15.0)
+        self.declare_parameter('arrival_distance_m', 10.0)  # Distance to middle waypoint to consider "arrived" (used by crosser controller)
         self.declare_parameter('tack_angle', 90.0)
         self.declare_parameter('tack_min_angle_from_wind', 50.0)  # Minimum angle from wind during tack to avoid stays
         self.declare_parameter('min_rudder_near_boundary', 0.3)  # Minimum rudder command when close to boundary
@@ -487,6 +488,7 @@ class ControllerNode(ArgoBaseNode):
             config['p_heading_gain'] = self.get_parameter('p_heading_gain').get_parameter_value().double_value if self.has_parameter('p_heading_gain') else 0.3
             config['arrival_distance_m'] = self.get_parameter('arrival_distance_m').get_parameter_value().double_value if self.has_parameter('arrival_distance_m') else 10.0
             config['boundary_turn_threshold'] = self.get_parameter('boundary_turn_threshold').get_parameter_value().double_value if self.has_parameter('boundary_turn_threshold') else 15.0
+            config['patrol_lookahead_time'] = self.get_parameter('patrol_lookahead_time').get_parameter_value().double_value if self.has_parameter('patrol_lookahead_time') else 20.0
             config['tack_angle'] = self.get_parameter('tack_angle').get_parameter_value().double_value if self.has_parameter('tack_angle') else 90.0
             config['tack_min_angle_from_wind'] = self.get_parameter('tack_min_angle_from_wind').get_parameter_value().double_value if self.has_parameter('tack_min_angle_from_wind') else 50.0
             config['no_go_zone_angle'] = self.get_parameter('no_go_zone_angle').get_parameter_value().double_value if self.has_parameter('no_go_zone_angle') else 45.0

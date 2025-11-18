@@ -93,7 +93,11 @@ class CrosserController(BaseController):
         
         self.arrival_distance_m = config.get('arrival_distance_m', 10.0)  # meters
         self.boundary_turn_threshold = config.get('boundary_turn_threshold', 15.0)  # meters from boundary to start turn
+        self.patrol_lookahead_time = config.get('patrol_lookahead_time', 20.0)  # seconds to predict ahead for boundary crossing
         self.tack_angle = config.get('tack_angle', 90.0)  # degrees for tacking
+        # Log loaded parameter for debugging
+        if self.logger:
+            self.logger.info(f"CrosserController: arrival_distance_m = {self.arrival_distance_m:.1f}m, boundary_turn_threshold = {self.boundary_turn_threshold:.1f}m, patrol_lookahead_time = {self.patrol_lookahead_time:.1f}s (from config)")
         self.tack_min_angle_from_wind = config.get('tack_min_angle_from_wind', 50.0)  # minimum angle from wind during tack to avoid stays
         self.no_go_zone_angle = config.get('no_go_zone_angle', 45.0)  # degrees - angle from wind where sailing is impossible
         self.min_rudder_near_boundary = config.get('min_rudder_near_boundary', 0.3)  # minimum rudder command when close to boundary
@@ -137,6 +141,15 @@ class CrosserController(BaseController):
         self._tack_cooldown = 5.0  # Minimum seconds between tacks
         self._tack_start_heading = None  # Heading when tack started (to detect when we've passed through wind)
         self._tack_wind_direction = None  # Wind direction when tack started
+        self._last_state_log_time = 0.0  # For throttling periodic state logs
+
+    def _log_state_transition(self, old_state: str, new_state: str, reason: str, details: dict = None):
+        """Log state transitions with detailed reasons immediately."""
+        detail_str = ""
+        if details:
+            detail_parts = [f"{k}={v:.1f}" if isinstance(v, float) else f"{k}={v}" for k, v in details.items()]
+            detail_str = f" ({', '.join(detail_parts)})"
+        self.log_entry(f"STATE TRANSITION: {old_state} → {new_state} | Reason: {reason}{detail_str}", level="INFO")
 
     def _load_middle_waypoint(self, map_name: str):
         """Load the 'middle' waypoint from GeoJSON file."""
@@ -341,6 +354,18 @@ class CrosserController(BaseController):
         if state.current_latitude is not None and state.current_longitude is not None:
             state.distance_to_boundary = self.geofence_manager.distance_to_boundary_lonlat(
                 state.current_longitude, state.current_latitude)
+            
+            # Predict boundary crossing time in direction of travel (not just nearest distance)
+            # This prevents false triggers when close to side boundaries while heading toward middle
+            if (state.compass_heading is not None and state.gps_sog is not None and 
+                state.gps_sog > 0.1):  # Only predict if we have speed (gps_sog is in knots)
+                speed_ms = state.gps_sog * 0.514444  # Convert knots to m/s (1 knot = 0.514444 m/s)
+                state.predicted_boundary_crossing_time = self.geofence_manager.predict_boundary_crossing_time(
+                    state.current_latitude, state.current_longitude,
+                    state.compass_heading, speed_ms, self.patrol_lookahead_time)
+            else:
+                state.predicted_boundary_crossing_time = None
+            
             if self.parent_node and hasattr(self.parent_node, 'pub_geofence_distance'):
                 distance_msg = Float64(data=state.distance_to_boundary if state.distance_to_boundary is not None else 0.0)
                 safe_publish(self.parent_node.pub_geofence_distance, distance_msg, self.parent_node)
@@ -369,25 +394,45 @@ class CrosserController(BaseController):
         
         # Determine crossing state and target heading
         distance_to_boundary = state.distance_to_boundary if state.distance_to_boundary is not None else float('inf')
+        abs_distance_to_boundary = abs(distance_to_boundary)
         
-        # Check if we've arrived at the middle
+        # Use predicted boundary crossing time to check if we're approaching boundary in direction of travel
+        # This prevents false triggers when close to side boundaries while heading toward middle
+        predicted_crossing_time = state.predicted_boundary_crossing_time if state.predicted_boundary_crossing_time is not None else float('inf')
+        approaching_boundary = (predicted_crossing_time < self.patrol_lookahead_time and 
+                                abs_distance_to_boundary < self.boundary_turn_threshold)
+        
+        # Periodic status logging (throttled to every 5 seconds to reduce chatter)
+        current_time = time.time()
+        if current_time - self._last_state_log_time > 5.0:
+            if self.logger:
+                crossing_info = f"predicted_crossing={predicted_crossing_time:.1f}s" if predicted_crossing_time != float('inf') else "no_crossing_predicted"
+                self.logger.debug(f"Status: state={self.crossing_state}, dist_to_middle={distance_to_middle:.1f}m, dist_to_boundary={abs_distance_to_boundary:.1f}m, {crossing_info}")
+            self._last_state_log_time = current_time
+        
         if distance_to_middle < self.arrival_distance_m:
             if not self._arrival_logged:
-                self.log_entry(f"Arrived at middle waypoint (distance: {distance_to_middle:.1f}m)", level="INFO")
+                self.log_entry(f"Arrived at middle waypoint (distance: {distance_to_middle:.1f}m < {self.arrival_distance_m:.1f}m)", level="INFO")
                 self._arrival_logged = True
             
             # When at middle, store current heading and continue on same heading
             if self.crossing_state == 'toward_middle':
+                old_state = self.crossing_state
                 if state.compass_heading is not None:
                     self._crossing_heading = state.compass_heading
                     self.crossing_state = 'crossing_through'
-                    self.log_entry(f"Crossing through middle - maintaining heading {self._crossing_heading:.1f}°", level="INFO")
+                    self._log_state_transition(old_state, self.crossing_state, 
+                                              f"Arrived at middle waypoint (distance={distance_to_middle:.1f}m < {self.arrival_distance_m:.1f}m)",
+                                              {'distance_to_middle': distance_to_middle, 'arrival_threshold': self.arrival_distance_m, 'crossing_heading': self._crossing_heading})
                     self.publish_state('crossing_through')
                 else:
                     # Fallback: use bearing to middle as crossing heading
                     if bearing_to_middle is not None:
                         self._crossing_heading = bearing_to_middle
                         self.crossing_state = 'crossing_through'
+                        self._log_state_transition(old_state, self.crossing_state,
+                                                  f"Arrived at middle waypoint (distance={distance_to_middle:.1f}m < {self.arrival_distance_m:.1f}m, using bearing as heading)",
+                                                  {'distance_to_middle': distance_to_middle, 'arrival_threshold': self.arrival_distance_m, 'crossing_heading': self._crossing_heading})
                         self.publish_state('crossing_through')
             
             # Continue on stored crossing heading
@@ -399,69 +444,110 @@ class CrosserController(BaseController):
                 target_bearing = bearing_to_middle if bearing_to_middle is not None else 0.0
         
         # Check if we're approaching the boundary (need to turn around)
-        elif self.crossing_state == 'crossing_through' and abs(distance_to_boundary) < self.boundary_turn_threshold:
-            # Approaching boundary - need to turn around
-            if self._turning_target_heading is None:
-                # Determine whether to tack or jibe based on wind
-                wind_dir_abs = self._calculate_absolute_wind_direction(state)
-                if wind_dir_abs is not None and state.compass_heading is not None:
-                    relative_wind_angle = abs(signed_angle_difference_degrees(wind_dir_abs, state.compass_heading))
-                    if relative_wind_angle > 80.0:
-                        # Sailing downwind - jibe
-                        self.crossing_state = 'turning_around'
-                        self.log_entry(f"Approaching boundary: sailing downwind (wind_angle={relative_wind_angle:.1f}°) → JIBING", level="INFO")
-                        # Store start heading for turn completion detection
-                        self._tack_start_heading = state.compass_heading
-                        # Calculate jibe target: turn away from wind
-                        if state.wind_angle is not None:
-                            if state.wind_angle > 180:
-                                # Wind from port, jibe to starboard
-                                self._turning_target_heading = (state.compass_heading - self.tack_angle) % 360.0
-                            else:
-                                # Wind from starboard, jibe to port
-                                self._turning_target_heading = (state.compass_heading + self.tack_angle) % 360.0
-                        else:
-                            # Fallback: reverse heading
-                            self._turning_target_heading = (state.compass_heading + 180.0) % 360.0
-                    else:
-                        # Sailing upwind - tack (need to be careful to avoid stays)
-                        self.crossing_state = 'turning_around'
-                        self.log_entry(f"Approaching boundary: sailing upwind (wind_angle={relative_wind_angle:.1f}°) → TACKING", level="INFO")
-                        # Store tack start info to detect when we've passed through wind
-                        self._tack_start_heading = state.compass_heading
-                        self._tack_wind_direction = wind_dir_abs
-                        
-                        # Calculate tack target: turn through the wind using tack_angle
-                        # Use wider angle for boundary turns to ensure successful tack with momentum
-                        if state.wind_angle is not None:
-                            if state.wind_angle > 180:
-                                # Wind from port, tack to starboard (wind will come from starboard after tack)
-                                # Target should be wind_dir + tack_angle (wider angle for successful tack)
-                                self._turning_target_heading = (wind_dir_abs + self.tack_angle) % 360.0
-                            else:
-                                # Wind from starboard, tack to port (wind will come from port after tack)
-                                # Target should be wind_dir - tack_angle (wider angle for successful tack)
-                                self._turning_target_heading = (wind_dir_abs - self.tack_angle) % 360.0
-                        else:
-                            # Fallback: use wider tack angle
-                            if state.compass_heading is not None:
-                                self._turning_target_heading = (state.compass_heading + self.tack_angle) % 360.0
-                            else:
-                                self._turning_target_heading = (bearing_to_middle + 180.0) % 360.0 if bearing_to_middle is not None else 0.0
-                else:
-                    # No wind data - just reverse heading
-                    self.crossing_state = 'turning_around'
-                    self.log_entry("Approaching boundary: no wind data - reversing heading", level="INFO")
-                    # Store start heading for turn completion detection
-                    self._tack_start_heading = state.compass_heading if state.compass_heading is not None else None
-                    if state.compass_heading is not None:
-                        self._turning_target_heading = (state.compass_heading + 180.0) % 360.0
-                    else:
-                        self._turning_target_heading = (bearing_to_middle + 180.0) % 360.0 if bearing_to_middle is not None else 0.0
-                self.publish_state('turning_around')
+        # IMPORTANT: When in 'crossing_through' state, check boundary more aggressively
+        # Use predicted crossing time for 'toward_middle' to prevent false triggers,
+        # but for 'crossing_through', also check distance directly since we're actively crossing
+        elif self.crossing_state == 'crossing_through' or self.crossing_state == 'toward_middle':
+            # For 'crossing_through', check boundary more aggressively (both prediction and direct distance)
+            # For 'toward_middle', use prediction to avoid false triggers from side boundaries
+            if self.crossing_state == 'crossing_through':
+                # In crossing_through, check boundary more proactively
+                # Trigger if: predicted crossing OR close to boundary (more aggressive)
+                boundary_check = (approaching_boundary or 
+                                 abs_distance_to_boundary < self.boundary_turn_threshold)
+            else:  # toward_middle
+                # Use prediction to avoid false triggers when close to side boundaries
+                boundary_check = approaching_boundary
             
-            # Use turning target heading
-            target_bearing = self._turning_target_heading if self._turning_target_heading is not None else state.compass_heading if state.compass_heading is not None else 0.0
+            if boundary_check:
+                # Approaching boundary - need to turn around
+                if self.logger:
+                    crossing_info = f", predicted_crossing={predicted_crossing_time:.1f}s" if predicted_crossing_time != float('inf') else ""
+                    self.logger.warn(f"⚠️ Approaching boundary: distance={abs_distance_to_boundary:.1f}m < threshold={self.boundary_turn_threshold:.1f}m{crossing_info}, state={self.crossing_state} → starting turn")
+                if self._turning_target_heading is None:
+                    # Determine whether to tack or jibe based on wind
+                    wind_dir_abs = self._calculate_absolute_wind_direction(state)
+                    if wind_dir_abs is not None and state.compass_heading is not None:
+                        relative_wind_angle = abs(signed_angle_difference_degrees(wind_dir_abs, state.compass_heading))
+                        if relative_wind_angle > 80.0:
+                            # Sailing downwind - jibe
+                            old_state = self.crossing_state
+                            self.crossing_state = 'turning_around'
+                            self._log_state_transition(old_state, self.crossing_state,
+                                                      f"Approaching boundary - sailing downwind, jibing",
+                                                      {'boundary_distance': abs_distance_to_boundary, 'threshold': self.boundary_turn_threshold,
+                                                       'wind_angle': relative_wind_angle, 'predicted_crossing': predicted_crossing_time if predicted_crossing_time != float('inf') else None})
+                            # Store start heading for turn completion detection
+                            self._tack_start_heading = state.compass_heading
+                            # Calculate jibe target: turn away from wind
+                            if state.wind_angle is not None:
+                                if state.wind_angle > 180:
+                                    # Wind from port, jibe to starboard
+                                    self._turning_target_heading = (state.compass_heading - self.tack_angle) % 360.0
+                                else:
+                                    # Wind from starboard, jibe to port
+                                    self._turning_target_heading = (state.compass_heading + self.tack_angle) % 360.0
+                            else:
+                                # Fallback: reverse heading
+                                self._turning_target_heading = (state.compass_heading + 180.0) % 360.0
+                        else:
+                            # Sailing upwind - tack (need to be careful to avoid stays)
+                            old_state = self.crossing_state
+                            self.crossing_state = 'turning_around'
+                            self._log_state_transition(old_state, self.crossing_state,
+                                                      f"Approaching boundary - sailing upwind, tacking",
+                                                      {'boundary_distance': abs_distance_to_boundary, 'threshold': self.boundary_turn_threshold,
+                                                       'wind_angle': relative_wind_angle, 'predicted_crossing': predicted_crossing_time if predicted_crossing_time != float('inf') else None})
+                            # Store tack start info to detect when we've passed through wind
+                            self._tack_start_heading = state.compass_heading
+                            self._tack_wind_direction = wind_dir_abs
+                            
+                            # Calculate tack target: turn through the wind using tack_angle
+                            # Use wider angle for boundary turns to ensure successful tack with momentum
+                            if state.wind_angle is not None:
+                                if state.wind_angle > 180:
+                                    # Wind from port, tack to starboard (wind will come from starboard after tack)
+                                    # Target should be wind_dir + tack_angle (wider angle for successful tack)
+                                    self._turning_target_heading = (wind_dir_abs + self.tack_angle) % 360.0
+                                else:
+                                    # Wind from starboard, tack to port (wind will come from port after tack)
+                                    # Target should be wind_dir - tack_angle (wider angle for successful tack)
+                                    self._turning_target_heading = (wind_dir_abs - self.tack_angle) % 360.0
+                            else:
+                                # Fallback: use wider tack angle
+                                if state.compass_heading is not None:
+                                    self._turning_target_heading = (state.compass_heading + self.tack_angle) % 360.0
+                                else:
+                                    self._turning_target_heading = (bearing_to_middle + 180.0) % 360.0 if bearing_to_middle is not None else 0.0
+                    else:
+                        # No wind data - just reverse heading
+                        old_state = self.crossing_state
+                        self.crossing_state = 'turning_around'
+                        self._log_state_transition(old_state, self.crossing_state,
+                                                  f"Approaching boundary - no wind data, reversing heading",
+                                                  {'boundary_distance': abs_distance_to_boundary, 'threshold': self.boundary_turn_threshold,
+                                                   'predicted_crossing': predicted_crossing_time if predicted_crossing_time != float('inf') else None})
+                        # Store start heading for turn completion detection
+                        self._tack_start_heading = state.compass_heading if state.compass_heading is not None else None
+                        if state.compass_heading is not None:
+                            self._turning_target_heading = (state.compass_heading + 180.0) % 360.0
+                        else:
+                            self._turning_target_heading = (bearing_to_middle + 180.0) % 360.0 if bearing_to_middle is not None else 0.0
+                self.publish_state('turning_around')
+                target_bearing = self._turning_target_heading if self._turning_target_heading is not None else state.compass_heading if state.compass_heading is not None else 0.0
+            else:
+                # Not approaching boundary - continue normal operation
+                if self.crossing_state == 'crossing_through':
+                    # Continue on stored crossing heading
+                    if self._crossing_heading is not None:
+                        target_bearing = self._crossing_heading
+                    elif state.compass_heading is not None:
+                        target_bearing = state.compass_heading
+                    else:
+                        target_bearing = bearing_to_middle if bearing_to_middle is not None else 0.0
+                else:  # toward_middle
+                    # Continue heading toward middle
+                    target_bearing = bearing_to_middle if bearing_to_middle is not None else state.compass_heading if state.compass_heading is not None else 0.0
         
         # Handle turning_around state (active turn execution)
         elif self.crossing_state == 'turning_around':
@@ -503,6 +589,7 @@ class CrosserController(BaseController):
                 # Turn complete if: heading toward middle (primary criterion)
                 # Be more lenient - if we're heading generally toward middle, complete the turn
                 turn_complete = False
+                turn_progress = None
                 
                 # Primary check: are we heading toward middle?
                 if heading_to_middle < 90.0:  # Within 90 degrees of middle
@@ -525,12 +612,18 @@ class CrosserController(BaseController):
                 
                 if turn_complete:
                     # Turn complete, head toward middle
+                    old_state = self.crossing_state
                     self.crossing_state = 'toward_middle'
+                    details = {'heading_error': heading_error, 'heading_to_middle': heading_to_middle}
+                    if turn_progress is not None:
+                        details['turn_progress'] = turn_progress
+                    self._log_state_transition(old_state, self.crossing_state,
+                                              f"Turn complete - heading toward middle",
+                                              details)
                     self._turning_target_heading = None
                     self._crossing_heading = None
                     self._tack_start_heading = None
                     self._tack_wind_direction = None
-                    self.log_entry(f"Turn complete - heading back toward middle (error={heading_error:.1f}°, to_middle={heading_to_middle:.1f}°)", level="INFO")
                     self.publish_state('toward_middle')
                     target_bearing = bearing_to_middle
         
@@ -541,10 +634,16 @@ class CrosserController(BaseController):
             # Check if middle is in no-go zone (upwind)
             if bearing_to_middle is not None and self._is_target_in_no_go_zone(bearing_to_middle, state):
                 # Middle is upwind - need to tack
+                old_state = self.crossing_state
                 self.crossing_state = 'tacking_upwind'
                 self._tacking_target_heading = self._calculate_tacking_target_heading(state, bearing_to_middle)
                 self._last_tack_time = time.time()
-                self.log_entry(f"Middle is upwind (in no-go zone) - switching to tacking mode", level="INFO")
+                wind_dir_abs = self._calculate_absolute_wind_direction(state)
+                angle_from_wind = abs(signed_angle_difference_degrees(wind_dir_abs, bearing_to_middle)) if wind_dir_abs is not None else None
+                self._log_state_transition(old_state, self.crossing_state,
+                                          f"Middle is upwind (in no-go zone) - switching to tacking mode",
+                                          {'bearing_to_middle': bearing_to_middle, 'angle_from_wind': angle_from_wind,
+                                           'no_go_zone_angle': self.no_go_zone_angle})
                 self.publish_state('tacking_upwind')
                 
                 # Use tacking target heading
@@ -560,9 +659,15 @@ class CrosserController(BaseController):
                 target_bearing = state.compass_heading if state.compass_heading is not None else 0.0
             elif not self._is_target_in_no_go_zone(bearing_to_middle, state):
                 # Middle is no longer upwind - can sail directly
+                old_state = self.crossing_state
                 self.crossing_state = 'toward_middle'
                 self._tacking_target_heading = None
-                self.log_entry("Middle is no longer upwind - switching to direct sailing", level="INFO")
+                wind_dir_abs = self._calculate_absolute_wind_direction(state)
+                angle_from_wind = abs(signed_angle_difference_degrees(wind_dir_abs, bearing_to_middle)) if wind_dir_abs is not None else None
+                self._log_state_transition(old_state, self.crossing_state,
+                                          f"Middle is no longer upwind - switching to direct sailing",
+                                          {'bearing_to_middle': bearing_to_middle, 'angle_from_wind': angle_from_wind,
+                                           'no_go_zone_angle': self.no_go_zone_angle})
                 self.publish_state('toward_middle')
                 target_bearing = bearing_to_middle
             else:
@@ -704,7 +809,7 @@ class CrosserController(BaseController):
         time_since_last_log = current_time - self._last_captains_log_time
         if self._last_captains_log_time == 0.0:
             should_log = True
-        elif time_since_last_log >= 1.0:
+        elif time_since_last_log >= 5.0:  # Log at most every 5 seconds
             should_log = True
         if not should_log:
             rudder_changed = (self._last_logged_rudder is None or abs(cmd_rudder - self._last_logged_rudder) > 0.05)

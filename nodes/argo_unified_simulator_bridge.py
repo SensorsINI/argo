@@ -689,11 +689,11 @@ class ArgoUnifiedSimulatorBridge(Node):
                     current_sail = self.last_sail_angle / 45.0     # Convert back from degrees
                     control_source = "robot_servo"
             
-            # Log control source periodically for diagnostics (every 2 seconds)
+            # Log control source periodically for diagnostics (every 5 seconds)
             if not hasattr(self, '_last_control_log_time'):
                 self._last_control_log_time = 0.0
             current_time = time.time()
-            if current_time - self._last_control_log_time > 2.0:
+            if current_time - self._last_control_log_time > 5.0:  # Log at most every 5 seconds
                 self.get_logger().info(
                     f"Control: source={control_source}, human_controlled={self.human_controlled}, "
                     f"rudder={current_rudder:.3f}, sail={current_sail:.3f}, "
@@ -2291,6 +2291,8 @@ def main(args=None):
             bridge.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        # Delay to allow shutdown messages from other nodes to flush before prompt appears
+        time.sleep(1.0)
 
 if __name__ == '__main__':
     main()
