@@ -916,12 +916,15 @@ class KeyboardControlNode(Node):
             line_num += 1
             controls_line1 = "  ←→ Rudder | ↑↓ Sail | C=Center"
             controls_line2 = "  SPACE=Sim Pause | W/E=Wind ±10°"
-            controls_line3 = "  R=Reset | H=Toggle RTH | M=Toggle Manual | ENTER=Refresh | Q=Quit"
+            controls_line3 = "  R=Reset | H=Toggle RTH | M=Toggle Manual"
+            controls_line4 = "  ENTER=Refresh | Q=Quit"
             self.stdscr.addstr(line_num, 2, controls_line1[:width-4])
             line_num += 1
             self.stdscr.addstr(line_num, 2, controls_line2[:width-4])
             line_num += 1
             self.stdscr.addstr(line_num, 2, controls_line3[:width-4])
+            line_num += 1
+            self.stdscr.addstr(line_num, 2, controls_line4[:width-4])
             line_num += 1
             
             # Topic info
