@@ -26,15 +26,15 @@
       mock_simulator:
         max_turn_rate: 30.0  # Degrees per second at full rudder and speed
         max_speed: 1.5  # Metres per second (approximate hull speed)
-        no_go_angle_deg: 40.0  # Approximate close-hauled limit (degrees from wind)
-        stall_decay_rate: 0.5  # m/s^2 equivalent deceleration while stalled
+        no_go_angle_deg: 45.0  # Approximate close-hauled limit (degrees from wind)
+        stall_decay_rate: 1.5  # m/s^2 equivalent deceleration while stalled
         stall_recovery_threshold: 0.1  # m/s; once above this we treat stall as cleared
         tack_entry_buffer_deg: 12.0  # Allow tacks to begin slightly before the no-go boundary
         tack_exit_buffer_deg: 6.0  # Required clearance before finishing a tack
         tack_speed_threshold: 0.35  # m/s minimum speed to initiate a tack
         tack_min_speed_to_continue: 0.25  # m/s minimum to keep crossing the wind
         tack_time_limit_s: 8.0  # Abort tack if it takes longer than this
-        tack_turn_boost: 1.8  # Multiplier applied to turn rate during a tack window
+        tack_turn_boost: 1.8  # Multiplier applied to turn rate during a tack window (increased for more aggressive tacks)
       # Wind characteristics (runtime configurable via ROS2 parameters)
       wind:
         wind_min_speed: 2.0         # Minimum wind speed in m/s (used for mock simulator)

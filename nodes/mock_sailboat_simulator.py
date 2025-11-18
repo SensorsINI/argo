@@ -280,7 +280,11 @@ class MockSailboatSimulator:
 
         # Smooth speed changes towards target
         speed_diff = target_speed - self.state.boat_speed
-        if effective_no_go:
+        # Apply stall deceleration if in no-go zone (even during tack)
+        # During tack, boat can pass through no-go zone but still loses speed
+        is_actually_in_no_go = abs_apparent < self.no_go_angle_deg
+        if effective_no_go or (in_tack_window and is_actually_in_no_go):
+            # Apply stall deceleration when stalled or when crossing through wind during tack
             adjustment = np.clip(speed_diff * 1.5 * self.dt,
                                  -self.stall_decay_rate * self.dt,
                                  self.stall_decay_rate * self.dt)
