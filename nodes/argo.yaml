@@ -1,6 +1,7 @@
 # Centralized configuration file for all Argo nodes
 # (there are a few other config files in the nodes directory, but this is the main one, see also README.md)
 
+# NOTE code should use ruamel for yaml parsing, not standard yaml library, to preserve comments and ordering
 # Global parameters (applied to all nodes)
 # The /** wildcard is ROS2 parameter syntax that applies these parameters to ALL nodes
 /**:
