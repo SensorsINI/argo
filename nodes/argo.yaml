@@ -20,7 +20,7 @@
     simulation:
       publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz)
       simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics
-      heading_trail_limit: 10  # Number (roughly) of historical heading markers to display in visualization
+      heading_trail_limit: 50  # Number (roughly) of historical heading markers to display in visualization
       grounding_behavior: reset # Behavior on grounding in local simulation: reset|terminate|continue
       # Mock simulator physics parameters (used when sailboat-playground is unavailable)
       mock_simulator:
@@ -62,7 +62,7 @@
 controller_node:
   ros__parameters:
     controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
-    controller_initially_paused: true  # Start controller in paused (manual) mode if true
+    controller_initially_paused: false  # Start controller in paused (manual) mode if true
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
     rudder_full_scale_deg: 60.0  # Heading error (degrees) that produces full rudder deflection (-1.0 to +1.0)
@@ -70,7 +70,7 @@ controller_node:
     patrol_lookahead_time: 15.0  # Seconds to predict ahead for boundary crossing (used by patrol/crosser controllers)
     boundary_turn_threshold: 7.0  # Distance to boundary (meters) to trigger turn maneuver
     tack_angle: 120.0  # Degrees to turn during tack maneuver (increased from 90° for better tack success - more momentum through wind, less likely to stall)
-    arrival_distance_m: 4.0  # Distance to middle waypoint (meters) to consider "arrived" (used by crosser controller)
+    arrival_distance_m: 3.0  # Distance to middle waypoint (meters) to consider "arrived" (used by crosser controller)
     tack_min_angle_from_wind: 50.0  # Minimum angle from wind during tack to avoid stays (degrees, used by crosser controller)
     no_go_zone_angle: 45.0  # Angle from wind where sailing is impossible (degrees, used by crosser controller)
     broad_reach_angle: 110.0  # Preferred angle to wind (degrees) for patrol mode sailing
