@@ -32,6 +32,17 @@ import json
 import yaml
 from pathlib import Path
 
+# ruamel.yaml is REQUIRED for safe parameter persistence (preserves YAML comments)
+try:
+    from ruamel.yaml import YAML
+except ImportError as e:
+    # Log FATAL error so lifecycle manager can display it
+    import logging
+    logging.basicConfig(level=logging.FATAL)
+    logger = logging.getLogger('argo_unified_simulator_bridge')
+    logger.fatal("FATAL: ruamel.yaml is required but not installed. Run: make install-python-deps")
+    sys.exit(1)
+
 from mock_sailboat_simulator import MockSailboatSimulator
 
 # Try to import sailboat-playground for local simulation
@@ -1746,7 +1757,7 @@ class ArgoUnifiedSimulatorBridge(Node):
           - simulation.wind.wind_direction -> /**.ros__parameters.simulation.wind.wind_direction
           - simulation.wind.wind_min_speed -> /**.ros__parameters.simulation.wind.wind_min_speed
         
-        Uses ruamel.yaml to preserve comments when available, falls back to PyYAML otherwise.
+        Uses ruamel.yaml to preserve comments and formatting.
         """
         try:
             script_path = Path(__file__).resolve()
@@ -1767,68 +1778,43 @@ class ArgoUnifiedSimulatorBridge(Node):
                 # Not a persistable parameter, silently ignore
                 return
             
-            # Try to preserve comments using ruamel.yaml if available
-            try:
-                from ruamel.yaml import YAML
-                rt_yaml = YAML()
-                rt_yaml.preserve_quotes = True
-                data = {}
-                if yaml_path.exists():
-                    with open(yaml_path, 'r') as f:
-                        data = rt_yaml.load(f) or {}
-                
-                # Ensure nested dicts exist
-                node = data
-                for k in keys[:-1]:
-                    if k not in node or not isinstance(node[k], dict):
-                        node[k] = {}
-                    node = node[k]
-                node[keys[-1]] = value
-                
-                # Write atomically: tmp then replace
-                tmp_path = yaml_path.with_suffix('.yaml.tmp')
-                bak_path = yaml_path.with_suffix('.yaml.bak')
-                with open(tmp_path, 'w') as f:
-                    rt_yaml.dump(data, f)
-                try:
-                    # Backup previous
-                    if yaml_path.exists():
-                        yaml_path.replace(bak_path)
-                except Exception:
-                    # Backup failure should not block persistence
-                    pass
-                Path(tmp_path).replace(yaml_path)
-                self.get_logger().info(f"Persisted '{param_name}' to {yaml_path} (comments preserved)")
-            except ImportError:
-                # Fallback to PyYAML (comments may be lost)
+            # Load existing YAML preserving comments
+            rt_yaml = YAML()
+            rt_yaml.preserve_quotes = True
+            data = {}
+            if yaml_path.exists():
                 with open(yaml_path, 'r') as f:
-                    data = yaml.safe_load(f) or {}
-                
-                # Ensure nested dicts exist
-                node = data
-                for k in keys[:-1]:
-                    if k not in node or not isinstance(node[k], dict):
-                        node[k] = {}
-                    node = node[k]
-                node[keys[-1]] = value
-                
-                # Write atomically: tmp then replace
-                tmp_path = yaml_path.with_suffix('.yaml.tmp')
-                bak_path = yaml_path.with_suffix('.yaml.bak')
-                with open(tmp_path, 'w') as f:
-                    yaml.safe_dump(data, f, sort_keys=False)
-                try:
-                    # Backup previous
-                    if yaml_path.exists():
-                        yaml_path.replace(bak_path)
-                except Exception:
-                    # Backup failure should not block persistence
-                    pass
-                Path(tmp_path).replace(yaml_path)
-                self.get_logger().warn('ruamel.yaml not available; YAML comments may not be preserved')
-                self.get_logger().info(f"Persisted '{param_name}' to {yaml_path}")
+                    data = rt_yaml.load(f) or {}
+            
+            # Ensure nested dicts exist
+            node = data
+            for k in keys[:-1]:
+                if k not in node or not isinstance(node[k], dict):
+                    node[k] = {}
+                node = node[k]
+            node[keys[-1]] = value
+            
+            # Write atomically: tmp then replace
+            tmp_path = yaml_path.with_suffix('.yaml.tmp')
+            bak_path = yaml_path.with_suffix('.yaml.bak')
+            with open(tmp_path, 'w') as f:
+                rt_yaml.dump(data, f)
+            
+            # Backup previous version
+            try:
+                if yaml_path.exists():
+                    yaml_path.replace(bak_path)
+            except Exception as backup_err:
+                # Backup failure should not block persistence
+                self.get_logger().debug(f"Backup failed (non-critical): {backup_err}")
+            
+            Path(tmp_path).replace(yaml_path)
+            self.get_logger().info(f"Persisted '{param_name}' to {yaml_path} (comments preserved)")
+            
         except Exception as e:
-            self.get_logger().warn(f"Failed to persist '{param_name}' to argo.yaml: {e}")
+            self.get_logger().error(f"Failed to persist '{param_name}' to argo.yaml: {e}")
+            import traceback
+            self.get_logger().debug(f"Traceback: {traceback.format_exc()}")
     
     def publish_navsat_fix(self, trace_id=None):
         """Publish a NavSatFix message.

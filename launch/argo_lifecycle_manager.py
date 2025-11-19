@@ -1811,11 +1811,20 @@ class ArgoLifecycleManager:
             node_status = self._get_node_status()
             running_nodes = [
                 node for node, status in node_status.items() if "RUNNING" in status]
+            stopped_nodes = [
+                node for node, status in node_status.items() if "STOPPED" in status]
+
+            # Check if any expected nodes have crashed
+            all_expected = self.expected_nodes + self.special_nodes
+            crashed_expected = [node for node in all_expected if node in stopped_nodes]
+            if crashed_expected:
+                # Node crashed during startup - exit immediately
+                print(f"\n⚠️  Node crash detected during startup: {', '.join(crashed_expected)}")
+                break
 
             # Progress reporting (journal-friendly)
             elapsed = time.time() - start_time
             if int(elapsed * 10) % 10 == 0:
-                all_expected = self.expected_nodes + self.special_nodes
                 missing_nodes = [node for node in all_expected if node not in running_nodes]
                 missing_str = f" (missing: {', '.join(missing_nodes)})" if missing_nodes else ""
                 print(
@@ -1836,17 +1845,27 @@ class ArgoLifecycleManager:
             print(f"❌ Missing: {', '.join(missing_nodes) if missing_nodes else '(none)'}")
             print(f"📋 Expected: {', '.join(all_expected)}")
             
-            # Check if missing nodes have error logs
+            # Get and display error messages for missing nodes
+            fatal_messages = self._get_fatal_messages_for_nodes()
             for missing_node in missing_nodes:
                 # Check if the process exists but isn't running
                 node_status = self._get_node_status()
                 if missing_node in node_status:
                     status = node_status[missing_node]
                     if "STOPPED" in status or "ERROR" in status:
-                        print(f"   ⚠️  {missing_node}: {status}")
+                        if missing_node in fatal_messages:
+                            print(f"   ⚠️  {missing_node}: {fatal_messages[missing_node]}")
+                        else:
+                            print(f"   ⚠️  {missing_node}: {status}")
                 else:
-                    print(f"   ⚠️  {missing_node}: Not found in node status")
+                    if missing_node in fatal_messages:
+                        print(f"   ⚠️  {missing_node}: {fatal_messages[missing_node]}")
+                    else:
+                        print(f"   ⚠️  {missing_node}: Not found in node status")
             
+            # Clean up any nodes that did start before returning
+            print("🛑 Stopping nodes that were started...")
+            self.stop()
             return False
 
         # Monitor during stabilization period
@@ -2708,24 +2727,47 @@ class ArgoLifecycleManager:
         return sorted(set(detected))
     
     def _get_fatal_messages_for_nodes(self) -> Dict[str, str]:
-        """Get the most recent FATAL message for each node from systemd journal"""
+        """Get the most recent FATAL message or Python exception for each node from systemd journal"""
         fatal_messages = {}
         
         try:
-            # Get recent FATAL messages from systemd journal for argo_launch.service
-            # Look back further to catch initial startup failures
+            # Search for FATAL messages and Python exceptions (ImportError, ModuleNotFoundError, etc.)
+            # Use extended-regex to search for multiple patterns
             result = subprocess.run([
                 'journalctl', '-u', 'argo_launch_standard.service', '--since', self.journal_since,
-                '--grep', 'FATAL', '--no-pager', '-o', 'short-precise'
+                '--grep', 'FATAL|ImportError|ModuleNotFoundError|Exception:', '--no-pager', '-o', 'short-precise'
             ], capture_output=True, text=True, timeout=5)
             
             if result.returncode == 0 and result.stdout:
                 lines = result.stdout.strip().split('\n')
                 
-                # Parse lines to extract node-specific FATAL messages
+                # Parse lines to extract node-specific error messages
                 # Process in reverse order to get the most recent message for each node
                 for line in reversed(lines):
-                    if 'FATAL' in line:
+                    # Check for Python exceptions first (most common startup failures)
+                    if 'ImportError:' in line or 'ModuleNotFoundError:' in line:
+                        # Try to identify which node this error belongs to
+                        for node in self.expected_nodes:
+                            if node in fatal_messages:
+                                continue  # Already have a message for this node
+                            
+                            # Check if this line mentions the node file
+                            if f'/{node}' in line or f'nodes/{node}' in line:
+                                # Extract the error message
+                                if 'ImportError:' in line:
+                                    error_part = line.split('ImportError:', 1)[1].strip()
+                                elif 'ModuleNotFoundError:' in line:
+                                    error_part = line.split('ModuleNotFoundError:', 1)[1].strip()
+                                
+                                # Clean up and truncate message
+                                if len(error_part) > 80:
+                                    error_part = error_part[:77] + "..."
+                                
+                                fatal_messages[node] = error_part
+                                break
+                    
+                    # Check for FATAL messages (ROS2 logger)
+                    elif 'FATAL' in line:
                         # Try to identify which node this FATAL message belongs to
                         for node in self.expected_nodes:
                             node_name = node.replace('.py', '')
@@ -2748,11 +2790,10 @@ class ArgoLifecycleManager:
                                         message = fatal_part[1].strip()
                                         # Clean up the message - take first meaningful sentence
                                         if '.' in message:
-                                            message = message.split(
-                                                '.')[0].strip()
+                                            message = message.split('.')[0].strip()
                                         # Limit message length for display
-                                        if len(message) > 50:
-                                            message = message[:47] + "..."
+                                        if len(message) > 80:
+                                            message = message[:77] + "..."
                                         
                                         # Store the most recent FATAL for this node
                                         fatal_messages[node] = f"FATAL: {message}"
@@ -2763,8 +2804,8 @@ class ArgoLifecycleManager:
                                         r'fatal\("([^"]*)"', line, re.IGNORECASE)
                                     if match:
                                         message = match.group(1)
-                                        if len(message) > 50:
-                                            message = message[:47] + "..."
+                                        if len(message) > 80:
+                                            message = message[:77] + "..."
                                         fatal_messages[node] = f"FATAL: {message}"
                                 break
                 

@@ -196,6 +196,17 @@ import collections
 from pathlib import Path
 import yaml
 
+# ruamel.yaml is REQUIRED for safe parameter persistence (preserves YAML comments)
+try:
+    from ruamel.yaml import YAML
+except ImportError as e:
+    # Log FATAL error so lifecycle manager can display it
+    import logging
+    logging.basicConfig(level=logging.FATAL)
+    logger = logging.getLogger('bno085')
+    logger.fatal("FATAL: ruamel.yaml is required but not installed. Run: make install-python-deps")
+    sys.exit(1)
+
 # ============================================================================
 # BRIDGE MODE: Convert C++ driver output to Argo format
 # ============================================================================
@@ -288,52 +299,41 @@ class BNO085Bridge(Node):
             return float(fallback)
     
     def _persist_yaw_offset_to_yaml(self, value: float) -> None:
-        """Persist yaw offset into nodes/argo.yaml under /**/ros__parameters/imu."""
+        """Persist yaw offset into nodes/argo.yaml under /**/ros__parameters/imu.
+        
+        Uses ruamel.yaml to preserve comments and formatting.
+        """
         try:
             yaml_path = self._argo_yaml_path()
-            # Try to preserve comments using ruamel.yaml if available
-            try:
-                from ruamel.yaml import YAML
-                rt_yaml = YAML()
-                rt_yaml.preserve_quotes = True
-                data = {}
-                if yaml_path.exists():
-                    with open(yaml_path, 'r') as f:
-                        data = rt_yaml.load(f) or {}
-                # Ensure nested structure exists
-                if '/**' not in data:
-                    data['/**'] = {}
-                if 'ros__parameters' not in data['/**']:
-                    data['/**']['ros__parameters'] = {}
-                if 'imu' not in data['/**']['ros__parameters']:
-                    data['/**']['ros__parameters']['imu'] = {}
-                data['/**']['ros__parameters']['imu']['yaw_offset_deg'] = float(value)
-                # Write back (ruamel preserves existing comments)
-                tmp_path = yaml_path.with_suffix('.yaml.tmp')
-                with open(tmp_path, 'w') as f:
-                    rt_yaml.dump(data, f)
-                tmp_path.replace(yaml_path)
-            except Exception:
-                # Fallback to PyYAML (comments may be lost)
-                cfg = {}
-                if yaml_path.exists():
-                    with open(yaml_path, 'r') as f:
-                        cfg = yaml.safe_load(f) or {}
-                if '/**' not in cfg:
-                    cfg['/**'] = {}
-                if 'ros__parameters' not in cfg['/**']:
-                    cfg['/**']['ros__parameters'] = {}
-                if 'imu' not in cfg['/**']['ros__parameters']:
-                    cfg['/**']['ros__parameters']['imu'] = {}
-                cfg['/**']['ros__parameters']['imu']['yaw_offset_deg'] = float(value)
-                tmp_path = yaml_path.with_suffix('.yaml.tmp')
-                with open(tmp_path, 'w') as f:
-                    yaml.safe_dump(cfg, f, sort_keys=False)
-                tmp_path.replace(yaml_path)
-                self.get_logger().warn('ruamel.yaml not available; YAML comments may not be preserved')
-            self.get_logger().info(f'Persisted imu.yaw_offset_deg={value:.3f}° to {yaml_path}')
+            
+            # Load existing YAML preserving comments
+            rt_yaml = YAML()
+            rt_yaml.preserve_quotes = True
+            data = {}
+            if yaml_path.exists():
+                with open(yaml_path, 'r') as f:
+                    data = rt_yaml.load(f) or {}
+            
+            # Ensure nested structure exists
+            if '/**' not in data:
+                data['/**'] = {}
+            if 'ros__parameters' not in data['/**']:
+                data['/**']['ros__parameters'] = {}
+            if 'imu' not in data['/**']['ros__parameters']:
+                data['/**']['ros__parameters']['imu'] = {}
+            data['/**']['ros__parameters']['imu']['yaw_offset_deg'] = float(value)
+            
+            # Write atomically: tmp then replace
+            tmp_path = yaml_path.with_suffix('.yaml.tmp')
+            with open(tmp_path, 'w') as f:
+                rt_yaml.dump(data, f)
+            tmp_path.replace(yaml_path)
+            
+            self.get_logger().info(f'Persisted imu.yaw_offset_deg={value:.3f}° to {yaml_path} (comments preserved)')
         except Exception as e:
-            self.get_logger().warn(f'Failed to persist imu.yaw_offset_deg to argo.yaml: {e}')
+            self.get_logger().error(f'Failed to persist imu.yaw_offset_deg to argo.yaml: {e}')
+            import traceback
+            self.get_logger().debug(f'Traceback: {traceback.format_exc()}')
     
     def _on_parameter_change(self, parameters):
         """Handle runtime parameter updates and persist yaw offset changes."""
