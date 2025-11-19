@@ -1380,84 +1380,98 @@ class ArgoLifecycleManager:
         
         print("🛑 Stopping Argo ROS2 nodes...")
         
-        # Terminate the entire process group
-        try:
-            os.killpg(self.pgid, signal.SIGTERM)
-            
-            # Wait for all tracked processes to finish
-            max_wait_per_process = 3.0
+        # First, try to terminate tracked processes individually for better control
+        terminated_processes = []
+        if hasattr(self, 'node_processes') and self.node_processes:
             for proc_info in self.node_processes:
                 if 'proc' in proc_info:
                     proc = proc_info['proc']
+                    name = proc_info.get('name', 'unknown')
                     try:
-                        proc.wait(timeout=max_wait_per_process)
-                    except (subprocess.TimeoutExpired, ProcessLookupError):
-                        try:
-                            proc.kill()
-                            proc.wait(timeout=1.0)
-                        except:
-                            pass
-                    except:
-                        pass
-            
-            # Wait for main process if it exists
-            if self.process:
+                        if proc.poll() is None:  # Process is still running
+                            proc.terminate()
+                            terminated_processes.append((proc, name))
+                            print(f"  📤 Sent SIGTERM to {name} (PID: {proc.pid})")
+                    except Exception as e:
+                        print(f"  ⚠️  Error terminating {name}: {e}")
+        
+        # Wait for tracked processes to finish
+        max_wait_per_process = 3.0
+        for proc, name in terminated_processes:
+            try:
+                proc.wait(timeout=max_wait_per_process)
+                print(f"  ✅ {name} stopped gracefully")
+            except subprocess.TimeoutExpired:
                 try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                    print(f"  ⚡ Force killed {name}")
+                except:
+                    print(f"  ⚠️  Could not force kill {name}")
+            except:
+                pass
+        
+        # Wait for main process if it exists
+        if self.process:
+            try:
+                if self.process.poll() is None:
+                    self.process.terminate()
+                    print(f"  📤 Sent SIGTERM to main launch process")
                     self.process.wait(timeout=max_wait_per_process)
-                except (subprocess.TimeoutExpired, ProcessLookupError):
-                    try:
-                        self.process.kill()
-                        self.process.wait(timeout=1.0)
-                    except:
-                        pass
+                    print(f"  ✅ Main launch process stopped")
+            except subprocess.TimeoutExpired:
+                try:
+                    self.process.kill()
+                    self.process.wait(timeout=1.0)
+                    print(f"  ⚡ Force killed main launch process")
                 except:
                     pass
-            
-            # Wait for process group to be empty (check every 0.2s for up to 6s)
-            for _ in range(30):  # 30 * 0.2s = 6s max
-                try:
-                    result = subprocess.run(
-                        ['ps', '-o', 'pid=', '-g', str(self.pgid)],
-                        capture_output=True,
-                        timeout=0.5,
-                        text=True
-                    )
-                    pids = [pid.strip() for pid in result.stdout.strip().split('\n') if pid.strip()]
-                    our_pid = os.getpid()
-                    other_pids = [pid for pid in pids if pid != str(our_pid)]
-                    if not other_pids:
-                        break
-                except:
-                    break
-                time.sleep(0.2)
-            
-            # After process group is empty, wait for ROS2 shutdown messages to flush
-            # ROS2 nodes write shutdown messages to stderr when they receive SIGTERM
-            # These messages can be buffered and take time to flush even after process exit
-            # Wait 8 seconds to ensure all buffered stderr output is flushed to terminal
-            time.sleep(8.0)
-            
-            sys.stdout.flush()
-            sys.stderr.flush()
-            print("✅ Process group terminated.")
-            
-            # Also explicitly kill foxglove_bridge processes (they may not be in the same process group)
+            except:
+                pass
+        
+        # Also use process group kill as backup (may catch bash wrapper processes)
+        try:
+            os.killpg(self.pgid, signal.SIGTERM)
+            print(f"  📤 Sent SIGTERM to process group {self.pgid}")
+        except ProcessLookupError:
+            # Process group already gone
+            print(f"  ℹ️  Process group {self.pgid} already terminated")
+        except Exception as e:
+            print(f"  ⚠️  Could not kill process group: {e}")
+        
+        # Use pkill as final backup to catch any remaining simulation processes
+        try:
+            subprocess.run(['pkill', '-TERM', '-f', 'argo_unified_simulator_bridge'], 
+                         capture_output=True, timeout=2)
+            subprocess.run(['pkill', '-TERM', '-f', 'controller.py'], 
+                         capture_output=True, timeout=2)
+            subprocess.run(['pkill', '-TERM', '-f', 'foxglove_bridge'], 
+                         capture_output=True, timeout=2)
+            print(f"  📤 Sent SIGTERM via pkill to remaining nodes")
+        except Exception as e:
+            print(f"  ⚠️  pkill cleanup failed: {e}")
+        
+        # Wait a bit for processes to terminate
+        time.sleep(2.0)
+        
+        # Force kill any remaining processes
+        try:
+            subprocess.run(['pkill', '-9', '-f', 'argo_unified_simulator_bridge'], 
+                         capture_output=True, timeout=2)
+            subprocess.run(['pkill', '-9', '-f', 'controller.py'], 
+                         capture_output=True, timeout=2)
             subprocess.run(['pkill', '-9', '-f', 'foxglove_bridge'], 
                          capture_output=True, timeout=2)
-            
-            self.node_processes.clear()
-            self._cleanup_ros2()
-            return True
-        except ProcessLookupError:
-            # This can happen if the process group is already gone
-            print("✅ Process group already terminated.")
-            self._cleanup_ros2()
-            return True
-        except Exception as e:
-            error_msg = str(e) if e else "Unknown error"
-            print(f"⚠️  Error killing process group: {error_msg}")
-            # Fallback to old method if killpg fails
-            return self._stop_fallback()
+        except:
+            pass
+        
+        sys.stdout.flush()
+        sys.stderr.flush()
+        print("✅ All node processes terminated.")
+        
+        self.node_processes.clear()
+        self._cleanup_ros2()
+        return True
 
     def _stop_fallback(self) -> bool:
         """Fallback method to stop nodes individually if process group kill fails."""
@@ -3467,6 +3481,18 @@ EXAMPLES:
             success = manager.toggle_pause_nodes(debug=args.debug)
             manager._cleanup_ros2()
             sys.exit(0 if success else 1)
+    except KeyboardInterrupt:
+        # Ctrl+C pressed - ensure all nodes are stopped
+        print("\n🛑 Keyboard interrupt detected, stopping all nodes...")
+        try:
+            manager.stop()
+        except:
+            pass
+        try:
+            manager._cleanup_ros2()
+        except:
+            pass
+        sys.exit(0)
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
         manager._cleanup_ros2()
