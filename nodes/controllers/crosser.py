@@ -479,17 +479,32 @@ class CrosserController(BaseController):
                                                        'wind_angle': relative_wind_angle, 'predicted_crossing': predicted_crossing_time if predicted_crossing_time != float('inf') else None})
                             # Store start heading for turn completion detection
                             self._tack_start_heading = state.compass_heading
-                            # Calculate jibe target: turn away from wind
-                            if state.wind_angle is not None:
-                                if state.wind_angle > 180:
-                                    # Wind from port, jibe to starboard
-                                    self._turning_target_heading = (state.compass_heading - self.tack_angle) % 360.0
+                            
+                            # Calculate jibe target: turn to point back toward middle
+                            # CRITICAL: Ensure target points toward middle, not away from it
+                            if state.compass_heading is not None:
+                                candidate_target_1 = (state.compass_heading + self.tack_angle) % 360.0
+                                candidate_target_2 = (state.compass_heading - self.tack_angle) % 360.0
+                                
+                                # Choose the candidate that points more toward the middle
+                                if bearing_to_middle is not None:
+                                    angle_to_middle_1 = abs(signed_angle_difference_degrees(bearing_to_middle, candidate_target_1))
+                                    angle_to_middle_2 = abs(signed_angle_difference_degrees(bearing_to_middle, candidate_target_2))
+                                    
+                                    if angle_to_middle_1 < angle_to_middle_2:
+                                        self._turning_target_heading = candidate_target_1
+                                        if self.logger:
+                                            self.logger.info(f"Jibe target: {candidate_target_1:.1f}° (angle to middle: {angle_to_middle_1:.1f}°)")
+                                    else:
+                                        self._turning_target_heading = candidate_target_2
+                                        if self.logger:
+                                            self.logger.info(f"Jibe target: {candidate_target_2:.1f}° (angle to middle: {angle_to_middle_2:.1f}°)")
                                 else:
-                                    # Wind from starboard, jibe to port
-                                    self._turning_target_heading = (state.compass_heading + self.tack_angle) % 360.0
+                                    # Fallback: reverse heading to point back
+                                    self._turning_target_heading = (state.compass_heading + 180.0) % 360.0
                             else:
-                                # Fallback: reverse heading
-                                self._turning_target_heading = (state.compass_heading + 180.0) % 360.0
+                                # Last resort: reverse bearing to middle
+                                self._turning_target_heading = (bearing_to_middle + 180.0) % 360.0 if bearing_to_middle is not None else 0.0
                         else:
                             # Sailing upwind - tack (need to be careful to avoid stays)
                             old_state = self.crossing_state
@@ -504,21 +519,35 @@ class CrosserController(BaseController):
                             
                             # Calculate tack target: turn through the wind using tack_angle
                             # Use wider angle for boundary turns to ensure successful tack with momentum
-                            if state.wind_angle is not None:
-                                if state.wind_angle > 180:
-                                    # Wind from port, tack to starboard (wind will come from starboard after tack)
-                                    # Target should be wind_dir + tack_angle (wider angle for successful tack)
-                                    self._turning_target_heading = (wind_dir_abs + self.tack_angle) % 360.0
+                            # CRITICAL: Ensure target points toward middle, not away from it
+                            candidate_target_1 = (wind_dir_abs + self.tack_angle) % 360.0
+                            candidate_target_2 = (wind_dir_abs - self.tack_angle) % 360.0
+                            
+                            # Choose the candidate that points more toward the middle
+                            if bearing_to_middle is not None:
+                                angle_to_middle_1 = abs(signed_angle_difference_degrees(bearing_to_middle, candidate_target_1))
+                                angle_to_middle_2 = abs(signed_angle_difference_degrees(bearing_to_middle, candidate_target_2))
+                                
+                                if angle_to_middle_1 < angle_to_middle_2:
+                                    self._turning_target_heading = candidate_target_1
+                                    if self.logger:
+                                        self.logger.info(f"Tack target: {candidate_target_1:.1f}° (angle to middle: {angle_to_middle_1:.1f}°)")
                                 else:
-                                    # Wind from starboard, tack to port (wind will come from port after tack)
-                                    # Target should be wind_dir - tack_angle (wider angle for successful tack)
-                                    self._turning_target_heading = (wind_dir_abs - self.tack_angle) % 360.0
+                                    self._turning_target_heading = candidate_target_2
+                                    if self.logger:
+                                        self.logger.info(f"Tack target: {candidate_target_2:.1f}° (angle to middle: {angle_to_middle_2:.1f}°)")
                             else:
-                                # Fallback: use wider tack angle
-                                if state.compass_heading is not None:
-                                    self._turning_target_heading = (state.compass_heading + self.tack_angle) % 360.0
+                                # Fallback: use wind angle sensor if available
+                                if state.wind_angle is not None:
+                                    if state.wind_angle > 180:
+                                        # Wind from port, tack to starboard
+                                        self._turning_target_heading = candidate_target_1
+                                    else:
+                                        # Wind from starboard, tack to port
+                                        self._turning_target_heading = candidate_target_2
                                 else:
-                                    self._turning_target_heading = (bearing_to_middle + 180.0) % 360.0 if bearing_to_middle is not None else 0.0
+                                    # Last resort: use first candidate
+                                    self._turning_target_heading = candidate_target_1
                     else:
                         # No wind data - just reverse heading
                         old_state = self.crossing_state
@@ -592,23 +621,29 @@ class CrosserController(BaseController):
                 turn_progress = None
                 
                 # Primary check: are we heading toward middle?
-                if heading_to_middle < 90.0:  # Within 90 degrees of middle
+                if heading_to_middle < 70.0:  # Within 70 degrees of middle (relaxed from 90)
                     # We're heading toward middle - check if we've made progress
                     # If we started the turn, we should have changed heading significantly
                     if self._tack_start_heading is not None:
                         # Check if we've turned significantly from start
                         turn_progress = abs(signed_angle_difference_degrees(state.compass_heading, self._tack_start_heading))
-                        if turn_progress > 30.0:  # We've turned at least 30 degrees
+                        if turn_progress > 40.0:  # We've turned at least 40 degrees (increased from 30)
                             turn_complete = True
+                            if self.logger:
+                                self.logger.info(f"Turn complete: turned {turn_progress:.1f}°, heading to middle {heading_to_middle:.1f}°")
                     else:
                         # No start heading recorded - just check if heading toward middle
-                        if heading_to_middle < 70.0:
+                        if heading_to_middle < 60.0:  # Stricter when no start heading
                             turn_complete = True
+                            if self.logger:
+                                self.logger.info(f"Turn complete: heading to middle {heading_to_middle:.1f}°")
                 
                 # Secondary check: are we close to target heading AND heading toward middle?
-                if not turn_complete and heading_error < 50.0 and heading_to_middle < 90.0:
-                    # Close to target and heading toward middle
+                if not turn_complete and heading_error < 40.0 and heading_to_middle < 80.0:
+                    # Close to target and heading toward middle (both thresholds tightened)
                     turn_complete = True
+                    if self.logger:
+                        self.logger.info(f"Turn complete: heading error {heading_error:.1f}°, heading to middle {heading_to_middle:.1f}°")
                 
                 if turn_complete:
                     # Turn complete, head toward middle
