@@ -38,9 +38,10 @@ Simulation Pause (SPACE):
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Vector3
 from std_msgs.msg import Bool, Float64
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, SetBool
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType, ParameterEvent
 import curses
@@ -87,7 +88,6 @@ class KeyboardControlNode(Node):
         self.is_rth_mode = False  # Track if we're in RTH mode
         
         # Controller pause service client
-        from std_srvs.srv import SetBool
         self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
         self.controller_paused = False  # Track current pause state
         
@@ -150,6 +150,7 @@ class KeyboardControlNode(Node):
         self.publish_simulation_paused()
         self._initialize_wind_direction()
         self._initialize_controller_type()
+        self._initialize_controller_pause_state()
     
     def _setup_curses(self):
         """Setup curses for terminal control."""
@@ -274,7 +275,13 @@ class KeyboardControlNode(Node):
         request = GetParameters.Request()
         request.names = [self.wind_param_name]
         future = self.wind_get_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        # Wait for result with manual timeout
+        start_time = time.time()
+        timeout = 2.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)
+        
         if future.done():
             response = future.result()
             if response and response.values:
@@ -298,7 +305,13 @@ class KeyboardControlNode(Node):
         request = GetParameters.Request()
         request.names = ['controller_type']
         future = self.controller_get_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        # Wait for result with manual timeout
+        start_time = time.time()
+        timeout = 2.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)
+        
         if future.done():
             response = future.result()
             if response and response.values:
@@ -320,6 +333,34 @@ class KeyboardControlNode(Node):
         self.default_controller_type = 'crosser'  # Default from argo.yaml
         self.current_controller_type = self.default_controller_type
         self.is_rth_mode = False
+    
+    def _initialize_controller_pause_state(self):
+        """Fetch current controller pause state by waiting for first topic message (best effort)."""
+        self.get_logger().info("Waiting for controller pause state...")
+        # Create a one-shot subscription to get the current state
+        state_received = {'value': None}
+        
+        def state_callback(msg):
+            state_received['value'] = bool(msg.data)
+        
+        # Subscribe temporarily to get current state
+        temp_sub = self.create_subscription(Bool, '/controller_pause_state', state_callback, 10)
+        
+        # Wait up to 3 seconds for first message
+        start_time = time.time()
+        while state_received['value'] is None and (time.time() - start_time) < 3.0:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        
+        # Destroy temporary subscription (we already have the main one)
+        self.destroy_subscription(temp_sub)
+        
+        if state_received['value'] is not None:
+            self.controller_paused = state_received['value']
+            state_str = "PAUSED (Manual)" if self.controller_paused else "UNPAUSED (Autonomous)"
+            self.get_logger().info(f"Initial controller state: {state_str}")
+        else:
+            self.get_logger().warn("Could not fetch initial controller pause state; defaulting to False (unpaused)")
+            self.controller_paused = False
 
     def pose_callback(self, msg):
         """Receive heading/pose from simulator."""
@@ -585,7 +626,12 @@ class KeyboardControlNode(Node):
         
         # Call service
         future = self.controller_set_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        # Wait for result with manual timeout (avoid spin_until_future_complete in timer callback)
+        start_time = time.time()
+        timeout = 3.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)  # Small sleep to avoid busy-waiting
         
         if future.done():
             try:
@@ -614,7 +660,9 @@ class KeyboardControlNode(Node):
     def toggle_controller_pause(self):
         """Toggle controller pause state (manual/human control)."""
         if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().warn("Controller pause service not available")
+            message = "⚠️  Controller pause service not available"
+            self.get_logger().warn(message)
+            self._add_diagnostic_message(message)
             return
         
         # Toggle pause state
@@ -626,7 +674,12 @@ class KeyboardControlNode(Node):
         
         # Call service
         future = self.controller_pause_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        # Wait for result with manual timeout (avoid spin_until_future_complete in timer callback)
+        start_time = time.time()
+        timeout = 3.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)  # Small sleep to avoid busy-waiting
         
         if future.done():
             try:
@@ -962,18 +1015,49 @@ class KeyboardControlNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = None
+    executor = None
     try:
         node = KeyboardControlNode()
-        rclpy.spin(node)
+        # Use MultiThreadedExecutor to allow nested service calls
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(node)
+        
+        # Spin with proper KeyboardInterrupt handling
+        try:
+            executor.spin()
+        except KeyboardInterrupt:
+            # Ctrl+C pressed - ensure cleanup happens
+            pass
     except KeyboardInterrupt:
+        # Ctrl+C during initialization
         pass
     except Exception as e:
         print(f"Error: {e}")
     finally:
+        # Always cleanup properly
+        print("\nShutting down keyboard control...")
         if node:
-            node.destroy_node()
+            # Trigger cleanup explicitly (restore terminal, resume simulation if paused)
+            try:
+                node.cleanup()
+            except Exception as e:
+                print(f"Error during cleanup: {e}")
+        if executor:
+            try:
+                executor.shutdown()
+            except:
+                pass
+        if node:
+            try:
+                node.destroy_node()
+            except:
+                pass
         if rclpy.ok():
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except:
+                pass
+        print("Keyboard control stopped.")
 
 if __name__ == '__main__':
     main()
