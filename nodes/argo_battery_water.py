@@ -3,13 +3,28 @@
 # Battery/Water ROS2 node
 # - Reads MAX11612 ADC: AIN0=battery via 27k/18k divider, AIN1=saltwater probe, AIN2=sail winch shunt
 # - Reads SHT45 temperature/humidity sensor
-# - Monitors MP2672GD charger status via GPIO: PC12 (!CHARGING) and PH9 (!ACOK)
+# - Monitors MP2672GD charger status via I2C (primary) and GPIO (fallback)
+# 
+# MP2672 Charger I2C Support (NEW):
+# - I2C Address: 0x4B (only accessible when USB power is present)
+# - Register 0x03 (Status): Reads CHG_STAT, PPM_STAT, BATTFLOAT_STAT, THERM_STAT, VSYS_STAT
+# - Register 0x04 (Fault): Reads WD_FAULT, INPUT_FAULT, THERM_SD_FAULT, TIMER_FAULT, BAT_FAULT, NTC_FAULT
+# - Automatic configuration on USB connection:
+#   * Disables CHG timer (REG02H bits [2:1] = 00) to prevent charging timeout during long development sessions
+#   * Disables Suspend mode (REG02H bit [0] = 1) to keep boost enabled
+# - During normal robot operation (battery only), MP2672 not accessible via I2C (powered by USB)
+# - Battery missing/balance cable fault detection via BATTFLOAT_STAT (REG 03H bit 2)
+# 
+# Charging Status Priority:
+# 1. MP2672 I2C register 0x03 (when USB power present)
+# 2. GPIO status with time-window filtering (fallback when USB not present)
+# 
 # Publishes (Float32):
 # - battery_voltage (V), saltwater_voltage (V), sail_current (A), pcb_temperature (C), relative_humidity (%)
 # - battery_remaining_pct (%) using per‑cell LiPo formula: soc% = S − S/(1 + (v/V0)^A)^B
 # Publishes (Bool):
-# - charging_status (true=charging, false=not charging) - inverted from !CHARGING GPIO
-# - ac_power_present (true=AC/USB power present, false=not present) - inverted from !ACOK GPIO
+# - charging_status (true=charging, false=not charging) - from MP2672 I2C or GPIO
+# - ac_power_present (true=AC/USB power present, false=not present) - from MP2672 I2C or GPIO
 # Alerts (Bool):
 # - battery_low_alert (hysteresis 50 mV around battery_low_threshold_v; warning on low, info on recover)
 # - saltwater_alert (voltage >= saltwater_alert_threshold_v)
@@ -30,7 +45,9 @@
 # - I2C Bus: Exclusively uses I2C bus 0 (Orange Pi Zero 2W default I2C interface)
 # - I2C Pins: SDA=PI6 (twi0-sda), SCL=PI5 (twi0-sck) - configured via pi-i2c0 overlay
 # - MAX11612 ADC at I2C address 0x34, SHT45 sensor at I2C address 0x44
+# - MP2672 charger at I2C address 0x4B (only accessible when USB power present)
 # - GPIO Pins: PC12 (pin 36, line 76) !CHARGING, PH9 (pin 26, line 233) !ACOK from MP2672GD
+# - HOST_CTL: GPIO 229 (pin 24) tied high via hardware pullup resistor for host control mode
 
 import rclpy
 from std_msgs.msg import Float32, Bool
@@ -59,9 +76,18 @@ from typing import Optional, Tuple
 # Hardware configuration constants
 I2C_BUS_NUMBER = 0  # Orange Pi Zero 2W default I2C bus
 
+# MP2672 I2C configuration
+MP2672_I2C_ADDR = 0x4B  # MP2672 I2C address in host control mode
+MP2672_REG_01 = 0x01  # Register 01H (see datasheet)
+MP2672_REG_02 = 0x02  # Register 02H - Configuration register (default: 0x95, see datasheet)
+MP2672_REG_STATUS = 0x03  # Register 03H - Status register (see datasheet page 31)
+MP2672_REG_04 = 0x04  # Register 04H - Fault register (default: 0x00, read-only, see datasheet)
+# Note: REG 05H is OTP-only and not accessible to customers
+
 # GPIO configuration for MP2672GD charger status
 CHARGING_GPIO_LINE = 76   # PC12 (pin 36) - !CHARGING from MP2672GD
 ACOK_GPIO_LINE = 233      # PH9 (pin 26) - !ACOK from MP2672GD
+HOST_CTL_GPIO_LINE = 229  # PH5/SPI1_CS0 (pin 24) - HOST_CTL to MP2672GD (not used, MPC2672GD reads CV pin on power-on only)
 
 # Sample rate configuration - dual timers for different sensor requirements
 SAIL_CURRENT_RATE_HZ = 5.0  # Hz for sail current (control critical)
@@ -146,6 +172,11 @@ class BatteryWaterNode(ArgoBaseNode):
             Bool, 'saltwater_alert', 10)
         self.pub_humidity_alert = self.create_publisher(
             Bool, 'humidity_alert', 10)
+        
+        # Critical I2C failure publisher (for automatic RTH switching)
+        self.pub_i2c_failure = self.create_publisher(
+            Bool, '/argo/critical/i2c_failure', 10)
+        self._i2c_failure_state = False  # Track current I2C failure state
 
         # Initialize health as unhealthy until we get readings
         self.set_unhealthy("No sensor readings yet")
@@ -200,6 +231,11 @@ class BatteryWaterNode(ArgoBaseNode):
         self._latest_anomaly_code = None
         self._latest_anomaly_reason = None
         
+        # MP2672 register information for service response
+        self._mp2672_status_info = None
+        self._mp2672_fault_info = None
+        self._mp2672_battery_missing_fault = False
+        
         # Thread-safe double buffer for service responses
         self._service_buffer = {
             'battery_voltage': 0.0,
@@ -219,6 +255,11 @@ class BatteryWaterNode(ArgoBaseNode):
             'charging_anomaly': False,
             'anomaly_code': None,
             'anomaly_reason': None,
+            # MP2672 charger information (NEW)
+            'mp2672_available': False,
+            'mp2672_status': None,  # Dict with parsed status register (REG 03H)
+            'mp2672_faults': None,  # Dict with parsed fault register (REG 04H)
+            'mp2672_battery_missing_fault': False,  # BATTFLOAT_STAT from REG 03H
             'timestamp': None
         }
         
@@ -273,6 +314,11 @@ class BatteryWaterNode(ArgoBaseNode):
         self._last_successful_read_time = time.monotonic()
         self._last_recovery_attempt_time = 0.0
         self._recovery_attempt_count = 0
+        
+        # Critical I2C failure detection (ADC failure = critical)
+        self._critical_i2c_failure = False
+        self._adc_failure_timeout = 30.0  # Consider critical after 30s of ADC failures
+        self._adc_failure_start_time = None
 
         # Timing and change detection for optimized publishing
         self._startup_time = time.monotonic()
@@ -332,10 +378,23 @@ class BatteryWaterNode(ArgoBaseNode):
         self.SHT45_HIGH_PRECISION_CMD = 0xFD
         self.SHT45_MEASUREMENT_DELAY = 0.01
 
+        # MP2672 I2C status monitoring
+        self.mp2672_available = False
+        self.mp2672_last_error_time = 0.0
+        self.mp2672_error_log_interval = 60.0  # Log errors max once per minute
+        
+        # Watchdog timer reset tracking (if watchdog is enabled instead of disabled)
+        self.mp2672_watchdog_enabled = False  # Track if watchdog is enabled (vs disabled)
+        self.mp2672_last_watchdog_reset_time = 0.0
+        self.mp2672_watchdog_reset_interval = 30.0  # Reset watchdog every 30s if enabled (timer is 40s default)
+        
         # GPIO setup for MP2672GD charger status monitoring
         self.gpio_available = False
         self.charging_gpio_line = None
         self.acok_gpio_line = None
+        # Note: HOST_CTL_GPIO_LINE (229) is tied high via hardware pullup resistor to VCC
+        # MP2672 checks CV pin on power-on only, so hardware pullup ensures host control mode
+        # GPIO can be used later to drive CV low to test standalone mode (future feature)
         if _HAS_GPIO:
             try:
                 # Initialize GPIO chip
@@ -409,6 +468,9 @@ class BatteryWaterNode(ArgoBaseNode):
 
             # Initial health status will be set after first sensor readings
             
+            # Check MP2672 I2C availability during initialization
+            self._check_mp2672_availability()
+            
             # Perform initial sensor readings for immediate status display
             self._perform_initial_readings()
         
@@ -470,6 +532,11 @@ class BatteryWaterNode(ArgoBaseNode):
                 'charging_anomaly': self._latest_charging_anomaly,
                 'anomaly_code': self._latest_anomaly_code,
                 'anomaly_reason': self._latest_anomaly_reason,
+                # MP2672 charger information
+                'mp2672_available': self.mp2672_available,
+                'mp2672_status': getattr(self, '_mp2672_status_info', None),
+                'mp2672_faults': getattr(self, '_mp2672_fault_info', None),
+                'mp2672_battery_missing_fault': getattr(self, '_mp2672_battery_missing_fault', False),
                 'timestamp': time.monotonic()
             })
 
@@ -621,8 +688,40 @@ class BatteryWaterNode(ArgoBaseNode):
                 'voltage_slope_vph': buffer_copy.get('voltage_slope_vph'),
                 'charging_anomaly': buffer_copy.get('charging_anomaly', False),
                 'anomaly_code': buffer_copy.get('anomaly_code'),
-                'anomaly_reason': buffer_copy.get('anomaly_reason')
+                'anomaly_reason': buffer_copy.get('anomaly_reason'),
+                # MP2672 charger information (NEW)
+                'mp2672_available': buffer_copy.get('mp2672_available', False),
+                'mp2672_status': buffer_copy.get('mp2672_status'),
+                'mp2672_faults': buffer_copy.get('mp2672_faults'),
+                'mp2672_battery_missing_fault': buffer_copy.get('mp2672_battery_missing_fault', False)
             }
+            
+            # Determine MP2672 fault condition summary for alerts
+            mp2672_fault_summary = None
+            if battery_data.get('mp2672_available') and battery_data.get('mp2672_faults'):
+                faults_dict = battery_data['mp2672_faults']
+                active_faults = []
+                
+                if faults_dict.get('wd_fault'):
+                    active_faults.append('Watchdog timer expiration')
+                if faults_dict.get('input_fault'):
+                    active_faults.append('Input OVP fault')
+                if faults_dict.get('therm_sd_fault'):
+                    active_faults.append('Thermal shutdown')
+                if faults_dict.get('timer_fault'):
+                    active_faults.append('Safety timer expiration')
+                if faults_dict.get('bat_fault'):
+                    active_faults.append('Battery OVP fault')
+                if faults_dict.get('ntc_fault_str') and faults_dict.get('ntc_fault_str') != 'Normal':
+                    active_faults.append(f"NTC {faults_dict['ntc_fault_str']}")
+                if battery_data.get('mp2672_battery_missing_fault'):
+                    active_faults.append('Battery missing or balance cable fault')
+                
+                if active_faults:
+                    mp2672_fault_summary = ' | '.join(active_faults)
+            
+            # Add MP2672 fault summary to battery data
+            battery_data['mp2672_fault_summary'] = mp2672_fault_summary
 
             # Format battery summary
             battery_summary = None
@@ -648,9 +747,17 @@ class BatteryWaterNode(ArgoBaseNode):
                 if battery_data.get(alert_key) is True:
                     active_alerts.append(description)
 
-            # Charging anomaly alert
+            # Charging anomaly alert (voltage falling while charging reported)
             if battery_data.get('charging_anomaly') is True:
                 active_alerts.append('⚠️ CHARGER POWER FAULT')
+            
+            # MP2672 fault alerts (from fault register - only when USB power present)
+            if battery_data.get('mp2672_fault_summary'):
+                active_alerts.append(f'⚠️ MP2672: {battery_data["mp2672_fault_summary"]}')
+            
+            # MP2672 battery missing/balance cable fault (from status register)
+            if battery_data.get('mp2672_battery_missing_fault'):
+                active_alerts.append('⚠️ BATTERY MISSING OR BALANCE CABLE FAULT')
 
             critical_alerts = " | ".join(
                 active_alerts) if active_alerts else None
@@ -1142,7 +1249,493 @@ class BatteryWaterNode(ArgoBaseNode):
             
         return False
 
-    # ---------- GPIO reading helpers ----------
+    # ---------- MP2672 I2C helpers ----------
+    def _read_mp2672_register(self, reg: int) -> Optional[int]:
+        """
+        Read a single register from MP2672 via I2C.
+        
+        Args:
+            reg: Register address (0x00-0xFF)
+        
+        Returns:
+            Register value (0-255) or None if read failed
+        """
+        if not self.use_smbus2:
+            return None
+            
+        try:
+            # MP2672 uses single-byte read after register address write
+            # Write register address, then read the register value
+            result = self._i2c_write_read(MP2672_I2C_ADDR, reg, 1)
+            if result and len(result) > 0:
+                return result[0]
+            return None
+        except Exception as e:
+            current_time = time.monotonic()
+            if current_time - self.mp2672_last_error_time >= self.mp2672_error_log_interval:
+                self.get_logger().debug(f"MP2672 register 0x{reg:02x} read failed: {e}")
+                self.mp2672_last_error_time = current_time
+            return None
+    
+    def _write_mp2672_register(self, reg: int, value: int) -> bool:
+        """
+        Write a single register to MP2672 via I2C.
+        
+        Args:
+            reg: Register address (0x00-0xFF)
+            value: Register value to write (0-255)
+        
+        Returns:
+            True if write succeeded, False otherwise
+        """
+        if not self.use_smbus2:
+            return False
+            
+        try:
+            # MP2672 write: first byte is register address, second byte is data
+            # Use write command with 2 bytes: [reg_addr, data]
+            with smbus2.SMBus(I2C_BUS_NUMBER) as b:
+                b.write_byte_data(MP2672_I2C_ADDR, reg, value & 0xFF)
+            return True
+        except Exception as e:
+            current_time = time.monotonic()
+            if current_time - self.mp2672_last_error_time >= self.mp2672_error_log_interval:
+                self.get_logger().warn(f"MP2672 register 0x{reg:02x} write failed: {e}")
+                self.mp2672_last_error_time = current_time
+            return False
+    
+    def _configure_mp2672_safe_settings(self) -> bool:
+        """
+        Configure MP2672 with safe settings for long-term USB charging.
+        
+        Critical settings:
+        - Disable CHG timer (REG02H bits [2:1] = 00) to prevent charging timeout
+        - Disable Watchdog timer (REG02H bits [5:4] = 00) to prevent watchdog expiration
+        - Disable Suspend mode (REG02H bit [0] = 1) to keep boost enabled
+        
+        This prevents mysterious charging timeouts and watchdog expiration during development
+        when Argo is left plugged into USB for extended periods.
+        
+        Returns:
+            True if configuration succeeded, False otherwise
+        """
+        if not self.mp2672_available:
+            return False
+        
+        try:
+            # Read current REG02H value
+            current_val = self._read_mp2672_register(MP2672_REG_02)
+            if current_val is None:
+                self.get_logger().warn("Failed to read MP2672 REG02H for configuration")
+                return False
+            
+            # Configure bits:
+            # Bit 7 (FSW): Preserve existing (switching frequency)
+            # Bit 6 (I2C WD Timer Reset): Set to 0 (normal operation, not resetting)
+            # Bits 5-4 (WD Timer [1:0]): Set to 00 (disable watchdog timer)
+            # Bit 3 (Register Reset): Preserve existing (0=keep)
+            # Bits 2-1 (CHG_TMR [1:0]): Set to 00 (disable CHG timer)
+            # Bit 0 (EN_SUSP): Set to 1 (disable suspend mode, enable boost)
+            
+            # Clear bits [5:0] to set all config bits, then set bit [0] = 1
+            # Mask 0xC0 = 11000000 preserves bits 7-6, clears bits 5-0
+            # But we want to clear bits 5-4 (watchdog) and bits 2-1 (CHG timer), keep bit 6 as 0
+            # So mask should be 0xC0 to preserve bits 7-6, then we'll set bit 0
+            new_val = current_val & 0xC0  # Preserve bits 7-6 (FSW and I2C WD Timer Reset)
+            new_val |= 0x01  # Set bit [0] = 1 (disable suspend, enable boost)
+            # Bits [5:4] remain 0 (watchdog timer disabled)
+            # Bits [2:1] remain 0 (CHG timer disabled)
+            # Bit 6 is preserved (I2C WD Timer Reset, typically 0)
+            
+            # Only write if value changed
+            if new_val != current_val:
+                if self._write_mp2672_register(MP2672_REG_02, new_val):
+                    # Verify write by reading back
+                    verify_val = self._read_mp2672_register(MP2672_REG_02)
+                    if verify_val == new_val:
+                        # Parse and log the configuration for verification
+                        wd_timer = (verify_val >> 4) & 0x03
+                        chg_tmr = (verify_val >> 1) & 0x03
+                        wd_timer_str = {0b00: "Disabled", 0b01: "40s", 0b10: "80s", 0b11: "160s"}.get(wd_timer, "Unknown")
+                        chg_tmr_str = {0b00: "Disabled", 0b01: "8hrs", 0b10: "20hrs", 0b11: "12hrs"}.get(chg_tmr, "Unknown")
+                        self.get_logger().info(
+                            f"MP2672 configured: REG02H = 0x{new_val:02x} "
+                            f"(WD timer: {wd_timer_str}, CHG timer: {chg_tmr_str}, Suspend disabled, Boost enabled)")
+                        return True
+                    else:
+                        # Verification failed - check if critical bits (WD timer, CHG timer, suspend) are correct
+                        # Some bits may be read-only or auto-set by the chip
+                        verify_wd_timer = (verify_val >> 4) & 0x03
+                        verify_chg_tmr = (verify_val >> 1) & 0x03
+                        verify_en_susp = verify_val & 0x01
+                        expected_wd_timer = 0b00  # Disabled
+                        expected_chg_tmr = 0b00  # Disabled
+                        expected_en_susp = 0b01  # Disabled (boost enabled)
+                        
+                        # Check critical bits: WD timer (must be disabled) and suspend (must be disabled)
+                        # CHG timer bit 2 may be read-only, so we accept if WD timer and suspend are correct
+                        if (verify_wd_timer == expected_wd_timer and 
+                            verify_en_susp == expected_en_susp):
+                            # Critical bits are correct, accept the configuration
+                            wd_timer_str = {0b00: "Disabled", 0b01: "40s", 0b10: "80s", 0b11: "160s"}.get(verify_wd_timer, "Unknown")
+                            chg_tmr_str = {0b00: "Disabled", 0b01: "8hrs", 0b10: "20hrs", 0b11: "12hrs"}.get(verify_chg_tmr, "Unknown")
+                            self.get_logger().info(
+                                f"MP2672 configured: REG02H = 0x{verify_val:02x} "
+                                f"(WD timer: {wd_timer_str}, CHG timer: {chg_tmr_str}, Suspend disabled, Boost enabled) "
+                                f"[Note: Some non-critical bits differ from written value]")
+                            return True
+                        else:
+                            self.get_logger().warn(
+                                f"MP2672 configuration verification failed: "
+                                f"wrote 0x{new_val:02x}, read back 0x{verify_val:02x}. "
+                                f"Critical bits: WD={verify_wd_timer} (expected {expected_wd_timer}), "
+                                f"CHG={verify_chg_tmr} (expected {expected_chg_tmr}), "
+                                f"SUSP={verify_en_susp} (expected {expected_en_susp})")
+                            return False
+                else:
+                    self.get_logger().warn("Failed to write MP2672 REG02H configuration")
+                    return False
+            else:
+                # Already configured correctly
+                self.get_logger().debug(
+                    f"MP2672 already configured correctly: REG02H = 0x{current_val:02x}")
+                return True
+                
+        except Exception as e:
+            self.get_logger().error(f"Error configuring MP2672: {e}")
+            return False
+    
+    def _read_mp2672_status(self) -> Optional[Tuple[bool, bool]]:
+        """
+        Read MP2672 status register (REG 03h) and parse charging status.
+        
+        Reference: MP2672 datasheet page 31, table for REG 03h
+        
+        Returns:
+            Tuple of (charging_status, ac_power_present) or None if read failed
+            charging_status: True if charging, False if not charging
+            ac_power_present: True if AC/USB power present, False if not present
+        """
+        status_reg = self._read_mp2672_register(MP2672_REG_STATUS)
+        if status_reg is None:
+            return None
+        
+        # Parse status register bits according to datasheet page 31 (REG 03H)
+        # 
+        # Bit definitions (from datasheet):
+        # Bits 5-4 (CHG_STAT [1:0]): 2-bit charging status
+        #   00 = Not charge
+        #   01 = Pre-charge
+        #   10 = Constant-current/constant-voltage charge (charging)
+        #   11 = Charge done
+        #
+        # Bit 3 (PPM_STAT): Power Path Management status
+        #   0 = Not PPM
+        #   1 = VINPPM (Input voltage PPM active - AC/USB power present)
+        #
+        # Bit 2 (BATTFLOAT_STAT): Battery status
+        #   0 = Battery present
+        #   1 = Battery missing
+        #
+        # Bit 1 (THERM_STAT): Thermal status
+        #   0 = Normal
+        #   1 = Thermal regulation
+        #
+        # Bit 0 (VSYS_STAT): VSYSMIN regulation status
+        #   0 = Not in VSYSMIN regulation
+        #   1 = In VSYSMIN regulation
+        
+        # Extract CHG_STAT [1:0] from bits 5-4
+        chg_stat = (status_reg >> 4) & 0x03  # Extract bits 5-4 (2-bit value)
+        
+        # Determine charging status: charging if CHG_STAT is 01 (pre-charge) or 10 (CC/CV charge)
+        charging_status = (chg_stat == 0b01) or (chg_stat == 0b10)
+        
+        # Extract PPM_STAT from bit 3 (indicates AC/USB power present and active)
+        ppm_stat = (status_reg >> 3) & 0x01
+        ac_power_present = bool(ppm_stat)  # 1 = VINPPM active (AC power present)
+        
+        # Extract BATTFLOAT_STAT from bit 2 (battery present/missing)
+        # Critical: BATTFLOAT_STAT=1 indicates battery missing/balance cable fault
+        battfloat_stat = (status_reg >> 2) & 0x01
+        battery_missing = bool(battfloat_stat)  # 1 = Battery missing or balance cable fault
+        
+        # Log battery missing/balance cable fault (throttled)
+        if battery_missing:
+            current_time = time.monotonic()
+            if current_time - self.mp2672_last_error_time >= self.mp2672_error_log_interval:
+                self.get_logger().warning(
+                    "MP2672 BATTFLOAT_STAT=1: Battery missing or balance cable fault detected! "
+                    "Check balance cable connection.")
+                self.mp2672_last_error_time = current_time
+        
+        return charging_status, ac_power_present
+    
+    def _read_mp2672_register_01(self) -> Optional[dict]:
+        """
+        Read MP2672 register 01H, fast charge current setting. Top 4 bits are OTP (not user programmable)
+        Lowest 4 bits are ICC, Fast charge current setting.
+
+        The fast charge current depends on RISet, which for argo is 6kOhms.
+        Then bit 0 is 100mA, bit 1 is 200mA, bit 2 is 400mA, bit 3 is 800mA, i.e. binary code.
+        Bits 1111 thus means 500mA + 1500mA = 2000mA.
+        
+        
+        Returns:
+            ICC bits, OTP bits are masked out. Return None if read failed.
+        """
+        reg_val = self._read_mp2672_register(MP2672_REG_01)
+        if reg_val is None:
+            return None
+        
+        # TODO: Parse bits according to datasheet when available
+        return {
+            'raw': reg_val,
+            'hex': f'0x{reg_val:02x}',
+            'binary': f'{reg_val:08b}'
+        }
+    
+    def _read_mp2672_register_02(self) -> Optional[dict]:
+        """
+        Read MP2672 register 02H (Configuration register).
+        
+        Default: 0x95 (1001 0101)
+        
+        Bit definitions (from datasheet):
+        - Bit 7 (FSW): Switching frequency (0=600kHz, 1=1200kHz, default 1=1200kHz)
+        - Bit 6: I2C WD Timer Reset (0=normal, 1=reset timer, default 0)
+        - Bits 5-4 (WD Timer [1:0]): Watchdog timer (00=disable, 01=40s, 10=80s, 11=160s. default 40s (01))
+          Note: OTP programmable means default is set during manufacturing, but bits are writable via I2C
+        - Bit 3: Register Reset (0=keep, 1=reset, after reset goes back to 0 automatically)
+        - Bits 2-1 (CHG_TMR [1:0]): Charge timer (00=disable, 01=8hrs, 10=20hrs, 11=12hrs. default 10 (20 hours))
+          Note: Bit 2 may be read-only or auto-set by chip (observed behavior)
+        - Bit 0 (EN_SUSP): Suspend mode (0=enable suspend, 1=disable suspend/enable boost, default 1=disable suspend/enable boost)
+        
+        Returns:
+            Dictionary with parsed configuration or None if read failed
+        """
+        reg_val = self._read_mp2672_register(MP2672_REG_02)
+        if reg_val is None:
+            return None
+        
+        # Parse bits according to datasheet
+        fsw = (reg_val >> 7) & 0x01
+        i2c_wd_reset = (reg_val >> 6) & 0x01
+        wd_timer = (reg_val >> 4) & 0x03
+        reg_reset = (reg_val >> 3) & 0x01
+        chg_tmr = (reg_val >> 1) & 0x03
+        en_susp = reg_val & 0x01
+        
+        # Convert to human-readable values
+        fsw_freq = "1200kHz" if fsw else "600kHz"
+        wd_timer_vals = {0b00: "Disabled", 0b01: "40s", 0b10: "80s", 0b11: "160s"}
+        chg_tmr_vals = {0b00: "Disabled", 0b01: "8hrs", 0b10: "20hrs", 0b11: "12hrs"}
+        
+        return {
+            'raw': reg_val,
+            'hex': f'0x{reg_val:02x}',
+            'fsw': fsw,
+            'fsw_freq': fsw_freq,
+            'i2c_wd_reset': bool(i2c_wd_reset),
+            'wd_timer': wd_timer,
+            'wd_timer_str': wd_timer_vals.get(wd_timer, "Unknown"),
+            'reg_reset': bool(reg_reset),
+            'chg_tmr': chg_tmr,
+            'chg_tmr_str': chg_tmr_vals.get(chg_tmr, "Unknown"),
+            'en_susp': bool(en_susp),
+            'suspend_mode': "Disabled (boost enabled)" if en_susp else "Enabled (boost disabled)"
+        }
+    
+    def _read_mp2672_register_04(self) -> Optional[dict]:
+        """
+        Read MP2672 register 04H (Fault register).
+        
+        Default: 0x00 (0000 0000) - All read-only fault flags
+        
+        Bit definitions (from datasheet):
+        - Bit 7 (WD_FAULT): Watchdog timer expiration (0=normal, 1=fault)
+        - Bit 6 (INPUT_FAULT): Input OVP fault (0=normal, 1=fault)
+        - Bit 5 (THERM_SD_FAULT): Thermal shutdown (0=normal, 1=fault)
+        - Bit 4 (TIMER_FAULT): Safety timer expiration (0=normal, 1=fault)
+        - Bit 3 (BAT_FAULT): Battery OVP fault (0=normal, 1=fault)
+        - Bits 2-0 (NTC_FAULT [2:0]): NTC fault status
+          000=normal, 001=cold, 010=cool, 011=warm, 100=hot
+        
+        Returns:
+            Dictionary with parsed fault status or None if read failed
+        """
+        reg_val = self._read_mp2672_register(MP2672_REG_04)
+        if reg_val is None:
+            return None
+        
+        # Parse bits according to datasheet
+        wd_fault = (reg_val >> 7) & 0x01
+        input_fault = (reg_val >> 6) & 0x01
+        therm_sd_fault = (reg_val >> 5) & 0x01
+        timer_fault = (reg_val >> 4) & 0x01
+        bat_fault = (reg_val >> 3) & 0x01
+        ntc_fault = reg_val & 0x07
+        
+        # Convert NTC fault to human-readable
+        ntc_vals = {
+            0b000: "Normal",
+            0b001: "Cold",
+            0b010: "Cool",
+            0b011: "Warm",
+            0b100: "Hot"
+        }
+        
+        # Check if any fault is active
+        any_fault = (wd_fault or input_fault or therm_sd_fault or 
+                    timer_fault or bat_fault or ntc_fault != 0b000)
+        
+        return {
+            'raw': reg_val,
+            'hex': f'0x{reg_val:02x}',
+            'any_fault': any_fault,
+            'wd_fault': bool(wd_fault),
+            'input_fault': bool(input_fault),
+            'therm_sd_fault': bool(therm_sd_fault),
+            'timer_fault': bool(timer_fault),
+            'bat_fault': bool(bat_fault),
+            'ntc_fault': ntc_fault,
+            'ntc_fault_str': ntc_vals.get(ntc_fault, "Unknown"),
+            'fault_summary': {
+                'wd_fault': "Watchdog timer expiration" if wd_fault else None,
+                'input_fault': "Input OVP fault" if input_fault else None,
+                'therm_sd_fault': "Thermal shutdown" if therm_sd_fault else None,
+                'timer_fault': "Safety timer expiration" if timer_fault else None,
+                'bat_fault': "Battery OVP fault" if bat_fault else None,
+                'ntc_fault': f"NTC {ntc_vals.get(ntc_fault, 'Unknown')}" if ntc_fault != 0b000 else None
+            }
+        }
+    
+    def _reset_mp2672_watchdog(self) -> bool:
+        """
+        Reset MP2672 watchdog timer by toggling I2C WD Timer Reset bit (REG02H bit 6).
+        
+        According to datasheet: In host control mode, the watchdog timer resets all
+        registers to default values if not reset periodically. This method resets the
+        watchdog timer to prevent register resets.
+        
+        Returns:
+            True if reset succeeded, False otherwise
+        """
+        if not self.mp2672_available:
+            return False
+        
+        try:
+            # Read current REG02H value
+            current_val = self._read_mp2672_register(MP2672_REG_02)
+            if current_val is None:
+                return False
+            
+            # Set bit 6 (I2C WD Timer Reset) to 1 to reset the timer
+            reset_val = current_val | 0x40  # Set bit 6 = 1 (0x40 = 01000000)
+            
+            if self._write_mp2672_register(MP2672_REG_02, reset_val):
+                # Immediately clear bit 6 back to 0 (normal operation)
+                # This completes the reset cycle
+                normal_val = reset_val & 0xBF  # Clear bit 6 (0xBF = 10111111)
+                return self._write_mp2672_register(MP2672_REG_02, normal_val)
+            
+            return False
+        except Exception as e:
+            self.get_logger().debug(f"Failed to reset MP2672 watchdog: {e}")
+            return False
+    
+    def _check_mp2672_availability(self):
+        """
+        Check if MP2672 is available on I2C bus and configure safe settings.
+        
+        Note: MP2672 only appears on I2C bus when USB power is present (powers the chip).
+        During normal robot operation (battery only), MP2672 is not accessible via I2C.
+        When USB power is connected (e.g., at shore), we configure safe settings:
+        - Disable CHG timer to prevent charging timeout
+        - Disable Watchdog timer to prevent register resets (or reset it periodically if enabled)
+        - Disable Suspend mode to keep boost enabled
+        
+        According to datasheet: In host control mode, the watchdog timer resets all registers
+        to default values if not reset periodically. We disable it by default, but if enabled,
+        we reset it periodically to prevent register resets.
+        """
+        try:
+            # Try reading status register to verify device is present
+            status = self._read_mp2672_register(MP2672_REG_STATUS)
+            if status is not None:
+                if not self.mp2672_available:
+                    self.mp2672_available = True
+                    self.get_logger().info(f"MP2672 detected at I2C address 0x{MP2672_I2C_ADDR:02x} (USB power present)")
+                    
+                    # First, check for and clear any existing watchdog fault by resetting watchdog
+                    fault_reg = self._read_mp2672_register(MP2672_REG_04)
+                    if fault_reg is not None and (fault_reg & 0x80):  # Bit 7 = watchdog fault
+                        self.get_logger().warn("MP2672 watchdog fault detected - resetting watchdog timer")
+                        self._reset_mp2672_watchdog()
+                    
+                    # Configure safe settings for long-term USB charging
+                    self._configure_mp2672_safe_settings()
+                    
+                    # Check if watchdog is enabled (vs disabled) for periodic reset tracking
+                    reg02 = self._read_mp2672_register(MP2672_REG_02)
+                    if reg02 is not None:
+                        wd_timer = (reg02 >> 4) & 0x03
+                        chg_tmr = (reg02 >> 1) & 0x03
+                        self.mp2672_watchdog_enabled = (wd_timer != 0b00)  # Enabled if not 00
+                        wd_timer_str = {0b00: "Disabled", 0b01: "40s", 0b10: "80s", 0b11: "160s"}.get(wd_timer, "Unknown")
+                        chg_tmr_str = {0b00: "Disabled", 0b01: "8hrs", 0b10: "20hrs", 0b11: "12hrs"}.get(chg_tmr, "Unknown")
+                        self.get_logger().info(f"MP2672 REG02H = 0x{reg02:02x}: WD timer = {wd_timer_str}, CHG timer = {chg_tmr_str}")
+                        if self.mp2672_watchdog_enabled:
+                            self.get_logger().info(f"MP2672 watchdog timer is enabled, will reset periodically")
+                else:
+                    # MP2672 already available - check if we need to reset watchdog
+                    # Only reset if watchdog is enabled (not disabled)
+                    if self.mp2672_watchdog_enabled:
+                        current_time = time.monotonic()
+                        if (current_time - self.mp2672_last_watchdog_reset_time) >= self.mp2672_watchdog_reset_interval:
+                            if self._reset_mp2672_watchdog():
+                                self.mp2672_last_watchdog_reset_time = current_time
+                                self.get_logger().debug("MP2672 watchdog timer reset")
+                return True
+            else:
+                if self.mp2672_available:
+                    self.mp2672_available = False
+                    self.get_logger().debug("MP2672 not accessible via I2C (normal when USB power not present)")
+                return False
+        except Exception:
+            if self.mp2672_available:
+                self.mp2672_available = False
+                self.get_logger().debug("MP2672 I2C communication error (normal when USB power not present)")
+            return False
+
+    # ---------- Charging status reading (MP2672 I2C with GPIO fallback) ----------
+    def _read_charging_status(self):
+        """
+        Read charging status from MP2672 I2C register (primary) or GPIO (fallback).
+        
+        Priority:
+        1. MP2672 I2C register 0x03 (if available)
+        2. GPIO status with time-window filtering (fallback)
+        
+        Returns:
+            Tuple of (charging_status, ac_power_present) or (None, None) if unavailable
+        """
+        # Try MP2672 I2C first (primary source)
+        if self.mp2672_available:
+            status = self._read_mp2672_status()
+            if status is not None:
+                charging_status, ac_power_present = status
+                # Update GPIO timestamps to match I2C reading for consistency
+                current_time = time.monotonic()
+                if charging_status:
+                    self._last_charging_true_time = current_time
+                if ac_power_present:
+                    self._last_ac_power_true_time = current_time
+                return charging_status, ac_power_present
+        
+        # Fallback to GPIO if I2C not available
+        return self._read_gpio_status()
+    
     def _read_gpio_status(self):
         """
         Get current GPIO status based on time-window filtering.
@@ -1200,6 +1793,21 @@ class BatteryWaterNode(ArgoBaseNode):
                 f"Node health set to UNHEALTHY due to {sensor_name} errors. Switching to low-frequency retry mode.")
             # Switch to low-frequency retry mode
             self._switch_to_retry_mode()
+        
+        # Check for critical I2C failure (ADC sensor failure = critical for battery monitoring)
+        if sensor_name == "ADC sensors" or "ADC" in sensor_name:
+            if self._adc_failure_start_time is None:
+                self._adc_failure_start_time = current_time
+                self.get_logger().warn("ADC failure detected - starting critical failure timer")
+            
+            # Check if ADC has been failing for too long (critical failure)
+            failure_duration = current_time - self._adc_failure_start_time
+            if failure_duration >= self._adc_failure_timeout and not self._critical_i2c_failure:
+                self._critical_i2c_failure = True
+                self._publish_i2c_failure(True)
+                self.get_logger().error(
+                    f"🔴 CRITICAL I2C FAILURE: ADC sensor has been failing for {failure_duration:.1f}s. "
+                    f"Battery monitoring unavailable - controller should switch to RTH mode.")
 
     def _switch_to_retry_mode(self):
         """Switch timers to low-frequency retry mode"""
@@ -1476,12 +2084,27 @@ class BatteryWaterNode(ArgoBaseNode):
             fill = width
         return '[' + ('#' * fill) + ('-' * (width - fill)) + ']'
 
+    def _publish_i2c_failure(self, failed: bool):
+        """Publish I2C failure status to critical failure topic"""
+        try:
+            msg = Bool(data=failed)
+            self.pub_i2c_failure.publish(msg)
+            self._i2c_failure_state = failed
+            if failed:
+                self.get_logger().error("Published CRITICAL I2C failure - controller should switch to RTH")
+            else:
+                self.get_logger().info("Published I2C recovery - critical failure cleared")
+        except Exception as e:
+            self.get_logger().error(f"Error publishing I2C failure status: {e}")
+    
     def _request_shutdown(self):
         """Request node shutdown due to critical sensor failure"""
         self._shutdown_requested = True
         self.get_logger().fatal("Node shutting down due to critical sensor failure")
         # Set health status as failed
         self.set_unhealthy("Critical sensor failure - shutting down")
+        # Publish critical I2C failure before shutdown
+        self._publish_i2c_failure(True)
         # Cancel timers to stop further execution
         if hasattr(self, 'sail_current_timer'):
             self.sail_current_timer.cancel()
@@ -1591,6 +2214,14 @@ class BatteryWaterNode(ArgoBaseNode):
             # Update successful read time for critical sensors
             self._last_successful_read_time = time.monotonic()
             
+            # Reset ADC failure timer on successful read
+            if self._adc_failure_start_time is not None:
+                self._adc_failure_start_time = None
+                if self._critical_i2c_failure:
+                    self._critical_i2c_failure = False
+                    self._publish_i2c_failure(False)
+                    self.get_logger().info("✅ I2C recovery: ADC sensor communication restored - critical failure cleared")
+            
             # If we were unhealthy but now have successful reads, recover to normal mode
             if not self.node_healthy:
                 self.node_healthy = True
@@ -1628,10 +2259,66 @@ class BatteryWaterNode(ArgoBaseNode):
             pass
         self._latest_battery_remaining_pct = battery_remaining_pct
 
-        # Read GPIO status
-        charging_status, ac_power_present = self._read_gpio_status()
+        # Check MP2672 availability and read charging status (I2C primary, GPIO fallback)
+        self._check_mp2672_availability()
+        charging_status, ac_power_present = self._read_charging_status()
         self._latest_charging_status = charging_status
         self._latest_ac_power_present = ac_power_present
+        
+        # Read MP2672 register information for service response (when USB power present)
+        mp2672_status_info = None
+        mp2672_fault_info = None
+        battery_missing_fault = False
+        
+        if self.mp2672_available:
+            try:
+                # Read status register (REG 03H) for detailed charging state
+                status_reg = self._read_mp2672_register(MP2672_REG_STATUS)
+                if status_reg is not None:
+                    # Parse status register
+                    chg_stat = (status_reg >> 4) & 0x03
+                    ppm_stat = (status_reg >> 3) & 0x01
+                    battfloat_stat = (status_reg >> 2) & 0x01
+                    therm_stat = (status_reg >> 1) & 0x01
+                    vsys_stat = status_reg & 0x01
+                    
+                    chg_stat_names = {
+                        0b00: 'Not charge',
+                        0b01: 'Pre-charge',
+                        0b10: 'Constant-current/constant-voltage charge',
+                        0b11: 'Charge done'
+                    }
+                    
+                    battery_missing_fault = bool(battfloat_stat)
+                    
+                    mp2672_status_info = {
+                        'raw': status_reg,
+                        'hex': f'0x{status_reg:02x}',
+                        'chg_stat': chg_stat,
+                        'chg_stat_str': chg_stat_names.get(chg_stat, 'Unknown'),
+                        'ppm_stat': bool(ppm_stat),
+                        'ppm_stat_str': 'VINPPM active (AC/USB power present)' if ppm_stat else 'No AC/USB power',
+                        'battfloat_stat': bool(battfloat_stat),
+                        'battfloat_stat_str': 'Battery missing or balance cable fault' if battfloat_stat else 'Battery present',
+                        'therm_stat': bool(therm_stat),
+                        'therm_stat_str': 'Thermal regulation' if therm_stat else 'Normal',
+                        'vsys_stat': bool(vsys_stat),
+                        'vsys_stat_str': 'In VSYSMIN regulation' if vsys_stat else 'Not in VSYSMIN regulation'
+                    }
+                
+                # Read fault register (REG 04H) for fault conditions
+                fault_info = self._read_mp2672_register_04()
+                if fault_info is not None:
+                    mp2672_fault_info = fault_info
+                    
+            except Exception as e:
+                # Fail gracefully - MP2672 info not critical for basic operation
+                self.get_logger().debug(f"Failed to read MP2672 register info: {e}")
+        
+        # Store MP2672 information for service buffer
+        self._mp2672_status_info = mp2672_status_info
+        self._mp2672_fault_info = mp2672_fault_info
+        self._mp2672_battery_missing_fault = battery_missing_fault
 
         # Publish all battery safety sensors
         if rclpy.ok():
@@ -1732,6 +2419,24 @@ class BatteryWaterNode(ArgoBaseNode):
 
         # Derive voltage slope (V/h) over recent samples and detect anomaly:
         # "charging" asserted while voltage slope is significantly negative.
+        #
+        # CHARGING ANOMALY DETECTION:
+        # This detects when the charger reports "charging" status (via GPIO or I2C) but the
+        # battery voltage is actually decreasing. This indicates a fault condition where:
+        # - Charger reports charging but is not delivering power, OR
+        # - System load exceeds charger capability, OR
+        # - USB power supply is insufficient (poor connection, weak USB port), OR
+        # - Charger hardware fault (when USB present, check MP2672 fault register)
+        #
+        # When USB power is present (MP2672 accessible via I2C):
+        #   - Check mp2672_faults for specific fault conditions (Input OVP, Thermal shutdown, etc.)
+        #   - Check mp2672_status for BATTFLOAT_STAT (battery missing/balance cable fault)
+        #   - Fault register provides detailed diagnostics (REG 04H)
+        #
+        # When USB power is NOT present (normal robot operation):
+        #   - MP2672 not accessible via I2C (powered by USB)
+        #   - Charging anomaly detection via voltage slope is primary fault indicator
+        #   - GPIO status with time-window filtering is used for charging status
         self._latest_voltage_slope_vph = None
         self._latest_charging_anomaly = False
         self._latest_anomaly_code = None
@@ -1749,10 +2454,13 @@ class BatteryWaterNode(ArgoBaseNode):
                 len(self._voltage_samples) >= self.battery_lifetime_min_samples and
                 self._latest_voltage_slope_vph <= MIN_DISCHARGING_SLOPE_FOR_ANOMALY_VPH):
             # Charging asserted but voltage is falling noticeably -> anomaly
+            # This indicates charger is not delivering power despite reporting charging status
             self._latest_charging_anomaly = True
             self._latest_anomaly_code = "charger_power_fault"
             self._latest_anomaly_reason = (
-                f"Charging active but voltage falling (slope {self._latest_voltage_slope_vph:.2f} V/h)"
+                f"Charging active but voltage falling (slope {self._latest_voltage_slope_vph:.2f} V/h). "
+                f"Possible causes: insufficient USB power, charger fault, or excessive load. "
+                f"{'Check MP2672 fault register for details.' if self.mp2672_available else 'MP2672 not accessible (USB power not present).'}"
             )
             # Prefer time-to-empty estimate; clear time-to-full as it's misleading
             self._latest_time_to_full_hours = None
