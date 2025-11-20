@@ -312,6 +312,7 @@ class MockSailboatSimulator:
             if abs(heading_to_downwind) < 5.0:
                 # Already pointing downwind, just maintain heading
                 turn_rate = 0.0
+                turn_sign = 0.0  # Not turning, sign doesn't matter
             else:
                 # Turn toward downwind
                 turn_sign = 1.0 if heading_to_downwind > 0.0 else -1.0
