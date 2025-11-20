@@ -28,8 +28,26 @@ class CrosserController(BaseController):
     Crosser controller that crosses from one side of the pond to the other,
     targeting the middle waypoint or center of the sailing area.
     
-    State Machine:
-    ==============
+    State and Maneuver Hierarchy:
+    =============================
+    
+    The controller tracks TWO separate concepts:
+    
+    1. **Crosser State** (what the controller is trying to achieve):
+       - toward_middle: Navigating toward the middle waypoint
+       - crossing_through: Maintaining steady heading after passing middle
+       - turning_around: Executing a turn at the boundary
+       - tacking_upwind: Zigzagging upwind when middle is in no-go zone
+    
+    2. **Maneuver** (how the boat is currently sailing):
+       - sailing: Normal sailing (default maneuver)
+       - tacking: Turning through the wind (bow through wind)
+       - jibing: Turning with wind behind (stern through wind)
+    
+    Logs show both: "State (MANEUVER)" e.g., "Turning Around (TACKING)"
+    
+    State Machine (Crosser States):
+    ================================
     
     The controller uses a state machine with four states:
     
@@ -136,6 +154,8 @@ class CrosserController(BaseController):
         self._arrival_logged = False
         self._crossing_heading = None  # Store the steady heading when crossing through middle
         self._turning_target_heading = None  # Target heading when turning around
+        self._turning_maneuver_type = None  # Type of turn: 'tacking' or 'jibing'
+        self._current_maneuver = 'sailing'  # Current sailing maneuver: 'sailing', 'tacking', 'jibing'
         self._tacking_target_heading = None  # Target heading when tacking upwind
         self._last_tack_time = 0.0  # Time of last tack to prevent rapid switching
         self._tack_cooldown = 5.0  # Minimum seconds between tacks
@@ -322,6 +342,8 @@ class CrosserController(BaseController):
         self._arrival_logged = False
         self._crossing_heading = None
         self._turning_target_heading = None
+        self._turning_maneuver_type = None
+        self._current_maneuver = 'sailing'
         self._tacking_target_heading = None
         self._last_tack_time = 0.0
         self._tack_start_heading = None
@@ -337,6 +359,8 @@ class CrosserController(BaseController):
         self._arrival_logged = False
         self._crossing_heading = None
         self._turning_target_heading = None
+        self._turning_maneuver_type = None
+        self._current_maneuver = 'sailing'
         self._tacking_target_heading = None
         self._last_tack_time = 0.0
         self._tack_start_heading = None
@@ -473,12 +497,16 @@ class CrosserController(BaseController):
                             # Sailing downwind - jibe
                             old_state = self.crossing_state
                             self.crossing_state = 'turning_around'
+                            self._turning_maneuver_type = 'jibing'
+                            self._current_maneuver = 'jibing'
                             self._log_state_transition(old_state, self.crossing_state,
                                                       f"Approaching boundary - sailing downwind, jibing",
                                                       {'boundary_distance': abs_distance_to_boundary, 'threshold': self.boundary_turn_threshold,
                                                        'wind_angle': relative_wind_angle, 'predicted_crossing': predicted_crossing_time if predicted_crossing_time != float('inf') else None})
                             # Store start heading for turn completion detection
                             self._tack_start_heading = state.compass_heading
+                            # Publish 'jibing' state for visualization
+                            self.publish_state('jibing')
                             
                             # Calculate jibe target: turn to point back toward middle
                             # CRITICAL: Ensure target points toward middle, not away from it
@@ -509,6 +537,8 @@ class CrosserController(BaseController):
                             # Sailing upwind - tack (need to be careful to avoid stays)
                             old_state = self.crossing_state
                             self.crossing_state = 'turning_around'
+                            self._turning_maneuver_type = 'tacking'
+                            self._current_maneuver = 'tacking'
                             self._log_state_transition(old_state, self.crossing_state,
                                                       f"Approaching boundary - sailing upwind, tacking",
                                                       {'boundary_distance': abs_distance_to_boundary, 'threshold': self.boundary_turn_threshold,
@@ -516,6 +546,8 @@ class CrosserController(BaseController):
                             # Store tack start info to detect when we've passed through wind
                             self._tack_start_heading = state.compass_heading
                             self._tack_wind_direction = wind_dir_abs
+                            # Publish 'tacking' state for visualization
+                            self.publish_state('tacking')
                             
                             # Calculate tack target: turn through the wind using tack_angle
                             # Use wider angle for boundary turns to ensure successful tack with momentum
@@ -552,17 +584,19 @@ class CrosserController(BaseController):
                         # No wind data - just reverse heading
                         old_state = self.crossing_state
                         self.crossing_state = 'turning_around'
+                        self._turning_maneuver_type = 'turn'  # Generic turn (no wind data to determine tack vs jibe)
                         self._log_state_transition(old_state, self.crossing_state,
                                                   f"Approaching boundary - no wind data, reversing heading",
                                                   {'boundary_distance': abs_distance_to_boundary, 'threshold': self.boundary_turn_threshold,
                                                    'predicted_crossing': predicted_crossing_time if predicted_crossing_time != float('inf') else None})
                         # Store start heading for turn completion detection
                         self._tack_start_heading = state.compass_heading if state.compass_heading is not None else None
+                        # Publish generic 'turning_around' state for visualization
+                        self.publish_state('turning_around')
                         if state.compass_heading is not None:
                             self._turning_target_heading = (state.compass_heading + 180.0) % 360.0
                         else:
                             self._turning_target_heading = (bearing_to_middle + 180.0) % 360.0 if bearing_to_middle is not None else 0.0
-                self.publish_state('turning_around')
                 target_bearing = self._turning_target_heading if self._turning_target_heading is not None else state.compass_heading if state.compass_heading is not None else 0.0
             else:
                 # Not approaching boundary - continue normal operation
@@ -649,6 +683,7 @@ class CrosserController(BaseController):
                     # Turn complete, head toward middle
                     old_state = self.crossing_state
                     self.crossing_state = 'toward_middle'
+                    self._current_maneuver = 'sailing'  # Return to normal sailing
                     details = {'heading_error': heading_error, 'heading_to_middle': heading_to_middle}
                     if turn_progress is not None:
                         details['turn_progress'] = turn_progress
@@ -656,6 +691,7 @@ class CrosserController(BaseController):
                                               f"Turn complete - heading toward middle",
                                               details)
                     self._turning_target_heading = None
+                    self._turning_maneuver_type = None
                     self._crossing_heading = None
                     self._tack_start_heading = None
                     self._tack_wind_direction = None
@@ -671,6 +707,7 @@ class CrosserController(BaseController):
                 # Middle is upwind - need to tack
                 old_state = self.crossing_state
                 self.crossing_state = 'tacking_upwind'
+                self._current_maneuver = 'tacking'  # Tacking maneuver when sailing upwind
                 self._tacking_target_heading = self._calculate_tacking_target_heading(state, bearing_to_middle)
                 self._last_tack_time = time.time()
                 wind_dir_abs = self._calculate_absolute_wind_direction(state)
@@ -696,6 +733,7 @@ class CrosserController(BaseController):
                 # Middle is no longer upwind - can sail directly
                 old_state = self.crossing_state
                 self.crossing_state = 'toward_middle'
+                self._current_maneuver = 'sailing'  # Return to normal sailing
                 self._tacking_target_heading = None
                 wind_dir_abs = self._calculate_absolute_wind_direction(state)
                 angle_from_wind = abs(signed_angle_difference_degrees(wind_dir_abs, bearing_to_middle)) if wind_dir_abs is not None else None
@@ -857,9 +895,25 @@ class CrosserController(BaseController):
         
         if should_log:
             log_parts = []
-            mode_desc = self.crossing_state
+            # Show both state and maneuver: "state (maneuver)"
+            state_name = self.crossing_state
+            maneuver_name = self._current_maneuver
+            
+            # Format state name for display
+            state_display = state_name.replace('_', ' ').title()
+            maneuver_display = maneuver_name.upper()
+            
+            # Combine state and maneuver
+            mode_desc = f"{state_display} ({maneuver_display})"
+            
+            # Add extra context for specific states
             if self.crossing_state == 'tacking_upwind':
-                mode_desc = f"{self.crossing_state} (middle is upwind)"
+                mode_desc = f"{state_display} ({maneuver_display}) - middle is upwind"
+            
+            # Publish the formatted state to /controller/state for visualization
+            # This includes both the goal state and the current maneuver
+            self.publish_state(mode_desc)
+            
             log_parts.append(f"Mode: {mode_desc}")
             if state.compass_heading is not None:
                 heading_info = f"heading: current={state.compass_heading:.1f}°, target={target_bearing:.1f}°"

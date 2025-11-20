@@ -1460,8 +1460,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         return marker
 
-    def create_tacking_status_marker(self):
-        """Create text banner when the simulator reports an in-progress tack."""
+    def create_controller_status_marker(self):
+        """Create text banner showing controller state and maneuver.
+        
+        Parses controller_state which can be:
+        - Just a state: "tacking", "jibing", "toward_middle", etc.
+        - State with maneuver: "Toward Middle (SAILING)", "Turning Around (TACKING)", etc.
+        
+        Displays abbreviated state and maneuver above the boat.
+        """
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"
@@ -1476,11 +1483,68 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.position.y = 0.0
         marker.pose.position.z = 1.0 * self.visualization_scale
 
-        marker.text = "TACKING"
+        # Parse controller_state to extract goal state and maneuver
+        # Format can be: "Toward Middle (SAILING)" or "tacking" or "jibing"
+        state_text = self.controller_state.strip() if self.controller_state else ""
+        
+        # Define abbreviations for states and maneuvers
+        state_abbrev = {
+            'toward_middle': 'TO-MID',
+            'toward middle': 'TO-MID',
+            'crossing_through': 'CROSS',
+            'crossing through': 'CROSS',
+            'turning_around': 'TURN',
+            'turning around': 'TURN',
+            'tacking_upwind': 'UPWIND',
+            'tacking upwind': 'UPWIND',
+            'proportional': 'PROP',
+            'wind_aware': 'WIND',
+            'return_to_home': 'RTH',
+            'patrol': 'PATROL',
+            'crosser': 'CROSS',
+            'human': 'HUMAN',
+        }
+        
+        maneuver_abbrev = {
+            'sailing': '⛵',
+            'tacking': '↻TACK',
+            'jibing': '↺JIBE',
+            'tack': '↻TACK',
+            'jibe': '↺JIBE',
+        }
+        
+        # Try to parse "State (MANEUVER)" format
+        if '(' in state_text and ')' in state_text:
+            # Extract state and maneuver
+            parts = state_text.split('(')
+            goal_state = parts[0].strip().lower()
+            maneuver = parts[1].replace(')', '').strip().lower()
+            
+            # Get abbreviations
+            goal_abbrev = state_abbrev.get(goal_state, goal_state[:6].upper())
+            maneuver_abbrev_text = maneuver_abbrev.get(maneuver, maneuver[:4].upper())
+            
+            marker.text = f"{goal_abbrev}\n{maneuver_abbrev_text}"
+        else:
+            # Simple state name - check if it's a maneuver or state
+            state_lower = state_text.lower()
+            if state_lower in ['tacking', 'jibing', 'sailing', 'tack', 'jibe']:
+                # It's a maneuver
+                marker.text = maneuver_abbrev.get(state_lower, state_text[:6].upper())
+            else:
+                # It's a state
+                marker.text = state_abbrev.get(state_lower, state_text[:6].upper())
 
         marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
 
-        marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.75)
+        # Color based on maneuver type
+        state_lower = state_text.lower()
+        if 'tacking' in state_lower or 'tack' in state_lower:
+            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.85)  # Green for tacking
+        elif 'jibing' in state_lower or 'jibe' in state_lower:
+            marker.color = ColorRGBA(r=1.0, g=0.6, b=0.0, a=0.85)  # Orange for jibing
+        else:
+            marker.color = ColorRGBA(r=0.2, g=0.6, b=1.0, a=0.75)  # Blue for normal sailing
 
         marker.lifetime.sec = 0
         marker.lifetime.nanosec = 0
@@ -1526,10 +1590,14 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_sail_label_marker())
             marker_array.markers.append(self.create_wind_label_marker())
             marker_array.markers.append(self.create_heading_label_marker())
-            if self.is_tacking:
-                marker_array.markers.append(self.create_tacking_status_marker())
+            
+            # Show controller status marker when controller is active
+            # Controller state comes from /controller/state topic published by controller.py
+            if self.controller_state and self.controller_state.strip():
+                marker_array.markers.append(self.create_controller_status_marker())
                 self._tacking_marker_active = True
             elif self._tacking_marker_active:
+                # Delete marker if controller state is no longer available
                 delete_marker = Marker()
                 delete_marker.header = Header()
                 delete_marker.header.frame_id = "base_link"
