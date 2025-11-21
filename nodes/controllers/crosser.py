@@ -654,8 +654,22 @@ class CrosserController(BaseController):
                 turn_complete = False
                 turn_progress = None
                 
-                # Primary check: are we heading toward middle?
-                if heading_to_middle < 70.0:  # Within 70 degrees of middle (relaxed from 90)
+                # SAFETY CHECK: Don't complete turn if still close to boundary AND heading toward middle would head back to boundary
+                # This prevents the turn-complete-turn cycle near boundaries
+                safe_to_complete_turn = True
+                if abs_distance_to_boundary < (self.boundary_turn_threshold * 1.5):
+                    # Still close to boundary - check if middle is in a safe direction
+                    # If predicted_crossing_time is low, heading toward middle will hit boundary
+                    if predicted_crossing_time < self.patrol_lookahead_time:
+                        safe_to_complete_turn = False
+                        if self.logger and (time.time() - self._last_state_log_time) > 5.0:
+                            self.logger.debug(
+                                f"Turn not complete yet - still too close to boundary "
+                                f"(dist={abs_distance_to_boundary:.1f}m, predicted_crossing={predicted_crossing_time:.1f}s)"
+                            )
+                
+                # Primary check: are we heading toward middle AND safe to complete?
+                if heading_to_middle < 70.0 and safe_to_complete_turn:  # Within 70 degrees of middle (relaxed from 90)
                     # We're heading toward middle - check if we've made progress
                     # If we started the turn, we should have changed heading significantly
                     if self._tack_start_heading is not None:
@@ -673,7 +687,7 @@ class CrosserController(BaseController):
                                 self.logger.info(f"Turn complete: heading to middle {heading_to_middle:.1f}°")
                 
                 # Secondary check: are we close to target heading AND heading toward middle?
-                if not turn_complete and heading_error < 40.0 and heading_to_middle < 80.0:
+                if not turn_complete and heading_error < 40.0 and heading_to_middle < 80.0 and safe_to_complete_turn:
                     # Close to target and heading toward middle (both thresholds tightened)
                     turn_complete = True
                     if self.logger:
@@ -684,11 +698,12 @@ class CrosserController(BaseController):
                     old_state = self.crossing_state
                     self.crossing_state = 'toward_middle'
                     self._current_maneuver = 'sailing'  # Return to normal sailing
-                    details = {'heading_error': heading_error, 'heading_to_middle': heading_to_middle}
+                    details = {'heading_error': heading_error, 'heading_to_middle': heading_to_middle,
+                              'distance_to_boundary': abs_distance_to_boundary if abs_distance_to_boundary is not None else None}
                     if turn_progress is not None:
                         details['turn_progress'] = turn_progress
-                    self._log_state_transition(old_state, self.crossing_state,
-                                              f"Turn complete - heading toward middle",
+                    self._log_state_transition(old_state, self.crossing_state, 
+                                              f"Turn complete - heading toward middle (safe distance: {abs_distance_to_boundary:.1f}m)",
                                               details)
                     self._turning_target_heading = None
                     self._turning_maneuver_type = None
