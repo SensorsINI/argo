@@ -219,6 +219,7 @@ import termios
 import json
 from typing import Optional, Dict, Any
 from logging.handlers import RotatingFileHandler
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 # isort: off
 # Add the support directory to the sys.path for ArgoBaseNode import
@@ -287,9 +288,9 @@ class Colors:
 
 # Button Press Configuration
 # Default button hold time for shutdown (seconds)
-DEFAULT_SHUTDOWN_THRESHOLD_S = 8.0
+DEFAULT_SHUTDOWN_THRESHOLD_S = 4.0
 # Warn users this many seconds before shutdown to release the button
-SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S = 4.0
+SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S = 2.0
 # Button release polling frequency during press (10 Hz - only used during button press)
 BUTTON_ERROR_RECOVERY_DELAY_S = 0.1     # Delay on button read error (seconds)
 # Maximum duration for multiple taps to toggle states (seconds)
@@ -355,6 +356,7 @@ BATTERY_VOLTAGE_MAX_V = 8.4        # Fully charged voltage (2 cells × 4.2V)
 # WiFi Monitoring
 WIFI_MONITORING_INTERVAL_S = 10     # Check WiFi status interval (seconds)
 WIFI_CONNECTIVITY_TIMEOUT_S = 5     # Timeout for WiFi connectivity tests (seconds)
+WIFI_CHECK_TIMEOUT_S = 8            # Timeout wrapper for WiFi check calls to prevent hangs (seconds)
 
 # DEVELOPMENT FLAG: Critical Battery Behavior
 # Set to True to use normal shutdown (cuts power) instead of halt (preserves power)
@@ -3460,8 +3462,18 @@ class PowerController(ArgoBaseNode):
 
         while self.running and self.wifi_monitoring_active:
             try:
-                # Check WiFi connectivity
-                wifi_connected = self.check_wifi_connectivity()
+                # Check WiFi connectivity with timeout wrapper to prevent hangs
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(self.check_wifi_connectivity)
+                        wifi_connected = future.result(timeout=WIFI_CHECK_TIMEOUT_S)
+                except FutureTimeoutError:
+                    self.get_logger().warning(
+                        f"WiFi connectivity check timed out after {WIFI_CHECK_TIMEOUT_S}s in monitoring thread")
+                    wifi_connected = False
+                except Exception as e:
+                    self.get_logger().error(f"Error in WiFi connectivity check: {e}")
+                    wifi_connected = False
 
                 if wifi_connected:
                     consecutive_successes += 1
@@ -3602,7 +3614,10 @@ class PowerController(ArgoBaseNode):
             return False
 
     def _check_network_status(self):
-        """Check network status periodically (only one that needs active checking)"""
+        """Check network status periodically (only one that needs active checking)
+        
+        Wrapped with timeout to prevent hangs in the LED heartbeat loop.
+        """
         import time
         current_time = time.time()
         if current_time - self.last_network_check < 5.0:  # Check every 5 seconds
@@ -3610,7 +3625,19 @@ class PowerController(ArgoBaseNode):
         
         self.last_network_check = current_time
         old_healthy = self.network_healthy
-        self.network_healthy = self.check_wifi_connectivity()
+        
+        # Wrap WiFi check in timeout to prevent hangs in LED heartbeat loop
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self.check_wifi_connectivity)
+                self.network_healthy = future.result(timeout=WIFI_CHECK_TIMEOUT_S)
+        except FutureTimeoutError:
+            self.get_logger().warning(
+                f"WiFi connectivity check timed out after {WIFI_CHECK_TIMEOUT_S}s - assuming UNHEALTHY")
+            self.network_healthy = False
+        except Exception as e:
+            self.get_logger().error(f"Error checking network status: {e}")
+            self.network_healthy = False
         
         if old_healthy != self.network_healthy:
             self.get_logger().info(f"Network health changed: {'HEALTHY' if self.network_healthy else 'UNHEALTHY'}")
