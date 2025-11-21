@@ -56,12 +56,13 @@
       "cameraState": {
         "perspective": false,
         "distance": 72.10076346743637,
-        "phi": 0.00005729577951308232,
-        "thetaOffset": -41.15995514038776,
+        "phi": 0,
+        "theta": 0,
+        "thetaOffset": 0,
         "targetOffset": [
-          24.33159698453514,
-          24.24448944034744,
-          -1.5414288510071361e-21
+          0,
+          0,
+          0
         ],
         "target": [
           0,
