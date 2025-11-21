@@ -246,6 +246,28 @@ make -C system-monitoring install-all
 - Monitors all thermal zones
 - Alerts on high temperatures
 
+### 8. Shutdown Logger Service
+
+**Service**: `shutdown-logger.service`  
+**Script**: `system-monitoring/scripts/shutdown-logger.sh`  
+**Installation**: `make -C system-monitoring install-shutdown-logger`
+
+**Log Files**:
+- `shutdown-YYYYMMDD-HHMMSS.log` - Shutdown event log with service stop times and timing information
+
+**Purpose**: Captures shutdown events, service stop times, and timing information to diagnose slow shutdowns  
+**Features**:
+- Runs early during shutdown (before services start stopping)
+- Logs active systemd jobs and services being stopped
+- Records service stop timeouts (identifies services with long TimeoutStopSec)
+- Captures shutdown target information
+- Detects critical battery shutdown flags
+- Performs filesystem sync timing
+- Logs to persistent storage, console, and kernel message buffer
+- **Critical for diagnosing 2+ minute shutdown delays**
+
+**Note**: This service is essential for diagnosing slow shutdowns. The systemd journal stops writing early in shutdown, so shutdown events are not captured in journalctl logs. This service fills that gap.
+
 ## System Integration Services
 
 ### Orange Pi Ramlog Service
@@ -428,6 +450,8 @@ cat /var/log.hdd/persistent/boot-history.log
 | `dmesg-YYYYMMDD-HHMMSS.log` | `persistent-dmesg.service` | Timestamped kernel messages | Per boot | Persistent |
 | `journalctl-YYYYMMDD-HHMMSS-<BOOT_ID>.log` | `boot-history-logger.service` | Boot-time systemd journal | Per boot | Persistent |
 | `journalctl-<BOOT_ID>.log` | `boot-history-logger.service` | Previous boot journal snapshots | Per boot | Persistent |
+| `shutdown-YYYYMMDD-HHMMSS.log` | `shutdown-logger.service` | Shutdown events and service stop times | Per shutdown | Persistent |
+| `shutdown-hook-YYYYMMDD-HHMMSS.log` | `argo_poweroff.shutdown` | Shutdown hook execution (late phase) | Per shutdown | Persistent |
 | `cursor-processes-YYYYMMDD.log` | `cursor-monitor.service` | Cursor IDE monitoring | 60s | Persistent |
 | `memory-YYYYMMDD.log` | `memory-monitor.service` | Memory usage | 30s | Persistent |
 | `processes-YYYYMMDD.log` | `memory-monitor.service` | Process monitoring | 30s | Persistent |

@@ -186,10 +186,28 @@ uninstall-temp-logger:
 	@sudo systemctl daemon-reload
 	@echo "✅ Temperature logger service uninstalled"
 
+# Shutdown Logger Service
+install-shutdown-logger:
+	@echo "📋 Installing shutdown logger service..."
+	@sudo cp $(MONITORING_DIR)/shutdown-logger.service $(SERVICE_DIR)/
+	@sudo cp $(MONITORING_DIR)/scripts/shutdown-logger.sh $(SCRIPT_DIR)/
+	@sudo chmod +x $(SCRIPT_DIR)/shutdown-logger.sh
+	@sudo systemctl daemon-reload
+	@sudo systemctl enable shutdown-logger.service
+	@echo "✅ Shutdown logger service installed and enabled"
+
+uninstall-shutdown-logger:
+	@echo "🗑️  Uninstalling shutdown logger service..."
+	@sudo systemctl disable shutdown-logger.service 2>/dev/null || true
+	@sudo rm -f $(SERVICE_DIR)/shutdown-logger.service
+	@sudo rm -f $(SCRIPT_DIR)/shutdown-logger.sh
+	@sudo systemctl daemon-reload
+	@echo "✅ Shutdown logger service uninstalled"
+
 # ==================== BULK OPERATIONS ====================
 
 # Install all system monitoring services
-install-all: install-boot-logger install-cursor-monitor install-memory-monitor install-orangepi-monitor install-persistent-dmesg install-persistent-log-manager install-crash-dump install-temp-logger
+install-all: install-boot-logger install-cursor-monitor install-memory-monitor install-orangepi-monitor install-persistent-dmesg install-persistent-log-manager install-crash-dump install-temp-logger install-shutdown-logger
 	@echo ""
 	@echo "✅ All system monitoring services installed successfully!"
 	@echo ""
@@ -202,12 +220,13 @@ install-all: install-boot-logger install-cursor-monitor install-memory-monitor i
 	@echo "  • argo-persistent-logs.service - Argo persistent log rotation & pruning"
 	@echo "  • crash-dump.service - Crash dump collection"
 	@echo "  • temp-logger.service - Temperature logging"
+	@echo "  • shutdown-logger.service - Shutdown event logging"
 	@echo ""
 	@echo "📝 Log files are stored in: $(PERSISTENT_LOG_DIR)"
 	@echo "🔍 Monitor logs with: tail -f $(PERSISTENT_LOG_DIR)/*.log"
 
 # Uninstall all system monitoring services
-uninstall-all: uninstall-boot-logger uninstall-cursor-monitor uninstall-memory-monitor uninstall-orangepi-monitor uninstall-persistent-dmesg uninstall-persistent-log-manager uninstall-crash-dump uninstall-temp-logger
+uninstall-all: uninstall-boot-logger uninstall-cursor-monitor uninstall-memory-monitor uninstall-orangepi-monitor uninstall-persistent-dmesg uninstall-persistent-log-manager uninstall-crash-dump uninstall-temp-logger uninstall-shutdown-logger
 	@echo ""
 	@echo "✅ All system monitoring services uninstalled successfully!"
 
@@ -320,6 +339,7 @@ help:
 	@echo "  install-persistent-log-manager - Install Argo persistent log manager"
 	@echo "  install-crash-dump       - Install crash dump service"
 	@echo "  install-temp-logger      - Install temperature logger service"
+	@echo "  install-shutdown-logger  - Install shutdown event logger service"
 	@echo ""
 	@echo "Bulk Operations:"
 	@echo "  install-all              - Install ALL system monitoring services"
@@ -346,4 +366,3 @@ help:
 	@echo ""
 	@echo "Log files are stored in: $(PERSISTENT_LOG_DIR)"
 	@echo "Monitor logs with: tail -f $(PERSISTENT_LOG_DIR)/*.log"
-

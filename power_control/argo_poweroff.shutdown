@@ -28,10 +28,28 @@ set -euo pipefail
 MODE="${1:-}"
 MODE_LC="$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')"
 
+# Persistent log file for shutdown hook
+PERSIST_DIR="/var/log.hdd/persistent"
+PERSIST_LOG="$PERSIST_DIR/shutdown-hook-$(date +%Y%m%d-%H%M%S).log"
+
+# Ensure persistent directory exists (critical for logging)
+mkdir -p "$PERSIST_DIR" 2>/dev/null || true
+
 # Console logging helper (postfix with 50 * and pause 1s)
 STARS="**************************************************"
 c_echo() {
-    echo "$(date): argo_poweroff: $* $STARS" > /dev/console 2>/dev/null || true
+    local msg="$(date): argo_poweroff: $* $STARS"
+    # Always log to console first (most reliable during shutdown)
+    echo "$msg" > /dev/console 2>/dev/null || true
+    # Also log to kernel message buffer for dmesg visibility
+    echo "$msg" > /dev/kmsg 2>/dev/null || true
+    # Try to log to persistent storage (may fail if filesystem is read-only)
+    if [ -d "$PERSIST_DIR" ] && [ -w "$PERSIST_DIR" ]; then
+        echo "$msg" >> "$PERSIST_LOG" 2>/dev/null || {
+            # If write fails, try to create directory and log again
+            mkdir -p "$PERSIST_DIR" 2>/dev/null && echo "$msg" >> "$PERSIST_LOG" 2>/dev/null || true
+        }
+    fi
     sleep .1
 }
 
