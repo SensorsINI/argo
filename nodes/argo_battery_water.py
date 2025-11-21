@@ -3,9 +3,14 @@
 # Battery/Water ROS2 node
 # - Reads MAX11612 ADC: AIN0=battery via 27k/18k divider, AIN1=saltwater probe, AIN2=sail winch shunt
 # - Reads SHT45 temperature/humidity sensor
-# - Monitors MP2672GD charger status via I2C (primary) and GPIO (fallback)
+# - Monitors MP2672GD charger status via GPIO (always) and optionally I2C (if host control enabled)
 # 
-# MP2672 Charger I2C Support (NEW):
+# MP2672 Charger Configuration:
+# - MP2672_HOST_CONTROL constant controls operating mode:
+#   * False (default): Standalone mode - uses GPIO only for charging and AC power status
+#   * True: Host control mode - uses I2C registers (primary) and GPIO (fallback)
+# 
+# MP2672 Charger I2C Support (when MP2672_HOST_CONTROL = True):
 # - I2C Address: 0x4B (only accessible when USB power is present)
 # - Register 0x03 (Status): Reads CHG_STAT, PPM_STAT, BATTFLOAT_STAT, THERM_STAT, VSYS_STAT
 # - Register 0x04 (Fault): Reads WD_FAULT, INPUT_FAULT, THERM_SD_FAULT, TIMER_FAULT, BAT_FAULT, NTC_FAULT
@@ -15,9 +20,12 @@
 # - During normal robot operation (battery only), MP2672 not accessible via I2C (powered by USB)
 # - Battery missing/balance cable fault detection via BATTFLOAT_STAT (REG 03H bit 2)
 # 
-# Charging Status Priority:
+# Charging Status Priority (when MP2672_HOST_CONTROL = True):
 # 1. MP2672 I2C register 0x03 (when USB power present)
 # 2. GPIO status with time-window filtering (fallback when USB not present)
+# 
+# Charging Status (when MP2672_HOST_CONTROL = False):
+# - GPIO status with time-window filtering (standalone mode)
 # 
 # Publishes (Float32):
 # - battery_voltage (V), saltwater_voltage (V), sail_current (A), pcb_temperature (C), relative_humidity (%)
@@ -45,7 +53,7 @@
 # - I2C Bus: Exclusively uses I2C bus 0 (Orange Pi Zero 2W default I2C interface)
 # - I2C Pins: SDA=PI6 (twi0-sda), SCL=PI5 (twi0-sck) - configured via pi-i2c0 overlay
 # - MAX11612 ADC at I2C address 0x34, SHT45 sensor at I2C address 0x44
-# - MP2672 charger at I2C address 0x4B (only accessible when USB power present)
+# - MP2672 charger at I2C address 0x4B (only accessible when USB power present and MP2672_HOST_CONTROL = True)
 # - GPIO Pins: PC12 (pin 36, line 76) !CHARGING, PH9 (pin 26, line 233) !ACOK from MP2672GD
 # - HOST_CTL: GPIO 229 (pin 24) tied high via hardware pullup resistor for host control mode
 
@@ -76,7 +84,9 @@ from typing import Optional, Tuple
 # Hardware configuration constants
 I2C_BUS_NUMBER = 0  # Orange Pi Zero 2W default I2C bus
 
-# MP2672 I2C configuration
+# MP2672 configuration
+MP2672_HOST_CONTROL = False  # Set to False for standalone mode (GPIO only), True for host control mode (I2C + GPIO)
+# MP2672 I2C configuration (only used when MP2672_HOST_CONTROL = True)
 MP2672_I2C_ADDR = 0x4B  # MP2672 I2C address in host control mode
 MP2672_REG_01 = 0x01  # Register 01H (see datasheet)
 MP2672_REG_02 = 0x02  # Register 02H - Configuration register (default: 0x95, see datasheet)
@@ -468,8 +478,12 @@ class BatteryWaterNode(ArgoBaseNode):
 
             # Initial health status will be set after first sensor readings
             
-            # Check MP2672 I2C availability during initialization
-            self._check_mp2672_availability()
+            # Check MP2672 I2C availability during initialization (only if host control enabled)
+            if MP2672_HOST_CONTROL:
+                self._check_mp2672_availability()
+            else:
+                self.mp2672_available = False
+                self.get_logger().info('MP2672 host control disabled - using standalone mode (GPIO only)')
             
             # Perform initial sensor readings for immediate status display
             self._perform_initial_readings()
@@ -1260,6 +1274,8 @@ class BatteryWaterNode(ArgoBaseNode):
         Returns:
             Register value (0-255) or None if read failed
         """
+        if not MP2672_HOST_CONTROL:
+            return None  # Host control disabled - I2C not available
         if not self.use_smbus2:
             return None
             
@@ -1288,6 +1304,8 @@ class BatteryWaterNode(ArgoBaseNode):
         Returns:
             True if write succeeded, False otherwise
         """
+        if not MP2672_HOST_CONTROL:
+            return False  # Host control disabled - I2C not available
         if not self.use_smbus2:
             return False
             
@@ -1319,6 +1337,8 @@ class BatteryWaterNode(ArgoBaseNode):
         Returns:
             True if configuration succeeded, False otherwise
         """
+        if not MP2672_HOST_CONTROL:
+            return False  # Host control disabled - I2C configuration not available
         if not self.mp2672_available:
             return False
         
@@ -1621,6 +1641,8 @@ class BatteryWaterNode(ArgoBaseNode):
         Returns:
             True if reset succeeded, False otherwise
         """
+        if not MP2672_HOST_CONTROL:
+            return False  # Host control disabled - I2C not available
         if not self.mp2672_available:
             return False
         
@@ -1658,7 +1680,15 @@ class BatteryWaterNode(ArgoBaseNode):
         According to datasheet: In host control mode, the watchdog timer resets all registers
         to default values if not reset periodically. We disable it by default, but if enabled,
         we reset it periodically to prevent register resets.
+        
+        When MP2672_HOST_CONTROL = False, this function does nothing (standalone mode).
         """
+        if not MP2672_HOST_CONTROL:
+            # Standalone mode - MP2672 not accessible via I2C
+            if self.mp2672_available:
+                self.mp2672_available = False
+            return False
+        
         try:
             # Try reading status register to verify device is present
             status = self._read_mp2672_register(MP2672_REG_STATUS)
@@ -1714,14 +1744,14 @@ class BatteryWaterNode(ArgoBaseNode):
         Read charging status from MP2672 I2C register (primary) or GPIO (fallback).
         
         Priority:
-        1. MP2672 I2C register 0x03 (if available)
-        2. GPIO status with time-window filtering (fallback)
+        1. MP2672 I2C register 0x03 (if available and MP2672_HOST_CONTROL = True)
+        2. GPIO status with time-window filtering (fallback or standalone mode)
         
         Returns:
             Tuple of (charging_status, ac_power_present) or (None, None) if unavailable
         """
-        # Try MP2672 I2C first (primary source)
-        if self.mp2672_available:
+        # Try MP2672 I2C first (primary source) - only if host control enabled
+        if MP2672_HOST_CONTROL and self.mp2672_available:
             status = self._read_mp2672_status()
             if status is not None:
                 charging_status, ac_power_present = status
@@ -2259,18 +2289,19 @@ class BatteryWaterNode(ArgoBaseNode):
             pass
         self._latest_battery_remaining_pct = battery_remaining_pct
 
-        # Check MP2672 availability and read charging status (I2C primary, GPIO fallback)
-        self._check_mp2672_availability()
+        # Check MP2672 availability and read charging status (I2C primary if host control enabled, GPIO fallback)
+        if MP2672_HOST_CONTROL:
+            self._check_mp2672_availability()
         charging_status, ac_power_present = self._read_charging_status()
         self._latest_charging_status = charging_status
         self._latest_ac_power_present = ac_power_present
         
-        # Read MP2672 register information for service response (when USB power present)
+        # Read MP2672 register information for service response (when USB power present and host control enabled)
         mp2672_status_info = None
         mp2672_fault_info = None
         battery_missing_fault = False
         
-        if self.mp2672_available:
+        if MP2672_HOST_CONTROL and self.mp2672_available:
             try:
                 # Read status register (REG 03H) for detailed charging state
                 status_reg = self._read_mp2672_register(MP2672_REG_STATUS)
