@@ -14,6 +14,7 @@ ExecStart=/home/orangepi/argo/network/scripts/wifi_reconnect.sh
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=argo-wifi-reconnect
+TimeoutStopSec=30
 
 # Set environment for proper operation
 Environment="HOME=/home/orangepi"
