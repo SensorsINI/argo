@@ -40,25 +40,31 @@ if command -v systemctl >/dev/null 2>&1; then
                    argo_health_monitor argo_thermal_monitor argo_storage_monitor \
                    argo_radio_servo_module argo_wifi_reconnect; do
         if systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
-            TIMEOUT=$(systemctl show -p TimeoutStopSec --value "$service.service" 2>/dev/null || echo "default")
+            TIMEOUT=$(systemctl show -p TimeoutStopUSec --value "$service.service" 2>/dev/null || echo "infinity")
             STATE=$(systemctl is-active "$service.service" 2>/dev/null || echo "inactive")
-            log_msg "  $service.service: timeout=${TIMEOUT}s, state=$STATE"
+            # Convert microseconds to seconds for readability
+            if [ "$TIMEOUT" != "infinity" ] && [ -n "$TIMEOUT" ]; then
+                TIMEOUT_SEC=$((TIMEOUT / 1000000))
+                log_msg "  $service.service: timeout=${TIMEOUT_SEC}s, state=$STATE"
+            else
+                log_msg "  $service.service: timeout=$TIMEOUT, state=$STATE"
+            fi
         fi
     done
     
     # List all active services with stop timeouts > 10s
     log_msg "=== SERVICES WITH LONG STOP TIMEOUTS (>10s) ==="
-    systemctl list-units --type=service --state=running --no-pager | \
-        grep -v "^  UNIT" | \
-        grep -v "^$" | \
+    systemctl list-units --type=service --state=running --no-pager 2>/dev/null | \
+        grep "\.service" | \
         awk '{print $1}' | \
         while read -r unit; do
-            TIMEOUT=$(systemctl show -p TimeoutStopSec --value "$unit" 2>/dev/null || echo "default")
-            if [ "$TIMEOUT" != "default" ] && [ "$TIMEOUT" != "" ]; then
-                # Extract numeric value if timeout is formatted like "30s" or just "30"
-                TIMEOUT_NUM=$(echo "$TIMEOUT" | sed 's/[^0-9]//g')
-                if [ -n "$TIMEOUT_NUM" ] && [ "$TIMEOUT_NUM" -gt 10 ]; then
-                    log_msg "  $unit: timeout=${TIMEOUT}s"
+            TIMEOUT=$(systemctl show -p TimeoutStopUSec --value "$unit" 2>/dev/null || echo "infinity")
+            if [ "$TIMEOUT" != "infinity" ] && [ -n "$TIMEOUT" ]; then
+                # Convert microseconds to seconds
+                TIMEOUT_SEC=$((TIMEOUT / 1000000))
+                if [ "$TIMEOUT_SEC" -gt 10 ]; then
+                    STATE=$(systemctl is-active "$unit" 2>/dev/null || echo "unknown")
+                    log_msg "  $unit: timeout=${TIMEOUT_SEC}s, state=$STATE"
                 fi
             fi
         done
