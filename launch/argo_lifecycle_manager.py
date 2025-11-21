@@ -47,6 +47,7 @@ import argcomplete
 import json
 import shlex
 import importlib.util
+import atexit
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import select
@@ -1355,6 +1356,19 @@ class ArgoLifecycleManager:
             # Explicitly exit if shutdown was requested
             if self.shutdown_requested:
                 print("✅ Lifecycle manager shutdown complete - exiting")
+                # Flush stdout/stderr to ensure all messages are written before prompt appears
+                sys.stdout.flush()
+                sys.stderr.flush()
+                # CRITICAL: Wait for any remaining shutdown messages from child processes to flush
+                # Even though we waited in stop(), there might be stragglers
+                # ROS2 nodes write shutdown messages to stderr which is unbuffered
+                time.sleep(3.0)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                # One final wait to ensure everything is flushed
+                time.sleep(1.0)
+                sys.stdout.flush()
+                sys.stderr.flush()
                 sys.exit(0)
         
         return True  # Always return True for clean exit
@@ -1366,30 +1380,98 @@ class ArgoLifecycleManager:
         
         print("🛑 Stopping Argo ROS2 nodes...")
         
-        # New: Terminate the entire process group
+        # First, try to terminate tracked processes individually for better control
+        terminated_processes = []
+        if hasattr(self, 'node_processes') and self.node_processes:
+            for proc_info in self.node_processes:
+                if 'proc' in proc_info:
+                    proc = proc_info['proc']
+                    name = proc_info.get('name', 'unknown')
+                    try:
+                        if proc.poll() is None:  # Process is still running
+                            proc.terminate()
+                            terminated_processes.append((proc, name))
+                            print(f"  📤 Sent SIGTERM to {name} (PID: {proc.pid})")
+                    except Exception as e:
+                        print(f"  ⚠️  Error terminating {name}: {e}")
+        
+        # Wait for tracked processes to finish
+        max_wait_per_process = 3.0
+        for proc, name in terminated_processes:
+            try:
+                proc.wait(timeout=max_wait_per_process)
+                print(f"  ✅ {name} stopped gracefully")
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                    print(f"  ⚡ Force killed {name}")
+                except:
+                    print(f"  ⚠️  Could not force kill {name}")
+            except:
+                pass
+        
+        # Wait for main process if it exists
+        if self.process:
+            try:
+                if self.process.poll() is None:
+                    self.process.terminate()
+                    print(f"  📤 Sent SIGTERM to main launch process")
+                    self.process.wait(timeout=max_wait_per_process)
+                    print(f"  ✅ Main launch process stopped")
+            except subprocess.TimeoutExpired:
+                try:
+                    self.process.kill()
+                    self.process.wait(timeout=1.0)
+                    print(f"  ⚡ Force killed main launch process")
+                except:
+                    pass
+            except:
+                pass
+        
+        # Also use process group kill as backup (may catch bash wrapper processes)
         try:
             os.killpg(self.pgid, signal.SIGTERM)
-            # Wait a moment for processes to terminate
-            time.sleep(2)
-            print("✅ Process group terminated.")
-            
-            # Also explicitly kill foxglove_bridge processes (they may not be in the same process group)
+            print(f"  📤 Sent SIGTERM to process group {self.pgid}")
+        except ProcessLookupError:
+            # Process group already gone
+            print(f"  ℹ️  Process group {self.pgid} already terminated")
+        except Exception as e:
+            print(f"  ⚠️  Could not kill process group: {e}")
+        
+        # Use pkill as final backup to catch any remaining simulation processes
+        try:
+            subprocess.run(['pkill', '-TERM', '-f', 'argo_unified_simulator_bridge'], 
+                         capture_output=True, timeout=2)
+            subprocess.run(['pkill', '-TERM', '-f', 'controller.py'], 
+                         capture_output=True, timeout=2)
+            subprocess.run(['pkill', '-TERM', '-f', 'foxglove_bridge'], 
+                         capture_output=True, timeout=2)
+            print(f"  📤 Sent SIGTERM via pkill to remaining nodes")
+        except Exception as e:
+            print(f"  ⚠️  pkill cleanup failed: {e}")
+        
+        # Wait a bit for processes to terminate
+        time.sleep(2.0)
+        
+        # Force kill any remaining processes
+        try:
+            subprocess.run(['pkill', '-9', '-f', 'argo_unified_simulator_bridge'], 
+                         capture_output=True, timeout=2)
+            subprocess.run(['pkill', '-9', '-f', 'controller.py'], 
+                         capture_output=True, timeout=2)
             subprocess.run(['pkill', '-9', '-f', 'foxglove_bridge'], 
                          capture_output=True, timeout=2)
-            
-            self.node_processes.clear()
-            self._cleanup_ros2()
-            return True
-        except ProcessLookupError:
-            # This can happen if the process group is already gone
-            print("✅ Process group already terminated.")
-            self._cleanup_ros2()
-            return True
-        except Exception as e:
-            error_msg = str(e) if e else "Unknown error"
-            print(f"⚠️  Error killing process group: {error_msg}")
-            # Fallback to old method if killpg fails
-            return self._stop_fallback()
+        except:
+            pass
+        
+        sys.stdout.flush()
+        sys.stderr.flush()
+        print("✅ All node processes terminated.")
+        
+        self.node_processes.clear()
+        self._cleanup_ros2()
+        return True
 
     def _stop_fallback(self) -> bool:
         """Fallback method to stop nodes individually if process group kill fails."""
@@ -1743,11 +1825,20 @@ class ArgoLifecycleManager:
             node_status = self._get_node_status()
             running_nodes = [
                 node for node, status in node_status.items() if "RUNNING" in status]
+            stopped_nodes = [
+                node for node, status in node_status.items() if "STOPPED" in status]
+
+            # Check if any expected nodes have crashed
+            all_expected = self.expected_nodes + self.special_nodes
+            crashed_expected = [node for node in all_expected if node in stopped_nodes]
+            if crashed_expected:
+                # Node crashed during startup - exit immediately
+                print(f"\n⚠️  Node crash detected during startup: {', '.join(crashed_expected)}")
+                break
 
             # Progress reporting (journal-friendly)
             elapsed = time.time() - start_time
             if int(elapsed * 10) % 10 == 0:
-                all_expected = self.expected_nodes + self.special_nodes
                 missing_nodes = [node for node in all_expected if node not in running_nodes]
                 missing_str = f" (missing: {', '.join(missing_nodes)})" if missing_nodes else ""
                 print(
@@ -1768,17 +1859,27 @@ class ArgoLifecycleManager:
             print(f"❌ Missing: {', '.join(missing_nodes) if missing_nodes else '(none)'}")
             print(f"📋 Expected: {', '.join(all_expected)}")
             
-            # Check if missing nodes have error logs
+            # Get and display error messages for missing nodes
+            fatal_messages = self._get_fatal_messages_for_nodes()
             for missing_node in missing_nodes:
                 # Check if the process exists but isn't running
                 node_status = self._get_node_status()
                 if missing_node in node_status:
                     status = node_status[missing_node]
                     if "STOPPED" in status or "ERROR" in status:
-                        print(f"   ⚠️  {missing_node}: {status}")
+                        if missing_node in fatal_messages:
+                            print(f"   ⚠️  {missing_node}: {fatal_messages[missing_node]}")
+                        else:
+                            print(f"   ⚠️  {missing_node}: {status}")
                 else:
-                    print(f"   ⚠️  {missing_node}: Not found in node status")
+                    if missing_node in fatal_messages:
+                        print(f"   ⚠️  {missing_node}: {fatal_messages[missing_node]}")
+                    else:
+                        print(f"   ⚠️  {missing_node}: Not found in node status")
             
+            # Clean up any nodes that did start before returning
+            print("🛑 Stopping nodes that were started...")
+            self.stop()
             return False
 
         # Monitor during stabilization period
@@ -1956,6 +2057,7 @@ class ArgoLifecycleManager:
                 print("\n🛑 Stopping simulation and cleaning up all nodes...")
                 self.shutdown_requested = True
                 self.stop()
+                # stop() already waits for all processes and stderr flush
                 print("✅ All simulation nodes terminated")
                 return True
             except Exception as e:
@@ -2639,24 +2741,47 @@ class ArgoLifecycleManager:
         return sorted(set(detected))
     
     def _get_fatal_messages_for_nodes(self) -> Dict[str, str]:
-        """Get the most recent FATAL message for each node from systemd journal"""
+        """Get the most recent FATAL message or Python exception for each node from systemd journal"""
         fatal_messages = {}
         
         try:
-            # Get recent FATAL messages from systemd journal for argo_launch.service
-            # Look back further to catch initial startup failures
+            # Search for FATAL messages and Python exceptions (ImportError, ModuleNotFoundError, etc.)
+            # Use extended-regex to search for multiple patterns
             result = subprocess.run([
                 'journalctl', '-u', 'argo_launch_standard.service', '--since', self.journal_since,
-                '--grep', 'FATAL', '--no-pager', '-o', 'short-precise'
+                '--grep', 'FATAL|ImportError|ModuleNotFoundError|Exception:', '--no-pager', '-o', 'short-precise'
             ], capture_output=True, text=True, timeout=5)
             
             if result.returncode == 0 and result.stdout:
                 lines = result.stdout.strip().split('\n')
                 
-                # Parse lines to extract node-specific FATAL messages
+                # Parse lines to extract node-specific error messages
                 # Process in reverse order to get the most recent message for each node
                 for line in reversed(lines):
-                    if 'FATAL' in line:
+                    # Check for Python exceptions first (most common startup failures)
+                    if 'ImportError:' in line or 'ModuleNotFoundError:' in line:
+                        # Try to identify which node this error belongs to
+                        for node in self.expected_nodes:
+                            if node in fatal_messages:
+                                continue  # Already have a message for this node
+                            
+                            # Check if this line mentions the node file
+                            if f'/{node}' in line or f'nodes/{node}' in line:
+                                # Extract the error message
+                                if 'ImportError:' in line:
+                                    error_part = line.split('ImportError:', 1)[1].strip()
+                                elif 'ModuleNotFoundError:' in line:
+                                    error_part = line.split('ModuleNotFoundError:', 1)[1].strip()
+                                
+                                # Clean up and truncate message
+                                if len(error_part) > 80:
+                                    error_part = error_part[:77] + "..."
+                                
+                                fatal_messages[node] = error_part
+                                break
+                    
+                    # Check for FATAL messages (ROS2 logger)
+                    elif 'FATAL' in line:
                         # Try to identify which node this FATAL message belongs to
                         for node in self.expected_nodes:
                             node_name = node.replace('.py', '')
@@ -2679,11 +2804,10 @@ class ArgoLifecycleManager:
                                         message = fatal_part[1].strip()
                                         # Clean up the message - take first meaningful sentence
                                         if '.' in message:
-                                            message = message.split(
-                                                '.')[0].strip()
+                                            message = message.split('.')[0].strip()
                                         # Limit message length for display
-                                        if len(message) > 50:
-                                            message = message[:47] + "..."
+                                        if len(message) > 80:
+                                            message = message[:77] + "..."
                                         
                                         # Store the most recent FATAL for this node
                                         fatal_messages[node] = f"FATAL: {message}"
@@ -2694,8 +2818,8 @@ class ArgoLifecycleManager:
                                         r'fatal\("([^"]*)"', line, re.IGNORECASE)
                                     if match:
                                         message = match.group(1)
-                                        if len(message) > 50:
-                                            message = message[:47] + "..."
+                                        if len(message) > 80:
+                                            message = message[:77] + "..."
                                         fatal_messages[node] = f"FATAL: {message}"
                                 break
                 
@@ -3214,6 +3338,7 @@ class ArgoLifecycleManager:
             # Stop all nodes first only if they are actually running
             if self._is_launch_running():
                 self.stop()
+                # stop() already waits for all processes and stderr flush, no additional wait needed
             
             # Clean up ROS2 last
             self._cleanup_ros2()
@@ -3224,6 +3349,8 @@ class ArgoLifecycleManager:
             # Explicitly exit if shutdown was requested
             if self.shutdown_requested:
                 print("✅ Lifecycle manager shutdown complete - exiting")
+                sys.stdout.flush()
+                sys.stderr.flush()
                 sys.exit(0)
         
         return True  # Always return True for clean exit
@@ -3238,7 +3365,17 @@ class ArgoLifecycleManager:
             return False
 
 
+def _final_stderr_flush():
+    """Final flush of stderr before process exits to catch any straggler ROS2 shutdown messages"""
+    # Wait 2 seconds for all ROS2 child processes to finish writing shutdown messages
+    time.sleep(2.0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
 def main():
+    # Register final stderr flush to run when process exits
+    atexit.register(_final_stderr_flush)
+    
     parser = argparse.ArgumentParser(
         description='Argo Status and Simulation Manager - Check status and manage simulations for the Argo sailboat.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3344,6 +3481,18 @@ EXAMPLES:
             success = manager.toggle_pause_nodes(debug=args.debug)
             manager._cleanup_ros2()
             sys.exit(0 if success else 1)
+    except KeyboardInterrupt:
+        # Ctrl+C pressed - ensure all nodes are stopped
+        print("\n🛑 Keyboard interrupt detected, stopping all nodes...")
+        try:
+            manager.stop()
+        except:
+            pass
+        try:
+            manager._cleanup_ros2()
+        except:
+            pass
+        sys.exit(0)
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
         manager._cleanup_ros2()

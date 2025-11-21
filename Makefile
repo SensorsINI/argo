@@ -49,6 +49,12 @@ INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else i
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 ARGO_DIR = $(REPO_DIR)
 
+# ==================== PLATFORM DETECTION ====================
+# Detect if we're on the Argo robot boat (Orange Pi) or host computer
+IS_ORANGEPI := $(shell if [ -f /proc/device-tree/compatible ] && grep -q "orangepi" /proc/device-tree/compatible 2>/dev/null; then echo 1; else echo 0; fi)
+REQUIREMENTS_FILE := $(if $(filter 1,$(IS_ORANGEPI)),requirements.txt,requirements-host.txt)
+PLATFORM_NAME := $(if $(filter 1,$(IS_ORANGEPI)),Orange Pi Robot,Host Computer)
+
 .PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm
 
 VM_REQUIREMENTS_FILE := requirements-host.txt
@@ -80,7 +86,8 @@ help:
 	@echo "  install-ros2-minimal - Install minimal ROS2 Humble packages (rclpy, messages, services, TF2, launch, rosbag2)"
 	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
 	@echo "  install-rosbag2-mcap - Install MCAP storage plugin for rosbag2 only"
-	@echo "  install-python-deps  - Install Python runtime dependencies (smbus2, pyserial, etc.)"
+	@echo "  install-python-deps  - Auto-detect platform and install correct Python dependencies"
+	@echo "                         (requirements.txt on robot, requirements-host.txt on host)"
 	@echo "  install-simulation-deps - Install Python dependencies for the simulator"
 	@echo "  check-deps           - Check status of all dependencies"
 	@echo "  install-hardware     - Install PWM capture module and hardware configuration"
@@ -483,26 +490,39 @@ install-argo-cli:
 # Use 'make -C power_control install' to install power control
 
 install-python-deps:
-	@echo "Installing Python runtime dependencies..."
-	@echo "Installing packages from requirements.txt..."
-	pip3 install -r requirements.txt
-	@echo "✅ Python dependencies installed successfully!"
+	@echo "======================================================================="
+	@echo "Auto-detecting platform..."
+	@echo "Platform: $(PLATFORM_NAME)"
+	@echo "Requirements file: $(REQUIREMENTS_FILE)"
+	@echo "======================================================================="
 	@echo ""
-	@echo "Core packages installed:"
-	@echo "  - rclpy: ROS2 Python client library"
-	@echo "  - std-msgs, geometry-msgs, diagnostic-msgs: ROS2 message types"
-	@echo "  - smbus2: I2C communication for sensors"
-	@echo "  - pyserial: Serial communication for GPS"
-	@echo "  - pynmea2: NMEA sentence parsing for GPS NavSatFix messages"
-	@echo "  - gpiod: Modern GPIO control for power management"
-	@echo "  - numpy: Numerical computations"
-	@echo "  - psutil: System monitoring"
-	@echo "  - PyYAML: Configuration file parsing"
+	@echo "Installing Python dependencies from $(REQUIREMENTS_FILE)..."
+	pip3 install -r $(REQUIREMENTS_FILE)
+	@echo ""
+	@echo "✅ Python dependencies installed successfully for $(PLATFORM_NAME)!"
+	@echo ""
+ifeq ($(IS_ORANGEPI),1)
+	@echo "Robot-specific packages installed:"
+	@echo "  - Hardware I/O: smbus2, pyserial, pynmea2, gpiod, spidev"
+	@echo "  - ROS2: rclpy, std-msgs, geometry-msgs, sensor-msgs, diagnostic-msgs"
+	@echo "  - Configuration: PyYAML, ruamel.yaml (comment-preserving)"
+	@echo "  - System: numpy, psutil"
 	@echo ""
 	@echo "Optional packages (may fail gracefully if unavailable):"
-	@echo "  - matplotlib: Plotting for testing and analysis"
-	@echo "  - pandas: Data analysis for CSV files"
-	@echo "  - diagnostic-updater: ROS2 diagnostic system"
+	@echo "  - matplotlib, pandas, diagnostic-updater"
+else
+	@echo "Host computer packages installed:"
+	@echo "  - Analysis & Plotting: numpy, pandas, matplotlib"
+	@echo "  - Configuration: PyYAML, ruamel.yaml (comment-preserving)"
+	@echo "  - Simulation: pyglet==1.5.27"
+	@echo "  - System: psutil, argparse, argcomplete"
+	@echo ""
+	@echo "💡 Note: ROS2 packages (rclpy, etc.) should be installed via apt:"
+	@echo "   sudo apt install ros-humble-desktop"
+	@echo "   (or ros-humble-ros-base for minimal footprint)"
+endif
+	@echo ""
+	@echo "Both environments include ruamel.yaml for safe YAML comment preservation!"
 
 install-hardware:
 	@echo "Installing PWM capture module and hardware configuration..."
@@ -510,13 +530,28 @@ install-hardware:
 	@echo "✅ Hardware installation complete!"
 	@echo "⚠️  Reboot required to apply hardware configuration changes."
 
-install-all: install-python-deps install-hardware install-cpu-tuning fix-orangepi-ramlog install-network-improvements
-	@echo "✅ Complete Argo hardware installation finished!"
+install-all: install-python-deps
+ifeq ($(IS_ORANGEPI),1)
+	@echo "Robot platform detected - installing hardware and system configurations..."
+	@$(MAKE) install-hardware install-cpu-tuning fix-orangepi-ramlog install-network-improvements
+	@echo "✅ Complete Argo robot installation finished!"
+	@echo ""
 	@echo "Next steps:"
 	@echo "1. Reboot to apply hardware configuration"
 	@echo "2. Run 'make -C launch install' to install services"
 	@echo "3. Run 'make -C launch enable' to enable automatic startup"
 	@echo "4. Run 'make -C launch start' to launch the system"
+else
+	@echo "✅ Host computer Python dependencies installed!"
+	@echo ""
+	@echo "Host computer setup complete. Hardware installation skipped (not on robot)."
+	@echo ""
+	@echo "Next steps for host computer:"
+	@echo "1. Ensure ROS2 is installed: sudo apt install ros-humble-desktop"
+	@echo "2. Initialize simulator submodule: make submodule-init"
+	@echo "3. Install simulation dependencies: make install-simulation-deps"
+	@echo "4. Run local simulation: make simulate-local"
+endif
 
 # ==================== CPU GOVERNOR TUNING ====================
 

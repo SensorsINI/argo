@@ -169,11 +169,18 @@ class ArgoBoatVisualization(ArgoBaseNode):
             int(self.get_parameter('simulation.heading_trail_limit').get_parameter_value().integer_value)
         )
         self.heading_trail_limit = initial_trail_limit
-        self.heading_trail = deque(maxlen=self.heading_trail_limit) if self.heading_trail_limit > 0 else deque()
+        
+        # No-go zone angle for sail positioning (read from controller parameters)
+        self.declare_parameter('controller_node.no_go_zone_angle', 45.0)
+        self.no_go_zone_angle = self.get_parameter('controller_node.no_go_zone_angle').get_parameter_value().double_value
+        # Use unlimited deque - markers will expire via lifetime instead of deque limit
+        self.heading_trail = deque()
         self.heading_trail_spacing_m = 3.0  # Minimum spacing between trail markers
         self.heading_trail_heading_threshold_deg = 12.0  # Heading delta to force a new marker
         self.heading_trail_time_spacing_s = 5.0  # Minimum time between markers
         self.heading_trail_last_time_s = None
+        # Unique marker ID counter (increments for each new marker, ensuring unique IDs)
+        self._trail_marker_id_counter = 0
         
         # Log scale setting for debugging
         if self.visualization_scale != 1.0:
@@ -266,13 +273,13 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.boat_pos_x = 0.0
         self.boat_pos_y = 0.0
         self.overlay_markers = []
-        self.heading_trail_clear_needed = False
         self.is_tacking = False
         self._tacking_marker_active = False
         self.human_controlled = False  # Track if boat is under human control
         self.controller_state = ""  # Track controller state (e.g., 'tacking', 'jibing', 'broad_reach')
         
         # Track how many trail markers have been published (for efficiency)
+        # This is the index in the deque of the last published marker
         self._published_trail_count = 0
         
         # TF2 buffer and listener for getting boat position from transforms
@@ -385,17 +392,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
                             f"(change via ros2 param set or Foxglove)"
                         )
                         self.heading_trail_limit = new_limit
-                        if self.heading_trail_limit == 0:
-                            self.heading_trail = deque()
-                        else:
-                            existing = list(self.heading_trail)[-self.heading_trail_limit:]
-                            self.heading_trail = deque(existing, maxlen=self.heading_trail_limit)
-                        if new_limit == 0:
-                            self.heading_trail.clear()
-                        self.heading_trail_last_time_s = None
-                        # Reset published count when trail limit changes (need to republish)
-                        self._published_trail_count = 0
-                        self.heading_trail_clear_needed = True
+                        # Note: We don't clear the deque or reset published count
+                        # Old markers will expire naturally via their lifetime
+                        # New markers will use the updated lifetime calculation
             else:
                 # Allow other parameters (don't fail on unknown parameters)
                 pass
@@ -538,6 +537,29 @@ class ArgoBoatVisualization(ArgoBaseNode):
             self.heading_trail.append(entry)
             self.heading_trail_last_time_s = current_time_s
 
+    def _calculate_marker_lifetime(self):
+        """Calculate marker lifetime based on heading_trail_limit and spacing parameters.
+        
+        Returns:
+            Tuple of (seconds, nanoseconds) for marker lifetime.
+            If heading_trail_limit is 0, returns (0, 0) for persistent markers.
+        """
+        if self.heading_trail_limit == 0:
+            return (0, 0)  # Persistent markers
+        
+        # Calculate lifetime to show approximately heading_trail_limit markers
+        # Use the time spacing as the basis, with a conservative multiplier
+        # If markers are created every heading_trail_time_spacing_s seconds,
+        # and we want heading_trail_limit markers visible, lifetime should be:
+        # heading_trail_limit * heading_trail_time_spacing_s
+        base_lifetime_sec = self.heading_trail_limit * self.heading_trail_time_spacing_s
+        # Add a small buffer (20%) to account for variations in spacing
+        lifetime_sec = int(base_lifetime_sec * 1.2)
+        # Calculate fractional seconds as nanoseconds
+        lifetime_nsec = int((base_lifetime_sec * 1.2 - lifetime_sec) * 1e9)
+        
+        return (lifetime_sec, lifetime_nsec)
+    
     def _create_heading_trail_markers(self, start_idx=0):
         """Create markers representing the historical heading trace.
         
@@ -554,6 +576,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
         arrow_width = 0.02 * self.visualization_scale
         arrow_height = 0.015 * self.visualization_scale
         
+        # Calculate marker lifetime
+        lifetime_sec, lifetime_nsec = self._calculate_marker_lifetime()
+        
         # Get previous entry for state change detection
         prev_entry = None
         if start_idx > 0 and start_idx <= len(self.heading_trail):
@@ -561,13 +586,21 @@ class ArgoBoatVisualization(ArgoBaseNode):
 
         for idx in range(start_idx, len(self.heading_trail)):
             entry = self.heading_trail[idx]
+            
+            # Use unique marker ID from counter (not based on deque index)
+            unique_marker_id = self._trail_marker_id_counter
+            self._trail_marker_id_counter += 1
+            # Wrap around at 100000 to avoid ID overflow (markers expire via lifetime anyway)
+            if self._trail_marker_id_counter >= 100000:
+                self._trail_marker_id_counter = 0
+            
             marker = Marker()
             marker.header = Header()
             marker.header.frame_id = "map"
             marker.header.stamp = self.get_current_time()
 
             marker.ns = "argo_heading_trail"
-            marker.id = base_id + idx
+            marker.id = base_id + unique_marker_id
             marker.type = Marker.ARROW
             marker.action = Marker.ADD
             marker.frame_locked = True
@@ -633,8 +666,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
                     marker_color = ColorRGBA(r=0.5, g=0.5, b=0.8, a=1.0)
                     label_text = entry.controller_state.upper() if entry.controller_state else "AUTO"
             
-            marker.lifetime.sec = 0
-            marker.lifetime.nanosec = 0
+            # Set marker lifetime (markers will expire naturally)
+            marker.lifetime.sec = lifetime_sec
+            marker.lifetime.nanosec = lifetime_nsec
 
             markers.append(marker)
             
@@ -656,7 +690,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
                 text_marker.header.stamp = self.get_current_time()
                 
                 text_marker.ns = "argo_heading_trail_labels"
-                text_marker.id = text_base_id + idx
+                text_marker.id = text_base_id + unique_marker_id
                 text_marker.type = Marker.TEXT_VIEW_FACING
                 text_marker.action = Marker.ADD
                 text_marker.frame_locked = True
@@ -675,9 +709,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
                 # Color matching the arrow (but fully opaque for text)
                 text_marker.color = marker_color
                 
-                # Lifetime
-                text_marker.lifetime.sec = 0
-                text_marker.lifetime.nanosec = 0
+                # Set label lifetime to match arrow marker
+                text_marker.lifetime.sec = lifetime_sec
+                text_marker.lifetime.nanosec = lifetime_nsec
                 
                 markers.append(text_marker)
             
@@ -995,45 +1029,90 @@ class ArgoBoatVisualization(ArgoBaseNode):
         hull_top_z = 0.075 * self.visualization_scale  # Half hull height (0.15/2)
         stern_x = -hull_half_length  # Back of hull (stern is at negative X)
         
-        # Determine downwind side from wind direction
-        # wind_angle: 0° to 360° (CW from front of boat, where wind comes from)
-        #   0° = from front, 90° = from starboard, 180° = from back, 270° = from port
-        # In base_link (ROS standard): +X = forward, +Y = left (port), -Y = right (starboard)
-        # Sail goes to downwind side (opposite of where wind comes from)
+        # Determine sail side based on fully extended sail angle relative to wind direction
+        # Sail should be on the side where the fully extended sail aligns best with wind direction
+        # If boat is in stays (no-go zone), sail should align with wind vector
         
-        # Normalize wind_angle to 0-360 range
-        wind_angle_norm = self.wind_angle % 360.0
+        # Get wind direction (where wind goes, downwind)
+        if self.true_wind_direction is not None:
+            # Use true wind direction (compass convention) - more accurate
+            # Calculate where wind goes (downwind direction) in compass frame
+            absolute_wind_to = (self.true_wind_direction + 180.0) % 360.0
+            # Convert to relative to boat heading
+            relative_wind_to_deg = (absolute_wind_to - self.boat_heading) % 360.0
+            if relative_wind_to_deg > 180.0:
+                relative_wind_to_deg -= 360.0  # Normalize to -180 to +180
+        else:
+            # Fallback: use wind_angle from sensor
+            # wind_angle: where wind comes from relative to boat
+            wind_angle_norm = self.wind_angle % 360.0
+            if wind_angle_norm > 180.0:
+                relative_wind_from = wind_angle_norm - 360.0
+            else:
+                relative_wind_from = wind_angle_norm
+            # Calculate where wind goes (downwind direction)
+            relative_wind_to_deg = relative_wind_from + 180.0
         
-        # Determine which side wind is coming from
-        # Wind from 0°-180° (front to back, starboard side) → sail goes to port (+Y)
-        # Wind from 180°-360° (back to front, port side) → sail goes to starboard (-Y)
-        # Special cases: 0° (front) and 180° (back) - use last known side
-        if wind_angle_norm < 0.1 or abs(wind_angle_norm - 180.0) < 0.1:
-            # Wind from directly front or back - use last known side
+        # Check if boat is in stays (no-go zone)
+        # No-go zone is read from argo.yaml parameter (typically 45° on either side of where wind comes from)
+        relative_wind_from_deg = relative_wind_to_deg - 180.0
+        if relative_wind_from_deg > 180.0:
+            relative_wind_from_deg -= 360.0
+        elif relative_wind_from_deg < -180.0:
+            relative_wind_from_deg += 360.0
+        
+        is_in_stays = abs(relative_wind_from_deg) < self.no_go_zone_angle
+        
+        # Determine sail side based on where wind is going (downwind side)
+        # The sail should be on the side where the wind is going, not where it's coming from
+        # In base_link: +Y = port (left), -Y = starboard (right)
+        # 
+        # Note: The angle convention needs to match the coordinate system
+        # If wind is going to port (left/+Y), the angle should be positive (90°)
+        # If wind is going to starboard (right/-Y), the angle should be negative (-90°)
+        # But we need to verify this matches the actual wind_angle convention
+        
+        # Special cases: wind going directly forward or aft - use last known side
+        if abs(relative_wind_to_deg) < 5.0 or abs(abs(relative_wind_to_deg) - 180.0) < 5.0:
             sail_side = self._last_visual_sail_side
-        elif 0.1 <= wind_angle_norm < 180.0:
-            # Wind from starboard side (0°-180°) → sail goes to port (+Y)
+        elif relative_wind_to_deg > 0:
+            # Wind going to port side → sail goes to port (+Y) [INVERTED from previous]
             sail_side = 1.0
-        else:  # 180.0 < wind_angle_norm < 360.0
-            # Wind from port side (180°-360°) → sail goes to starboard (-Y)
+        else:  # relative_wind_to_deg < 0
+            # Wind going to starboard side → sail goes to starboard (-Y) [INVERTED from previous]
             sail_side = -1.0
         
-        # Ensure we have a valid side
-        if sail_side == 0.0:
-            sail_side = 1.0  # Default to port
-        
+        # Store for next time (for special cases)
         self._last_visual_sail_side = sail_side
         
-        # Sail trim angle from sail command (-1 = sheeted in, +1 = fully eased)
-        sheet_fraction = max(0.0, min(1.0, 0.5 * (self.sail_cmd + 1.0)))
+        # Sail angle parameters
         max_sail_angle_deg = 60.0
         max_sail_angle_rad = math.radians(max_sail_angle_deg)
-        
-        # Sail orientation: start centered (straight aft) and ease toward the downwind side
-        # When sheet_fraction=0 (cmd = -1) → straight aft (π rad)
-        # When sheet_fraction=1 (cmd = +1) → π ± max_sail_angle depending on side
         base_aft_rad = math.pi  # 180° = aft direction (-X)
-        total_sail_angle_rad = base_aft_rad + sail_side * sheet_fraction * max_sail_angle_rad
+        
+        # Special case: if in stays, align sail with wind vector
+        if is_in_stays:
+            # In stays: sail should point in the direction wind is going (align with wind vector)
+            # Calculate sail angle to align with wind direction
+            relative_wind_to_rad = math.radians(relative_wind_to_deg)
+            # Sail angle should match wind direction (where wind goes)
+            total_sail_angle_rad = relative_wind_to_rad
+            # Determine sail side based on which side the wind is going to (matching normal case)
+            if relative_wind_to_deg > 0:
+                sail_side = 1.0  # Wind going to port, sail on port [INVERTED]
+            else:
+                sail_side = -1.0  # Wind going to starboard, sail on starboard [INVERTED]
+        else:
+            # Normal sailing: use sail trim based on command
+            self._last_visual_sail_side = sail_side
+            
+            # Sail trim angle from sail command (-1 = sheeted in, +1 = fully eased)
+            sheet_fraction = max(0.0, min(1.0, 0.5 * (self.sail_cmd + 1.0)))
+            
+            # Sail orientation: start centered (straight aft) and ease toward the downwind side
+            # When sheet_fraction=0 (cmd = -1) → straight aft (π rad)
+            # When sheet_fraction=1 (cmd = +1) → π ± max_sail_angle depending on side
+            total_sail_angle_rad = base_aft_rad + sail_side * sheet_fraction * max_sail_angle_rad
         
         boom_length = hull_half_length
 
@@ -1438,8 +1517,15 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         return marker
 
-    def create_tacking_status_marker(self):
-        """Create text banner when the simulator reports an in-progress tack."""
+    def create_controller_status_marker(self):
+        """Create text banner showing controller state and maneuver.
+        
+        Parses controller_state which can be:
+        - Just a state: "tacking", "jibing", "toward_middle", etc.
+        - State with maneuver: "Toward Middle (SAILING)", "Turning Around (TACKING)", etc.
+        
+        Displays abbreviated state and maneuver above the boat.
+        """
         marker = Marker()
         marker.header = Header()
         marker.header.frame_id = "base_link"
@@ -1454,11 +1540,68 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.position.y = 0.0
         marker.pose.position.z = 1.0 * self.visualization_scale
 
-        marker.text = "TACKING"
+        # Parse controller_state to extract goal state and maneuver
+        # Format can be: "Toward Middle (SAILING)" or "tacking" or "jibing"
+        state_text = self.controller_state.strip() if self.controller_state else ""
+        
+        # Define abbreviations for states and maneuvers
+        state_abbrev = {
+            'toward_middle': 'TO-MID',
+            'toward middle': 'TO-MID',
+            'crossing_through': 'CROSS',
+            'crossing through': 'CROSS',
+            'turning_around': 'TURN',
+            'turning around': 'TURN',
+            'tacking_upwind': 'UPWIND',
+            'tacking upwind': 'UPWIND',
+            'proportional': 'PROP',
+            'wind_aware': 'WIND',
+            'return_to_home': 'RTH',
+            'patrol': 'PATROL',
+            'crosser': 'CROSS',
+            'human': 'HUMAN',
+        }
+        
+        maneuver_abbrev = {
+            'sailing': '⛵',
+            'tacking': '↻TACK',
+            'jibing': '↺JIBE',
+            'tack': '↻TACK',
+            'jibe': '↺JIBE',
+        }
+        
+        # Try to parse "State (MANEUVER)" format
+        if '(' in state_text and ')' in state_text:
+            # Extract state and maneuver
+            parts = state_text.split('(')
+            goal_state = parts[0].strip().lower()
+            maneuver = parts[1].replace(')', '').strip().lower()
+            
+            # Get abbreviations
+            goal_abbrev = state_abbrev.get(goal_state, goal_state[:6].upper())
+            maneuver_abbrev_text = maneuver_abbrev.get(maneuver, maneuver[:4].upper())
+            
+            marker.text = f"{goal_abbrev}\n{maneuver_abbrev_text}"
+        else:
+            # Simple state name - check if it's a maneuver or state
+            state_lower = state_text.lower()
+            if state_lower in ['tacking', 'jibing', 'sailing', 'tack', 'jibe']:
+                # It's a maneuver
+                marker.text = maneuver_abbrev.get(state_lower, state_text[:6].upper())
+            else:
+                # It's a state
+                marker.text = state_abbrev.get(state_lower, state_text[:6].upper())
 
         marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
 
-        marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.75)
+        # Color based on maneuver type
+        state_lower = state_text.lower()
+        if 'tacking' in state_lower or 'tack' in state_lower:
+            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.85)  # Green for tacking
+        elif 'jibing' in state_lower or 'jibe' in state_lower:
+            marker.color = ColorRGBA(r=1.0, g=0.6, b=0.0, a=0.85)  # Orange for jibing
+        else:
+            marker.color = ColorRGBA(r=0.2, g=0.6, b=1.0, a=0.75)  # Blue for normal sailing
 
         marker.lifetime.sec = 0
         marker.lifetime.nanosec = 0
@@ -1472,39 +1615,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
             
             self._update_heading_trail()
             
-            # Check if trail was trimmed (deque dropped old entries due to maxlen)
-            # Do this before checking heading_trail_clear_needed
-            if self.heading_trail_limit > 0 and self.heading_trail:
-                num_trail_markers = len(self.heading_trail)
-                if num_trail_markers < self._published_trail_count:
-                    # Trail was trimmed - need to clear and republish all
-                    self.heading_trail_clear_needed = True
-                    self._published_trail_count = 0
-            
-            # Add boat visualization markers
-            if self.heading_trail_clear_needed:
-                # Clear all trail markers
-                delete_marker = Marker()
-                delete_marker.header = Header()
-                delete_marker.header.frame_id = "map"
-                delete_marker.header.stamp = self.get_current_time()
-                delete_marker.ns = "argo_heading_trail"
-                delete_marker.id = 0
-                delete_marker.action = Marker.DELETEALL
-                marker_array.markers.append(delete_marker)
-                
-                # Also clear trail labels
-                delete_label_marker = Marker()
-                delete_label_marker.header = Header()
-                delete_label_marker.header.frame_id = "map"
-                delete_label_marker.header.stamp = self.get_current_time()
-                delete_label_marker.ns = "argo_heading_trail_labels"
-                delete_label_marker.id = 0
-                delete_label_marker.action = Marker.DELETEALL
-                marker_array.markers.append(delete_label_marker)
-                
-                self.heading_trail_clear_needed = False
-                self._published_trail_count = 0  # Reset counter after clear
+            # Note: We no longer need to check for deque trimming or clear markers
+            # Markers expire naturally via their lifetime, and the deque is unlimited
 
             marker_array.markers.append(self.create_boat_hull_marker())
             marker_array.markers.append(self.create_mast_marker())
@@ -1516,7 +1628,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_heading_arrow_marker())
 
             # Add NEW historical heading markers only (efficiency optimization)
-            # Markers with lifetime=0 are persistent, so we only need to publish new ones
+            # Markers have finite lifetimes and expire naturally, so we only need to publish new ones
             if self.heading_trail_limit > 0 and self.heading_trail:
                 num_trail_markers = len(self.heading_trail)
                 if num_trail_markers > self._published_trail_count:
@@ -1535,10 +1647,14 @@ class ArgoBoatVisualization(ArgoBaseNode):
             marker_array.markers.append(self.create_sail_label_marker())
             marker_array.markers.append(self.create_wind_label_marker())
             marker_array.markers.append(self.create_heading_label_marker())
-            if self.is_tacking:
-                marker_array.markers.append(self.create_tacking_status_marker())
+            
+            # Show controller status marker when controller is active
+            # Controller state comes from /controller/state topic published by controller.py
+            if self.controller_state and self.controller_state.strip():
+                marker_array.markers.append(self.create_controller_status_marker())
                 self._tacking_marker_active = True
             elif self._tacking_marker_active:
+                # Delete marker if controller state is no longer available
                 delete_marker = Marker()
                 delete_marker.header = Header()
                 delete_marker.header.frame_id = "base_link"
