@@ -113,6 +113,9 @@ from sensor_msgs.msg import NavSatFix
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Bool, ColorRGBA, Header, Float64, String
 from rosgraph_msgs.msg import Clock
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 import math
 import numpy as np
 import sys
@@ -271,6 +274,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         # Track how many trail markers have been published (for efficiency)
         self._published_trail_count = 0
+        
+        # TF2 buffer and listener for getting boat position from transforms
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # Timer for publishing markers
         self.timer = self.create_timer(1.0/self.update_rate, self.publish_markers)
@@ -434,6 +441,51 @@ class ArgoBoatVisualization(ArgoBaseNode):
             self.boat_pos_x = d_lon * R * math.cos(math.radians(self.base_lat))
         except Exception as exc:
             self.get_logger().warn(f"Failed to update boat XY from GPS: {exc}")
+    
+    def _get_boat_position_from_tf(self):
+        """Get boat position in map frame from TF transforms.
+        
+        Returns:
+            tuple: (x, y) position in map frame, or falls back to GPS-based position if transform unavailable
+        """
+        try:
+            # Use current time for transform lookup (works with /clock during playback)
+            # Convert builtin_interfaces/Time to rclpy.time.Time
+            time_msg = self.get_current_time()
+            if self.sim_time is not None:
+                # During playback, use sim_time directly
+                current_time = rclpy.time.Time(seconds=time_msg.sec, nanoseconds=time_msg.nanosec)
+            else:
+                # During live operation, use node's clock
+                current_time = self.get_clock().now()
+            
+            # Look up transform from map to base_link
+            transform = self.tf_buffer.lookup_transform(
+                'map',
+                'base_link',
+                current_time,
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            # Extract translation (boat position in map frame)
+            x = transform.transform.translation.x
+            y = transform.transform.translation.y
+            # Debug: Log position periodically to diagnose offset issues
+            if hasattr(self, '_tf_debug_counter'):
+                self._tf_debug_counter += 1
+            else:
+                self._tf_debug_counter = 0
+            if self._tf_debug_counter % 100 == 0:  # Every 10 seconds at 10Hz
+                self.get_logger().debug(f"TF boat position: x={x:.2f}, y={y:.2f}, GPS fallback: x={self.boat_pos_x:.2f}, y={self.boat_pos_y:.2f}")
+            return (x, y)
+        except (TransformException, Exception) as ex:
+            # Transform not available - fall back to GPS-based position
+            if hasattr(self, '_tf_fallback_counter'):
+                self._tf_fallback_counter += 1
+            else:
+                self._tf_fallback_counter = 0
+            if self._tf_fallback_counter % 100 == 0:  # Log fallback periodically
+                self.get_logger().warn(f"TF lookup failed, using GPS fallback: {ex}")
+            return (self.boat_pos_x, self.boat_pos_y)
 
     def _update_heading_trail(self):
         """Store the current boat position and heading for historical visualization."""
@@ -1054,7 +1106,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"  # Use global frame so arrow stays aligned with wind
+        marker.header.frame_id = "map"  # Use map frame so arrow shows absolute wind direction
         marker.header.stamp = self.get_current_time()
         
         marker.id = 5
@@ -1062,9 +1114,11 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.action = Marker.ADD
         marker.ns = "argo_boat"
         
-        # Position above boat in map frame - apply visualization scale
-        marker.pose.position.x = self.boat_pos_x
-        marker.pose.position.y = self.boat_pos_y
+        # Position above boat in map frame - get from TF transforms (works during playback)
+        # Falls back to GPS-based position if TF not available
+        boat_x, boat_y = self._get_boat_position_from_tf()
+        marker.pose.position.x = boat_x
+        marker.pose.position.y = boat_y
         marker.pose.position.z = 1.0 * self.visualization_scale  # Just above mast
         
         # Convert wind direction from "relative to boat, where wind comes from" 
@@ -1328,10 +1382,13 @@ class ArgoBoatVisualization(ArgoBaseNode):
         wind_yaw_deg = (90.0 - absolute_wind_to) % 360.0
         wind_yaw_rad = math.radians(wind_yaw_deg)
         
+        # Get boat position from TF (works during playback)
+        boat_x, boat_y = self._get_boat_position_from_tf()
+        
         # Calculate midpoint offset (half arrow length in wind direction)
         midpoint_offset = arrow_length * 0.5
-        marker.pose.position.x = self.boat_pos_x + midpoint_offset * math.cos(wind_yaw_rad)
-        marker.pose.position.y = self.boat_pos_y + midpoint_offset * math.sin(wind_yaw_rad)
+        marker.pose.position.x = boat_x + midpoint_offset * math.cos(wind_yaw_rad)
+        marker.pose.position.y = boat_y + midpoint_offset * math.sin(wind_yaw_rad)
         marker.pose.position.z = 1.0 * self.visualization_scale  # Same height as wind arrow start
         
         # Text content with values
