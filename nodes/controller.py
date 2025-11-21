@@ -416,6 +416,12 @@ class ControllerNode(ArgoBaseNode):
             Bool, '/saltwater_alert', self.saltwater_alert_callback, 10)
         self.create_subscription(
             Bool, '/humidity_alert', self.humidity_alert_callback, 10)
+        
+        # Critical I2C failure monitoring (triggers automatic RTH)
+        self.create_subscription(
+            Bool, '/argo/critical/i2c_failure', self.i2c_failure_callback, 10)
+        self._i2c_failure_active = False
+        self._rth_switched_due_to_i2c = False
 
         # LoRa connectivity monitoring (for return-to-home)
         self.create_subscription(
@@ -774,6 +780,38 @@ class ControllerNode(ArgoBaseNode):
         self.boat_state.humidity_alert = msg.data
         if msg.data:
             self.get_logger().warn("💦 HIGH HUMIDITY ALERT - Check ventilation")
+    
+    def i2c_failure_callback(self, msg):
+        """Receive critical I2C failure status - automatically switch to RTH if failure detected"""
+        # Always process critical failures, even when paused
+        i2c_failed = msg.data
+        old_state = self._i2c_failure_active
+        self._i2c_failure_active = i2c_failed
+        
+        if i2c_failed and not old_state:
+            # I2C failure just detected - switch to RTH immediately
+            self.get_logger().error(
+                "🔴 CRITICAL I2C BUS FAILURE DETECTED - Battery/wind sensors unavailable. "
+                "Automatically switching to Return-to-Home mode for safety.")
+            
+            # Switch to RTH controller if not already in RTH mode
+            if not isinstance(self.controller, ReturnToHomeController):
+                old_controller_name = self.controller.name if self.controller else "None"
+                self.switch_controller('return_to_home')
+                self._rth_switched_due_to_i2c = True
+                self.get_logger().error(
+                    f"Controller automatically switched from {old_controller_name} to ReturnToHomeController "
+                    f"due to critical I2C bus failure")
+            else:
+                self.get_logger().info("Already in RTH mode - maintaining RTH due to I2C failure")
+        
+        elif not i2c_failed and old_state:
+            # I2C recovery detected
+            self.get_logger().info(
+                "✅ I2C BUS RECOVERY DETECTED - Critical sensors restored. "
+                "Controller will remain in current mode (RTH or manual switch required to exit RTH).")
+            # Note: We don't automatically switch away from RTH - user must manually switch
+            # This prevents oscillation if I2C is intermittent
 
     # --- LoRa Connectivity Callbacks ---
     def lora_connection_callback(self, msg):

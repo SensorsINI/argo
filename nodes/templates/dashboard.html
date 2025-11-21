@@ -21,6 +21,11 @@
         <!-- System Status Card -->
         <div class="card">
             <h2>System Status</h2>
+            <!-- Critical I2C Failure Alert (shown when I2C bus fails) -->
+            <div id="i2c-failure-alert" class="critical-alert" style="display: none; background-color: #ff4444; color: white; padding: 12px; border-radius: 8px; margin-bottom: 12px; font-weight: bold; text-align: center;">
+                🔴 CRITICAL I2C BUS FAILURE<br>
+                <span style="font-size: 0.9em; font-weight: normal;">Battery/wind sensors unavailable - Controller switched to RTH mode</span>
+            </div>
             <div class="status-grid">
                 <!-- Row 1: System, Nodes, Health -->
                 <div class="status-item">
@@ -206,6 +211,7 @@
         
         // Critical state tracking for reactive updates
         let lastCriticalState = {
+            i2c_failure: false,
             human_controlled: null,
             recording: null,
             controller_type: null,
@@ -293,6 +299,12 @@
                 lastCriticalState.controller_paused = criticalData.controller_paused;
             }
             
+            // Update I2C failure alert
+            if ((criticalData.i2c_failure || false) !== lastCriticalState.i2c_failure) {
+                needsUpdate = true;
+                lastCriticalState.i2c_failure = criticalData.i2c_failure || false;
+            }
+            
             if (!needsUpdate) {
                 return; // No changes, skip UI update
             }
@@ -328,6 +340,21 @@
             // Controller type
             if (data.controller_type !== undefined) {
                 document.getElementById('controller-type').textContent = data.controller_type;
+            }
+            
+            // I2C failure alert
+            updateI2CFailureAlert(data.i2c_failure || false);
+        }
+        
+        // Update I2C failure alert visibility
+        function updateI2CFailureAlert(i2cFailed) {
+            const alertElement = document.getElementById('i2c-failure-alert');
+            if (alertElement) {
+                if (i2cFailed) {
+                    alertElement.style.display = 'block';
+                } else {
+                    alertElement.style.display = 'none';
+                }
             }
         }
         
@@ -390,6 +417,7 @@
                     lastCriticalState.recording = data.recording;
                     lastCriticalState.controller_type = data.controller_type;
                     lastCriticalState.controller_paused = data.controller_paused;
+                    lastCriticalState.i2c_failure = data.i2c_failure || false;
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);

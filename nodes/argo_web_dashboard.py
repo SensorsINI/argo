@@ -159,6 +159,9 @@ class ArgoWebDashboard(ArgoBaseNode):
             # Recording
             'recording': False,
             
+            # Critical failures
+            'i2c_failure': False,  # Critical I2C bus failure status
+            
             # Home position
             'home_latitude': None,
             'home_longitude': None,
@@ -471,6 +474,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/argo/recording/status', self.recording_status_cb, self.transient_local_qos)
+        )
+        
+        # Critical I2C failure monitoring
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/argo/critical/i2c_failure', self.i2c_failure_cb, 10)
         )
         
         # LoRa sources (fallback when WiFi unavailable)
@@ -1136,6 +1144,26 @@ class ArgoWebDashboard(ArgoBaseNode):
         if recording_changed:
             self._trigger_critical_state_update()
     
+    def i2c_failure_cb(self, msg):
+        """Callback for critical I2C failure status updates."""
+        # Always process critical failures, even in low-power mode
+        with self.state_lock:
+            prev_i2c_failure = self.state.get('i2c_failure')
+            self.state['i2c_failure'] = msg.data
+            i2c_failure_changed = prev_i2c_failure != msg.data
+        
+        # Log critical failures with high visibility
+        if msg.data:
+            self.get_logger().error(
+                "🔴 CRITICAL I2C BUS FAILURE - Battery/wind sensors unavailable. "
+                "Controller should have automatically switched to RTH mode.")
+        elif i2c_failure_changed:
+            self.get_logger().info("✅ I2C BUS RECOVERY - Critical sensors restored")
+        
+        # Trigger immediate UI update for critical state change
+        if i2c_failure_changed:
+            self._trigger_critical_state_update()
+    
     def _query_recording_status(self):
         """Query the current recording status from the service to get initial state."""
         try:
@@ -1745,13 +1773,14 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         @self.app.route('/api/status/critical')
         def get_critical_status():
-            """Get only critical status fields (human_controlled, recording, controller_type) for fast polling."""
+            """Get only critical status fields (human_controlled, recording, controller_type, i2c_failure) for fast polling."""
             with self.state_lock:
                 return jsonify({
                     'human_controlled': self.state.get('human_controlled'),
                     'recording': self.state.get('recording'),
                     'controller_type': self.state.get('controller_type'),
-                    'controller_paused': self.state.get('controller_paused')
+                    'controller_paused': self.state.get('controller_paused'),
+                    'i2c_failure': self.state.get('i2c_failure', False)
                 })
         
         @self.app.route('/api/toggle_pause', methods=['POST'])

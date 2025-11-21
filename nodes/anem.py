@@ -315,6 +315,11 @@ class AnemNode(ArgoBaseNode):
             Vector3, 'anem_speed_angle_temp', 10)
         self.pub_temperature_air = self.create_publisher(
             Float32, 'temperature_air', 10)
+        
+        # Critical I2C failure publisher (for automatic RTH switching)
+        self.pub_i2c_failure = self.create_publisher(
+            Bool, '/argo/critical/i2c_failure', 10)
+        self._i2c_failure_state = False  # Track current I2C failure state
 
         # Visual debug mode flag
         self.debug_visually = debug_visually
@@ -329,6 +334,12 @@ class AnemNode(ArgoBaseNode):
         self._last_successful_read_time = time.time()
         self._last_recovery_attempt_time = 0.0
         self._recovery_attempt_count = 0
+        
+        # Critical I2C failure detection (all sensors failed = critical)
+        self._critical_i2c_failure = False
+        self._all_sensors_failed_timeout = 30.0  # Consider critical after 30s of all sensors failing
+        self._all_sensors_failed_start_time = None
+        self._detected_sensors = set()  # Track which sensors are detected
         
         # Add a throttle for the "no valid samples" warning
         self._last_no_valid_samples_log_time = 0.0
@@ -549,9 +560,32 @@ class AnemNode(ArgoBaseNode):
             if log_on_fail:
                 self.get_logger().info(
                     f'Stopping existing continuous measurements on detected sensors: {sensors_detected}')
+            # Update detected sensors set
+            self._detected_sensors = set(sensors_detected)
+            # Reset failure timer if sensors are detected
+            if self._all_sensors_failed_start_time is not None:
+                self._all_sensors_failed_start_time = None
+                if self._critical_i2c_failure:
+                    self._critical_i2c_failure = False
+                    self._publish_i2c_failure(False)
+                    self.get_logger().info("✅ I2C recovery: Wind sensors detected - critical failure cleared")
         else:
             if log_on_fail:
                 self.get_logger().warn('Wind sensor not detected on I2C bus')
+            # All sensors failed - start critical failure timer
+            current_time = time.time()
+            if self._all_sensors_failed_start_time is None:
+                self._all_sensors_failed_start_time = current_time
+                self.get_logger().warn("All wind sensors failed - starting critical failure timer")
+            else:
+                # Check if all sensors have been failing for too long (critical failure)
+                failure_duration = current_time - self._all_sensors_failed_start_time
+                if failure_duration >= self._all_sensors_failed_timeout and not self._critical_i2c_failure:
+                    self._critical_i2c_failure = True
+                    self._publish_i2c_failure(True)
+                    self.get_logger().error(
+                        f"🔴 CRITICAL I2C FAILURE: All wind sensors have been failing for {failure_duration:.1f}s. "
+                        f"Wind monitoring unavailable - controller should switch to RTH mode.")
             return False
 
         for a in self.i2cAddr:
@@ -713,6 +747,19 @@ class AnemNode(ArgoBaseNode):
         self.main_timer = self.create_timer(
             1.0 / PUBLISHING_RATE, self.publish_callback)
         self.get_logger().info("Switched back to normal 3Hz mode - I2C communication recovered")
+    
+    def _publish_i2c_failure(self, failed: bool):
+        """Publish I2C failure status to critical failure topic"""
+        try:
+            msg = Bool(data=failed)
+            self.pub_i2c_failure.publish(msg)
+            self._i2c_failure_state = failed
+            if failed:
+                self.get_logger().error("Published CRITICAL I2C failure - controller should switch to RTH")
+            else:
+                self.get_logger().info("Published I2C recovery - critical failure cleared")
+        except Exception as e:
+            self.get_logger().error(f"Error publishing I2C failure status: {e}")
 
     def _check_io_recovery(self):
         """Check if I2C communication has recovered and switch back to normal mode"""
@@ -777,6 +824,14 @@ class AnemNode(ArgoBaseNode):
                 # Update successful read time for recovery detection
                 self._last_successful_read_time = time.time()
                 self._consecutive_io_errors = 0  # Reset error counter on success
+                
+                # Reset failure timer on successful read
+                if self._all_sensors_failed_start_time is not None:
+                    self._all_sensors_failed_start_time = None
+                    if self._critical_i2c_failure:
+                        self._critical_i2c_failure = False
+                        self._publish_i2c_failure(False)
+                        self.get_logger().info("✅ I2C recovery: Wind sensor communication restored - critical failure cleared")
 
             # Check for recovery from I2C errors (do this even if no valid samples)
             if not self.node_healthy:
@@ -789,6 +844,18 @@ class AnemNode(ArgoBaseNode):
                     self.get_logger().warn("No valid sensor samples in this cycle, skipping publish. Will retry.")
                     self._last_no_valid_samples_log_time = current_time
                 self.set_unhealthy("No valid sensor samples")
+                
+                # Check for critical I2C failure (all sensors failed for extended period)
+                if self._all_sensors_failed_start_time is None:
+                    self._all_sensors_failed_start_time = current_time
+                else:
+                    failure_duration = current_time - self._all_sensors_failed_start_time
+                    if failure_duration >= self._all_sensors_failed_timeout and not self._critical_i2c_failure:
+                        self._critical_i2c_failure = True
+                        self._publish_i2c_failure(True)
+                        self.get_logger().error(
+                            f"🔴 CRITICAL I2C FAILURE: All wind sensors have been failing for {failure_duration:.1f}s. "
+                            f"Wind monitoring unavailable - controller should switch to RTH mode.")
                 return
 
             # Average differential pressures across all valid samples
