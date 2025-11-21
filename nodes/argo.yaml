@@ -1,28 +1,82 @@
 # Centralized configuration file for all Argo nodes
 # (there are a few other config files in the nodes directory, but this is the main one, see also README.md)
 
+# NOTE code should use ruamel for yaml parsing, not standard yaml library, to preserve comments and ordering
 # Global parameters (applied to all nodes)
 # The /** wildcard is ROS2 parameter syntax that applies these parameters to ALL nodes
 /**:
   ros__parameters:
+    # Map configuration (used by sailing_area_publisher, argo_transform_publisher, controllers)
+    geofence_map_name: Argo Irchel North pond sailing area
+    # Controller parameters (used by controller.py and crosser controller)
+    p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
+    min_rudder_near_boundary: 0.5  # Minimum rudder command when close to boundary (0.0-1.0)
+    boundary_emergency_threshold: 4.0  # Meters from boundary for emergency turn
+    turn_rudder_gain_multiplier: 2.0  # Multiplier for rudder gain during turns (more aggressive control)
     argo:
       mode: autonomous  # NOTE: Currently unused - launch mode controlled via launch argument (normal/simulation)
-      geofence_map_name: Argo Irchel North pond sailing area
-      p_heading_gain: 0.6  # Proportional gain for heading control (P controller, can be extended to PID)
-      min_rudder_near_boundary: 0.3  # Minimum rudder command when close to boundary (0.0-1.0)
-      boundary_emergency_threshold: 5.0  # Meters from boundary for emergency turn
-      turn_rudder_gain_multiplier: 2.0  # Multiplier for rudder gain during turns (more aggressive control)
     # Simulation parameters (shared across simulator bridge, transform publisher, and visualization)
     # These are accessible to all nodes via the simulation.* namespace
     simulation:
       publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz)
       simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics
-      heading_trail_limit: 100  # Number of historical heading markers to display in visualization
+      heading_trail_limit: 20  # Number (roughly) of historical heading markers to display in visualization
       grounding_behavior: reset # Behavior on grounding in local simulation: reset|terminate|continue
-      exit_confirmation: true
+      # Sensor noise modeling for sim-to-real gap reduction
+      # Set all noise parameters to 0.0 to disable noise (perfect sensors)
+      sensor_noise:
+        enabled: false  # Master switch for all sensor noise (set to true for realistic simulation)
+        # Wind sensor (anemometer) noise parameters
+        wind:
+          use_apparent_wind: false  # If true, simulate apparent wind (true_wind - boat_velocity), if false use true wind
+          angle_noise_stddev: 5.0   # Standard deviation of wind angle noise (degrees)
+          angle_bias: 0.0           # Constant bias/offset in wind angle (degrees)
+          speed_noise_stddev: 0.5   # Standard deviation of wind speed noise (m/s)
+          speed_bias: 0.0           # Constant bias/offset in wind speed (m/s)
+          update_rate: 4.0          # Sensor update rate (Hz) - real anemometer typically 1-10 Hz
+          dropout_probability: 0.0  # Probability of sensor dropout per update (0.0-1.0)
+          dropout_duration: 1.0     # Duration of dropout events (seconds)
+        # Compass/IMU noise parameters
+        compass:
+          heading_noise_stddev: 2.0  # Standard deviation of heading noise (degrees)
+          heading_bias: 0.0          # Constant bias/offset in heading (degrees) - simulates miscalibration
+          heading_drift_rate: 0.1    # Heading drift rate (degrees/minute) - simulates gyro drift
+          update_rate: 10.0          # Sensor update rate (Hz)
+          magnetic_interference_stddev: 5.0  # Additional noise near metal/electronics (degrees)
+        # GPS noise parameters
+        gps:
+          position_noise_stddev: 3.0  # Standard deviation of position noise (meters) - typical GPS ~3-10m
+          cog_noise_stddev: 5.0       # Course over ground noise (degrees)
+          sog_noise_stddev: 0.2       # Speed over ground noise (m/s or knots?)
+          update_rate: 1.0            # GPS update rate (Hz) - typically 1-10 Hz
+          dropout_probability: 0.0    # Probability of GPS fix loss per update
+          dropout_duration: 2.0       # Duration of GPS dropout (seconds)
+        # IMU accelerometer/gyro noise (for roll/pitch)
+        imu:
+          accel_noise_stddev: 0.1     # Accelerometer noise (m/s²)
+          gyro_noise_stddev: 0.05     # Gyroscope noise (rad/s)
+          update_rate: 100.0          # IMU update rate (Hz) - typically 50-400 Hz
+        # Sensor latency (time delays)
+        latency:
+          wind_latency_ms: 100        # Wind sensor processing delay (milliseconds)
+          compass_latency_ms: 50      # Compass/IMU processing delay (milliseconds)
+          gps_latency_ms: 200         # GPS processing delay (milliseconds)
+      # Mock simulator physics parameters (used when sailboat-playground is unavailable)
+      mock_simulator:
+        max_turn_rate: 30.0  # Degrees per second at full rudder and speed
+        max_speed: 1.5  # Metres per second (approximate hull speed)
+        no_go_angle_deg: 45.0  # Approximate close-hauled limit (degrees from wind)
+        stall_decay_rate: 1.5  # m/s^2 equivalent deceleration while stalled
+        stall_recovery_threshold: 0.1  # m/s; once above this we treat stall as cleared
+        tack_entry_buffer_deg: 12.0  # Allow tacks to begin slightly before the no-go boundary
+        tack_exit_buffer_deg: 6.0  # Required clearance before finishing a tack
+        tack_speed_threshold: 0.35  # m/s minimum speed to initiate a tack
+        tack_min_speed_to_continue: 0.25  # m/s minimum to keep crossing the wind
+        tack_time_limit_s: 8.0  # Abort tack if it takes longer than this
+        tack_turn_boost: 1.8  # Multiplier applied to turn rate during a tack window (increased for more aggressive tacks)
       # Wind characteristics (runtime configurable via ROS2 parameters)
       wind:
-        wind_min_speed: 2.0         # Minimum wind speed in m/s (used for mock simulator)
+        wind_min_speed: 5.0         # Minimum wind speed in m/s (used for mock simulator)
         wind_max_speed: 10.0        # Maximum wind speed in m/s (placeholder for variable wind)
         wind_direction: 300.0       # Degrees (compass, 0°=North), where wind COMES FROM
         # Placeholder parameters for future wind variability features:
@@ -46,14 +100,18 @@
       yaw_offset_deg: 59.25
 controller_node:
   ros__parameters:
-    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser
+    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
+    controller_initially_paused: false  # Start controller in paused (manual) mode if true
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
     rudder_full_scale_deg: 60.0  # Heading error (degrees) that produces full rudder deflection (-1.0 to +1.0)
     param_file_path: argo.yaml
-    patrol_lookahead_time: 20.0  # Seconds to predict ahead for boundary crossing (used by patrol/crosser controllers)
-    boundary_turn_threshold: 12.0  # Distance to boundary (meters) to trigger turn maneuver
-    tack_angle: 100.0  # Degrees to turn during tack maneuver (increased from 90° for better tack success - more momentum through wind, less likely to stall)
+    patrol_lookahead_time: 15.0  # Seconds to predict ahead for boundary crossing (used by patrol/crosser controllers)
+    boundary_turn_threshold: 7.0  # Distance to boundary (meters) to trigger turn maneuver
+    tack_angle: 120.0  # Degrees to turn during tack maneuver (increased from 90° for better tack success - more momentum through wind, less likely to stall)
+    arrival_distance_m: 3.0  # Distance to middle waypoint (meters) to consider "arrived" (used by crosser controller)
+    tack_min_angle_from_wind: 50.0  # Minimum angle from wind during tack to avoid stays (degrees, used by crosser controller)
+    no_go_zone_angle: 45.0  # Angle from wind where sailing is impossible (degrees, used by crosser controller)
     broad_reach_angle: 110.0  # Preferred angle to wind (degrees) for patrol mode sailing
 
 rudder_sail_radio_node:

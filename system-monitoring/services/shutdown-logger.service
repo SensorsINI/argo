@@ -1,0 +1,19 @@
+[Unit]
+Description=Shutdown Event Logger
+Documentation=man:systemd.service(5)
+DefaultDependencies=no
+# Run BEFORE shutdown begins, while all services are still active
+Before=shutdown.target reboot.target poweroff.target halt.target
+
+[Service]
+Type=oneshot
+# This runs at the START of shutdown to capture service states
+ExecStart=/usr/local/bin/shutdown-logger.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=10
+RemainAfterExit=yes
+
+[Install]
+# This service is triggered when shutdown.target is activated
+WantedBy=shutdown.target reboot.target poweroff.target halt.target

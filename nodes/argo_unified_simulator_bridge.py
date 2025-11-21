@@ -32,6 +32,17 @@ import json
 import yaml
 from pathlib import Path
 
+# ruamel.yaml is REQUIRED for safe parameter persistence (preserves YAML comments)
+try:
+    from ruamel.yaml import YAML
+except ImportError as e:
+    # Log FATAL error so lifecycle manager can display it
+    import logging
+    logging.basicConfig(level=logging.FATAL)
+    logger = logging.getLogger('argo_unified_simulator_bridge')
+    logger.fatal("FATAL: ruamel.yaml is required but not installed. Run: make install-python-deps")
+    sys.exit(1)
+
 from mock_sailboat_simulator import MockSailboatSimulator
 
 # Try to import sailboat-playground for local simulation
@@ -182,6 +193,19 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.get_logger().warn(f"Invalid grounding_behavior '{self.grounding_behavior}', using 'terminate'")
             self.grounding_behavior = 'terminate'
         
+        # --- Mock Simulator Parameters (declare early so available during simulator creation) ---
+        self.declare_parameter('simulation.mock_simulator.max_turn_rate', 30.0)
+        self.declare_parameter('simulation.mock_simulator.max_speed', 1.5)
+        self.declare_parameter('simulation.mock_simulator.no_go_angle_deg', 40.0)
+        self.declare_parameter('simulation.mock_simulator.stall_decay_rate', 0.5)
+        self.declare_parameter('simulation.mock_simulator.stall_recovery_threshold', 0.1)
+        self.declare_parameter('simulation.mock_simulator.tack_entry_buffer_deg', 12.0)
+        self.declare_parameter('simulation.mock_simulator.tack_exit_buffer_deg', 6.0)
+        self.declare_parameter('simulation.mock_simulator.tack_speed_threshold', 0.35)
+        self.declare_parameter('simulation.mock_simulator.tack_min_speed_to_continue', 0.25)
+        self.declare_parameter('simulation.mock_simulator.tack_time_limit_s', 8.0)
+        self.declare_parameter('simulation.mock_simulator.tack_turn_boost', 1.8)
+        
         # Initialize simulator based on mode
         if mode == 'local':
             self._init_local_simulator()
@@ -196,6 +220,9 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.human_controlled = False  # Start in robot control for autonomous testing
         self.mock_human_input = False  # Disable mock input - use real control
         self.human_input_time = 0.0
+        
+        # Reset work flag for async reset execution
+        self._reset_pending = False
         
         # External control state (for Foxglove Teleop, etc.)
         self.external_rudder = 0.0  # -1 to +1
@@ -581,7 +608,34 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Calculate dt from simulation_rate to ensure physics matches timer frequency
         dt = 1.0 / self.simulation_rate
         self.get_logger().info(f'Creating mock simulator with dt={dt:.3f}s (simulation_rate={self.simulation_rate:.1f} Hz)...')
-        simulator = MockSailboatSimulator(dt=dt)
+        
+        # Read mock simulator parameters from ROS2 parameters
+        max_turn_rate = self.get_parameter('simulation.mock_simulator.max_turn_rate').get_parameter_value().double_value
+        max_speed = self.get_parameter('simulation.mock_simulator.max_speed').get_parameter_value().double_value
+        no_go_angle_deg = self.get_parameter('simulation.mock_simulator.no_go_angle_deg').get_parameter_value().double_value
+        stall_decay_rate = self.get_parameter('simulation.mock_simulator.stall_decay_rate').get_parameter_value().double_value
+        stall_recovery_threshold = self.get_parameter('simulation.mock_simulator.stall_recovery_threshold').get_parameter_value().double_value
+        tack_entry_buffer_deg = self.get_parameter('simulation.mock_simulator.tack_entry_buffer_deg').get_parameter_value().double_value
+        tack_exit_buffer_deg = self.get_parameter('simulation.mock_simulator.tack_exit_buffer_deg').get_parameter_value().double_value
+        tack_speed_threshold = self.get_parameter('simulation.mock_simulator.tack_speed_threshold').get_parameter_value().double_value
+        tack_min_speed_to_continue = self.get_parameter('simulation.mock_simulator.tack_min_speed_to_continue').get_parameter_value().double_value
+        tack_time_limit_s = self.get_parameter('simulation.mock_simulator.tack_time_limit_s').get_parameter_value().double_value
+        tack_turn_boost = self.get_parameter('simulation.mock_simulator.tack_turn_boost').get_parameter_value().double_value
+        
+        simulator = MockSailboatSimulator(
+            dt=dt,
+            max_turn_rate=max_turn_rate,
+            max_speed=max_speed,
+            no_go_angle_deg=no_go_angle_deg,
+            stall_decay_rate=stall_decay_rate,
+            stall_recovery_threshold=stall_recovery_threshold,
+            tack_entry_buffer_deg=tack_entry_buffer_deg,
+            tack_exit_buffer_deg=tack_exit_buffer_deg,
+            tack_speed_threshold=tack_speed_threshold,
+            tack_min_speed_to_continue=tack_min_speed_to_continue,
+            tack_time_limit_s=tack_time_limit_s,
+            tack_turn_boost=tack_turn_boost
+        )
         # Mock simulator initializes at (0, 0) with heading 0, so we need to set it
         if hasattr(simulator, 'boat_x'):
             simulator.boat_x = 0.0
@@ -650,6 +704,11 @@ class ArgoUnifiedSimulatorBridge(Node):
     
     def local_simulation_step(self):
         """Main simulation step for local mode - updates physics and publishes sensor data."""
+        # Check if reset is pending and perform it
+        if self._reset_pending:
+            self._perform_reset_work()
+            return  # Skip normal simulation step this cycle
+        
         try:
             self.position_trace_counter += 1
             trace_id = self.position_trace_counter
@@ -689,11 +748,11 @@ class ArgoUnifiedSimulatorBridge(Node):
                     current_sail = self.last_sail_angle / 45.0     # Convert back from degrees
                     control_source = "robot_servo"
             
-            # Log control source periodically for diagnostics (every 2 seconds)
+            # Log control source periodically for diagnostics (every 5 seconds)
             if not hasattr(self, '_last_control_log_time'):
                 self._last_control_log_time = 0.0
             current_time = time.time()
-            if current_time - self._last_control_log_time > 2.0:
+            if current_time - self._last_control_log_time > 5.0:  # Log at most every 5 seconds
                 self.get_logger().info(
                     f"Control: source={control_source}, human_controlled={self.human_controlled}, "
                     f"rudder={current_rudder:.3f}, sail={current_sail:.3f}, "
@@ -1215,7 +1274,24 @@ class ArgoUnifiedSimulatorBridge(Node):
         return lat, lon
 
     def reset_simulation_callback(self, request, response):
-        """Reset simulation to initial state by recreating the simulator."""
+        """Reset simulation to initial state by recreating the simulator.
+        
+        Returns immediately and performs reset asynchronously to avoid service timeout.
+        """
+        # Return response immediately to avoid timeout
+        response.success = True
+        response.message = "Reset initiated (will complete asynchronously)"
+        
+        # Set flag to perform reset work on next timer cycle
+        self._reset_pending = True
+        
+        return response
+    
+    def _perform_reset_work(self):
+        """Perform the actual reset work asynchronously (called from simulation timer)."""
+        # Clear the flag immediately
+        self._reset_pending = False
+        
         try:
             self.get_logger().info("Resetting simulation to initial state (recreating simulator)...")
             
@@ -1365,18 +1441,12 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.last_control_time = time.time()
             self.human_controlled = True
             
-            response.success = True
-            response.message = "Simulation reset to initial state (home waypoint)"
             self.get_logger().info("✅ Simulation reset successful (simulator recreated)")
-            return response
             
         except Exception as e:
             self.get_logger().error(f"Error resetting simulation: {e}")
             import traceback
             self.get_logger().error(f"Traceback: {traceback.format_exc()}")
-            response.success = False
-            response.message = f"Reset failed: {str(e)}"
-            return response
     
     def _load_initial_wind_direction(self):
         """Load initial wind_direction from argo.yaml configuration file.
@@ -1687,7 +1757,7 @@ class ArgoUnifiedSimulatorBridge(Node):
           - simulation.wind.wind_direction -> /**.ros__parameters.simulation.wind.wind_direction
           - simulation.wind.wind_min_speed -> /**.ros__parameters.simulation.wind.wind_min_speed
         
-        Uses ruamel.yaml to preserve comments when available, falls back to PyYAML otherwise.
+        Uses ruamel.yaml to preserve comments and formatting.
         """
         try:
             script_path = Path(__file__).resolve()
@@ -1708,68 +1778,43 @@ class ArgoUnifiedSimulatorBridge(Node):
                 # Not a persistable parameter, silently ignore
                 return
             
-            # Try to preserve comments using ruamel.yaml if available
-            try:
-                from ruamel.yaml import YAML
-                rt_yaml = YAML()
-                rt_yaml.preserve_quotes = True
-                data = {}
-                if yaml_path.exists():
-                    with open(yaml_path, 'r') as f:
-                        data = rt_yaml.load(f) or {}
-                
-                # Ensure nested dicts exist
-                node = data
-                for k in keys[:-1]:
-                    if k not in node or not isinstance(node[k], dict):
-                        node[k] = {}
-                    node = node[k]
-                node[keys[-1]] = value
-                
-                # Write atomically: tmp then replace
-                tmp_path = yaml_path.with_suffix('.yaml.tmp')
-                bak_path = yaml_path.with_suffix('.yaml.bak')
-                with open(tmp_path, 'w') as f:
-                    rt_yaml.dump(data, f)
-                try:
-                    # Backup previous
-                    if yaml_path.exists():
-                        yaml_path.replace(bak_path)
-                except Exception:
-                    # Backup failure should not block persistence
-                    pass
-                Path(tmp_path).replace(yaml_path)
-                self.get_logger().info(f"Persisted '{param_name}' to {yaml_path} (comments preserved)")
-            except ImportError:
-                # Fallback to PyYAML (comments may be lost)
+            # Load existing YAML preserving comments
+            rt_yaml = YAML()
+            rt_yaml.preserve_quotes = True
+            data = {}
+            if yaml_path.exists():
                 with open(yaml_path, 'r') as f:
-                    data = yaml.safe_load(f) or {}
-                
-                # Ensure nested dicts exist
-                node = data
-                for k in keys[:-1]:
-                    if k not in node or not isinstance(node[k], dict):
-                        node[k] = {}
-                    node = node[k]
-                node[keys[-1]] = value
-                
-                # Write atomically: tmp then replace
-                tmp_path = yaml_path.with_suffix('.yaml.tmp')
-                bak_path = yaml_path.with_suffix('.yaml.bak')
-                with open(tmp_path, 'w') as f:
-                    yaml.safe_dump(data, f, sort_keys=False)
-                try:
-                    # Backup previous
-                    if yaml_path.exists():
-                        yaml_path.replace(bak_path)
-                except Exception:
-                    # Backup failure should not block persistence
-                    pass
-                Path(tmp_path).replace(yaml_path)
-                self.get_logger().warn('ruamel.yaml not available; YAML comments may not be preserved')
-                self.get_logger().info(f"Persisted '{param_name}' to {yaml_path}")
+                    data = rt_yaml.load(f) or {}
+            
+            # Ensure nested dicts exist
+            node = data
+            for k in keys[:-1]:
+                if k not in node or not isinstance(node[k], dict):
+                    node[k] = {}
+                node = node[k]
+            node[keys[-1]] = value
+            
+            # Write atomically: tmp then replace
+            tmp_path = yaml_path.with_suffix('.yaml.tmp')
+            bak_path = yaml_path.with_suffix('.yaml.bak')
+            with open(tmp_path, 'w') as f:
+                rt_yaml.dump(data, f)
+            
+            # Backup previous version
+            try:
+                if yaml_path.exists():
+                    yaml_path.replace(bak_path)
+            except Exception as backup_err:
+                # Backup failure should not block persistence
+                self.get_logger().debug(f"Backup failed (non-critical): {backup_err}")
+            
+            Path(tmp_path).replace(yaml_path)
+            self.get_logger().info(f"Persisted '{param_name}' to {yaml_path} (comments preserved)")
+            
         except Exception as e:
-            self.get_logger().warn(f"Failed to persist '{param_name}' to argo.yaml: {e}")
+            self.get_logger().error(f"Failed to persist '{param_name}' to argo.yaml: {e}")
+            import traceback
+            self.get_logger().debug(f"Traceback: {traceback.format_exc()}")
     
     def publish_navsat_fix(self, trace_id=None):
         """Publish a NavSatFix message.
@@ -2291,6 +2336,8 @@ def main(args=None):
             bridge.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        # Delay to allow shutdown messages from other nodes to flush before prompt appears
+        time.sleep(1.0)
 
 if __name__ == '__main__':
     main()

@@ -6,7 +6,7 @@
 # must be installed via apt on the host system and exposed to the virtual
 # environment by creating it with --system-site-packages.
 
-# Reqired for simulation on host machine
+# Required for simulation on host machine
 # sudo apt install ros-humble-desktop  # or ros-humble-ros-base if you want smaller footprint
 
 
@@ -14,6 +14,7 @@ numpy
 pandas
 matplotlib
 PyYAML
+ruamel.yaml>=0.17,<0.18  # Comment-preserving YAML round-trips (same as robot)
 psutil
 argparse
 argcomplete

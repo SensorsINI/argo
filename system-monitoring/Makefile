@@ -189,7 +189,7 @@ uninstall-temp-logger:
 # Shutdown Logger Service
 install-shutdown-logger:
 	@echo "📋 Installing shutdown logger service..."
-	@sudo cp $(MONITORING_DIR)/shutdown-logger.service $(SERVICE_DIR)/
+	@sudo cp $(MONITORING_DIR)/services/shutdown-logger.service $(SERVICE_DIR)/
 	@sudo cp $(MONITORING_DIR)/scripts/shutdown-logger.sh $(SCRIPT_DIR)/
 	@sudo chmod +x $(SCRIPT_DIR)/shutdown-logger.sh
 	@sudo systemctl daemon-reload

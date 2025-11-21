@@ -38,9 +38,10 @@ Simulation Pause (SPACE):
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Vector3
 from std_msgs.msg import Bool, Float64
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, SetBool
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType, ParameterEvent
 import curses
@@ -86,6 +87,10 @@ class KeyboardControlNode(Node):
         self.current_controller_type = None  # Track current controller
         self.is_rth_mode = False  # Track if we're in RTH mode
         
+        # Controller pause service client
+        self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
+        self.controller_paused = False  # Track current pause state
+        
         # Control state
         self.rudder_position = 0.0  # -1.0 to +1.0
         self.sail_position = 0.0    # -1.0 to +1.0
@@ -116,8 +121,13 @@ class KeyboardControlNode(Node):
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(Bool, '/human_controlled', self.control_mode_callback, 10)
+        self.create_subscription(Bool, '/controller_pause_state', self.controller_pause_state_callback, 10)
         
-        # Setup curses
+        # Log initialization messages BEFORE curses takes over terminal
+        self.get_logger().info('Keyboard control node ready')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Toggle Manual | ENTER=Refresh | Q=Quit')
+        
+        # Setup curses (after logging to avoid polluting display)
         self.stdscr = curses.initscr()
         self._setup_curses()
         
@@ -140,9 +150,7 @@ class KeyboardControlNode(Node):
         self.publish_simulation_paused()
         self._initialize_wind_direction()
         self._initialize_controller_type()
-
-        self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | Q=Quit')
+        self._initialize_controller_pause_state()
     
     def _setup_curses(self):
         """Setup curses for terminal control."""
@@ -231,7 +239,8 @@ class KeyboardControlNode(Node):
                     continue
                 if param.value.type == ParameterType.PARAMETER_DOUBLE:
                     self.wind_direction_deg = param.value.double_value % 360.0
-                    self.get_logger().info(f"Wind direction parameter event: {self.wind_direction_deg:.1f}°")
+                    # Use diagnostic message system instead of logger to avoid polluting curses display
+                    self._add_diagnostic_message(f"Wind direction parameter event: {self.wind_direction_deg:.1f}°")
                 return
         
         # Handle controller type updates
@@ -250,7 +259,8 @@ class KeyboardControlNode(Node):
                     # If we don't have a default yet and this is not RTH, save it
                     elif not self.is_rth_mode and not self.default_controller_type:
                         self.default_controller_type = new_controller
-                    self.get_logger().info(f"Controller type parameter event: {new_controller} (RTH mode: {self.is_rth_mode}, default: {self.default_controller_type})")
+                    # Use diagnostic message system instead of logger to avoid polluting curses display
+                    self._add_diagnostic_message(f"Controller type parameter event: {new_controller} (RTH mode: {self.is_rth_mode}, default: {self.default_controller_type})")
                 return
 
     def _initialize_wind_direction(self):
@@ -265,7 +275,13 @@ class KeyboardControlNode(Node):
         request = GetParameters.Request()
         request.names = [self.wind_param_name]
         future = self.wind_get_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        # Wait for result with manual timeout
+        start_time = time.time()
+        timeout = 2.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)
+        
         if future.done():
             response = future.result()
             if response and response.values:
@@ -289,7 +305,13 @@ class KeyboardControlNode(Node):
         request = GetParameters.Request()
         request.names = ['controller_type']
         future = self.controller_get_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        # Wait for result with manual timeout
+        start_time = time.time()
+        timeout = 2.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)
+        
         if future.done():
             response = future.result()
             if response and response.values:
@@ -311,6 +333,34 @@ class KeyboardControlNode(Node):
         self.default_controller_type = 'crosser'  # Default from argo.yaml
         self.current_controller_type = self.default_controller_type
         self.is_rth_mode = False
+    
+    def _initialize_controller_pause_state(self):
+        """Fetch current controller pause state by waiting for first topic message (best effort)."""
+        self.get_logger().info("Waiting for controller pause state...")
+        # Create a one-shot subscription to get the current state
+        state_received = {'value': None}
+        
+        def state_callback(msg):
+            state_received['value'] = bool(msg.data)
+        
+        # Subscribe temporarily to get current state
+        temp_sub = self.create_subscription(Bool, '/controller_pause_state', state_callback, 10)
+        
+        # Wait up to 3 seconds for first message
+        start_time = time.time()
+        while state_received['value'] is None and (time.time() - start_time) < 3.0:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        
+        # Destroy temporary subscription (we already have the main one)
+        self.destroy_subscription(temp_sub)
+        
+        if state_received['value'] is not None:
+            self.controller_paused = state_received['value']
+            state_str = "PAUSED (Manual)" if self.controller_paused else "UNPAUSED (Autonomous)"
+            self.get_logger().info(f"Initial controller state: {state_str}")
+        else:
+            self.get_logger().warn("Could not fetch initial controller pause state; defaulting to False (unpaused)")
+            self.controller_paused = False
 
     def pose_callback(self, msg):
         """Receive heading/pose from simulator."""
@@ -325,6 +375,10 @@ class KeyboardControlNode(Node):
     def control_mode_callback(self, msg):
         """Receive control mode status."""
         self.simulator_mode = "HUMAN" if msg.data else "ROBOT"
+    
+    def controller_pause_state_callback(self, msg):
+        """Receive controller pause state."""
+        self.controller_paused = bool(msg.data)
     
     def handle_keyboard_input(self):
         """Process keyboard input."""
@@ -357,6 +411,10 @@ class KeyboardControlNode(Node):
                 self.reset_simulation()
             elif key == ord('h') or key == ord('H'):
                 self.toggle_rth_controller()
+            elif key == ord('m') or key == ord('M'):
+                self.toggle_controller_pause()
+            elif key == ord('\n') or key == ord('\r') or key == curses.KEY_ENTER:
+                self.clear_and_refresh_display()
             elif key == ord('q') or key == ord('Q'):
                 self.running = False
                 self.cleanup()
@@ -528,56 +586,18 @@ class KeyboardControlNode(Node):
             self._pending_wind_delta = 0.0
     
     def reset_simulation(self):
-        """Reset simulation to initial state."""
-        if not self.reset_service_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().warn("Reset service not available (simulator bridge may not be running)")
-            return
-        
+        """Reset simulation to initial state (fire-and-forget)."""
+        # Fire-and-forget: just send the request, don't wait for response
         request = Trigger.Request()
-        future = self.reset_service_client.call_async(request)
-        
-        # Wait for the response with timeout (increased to allow for reset processing time)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        
-        if future.done():
-            try:
-                response = future.result()
-                if response.success:
-                    message = f"✅ {response.message}"
-                    self.get_logger().info(message)
-                    self._add_diagnostic_message(message)
-                else:
-                    message = f"⚠️  Reset service returned: {response.message}"
-                    self.get_logger().warn(message)
-                    self._add_diagnostic_message(message)
-            except Exception as e:
-                message = f"❌ Error calling reset service: {e}"
-                self.get_logger().error(message)
-                self._add_diagnostic_message(message)
-        else:
-            # Check if future completed after timeout (service might have succeeded)
-            # Give it a moment to check if it completed
-            import time as time_module
-            time_module.sleep(0.1)  # Brief pause to check if response arrived
-            if future.done():
-                try:
-                    response = future.result()
-                    if response.success:
-                        message = f"✅ Reset completed (slow response): {response.message}"
-                        self.get_logger().info(message)
-                        self._add_diagnostic_message(message)
-                    else:
-                        message = f"⚠️  Reset service returned: {response.message}"
-                        self.get_logger().warn(message)
-                        self._add_diagnostic_message(message)
-                except:
-                    message = "⚠️  Reset service call timed out (check if reset succeeded)"
-                    self.get_logger().warn(message)
-                    self._add_diagnostic_message(message)
-            else:
-                message = "⚠️  Reset service call timed out (check if reset succeeded)"
-                self.get_logger().warn(message)
-                self._add_diagnostic_message(message)
+        try:
+            self.reset_service_client.call_async(request)
+            message = "✅ Reset request sent"
+            self.get_logger().info(message)
+            self._add_diagnostic_message(message)
+        except Exception as e:
+            message = f"⚠️  Error sending reset request: {e}"
+            self.get_logger().warn(message)
+            self._add_diagnostic_message(message)
     
     def toggle_rth_controller(self):
         """Toggle between default controller (from argo.yaml) and RTH controller."""
@@ -606,7 +626,12 @@ class KeyboardControlNode(Node):
         
         # Call service
         future = self.controller_set_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        
+        # Wait for result with manual timeout (avoid spin_until_future_complete in timer callback)
+        start_time = time.time()
+        timeout = 3.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)  # Small sleep to avoid busy-waiting
         
         if future.done():
             try:
@@ -631,6 +656,70 @@ class KeyboardControlNode(Node):
             message = "⚠️  Controller switch service call timed out"
             self.get_logger().warn(message)
             self._add_diagnostic_message(message)
+    
+    def toggle_controller_pause(self):
+        """Toggle controller pause state (manual/human control)."""
+        if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
+            message = "⚠️  Controller pause service not available"
+            self.get_logger().warn(message)
+            self._add_diagnostic_message(message)
+            return
+        
+        # Toggle pause state
+        new_pause_state = not self.controller_paused
+        
+        # Create request
+        request = SetBool.Request()
+        request.data = new_pause_state
+        
+        # Call service
+        future = self.controller_pause_client.call_async(request)
+        
+        # Wait for result with manual timeout (avoid spin_until_future_complete in timer callback)
+        start_time = time.time()
+        timeout = 3.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)  # Small sleep to avoid busy-waiting
+        
+        if future.done():
+            try:
+                response = future.result()
+                if response.success:
+                    self.controller_paused = new_pause_state
+                    mode = "PAUSED (Manual)" if new_pause_state else "UNPAUSED (Autonomous)"
+                    message = f"✅ Controller {mode}"
+                    self.get_logger().info(message)
+                    self._add_diagnostic_message(message)
+                else:
+                    message = f"⚠️  Failed to toggle controller pause: {response.message}"
+                    self.get_logger().warn(message)
+                    self._add_diagnostic_message(message)
+            except Exception as e:
+                message = f"❌ Error toggling controller pause: {e}"
+                self.get_logger().error(message)
+                self._add_diagnostic_message(message)
+        else:
+            message = "⚠️  Controller pause service call timed out"
+            self.get_logger().warn(message)
+            self._add_diagnostic_message(message)
+    
+    def clear_and_refresh_display(self):
+        """Clear and refresh the display to fix corruption from logging messages."""
+        try:
+            # Force a complete screen clear and refresh
+            self.stdscr.clear()
+            # Reset terminal size tracking to force full redraw
+            if hasattr(self, '_last_term_size'):
+                del self._last_term_size
+            # Immediately update display
+            self.update_display()
+            self._add_diagnostic_message("Display cleared and refreshed")
+        except Exception as e:
+            # If clearing fails, at least try to refresh
+            try:
+                self.stdscr.refresh()
+            except:
+                pass
     
     def publish_control(self):
         """Publish current control commands to /rudder_sail_radio only when keyboard is active."""
@@ -676,6 +765,8 @@ class KeyboardControlNode(Node):
     
     def _add_diagnostic_message(self, message):
         """Add a diagnostic message to the display queue."""
+        # Strip any trailing newlines to prevent display issues
+        message = message.rstrip('\n\r')
         current_time = time.time()
         self.diagnostic_messages.append((message, current_time))
         # Keep only recent messages
@@ -817,7 +908,8 @@ class KeyboardControlNode(Node):
             
             # Controller status
             controller_name = self.current_controller_type.upper() if self.current_controller_type else 'UNKNOWN'
-            controller_status = f"Controller: {controller_name}"
+            pause_status = " [PAUSED]" if self.controller_paused else ""
+            controller_status = f"Controller: {controller_name}{pause_status}"
             if self.is_rth_mode:
                 controller_status += " (RTH MODE)"
             else:
@@ -838,13 +930,16 @@ class KeyboardControlNode(Node):
             self.stdscr.addstr(line_num, 2, "Controls:")
             line_num += 1
             controls_line1 = "  ←→ Rudder | ↑↓ Sail | C=Center"
-            controls_line2 = "  SPACE=Pause | W/E=Wind ±10°"
-            controls_line3 = "  R=Reset | H=Toggle RTH | Q=Quit"
+            controls_line2 = "  SPACE=Sim Pause | W/E=Wind ±10°"
+            controls_line3 = "  R=Reset | H=Toggle RTH | M=Toggle Manual"
+            controls_line4 = "  ENTER=Refresh | Q=Quit"
             self.stdscr.addstr(line_num, 2, controls_line1[:width-4])
             line_num += 1
             self.stdscr.addstr(line_num, 2, controls_line2[:width-4])
             line_num += 1
             self.stdscr.addstr(line_num, 2, controls_line3[:width-4])
+            line_num += 1
+            self.stdscr.addstr(line_num, 2, controls_line4[:width-4])
             line_num += 1
             
             # Topic info
@@ -920,18 +1015,49 @@ class KeyboardControlNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = None
+    executor = None
     try:
         node = KeyboardControlNode()
-        rclpy.spin(node)
+        # Use MultiThreadedExecutor to allow nested service calls
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(node)
+        
+        # Spin with proper KeyboardInterrupt handling
+        try:
+            executor.spin()
+        except KeyboardInterrupt:
+            # Ctrl+C pressed - ensure cleanup happens
+            pass
     except KeyboardInterrupt:
+        # Ctrl+C during initialization
         pass
     except Exception as e:
         print(f"Error: {e}")
     finally:
+        # Always cleanup properly
+        print("\nShutting down keyboard control...")
         if node:
-            node.destroy_node()
+            # Trigger cleanup explicitly (restore terminal, resume simulation if paused)
+            try:
+                node.cleanup()
+            except Exception as e:
+                print(f"Error during cleanup: {e}")
+        if executor:
+            try:
+                executor.shutdown()
+            except:
+                pass
+        if node:
+            try:
+                node.destroy_node()
+            except:
+                pass
         if rclpy.ok():
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except:
+                pass
+        print("Keyboard control stopped.")
 
 if __name__ == '__main__':
     main()

@@ -37,28 +37,43 @@ class MockSimulatorState:
 class MockSailboatSimulator:
     """Mock simulator for testing when sailboat-playground is not available."""
 
-    def __init__(self, dt=0.1):
+    def __init__(self, dt=0.1, max_turn_rate=None, max_speed=None, no_go_angle_deg=None,
+                 stall_decay_rate=None, stall_recovery_threshold=None,
+                 tack_entry_buffer_deg=None, tack_exit_buffer_deg=None,
+                 tack_speed_threshold=None, tack_min_speed_to_continue=None,
+                 tack_time_limit_s=None, tack_turn_boost=None):
         """Initialize mock simulator.
         
         Args:
             dt: Time step in seconds per integration step (default: 0.1 = 10 Hz)
                 Should match the simulation rate from the bridge (1.0 / simulation_rate)
+            max_turn_rate: Degrees per second at full rudder and speed (default: 30.0)
+            max_speed: Metres per second, approximate hull speed (default: 1.5)
+            no_go_angle_deg: Approximate close-hauled limit in degrees (default: 40.0)
+            stall_decay_rate: m/s^2 equivalent deceleration while stalled (default: 0.5)
+            stall_recovery_threshold: m/s; once above this we treat stall as cleared (default: 0.1)
+            tack_entry_buffer_deg: Allow tacks to begin slightly before the no-go boundary (default: 12.0)
+            tack_exit_buffer_deg: Required clearance before finishing a tack (default: 6.0)
+            tack_speed_threshold: m/s minimum speed to initiate a tack (default: 0.35)
+            tack_min_speed_to_continue: m/s minimum to keep crossing the wind (default: 0.25)
+            tack_time_limit_s: Abort tack if it takes longer than this (default: 8.0)
+            tack_turn_boost: Multiplier applied to turn rate during a tack window (default: 1.8)
         """
         self.state = MockSimulatorState()
 
-        # Physics parameters
+        # Physics parameters (use provided values or defaults)
         self.dt = float(dt)  # seconds per integration step
-        self.max_turn_rate = 30.0  # degrees per second at full rudder and speed
-        self.max_speed = 1.5  # metres / second (approximate hull speed)
-        self.no_go_angle_deg = 40.0  # approximate close-hauled limit
-        self.stall_decay_rate = 0.5  # m/s^2 equivalent deceleration while stalled
-        self.stall_recovery_threshold = 0.1  # m/s; once above this we treat stall as cleared
-        self.tack_entry_buffer_deg = 12.0  # allow tacks to begin slightly before the no-go boundary
-        self.tack_exit_buffer_deg = 6.0  # required clearance before finishing a tack
-        self.tack_speed_threshold = 0.35  # m/s minimum speed to initiate a tack
-        self.tack_min_speed_to_continue = 0.25  # m/s minimum to keep crossing the wind
-        self.tack_time_limit_s = 8.0  # abort tack if it takes longer than this
-        self.tack_turn_boost = 1.8  # multiplier applied to turn rate during a tack window
+        self.max_turn_rate = float(max_turn_rate) if max_turn_rate is not None else 30.0
+        self.max_speed = float(max_speed) if max_speed is not None else 1.5
+        self.no_go_angle_deg = float(no_go_angle_deg) if no_go_angle_deg is not None else 40.0
+        self.stall_decay_rate = float(stall_decay_rate) if stall_decay_rate is not None else 0.5
+        self.stall_recovery_threshold = float(stall_recovery_threshold) if stall_recovery_threshold is not None else 0.1
+        self.tack_entry_buffer_deg = float(tack_entry_buffer_deg) if tack_entry_buffer_deg is not None else 12.0
+        self.tack_exit_buffer_deg = float(tack_exit_buffer_deg) if tack_exit_buffer_deg is not None else 6.0
+        self.tack_speed_threshold = float(tack_speed_threshold) if tack_speed_threshold is not None else 0.35
+        self.tack_min_speed_to_continue = float(tack_min_speed_to_continue) if tack_min_speed_to_continue is not None else 0.25
+        self.tack_time_limit_s = float(tack_time_limit_s) if tack_time_limit_s is not None else 8.0
+        self.tack_turn_boost = float(tack_turn_boost) if tack_turn_boost is not None else 1.8
         self.debug_tack = False # TODO: disable after tacking is working
 
     def set_debug_tack_logging(self, enabled: bool) -> None:
@@ -265,7 +280,11 @@ class MockSailboatSimulator:
 
         # Smooth speed changes towards target
         speed_diff = target_speed - self.state.boat_speed
-        if effective_no_go:
+        # Apply stall deceleration if in no-go zone (even during tack)
+        # During tack, boat can pass through no-go zone but still loses speed
+        is_actually_in_no_go = abs_apparent < self.no_go_angle_deg
+        if effective_no_go or (in_tack_window and is_actually_in_no_go):
+            # Apply stall deceleration when stalled or when crossing through wind during tack
             adjustment = np.clip(speed_diff * 1.5 * self.dt,
                                  -self.stall_decay_rate * self.dt,
                                  self.stall_decay_rate * self.dt)
@@ -293,6 +312,7 @@ class MockSailboatSimulator:
             if abs(heading_to_downwind) < 5.0:
                 # Already pointing downwind, just maintain heading
                 turn_rate = 0.0
+                turn_sign = 0.0  # Not turning, sign doesn't matter
             else:
                 # Turn toward downwind
                 turn_sign = 1.0 if heading_to_downwind > 0.0 else -1.0
