@@ -90,5 +90,8 @@ export ROS_DOMAIN_ID=0
 PATH="$ARGO_DIR/launch:$ARGO_DIR/nodes:$ARGO_DIR/scripts:$ARGO_DIR/power_control:$PATH"
 
 # Add argo_quick_timer to PROMPT_COMMAND for continuous status monitoring
+# Only enable on the boat (Orange Pi), not on host computers
 # This will check status before each prompt (throttled to 5-minute intervals)
-PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }argo_quick_timer"
+if [ -f /proc/device-tree/compatible ] && grep -q "orangepi" /proc/device-tree/compatible 2>/dev/null; then
+    PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }argo_quick_timer"
+fi
