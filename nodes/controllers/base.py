@@ -33,10 +33,16 @@ class BoatState:
     timestamp: float = 0.0
 
     # Navigation
-    compass_heading: Optional[float] = None  # degrees (0-360)
-    gps_cog: Optional[float] = None          # course over ground, degrees true
-    gps_sog: Optional[float] = None          # speed over ground, knots
-    gps_velocity: Optional[Vector3] = None   # x=north, y=east, z=speed
+    compass_heading: Optional[float] = None  # degrees (0-360) - fast updates (~10 Hz), low noise, reliable when moving
+    gps_cog: Optional[float] = None          # course over ground, degrees true (updates at ~0.2 Hz)
+    gps_sog: Optional[float] = None          # speed over ground, knots (updates at ~0.2 Hz - CRITICAL: may be stale)
+    gps_velocity: Optional[Vector3] = None   # x=north, y=east, z=speed (updates at ~0.2 Hz)
+    # Note: GPS position (/fix) updates at 1 Hz, but GPS velocity/COG/SOG updates at ~0.2 Hz (1/5 Hz)
+    # Controller provides fallback speed estimation from position changes when GPS SOG is stale
+    # 
+    # Future sensor fusion:
+    # - fused_heading: Compass-GPS fusion (compass fast/low-noise, GPS absolute reference)
+    # - absolute_wind_direction: Calculated from relative wind + heading (centralized in controller.py)
 
     # IMU
     accel: Optional[Vector3] = None          # accelerometer, g units

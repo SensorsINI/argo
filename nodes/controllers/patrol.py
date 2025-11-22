@@ -320,6 +320,8 @@ class PatrolController(BaseController):
                     self.last_geofence_log_time = current_time
                     self.last_reported_distance = distance_abs
                     self.last_reported_inside = is_inside
+            # NOTE: GPS SOG updates at ~0.2 Hz (every 5 seconds), so may be stale.
+            # Controller uses position-based speed estimation as fallback (updates at 1 Hz).
             if state.gps_sog is not None and state.compass_heading is not None:
                 speed_ms = state.gps_sog * 0.514444
                 state.predicted_boundary_crossing_time = self.geofence_manager.predict_boundary_crossing_time(
