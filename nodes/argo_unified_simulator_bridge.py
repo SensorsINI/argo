@@ -185,6 +185,15 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.gps_cog_noise_stddev = gps_noise_params['cog_noise_stddev']
         self.gps_sog_noise_stddev = gps_noise_params['sog_noise_stddev']
         self.gps_update_rate = gps_noise_params['update_rate']
+        self.gps_noise_time_constant = gps_noise_params['noise_time_constant']
+        
+        # Calculate filter coefficient for first-order low-pass filter
+        # alpha = exp(-dt/tau) where dt = 1/update_rate, tau = time_constant
+        if self.gps_update_rate > 0 and self.gps_noise_time_constant > 0:
+            dt = 1.0 / self.gps_update_rate
+            self.gps_noise_alpha = math.exp(-dt / self.gps_noise_time_constant)
+        else:
+            self.gps_noise_alpha = 0.0  # No filtering if invalid parameters
         
         # Declare GPS noise parameters (can be changed dynamically)
         self.declare_parameter('simulation.sensor_noise.enabled', self.gps_noise_enabled)
@@ -192,11 +201,16 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.declare_parameter('simulation.sensor_noise.gps.cog_noise_stddev', self.gps_cog_noise_stddev)
         self.declare_parameter('simulation.sensor_noise.gps.sog_noise_stddev', self.gps_sog_noise_stddev)
         self.declare_parameter('simulation.sensor_noise.gps.update_rate', self.gps_update_rate)
+        self.declare_parameter('simulation.sensor_noise.gps.noise_time_constant', self.gps_noise_time_constant)
         
         if self.gps_noise_enabled:
-            self.get_logger().info(f"GPS noise enabled: position={self.gps_position_noise_stddev:.2f}m, COG={self.gps_cog_noise_stddev:.2f}°, SOG={self.gps_sog_noise_stddev:.2f}m/s")
+            self.get_logger().info(f"GPS noise enabled: position={self.gps_position_noise_stddev:.2f}m, COG={self.gps_cog_noise_stddev:.2f}°, SOG={self.gps_sog_noise_stddev:.2f}m/s, time_constant={self.gps_noise_time_constant:.1f}s (alpha={self.gps_noise_alpha:.3f})")
         else:
             self.get_logger().info("GPS noise disabled (perfect sensors)")
+        
+        # GPS update throttling - track last GPS update time to enforce update_rate
+        self.last_gps_update_time = 0.0
+        self.gps_update_interval = 1.0 / self.gps_update_rate if self.gps_update_rate > 0 else 1.0
         
         # --- Simulation Parameters (declare early so available during simulator creation) ---
         # Read simulation rate from shared simulation parameters (argo.yaml)
@@ -425,6 +439,13 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.noisy_gps_position = None  # (lat, lon) in degrees (with noise)
         self.true_cog = None  # True course over ground
         self.true_sog = None  # True speed over ground
+        
+        # GPS noise state for first-order low-pass filtering (temporal correlation)
+        self.gps_noise_north = 0.0  # Filtered north position noise (meters)
+        self.gps_noise_east = 0.0   # Filtered east position noise (meters)
+        self.gps_noise_cog = 0.0    # Filtered COG noise (degrees)
+        self.gps_noise_sog = 0.0    # Filtered SOG noise (m/s)
+        self.gps_noise_alpha = 1.0   # Filter coefficient (will be calculated from time constant)
     
     def publish_control_arbitration(self):
         """Publish control arbitration status (simulate rudder_sail_radio.py functionality)."""
@@ -961,45 +982,81 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.pub_compass.publish(compass_msg)
         
         # GPS data (compass convention) - apply noise if enabled
+        # Throttle GPS velocity/COG/SOG publishing to match GPS update rate (not simulation rate)
+        current_time = time.time()
+        time_since_last_gps_update = current_time - self.last_gps_update_time
+        
+        # Only update GPS velocity/COG/SOG if enough time has passed (enforce update_rate)
+        should_update_gps = time_since_last_gps_update >= self.gps_update_interval
+        
         # Store true values for visualization
         true_cog = heading_compass
         true_sog = self.boat_state['speed'] * 1.94384  # m/s to knots
         
         # Apply noise to COG and SOG if enabled
+        # Note: Noise filter should update continuously, but we only publish at GPS update rate
         if self.gps_noise_enabled:
             # Update noise parameters from ROS2 parameters (may have changed)
             self.gps_noise_enabled = self.get_parameter('simulation.sensor_noise.enabled').get_parameter_value().bool_value
             self.gps_cog_noise_stddev = self.get_parameter('simulation.sensor_noise.gps.cog_noise_stddev').get_parameter_value().double_value
             self.gps_sog_noise_stddev = self.get_parameter('simulation.sensor_noise.gps.sog_noise_stddev').get_parameter_value().double_value
+            self.gps_update_rate = self.get_parameter('simulation.sensor_noise.gps.update_rate').get_parameter_value().double_value
+            self.gps_noise_time_constant = self.get_parameter('simulation.sensor_noise.gps.noise_time_constant').get_parameter_value().double_value
             
-            # Apply COG noise (Gaussian)
-            cog_noise = np.random.normal(0.0, self.gps_cog_noise_stddev)
-            noisy_cog = (true_cog + cog_noise) % 360.0
-            # Apply SOG noise (Gaussian, ensure non-negative)
-            sog_noise = np.random.normal(0.0, self.gps_sog_noise_stddev)
-            noisy_sog = max(0.0, true_sog + sog_noise)
+            # Recalculate filter coefficient if parameters changed
+            if self.gps_update_rate > 0 and self.gps_noise_time_constant > 0:
+                dt = 1.0 / self.gps_update_rate
+                self.gps_noise_alpha = math.exp(-dt / self.gps_noise_time_constant)
+            else:
+                self.gps_noise_alpha = 0.0
+            
+            # Update GPS update interval for throttling
+            self.gps_update_interval = 1.0 / self.gps_update_rate if self.gps_update_rate > 0 else 1.0
+            
+            # Apply first-order low-pass filter to COG noise (temporal correlation)
+            # noise[t] = alpha * noise[t-1] + (1-alpha) * new_random_noise
+            # Only update noise when it's time to publish (to match GPS update rate)
+            if should_update_gps:
+                new_cog_noise = np.random.normal(0.0, self.gps_cog_noise_stddev)
+                self.gps_noise_cog = self.gps_noise_alpha * self.gps_noise_cog + (1.0 - self.gps_noise_alpha) * new_cog_noise
+            noisy_cog = (true_cog + self.gps_noise_cog) % 360.0
+            
+            # Apply first-order low-pass filter to SOG noise (temporal correlation)
+            if should_update_gps:
+                new_sog_noise = np.random.normal(0.0, self.gps_sog_noise_stddev)
+                self.gps_noise_sog = self.gps_noise_alpha * self.gps_noise_sog + (1.0 - self.gps_noise_alpha) * new_sog_noise
+            noisy_sog = max(0.0, true_sog + self.gps_noise_sog)
         else:
             noisy_cog = true_cog
             noisy_sog = true_sog
+            # Reset noise state when disabled
+            self.gps_noise_cog = 0.0
+            self.gps_noise_sog = 0.0
         
         # Store true position for visualization (before noise is applied)
         self.true_boat_position = (self.boat_state['x'], self.boat_state['y'])
         self.true_cog = true_cog
         self.true_sog = true_sog
         
-        gps_cog_msg = Float64(data=noisy_cog)  # Course over ground (with noise)
-        self.pub_gps_cog.publish(gps_cog_msg)
-        
-        gps_sog_msg = Float64(data=noisy_sog)  # Speed over ground (with noise)
-        self.pub_gps_sog.publish(gps_sog_msg)
-        
-        # GPS velocity vector (north, east, speed) - use noisy values
-        # Use noisy compass heading for velocity calculation
-        noisy_heading_compass_rad = math.radians(noisy_cog)
-        vel_north = (noisy_sog / 1.94384) * math.cos(noisy_heading_compass_rad) * 1.94384  # knots
-        vel_east = (noisy_sog / 1.94384) * math.sin(noisy_heading_compass_rad) * 1.94384   # knots
-        gps_vel_msg = Vector3(x=vel_north, y=vel_east, z=noisy_sog)
-        self.pub_gps_velocity.publish(gps_vel_msg)
+        # Only publish GPS velocity/COG/SOG at the configured GPS update rate
+        # This models the real GPS behavior where velocity updates are much slower than position updates
+        if should_update_gps:
+            gps_cog_msg = Float64(data=noisy_cog)  # Course over ground (with noise)
+            self.pub_gps_cog.publish(gps_cog_msg)
+            
+            gps_sog_msg = Float64(data=noisy_sog)  # Speed over ground (with noise)
+            self.pub_gps_sog.publish(gps_sog_msg)
+            
+            # GPS velocity vector (north, east, speed) - use noisy values
+            # Use noisy compass heading for velocity calculation
+            noisy_heading_compass_rad = math.radians(noisy_cog)
+            vel_north = (noisy_sog / 1.94384) * math.cos(noisy_heading_compass_rad) * 1.94384  # knots
+            vel_east = (noisy_sog / 1.94384) * math.sin(noisy_heading_compass_rad) * 1.94384   # knots
+            gps_vel_msg = Vector3(x=vel_north, y=vel_east, z=noisy_sog)
+            self.pub_gps_velocity.publish(gps_vel_msg)
+            
+            # Update last GPS update time
+            self.last_gps_update_time = current_time
         
         # Wind data: Simulate ideal anemometer for mock simulation
         # For mock simulation: report ABSOLUTE wind (true wind direction from North, compass convention)
@@ -1608,13 +1665,15 @@ class ArgoUnifiedSimulatorBridge(Node):
                 - cog_noise_stddev: float (degrees)
                 - sog_noise_stddev: float (m/s)
                 - update_rate: float (Hz)
+                - noise_time_constant: float (seconds)
         """
         defaults = {
             'enabled': False,
             'position_noise_stddev': 5.0,
             'cog_noise_stddev': 5.0,
             'sog_noise_stddev': 0.2,
-            'update_rate': 1.0
+            'update_rate': 1.0,
+            'noise_time_constant': 3.0
         }
         
         try:
@@ -1634,7 +1693,8 @@ class ArgoUnifiedSimulatorBridge(Node):
                         'position_noise_stddev': float(gps_noise.get('position_noise_stddev', defaults['position_noise_stddev'])),
                         'cog_noise_stddev': float(gps_noise.get('cog_noise_stddev', defaults['cog_noise_stddev'])),
                         'sog_noise_stddev': float(gps_noise.get('sog_noise_stddev', defaults['sog_noise_stddev'])),
-                        'update_rate': float(gps_noise.get('update_rate', defaults['update_rate']))
+                        'update_rate': float(gps_noise.get('update_rate', defaults['update_rate'])),
+                        'noise_time_constant': float(gps_noise.get('noise_time_constant', defaults['noise_time_constant']))
                     }
                     
                     if result['enabled']:
@@ -1957,17 +2017,31 @@ class ArgoUnifiedSimulatorBridge(Node):
             # Update noise parameters from ROS2 parameters (may have changed)
             self.gps_noise_enabled = self.get_parameter('simulation.sensor_noise.enabled').get_parameter_value().bool_value
             self.gps_position_noise_stddev = self.get_parameter('simulation.sensor_noise.gps.position_noise_stddev').get_parameter_value().double_value
+            self.gps_update_rate = self.get_parameter('simulation.sensor_noise.gps.update_rate').get_parameter_value().double_value
+            self.gps_noise_time_constant = self.get_parameter('simulation.sensor_noise.gps.noise_time_constant').get_parameter_value().double_value
             
-            # Apply position noise in meters (convert to lat/lon offset)
-            # Generate noise in meters (north and east components)
-            noise_north_m = np.random.normal(0.0, self.gps_position_noise_stddev)
-            noise_east_m = np.random.normal(0.0, self.gps_position_noise_stddev)
+            # Recalculate filter coefficient if parameters changed
+            if self.gps_update_rate > 0 and self.gps_noise_time_constant > 0:
+                dt = 1.0 / self.gps_update_rate
+                self.gps_noise_alpha = math.exp(-dt / self.gps_noise_time_constant)
+            else:
+                self.gps_noise_alpha = 0.0
             
-            # Convert meters to lat/lon offset (approximate, works for small distances)
+            # Apply first-order low-pass filter to position noise (temporal correlation)
+            # noise[t] = alpha * noise[t-1] + (1-alpha) * new_random_noise
+            # Generate new random noise in meters (north and east components)
+            new_noise_north_m = np.random.normal(0.0, self.gps_position_noise_stddev)
+            new_noise_east_m = np.random.normal(0.0, self.gps_position_noise_stddev)
+            
+            # Filter the noise
+            self.gps_noise_north = self.gps_noise_alpha * self.gps_noise_north + (1.0 - self.gps_noise_alpha) * new_noise_north_m
+            self.gps_noise_east = self.gps_noise_alpha * self.gps_noise_east + (1.0 - self.gps_noise_alpha) * new_noise_east_m
+            
+            # Convert filtered noise in meters to lat/lon offset (approximate, works for small distances)
             # 1 degree latitude ≈ 111,000 meters
             # 1 degree longitude ≈ 111,000 * cos(latitude) meters
-            lat_offset = noise_north_m / 111000.0
-            lon_offset = noise_east_m / (111000.0 * math.cos(math.radians(true_lat)))
+            lat_offset = self.gps_noise_north / 111000.0
+            lon_offset = self.gps_noise_east / (111000.0 * math.cos(math.radians(true_lat)))
             
             noisy_lat = true_lat + lat_offset
             noisy_lon = true_lon + lon_offset
@@ -1978,6 +2052,9 @@ class ArgoUnifiedSimulatorBridge(Node):
             noisy_lat = true_lat
             noisy_lon = true_lon
             self.noisy_gps_position = None
+            # Reset noise state when disabled
+            self.gps_noise_north = 0.0
+            self.gps_noise_east = 0.0
         
         # Validate GPS coordinates before publishing
         if math.isnan(noisy_lat) or math.isnan(noisy_lon) or math.isinf(noisy_lat) or math.isinf(noisy_lon):

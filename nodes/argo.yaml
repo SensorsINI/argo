@@ -44,11 +44,13 @@
           update_rate: 10.0          # Sensor update rate (Hz)
           magnetic_interference_stddev: 5.0  # Additional noise near metal/electronics (degrees)
         # GPS noise parameters
+        # Values based on analysis of pond recording (argo_20251117_114846 first irchel pond in rain)
         gps:
-          position_noise_stddev: 5.0  # Standard deviation of position noise (meters) - typical GPS ~3-10m
-          cog_noise_stddev: 5.0       # Course over ground noise (degrees)
-          sog_noise_stddev: 0.2       # Speed over ground noise (m/s or knots?)
-          update_rate: 1.0            # GPS update rate (Hz) - typically 1-10 Hz
+          position_noise_stddev: 0.5  # Standard deviation of position noise (meters) - measured: 0.51m from pond recording
+          cog_noise_stddev: 5.0       # Course over ground noise (degrees) - measured: 44.64° at low speeds, using conservative value
+          sog_noise_stddev: 0.16       # Speed over ground noise (m/s) - measured: 0.156 m/s from pond recording
+          update_rate: 0.2            # GPS update rate (Hz) - measured: ~0.2 Hz (1/5 Hz) from pond recording, critical for sim2real gap
+          noise_time_constant: 3.0    # Time constant for noise filtering (seconds) - measured: 3.01s from pond recording
           dropout_probability: 0.0    # Probability of GPS fix loss per update
           dropout_duration: 2.0       # Duration of GPS dropout (seconds)
         # IMU accelerometer/gyro noise (for roll/pitch)

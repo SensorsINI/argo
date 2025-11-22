@@ -120,6 +120,17 @@ class GpsNode(ArgoBaseNode):
     3D panel for mapping. Combined with /gps_velocity and /gps_cog topics, this
     enables comprehensive boat tracking and navigation visualization.
 
+    GPS Noise Characteristics (from real-world measurements):
+    Analysis of pond recording (argo_20251117_114846 first irchel pond in rain) revealed:
+    - Position noise: 0.51 m stddev (much better than typical 3-10m due to open water conditions)
+    - COG noise: 44.64° stddev at low speeds (<0.5 m/s), ~5° at normal speeds
+    - SOG noise: 0.156 m/s stddev
+    - Temporal correlation: 3.01s time constant (GPS receiver applies smoothing)
+    - Update rate: ~0.2 Hz (1/5 Hz) for velocity/COG/SOG (much slower than position updates)
+    
+    These characteristics are modeled in simulation via argo.yaml sensor_noise.gps parameters
+    to reduce sim-to-real gap. The low velocity update rate (0.2 Hz) is critical to model correctly.
+
     Command Line Options:
     --debug: Enable detailed debug logging of GPS data and communication
     """
