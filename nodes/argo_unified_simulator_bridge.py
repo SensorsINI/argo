@@ -178,6 +178,26 @@ class ArgoUnifiedSimulatorBridge(Node):
         if self.wind_speed < 0:
             self.wind_speed = 0.0
         
+        # --- Load GPS noise parameters from argo.yaml ---
+        gps_noise_params = self._load_gps_noise_parameters()
+        self.gps_noise_enabled = gps_noise_params['enabled']
+        self.gps_position_noise_stddev = gps_noise_params['position_noise_stddev']
+        self.gps_cog_noise_stddev = gps_noise_params['cog_noise_stddev']
+        self.gps_sog_noise_stddev = gps_noise_params['sog_noise_stddev']
+        self.gps_update_rate = gps_noise_params['update_rate']
+        
+        # Declare GPS noise parameters (can be changed dynamically)
+        self.declare_parameter('simulation.sensor_noise.enabled', self.gps_noise_enabled)
+        self.declare_parameter('simulation.sensor_noise.gps.position_noise_stddev', self.gps_position_noise_stddev)
+        self.declare_parameter('simulation.sensor_noise.gps.cog_noise_stddev', self.gps_cog_noise_stddev)
+        self.declare_parameter('simulation.sensor_noise.gps.sog_noise_stddev', self.gps_sog_noise_stddev)
+        self.declare_parameter('simulation.sensor_noise.gps.update_rate', self.gps_update_rate)
+        
+        if self.gps_noise_enabled:
+            self.get_logger().info(f"GPS noise enabled: position={self.gps_position_noise_stddev:.2f}m, COG={self.gps_cog_noise_stddev:.2f}°, SOG={self.gps_sog_noise_stddev:.2f}m/s")
+        else:
+            self.get_logger().info("GPS noise disabled (perfect sensors)")
+        
         # --- Simulation Parameters (declare early so available during simulator creation) ---
         # Read simulation rate from shared simulation parameters (argo.yaml)
         self.declare_parameter('simulation.simulation_rate', 10.0)
@@ -258,6 +278,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         self.pub_gps_satellites = self.create_publisher(UInt8, '/gps_num_satellites', 10)
         self.pub_gps_fix = self.create_publisher(NavSatFix, '/fix', 10)
         self.pub_gps_data = self.create_publisher(String, '/gps_data', 10)
+        # True GPS position (for noise visualization)
+        self.pub_gps_fix_true = self.create_publisher(NavSatFix, '/fix_true', 10)
 
         # Wind data
         self.pub_wind = self.create_publisher(Vector3, '/anem_speed_angle_temp', 10)
@@ -396,6 +418,13 @@ class ArgoUnifiedSimulatorBridge(Node):
         
         # Initial state
         self.boat_state = None
+        
+        # GPS noise tracking for visualization
+        self.true_boat_position = None  # (x, y) in meters
+        self.true_gps_position = None  # (lat, lon) in degrees
+        self.noisy_gps_position = None  # (lat, lon) in degrees (with noise)
+        self.true_cog = None  # True course over ground
+        self.true_sog = None  # True speed over ground
     
     def publish_control_arbitration(self):
         """Publish control arbitration status (simulate rudder_sail_radio.py functionality)."""
@@ -931,21 +960,45 @@ class ArgoUnifiedSimulatorBridge(Node):
         compass_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
         self.pub_compass.publish(compass_msg)
         
-        # GPS data (compass convention)
-        gps_cog_msg = Float64(data=heading_compass)  # Course over ground
+        # GPS data (compass convention) - apply noise if enabled
+        # Store true values for visualization
+        true_cog = heading_compass
+        true_sog = self.boat_state['speed'] * 1.94384  # m/s to knots
+        
+        # Apply noise to COG and SOG if enabled
+        if self.gps_noise_enabled:
+            # Update noise parameters from ROS2 parameters (may have changed)
+            self.gps_noise_enabled = self.get_parameter('simulation.sensor_noise.enabled').get_parameter_value().bool_value
+            self.gps_cog_noise_stddev = self.get_parameter('simulation.sensor_noise.gps.cog_noise_stddev').get_parameter_value().double_value
+            self.gps_sog_noise_stddev = self.get_parameter('simulation.sensor_noise.gps.sog_noise_stddev').get_parameter_value().double_value
+            
+            # Apply COG noise (Gaussian)
+            cog_noise = np.random.normal(0.0, self.gps_cog_noise_stddev)
+            noisy_cog = (true_cog + cog_noise) % 360.0
+            # Apply SOG noise (Gaussian, ensure non-negative)
+            sog_noise = np.random.normal(0.0, self.gps_sog_noise_stddev)
+            noisy_sog = max(0.0, true_sog + sog_noise)
+        else:
+            noisy_cog = true_cog
+            noisy_sog = true_sog
+        
+        # Store true position for visualization (before noise is applied)
+        self.true_boat_position = (self.boat_state['x'], self.boat_state['y'])
+        self.true_cog = true_cog
+        self.true_sog = true_sog
+        
+        gps_cog_msg = Float64(data=noisy_cog)  # Course over ground (with noise)
         self.pub_gps_cog.publish(gps_cog_msg)
         
-        # Speed over ground (convert m/s to knots)
-        speed_knots = self.boat_state['speed'] * 1.94384  # m/s to knots
-        gps_sog_msg = Float64(data=speed_knots)
+        gps_sog_msg = Float64(data=noisy_sog)  # Speed over ground (with noise)
         self.pub_gps_sog.publish(gps_sog_msg)
         
-        # GPS velocity vector (north, east, speed)
-        # Use compass heading for velocity calculation
-        heading_compass_rad = math.radians(heading_compass)
-        vel_north = self.boat_state['speed'] * math.cos(heading_compass_rad) * 1.94384  # knots
-        vel_east = self.boat_state['speed'] * math.sin(heading_compass_rad) * 1.94384   # knots
-        gps_vel_msg = Vector3(x=vel_north, y=vel_east, z=speed_knots)
+        # GPS velocity vector (north, east, speed) - use noisy values
+        # Use noisy compass heading for velocity calculation
+        noisy_heading_compass_rad = math.radians(noisy_cog)
+        vel_north = (noisy_sog / 1.94384) * math.cos(noisy_heading_compass_rad) * 1.94384  # knots
+        vel_east = (noisy_sog / 1.94384) * math.sin(noisy_heading_compass_rad) * 1.94384   # knots
+        gps_vel_msg = Vector3(x=vel_north, y=vel_east, z=noisy_sog)
         self.pub_gps_velocity.publish(gps_vel_msg)
         
         # Wind data: Simulate ideal anemometer for mock simulation
@@ -1545,6 +1598,54 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.get_logger().warn(f"Failed to load human_override_timeout from argo.yaml: {e}, using default 2.0s")
             return 2.0
     
+    def _load_gps_noise_parameters(self):
+        """Load GPS noise parameters from argo.yaml configuration file.
+        
+        Returns:
+            dict: Dictionary with GPS noise parameters:
+                - enabled: bool
+                - position_noise_stddev: float (meters)
+                - cog_noise_stddev: float (degrees)
+                - sog_noise_stddev: float (m/s)
+                - update_rate: float (Hz)
+        """
+        defaults = {
+            'enabled': False,
+            'position_noise_stddev': 5.0,
+            'cog_noise_stddev': 5.0,
+            'sog_noise_stddev': 0.2,
+            'update_rate': 1.0
+        }
+        
+        try:
+            # Try to read directly from argo.yaml file
+            argo_yaml_path = "nodes/argo.yaml"
+            if os.path.exists(argo_yaml_path):
+                with open(argo_yaml_path, 'r') as f:
+                    import yaml
+                    config = yaml.safe_load(f)
+                    # Navigate through the YAML structure: /**/ros__parameters/simulation/sensor_noise/gps
+                    sensor_noise = config.get('/**', {}).get('ros__parameters', {}).get('simulation', {}).get('sensor_noise', {})
+                    enabled = sensor_noise.get('enabled', defaults['enabled'])
+                    gps_noise = sensor_noise.get('gps', {})
+                    
+                    result = {
+                        'enabled': bool(enabled),
+                        'position_noise_stddev': float(gps_noise.get('position_noise_stddev', defaults['position_noise_stddev'])),
+                        'cog_noise_stddev': float(gps_noise.get('cog_noise_stddev', defaults['cog_noise_stddev'])),
+                        'sog_noise_stddev': float(gps_noise.get('sog_noise_stddev', defaults['sog_noise_stddev'])),
+                        'update_rate': float(gps_noise.get('update_rate', defaults['update_rate']))
+                    }
+                    
+                    if result['enabled']:
+                        self.get_logger().info(f"Loaded GPS noise parameters from {argo_yaml_path}")
+                    return result
+            
+            return defaults
+        except Exception as e:
+            self.get_logger().warn(f"Failed to load GPS noise parameters from argo.yaml: {e}, using defaults")
+            return defaults
+    
     def _apply_wind_direction_to_simulator(self, wind_direction_deg):
         """Apply wind direction change to the simulator's environment.
         
@@ -1845,11 +1946,42 @@ class ArgoUnifiedSimulatorBridge(Node):
             self.get_logger().warn(f"Boat position suspiciously far from origin: {distance_from_origin:.1f}m (x={boat_x:.1f}, y={boat_y:.1f}) - skipping GPS publish")
             return
 
-        lat, lon = self.xy_to_latlon(boat_x, boat_y)
+        # Convert true position to GPS coordinates
+        true_lat, true_lon = self.xy_to_latlon(boat_x, boat_y)
+        
+        # Store true GPS position for visualization
+        self.true_gps_position = (true_lat, true_lon)
+        
+        # Apply position noise if enabled
+        if self.gps_noise_enabled:
+            # Update noise parameters from ROS2 parameters (may have changed)
+            self.gps_noise_enabled = self.get_parameter('simulation.sensor_noise.enabled').get_parameter_value().bool_value
+            self.gps_position_noise_stddev = self.get_parameter('simulation.sensor_noise.gps.position_noise_stddev').get_parameter_value().double_value
+            
+            # Apply position noise in meters (convert to lat/lon offset)
+            # Generate noise in meters (north and east components)
+            noise_north_m = np.random.normal(0.0, self.gps_position_noise_stddev)
+            noise_east_m = np.random.normal(0.0, self.gps_position_noise_stddev)
+            
+            # Convert meters to lat/lon offset (approximate, works for small distances)
+            # 1 degree latitude ≈ 111,000 meters
+            # 1 degree longitude ≈ 111,000 * cos(latitude) meters
+            lat_offset = noise_north_m / 111000.0
+            lon_offset = noise_east_m / (111000.0 * math.cos(math.radians(true_lat)))
+            
+            noisy_lat = true_lat + lat_offset
+            noisy_lon = true_lon + lon_offset
+            
+            # Store noisy position for visualization
+            self.noisy_gps_position = (noisy_lat, noisy_lon)
+        else:
+            noisy_lat = true_lat
+            noisy_lon = true_lon
+            self.noisy_gps_position = None
         
         # Validate GPS coordinates before publishing
-        if math.isnan(lat) or math.isnan(lon) or math.isinf(lat) or math.isinf(lon):
-            self.get_logger().warn(f"Invalid GPS coordinates calculated: lat={lat}, lon={lon} - skipping GPS publish")
+        if math.isnan(noisy_lat) or math.isnan(noisy_lon) or math.isinf(noisy_lat) or math.isinf(noisy_lon):
+            self.get_logger().warn(f"Invalid GPS coordinates calculated: lat={noisy_lat}, lon={noisy_lon} - skipping GPS publish")
             return
 
         fix_msg = NavSatFix()
@@ -1857,11 +1989,34 @@ class ArgoUnifiedSimulatorBridge(Node):
         fix_msg.header.frame_id = 'gps'
         fix_msg.status.status = NavSatStatus.STATUS_FIX
         fix_msg.status.service = NavSatStatus.SERVICE_GPS
-        fix_msg.latitude = lat
-        fix_msg.longitude = lon
+        fix_msg.latitude = noisy_lat  # Use noisy position
+        fix_msg.longitude = noisy_lon  # Use noisy position
         fix_msg.altitude = 0.0  # Mock altitude
         fix_msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
+        
+        # Set position covariance based on noise standard deviation
+        if self.gps_noise_enabled:
+            # Convert noise stddev (meters) to variance (meters^2)
+            variance = self.gps_position_noise_stddev ** 2
+            fix_msg.position_covariance[0] = variance  # East-East
+            fix_msg.position_covariance[4] = variance  # North-North
+            fix_msg.position_covariance[8] = variance * 2  # Up-Up (usually worse)
+        
         self.pub_gps_fix.publish(fix_msg)
+        
+        # Publish true GPS position for noise visualization (always publish when we have true position)
+        # This allows visualization to show the difference even if noise is temporarily disabled
+        if self.true_gps_position is not None:
+            true_fix_msg = NavSatFix()
+            true_fix_msg.header.stamp = self.get_clock().now().to_msg()
+            true_fix_msg.header.frame_id = 'gps'
+            true_fix_msg.status.status = NavSatStatus.STATUS_FIX
+            true_fix_msg.status.service = NavSatStatus.SERVICE_GPS
+            true_fix_msg.latitude = self.true_gps_position[0]
+            true_fix_msg.longitude = self.true_gps_position[1]
+            true_fix_msg.altitude = 0.0
+            true_fix_msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
+            self.pub_gps_fix_true.publish(true_fix_msg)
 
     def publish_mock_nmea(self):
         """Publish a mock NMEA RMC sentence."""

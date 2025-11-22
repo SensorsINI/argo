@@ -25,7 +25,7 @@
       # Sensor noise modeling for sim-to-real gap reduction
       # Set all noise parameters to 0.0 to disable noise (perfect sensors)
       sensor_noise:
-        enabled: false  # Master switch for all sensor noise (set to true for realistic simulation)
+        enabled: true  # Master switch for all sensor noise (set to true for realistic simulation)
         # Wind sensor (anemometer) noise parameters
         wind:
           use_apparent_wind: false  # If true, simulate apparent wind (true_wind - boat_velocity), if false use true wind
@@ -45,7 +45,7 @@
           magnetic_interference_stddev: 5.0  # Additional noise near metal/electronics (degrees)
         # GPS noise parameters
         gps:
-          position_noise_stddev: 3.0  # Standard deviation of position noise (meters) - typical GPS ~3-10m
+          position_noise_stddev: 5.0  # Standard deviation of position noise (meters) - typical GPS ~3-10m
           cog_noise_stddev: 5.0       # Course over ground noise (degrees)
           sog_noise_stddev: 0.2       # Speed over ground noise (m/s or knots?)
           update_rate: 1.0            # GPS update rate (Hz) - typically 1-10 Hz
@@ -60,7 +60,7 @@
         latency:
           wind_latency_ms: 100        # Wind sensor processing delay (milliseconds)
           compass_latency_ms: 50      # Compass/IMU processing delay (milliseconds)
-          gps_latency_ms: 200         # GPS processing delay (milliseconds)
+          gps_latency_ms: 500         # GPS processing delay (milliseconds)
       # Mock simulator physics parameters (used when sailboat-playground is unavailable)
       mock_simulator:
         max_turn_rate: 30.0  # Degrees per second at full rudder and speed

@@ -229,6 +229,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.create_subscription(Bool, '/simulator/tacking', self.tacking_status_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(NavSatFix, '/fix', self.gps_callback, 10)
+        # Subscribe to true GPS position for noise visualization
+        self.create_subscription(NavSatFix, '/fix_true', self.gps_true_callback, 10)
         
         # Subscribe to human control status and controller state
         self.create_subscription(Bool, '/human_controlled', self.human_controlled_callback, 10)
@@ -267,6 +269,11 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.boat_speed = 0.0  # m/s (derived from GPS speed)
         self.gps_lat = 0.0
         self.gps_lon = 0.0
+        # True GPS position (for noise visualization)
+        self.gps_lat_true = None
+        self.gps_lon_true = None
+        self.boat_pos_x_true = None
+        self.boat_pos_y_true = None
         self._last_visual_sail_side = 1.0
         self.base_lat = None
         self.base_lon = None
@@ -734,7 +741,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.boat_speed = float(self.gps_velocity_speed) * 0.514444
     
     def gps_callback(self, msg):
-        """Update GPS position"""
+        """Update GPS position (noisy position)"""
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
             self.gps_lat = msg.latitude
             self.gps_lon = msg.longitude
@@ -742,6 +749,30 @@ class ArgoBoatVisualization(ArgoBaseNode):
                 self.base_lat = msg.latitude
                 self.base_lon = msg.longitude
             self._update_boat_position_from_gps()
+    
+    def gps_true_callback(self, msg):
+        """Update true GPS position (for noise visualization)"""
+        if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
+            self.gps_lat_true = msg.latitude
+            self.gps_lon_true = msg.longitude
+            # Update true position in local coordinates
+            if self.base_lat is not None and self.base_lon is not None:
+                try:
+                    R = 6378137.0  # Earth radius in meters
+                    d_lat = math.radians(self.gps_lat_true - self.base_lat)
+                    d_lon = math.radians(self.gps_lon_true - self.base_lon)
+                    self.boat_pos_y_true = d_lat * R
+                    self.boat_pos_x_true = d_lon * R * math.cos(math.radians(self.base_lat))
+                except Exception as exc:
+                    self.get_logger().warn(f"Failed to update true boat XY from GPS: {exc}")
+            else:
+                # base_lat/base_lon not set yet - use GPS callback to set them
+                if self.base_lat is None or self.base_lon is None:
+                    self.base_lat = msg.latitude
+                    self.base_lon = msg.longitude
+                    self.boat_pos_y_true = 0.0
+                    self.boat_pos_x_true = 0.0
+                    self.get_logger().info(f"Set base location from true GPS: lat={self.base_lat:.6f}, lon={self.base_lon:.6f}")
     
     def create_boat_hull_marker(self):
         """Create a simple boat hull marker as a triangle with tip at bow"""
@@ -1608,6 +1639,70 @@ class ArgoBoatVisualization(ArgoBaseNode):
 
         return marker
     
+    def create_gps_noise_marker(self):
+        """Create a transparent line marker showing GPS position noise (from true to noisy position).
+        
+        Returns:
+            Marker or None: Line marker connecting true and noisy GPS positions, or None if not available
+        """
+        # Only show if we have both true and noisy positions
+        if (self.boat_pos_x_true is None or self.boat_pos_y_true is None or
+            self.boat_pos_x is None or self.boat_pos_y is None):
+            return None
+        
+        # Calculate distance between true and noisy positions
+        dx = self.boat_pos_x - self.boat_pos_x_true
+        dy = self.boat_pos_y - self.boat_pos_y_true
+        distance = math.sqrt(dx**2 + dy**2)
+        
+        # Log first time we create a marker (for debugging)
+        if not hasattr(self, '_gps_noise_marker_created'):
+            self._gps_noise_marker_created = True
+            self.get_logger().info(
+                f"GPS noise marker created: distance={distance:.2f}m, "
+                f"true=({self.boat_pos_x_true:.2f}, {self.boat_pos_y_true:.2f}), "
+                f"noisy=({self.boat_pos_x:.2f}, {self.boat_pos_y:.2f})"
+            )
+        
+        # Only show marker if there's significant noise (more than 0.01m to catch small noise)
+        # Lower threshold helps visualize even small GPS errors
+        if distance < 0.01:
+            return None
+        
+        marker = Marker()
+        marker.header = Header()
+        marker.header.frame_id = "map"  # Use map frame for GPS positions
+        marker.header.stamp = self.get_current_time()
+        
+        marker.id = 15
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+        marker.ns = "gps_noise"
+        
+        # Create line from true position to noisy position
+        true_point = Point()
+        true_point.x = self.boat_pos_x_true
+        true_point.y = self.boat_pos_y_true
+        true_point.z = 0.1  # Slightly above ground for visibility
+        
+        noisy_point = Point()
+        noisy_point.x = self.boat_pos_x
+        noisy_point.y = self.boat_pos_y
+        noisy_point.z = 0.1  # Slightly above ground for visibility
+        
+        marker.points = [true_point, noisy_point]
+        
+        # Very transparent red line to show noise
+        marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.5)  # Very transparent red
+        
+        # Thin line
+        marker.scale.x = 0.05  # Line width in meters
+        
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+        
+        return marker
+    
     def publish_markers(self):
         """Publish all visualization markers"""
         try:
@@ -1664,6 +1759,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
                 delete_marker.action = Marker.DELETE
                 marker_array.markers.append(delete_marker)
                 self._tacking_marker_active = False
+            
+            # Add GPS noise visualization (transparent line from true to noisy position)
+            # Always try to create the marker - it will return None if conditions aren't met
+            noise_marker = self.create_gps_noise_marker()
+            if noise_marker:
+                marker_array.markers.append(noise_marker)
             
             # Add sailing area markers (boundaries, waypoints, hazards) for 3D visualization
             # Note: These come from sailing_area_publisher and may be empty initially
