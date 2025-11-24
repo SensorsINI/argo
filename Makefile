@@ -55,7 +55,7 @@ IS_ORANGEPI := $(shell if [ -f /proc/device-tree/compatible ] && grep -q "orange
 REQUIREMENTS_FILE := $(if $(filter 1,$(IS_ORANGEPI)),requirements.txt,requirements-host.txt)
 PLATFORM_NAME := $(if $(filter 1,$(IS_ORANGEPI)),Orange Pi Robot,Host Computer)
 
-.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm
+.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks freeze-mac-address install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm
 
 VM_REQUIREMENTS_FILE := requirements-host.txt
 VM_INSTALL_SCOPE := $(shell if [ $$(id -u) -eq 0 ]; then printf 'system'; else printf 'user'; fi)
@@ -113,6 +113,7 @@ help:
 	@echo "  fix-orangepi-ramlog  - Fix orangepi-ramlog to preserve persistent logs"
 	@echo "  setup-wifi-networks  - Configure WiFi networks with proper priority order"
 	@echo "  install-network-improvements - Install WiFi reconnection system and NetworkManager optimizations"
+	@echo "  freeze-mac-address  - Freeze WiFi MAC address to previous value (from logs) or specified value"
 	@echo ""
 	@echo "Network Testing:"
 	@echo "  test-wifi-reconnection - Start WiFi reconnection test (3min, background)"
@@ -578,6 +579,20 @@ setup-wifi-networks:
 	else \
 		echo "❌ Error: scripts/setup_wifi_networks.sh not found!"; \
 		echo "   Make sure you're running this from the Argo project root directory."; \
+		exit 1; \
+	fi
+
+# Freeze MAC address to previous value or specified MAC address
+freeze-mac-address:
+	@echo "🔒 Freezing WiFi MAC address..."
+	@if [ -f scripts/freeze_mac_address.sh ]; then \
+		if [ -n "$(MAC)" ]; then \
+			./scripts/freeze_mac_address.sh "$(MAC)"; \
+		else \
+			./scripts/freeze_mac_address.sh --from-logs; \
+		fi; \
+	else \
+		echo "❌ Error: scripts/freeze_mac_address.sh not found!"; \
 		exit 1; \
 	fi
 
