@@ -208,9 +208,138 @@ crontab -l
 3. **Permission errors**: Ensure script has execute permissions
 4. **NetworkManager issues**: Check service status and configuration
 
+## Adding New WiFi Networks
+
+When adding a new WiFi network (e.g., "Hotel dei Pini" at a new location), follow these steps to ensure proper configuration with MAC address cloning and network priority.
+
+### Step-by-Step Guide
+
+#### 1. Add the WiFi Network
+
+**Option A: Using NetworkManager CLI (Recommended)**
+```bash
+# For password-protected network
+nmcli connection add type wifi con-name "Hotel dei Pini" ifname wlan0 ssid "Hotel dei Pini" \
+    wifi-sec.key-mgmt wpa-psk wifi-sec.psk "password-here" \
+    connection.autoconnect yes connection.autoconnect-priority 25
+
+# For open network (no password)
+nmcli connection add type wifi con-name "Hotel dei Pini" ifname wlan0 ssid "Hotel dei Pini" \
+    connection.autoconnect yes connection.autoconnect-priority 25
+```
+
+**Option B: Using NetworkManager GUI**
+- Open NetworkManager settings
+- Add new WiFi network
+- Set connection name, SSID, and password
+- Configure autoconnect and priority (see priority guidelines below)
+
+#### 2. Set Network Priority
+
+Choose an appropriate priority based on network type:
+- **25-30**: Temporary high-priority networks (hotels, cafes, temporary hotspots)
+- **20**: Personal mobile hotspots (tobi-matebook, tobi-s24)
+- **15**: Secondary home/office networks
+- **5-10**: Primary home/office networks (tobi-wlan)
+- **0-5**: Fallback networks (uzh-iot)
+
+**Example for Hotel dei Pini:**
+```bash
+# Set high priority for temporary hotel network
+nmcli connection modify "Hotel dei Pini" connection.autoconnect-priority 25
+```
+
+#### 3. **CRITICAL: Set Cloned MAC Address**
+
+**This step is essential** - without it, the new network won't use the frozen MAC address and may fail to connect or break network identity.
+
+```bash
+# Get the frozen MAC address from ARGO_MAC_ID.txt
+FROZEN_MAC=$(grep -E "^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$" network/ARGO_MAC_ID.txt | tail -1)
+
+# Set cloned MAC address for the new network
+nmcli connection modify "Hotel dei Pini" 802-11-wireless.cloned-mac-address "$FROZEN_MAC"
+
+# Or specify directly
+nmcli connection modify "Hotel dei Pini" 802-11-wireless.cloned-mac-address "c8:26:e2:6c:58:ba"
+```
+
+#### 4. Verify Configuration
+
+```bash
+# Check connection details
+nmcli connection show "Hotel dei Pini"
+
+# Verify cloned MAC address is set
+nmcli connection show "Hotel dei Pini" | grep cloned-mac-address
+
+# Test connection
+nmcli connection up "Hotel dei Pini"
+
+# Verify actual MAC address used
+ip link show wlan0 | grep -oP '(?<=link/ether )[^ ]+'
+# Should show: c8:26:e2:6c:58:ba
+```
+
+#### 5. Update WiFi Reconnection Script (Optional)
+
+If you want the new network to be considered in automatic network switching, edit `/usr/local/bin/wifi_reconnect.sh`:
+
+```bash
+# Add to PREFERRED_NETWORKS array (in priority order)
+PREFERRED_NETWORKS=("Hotel dei Pini" "tobi-s24" "tobi-wlan" "uzh-iot")
+```
+
+**Note**: The WiFi reconnection script only switches to higher-priority networks. If "Hotel dei Pini" has priority 25, it will be preferred over lower-priority networks.
+
+### Complete Example: Adding "Hotel dei Pini"
+
+```bash
+# 1. Add network with password
+nmcli connection add type wifi con-name "Hotel dei Pini" ifname wlan0 ssid "Hotel dei Pini" \
+    wifi-sec.key-mgmt wpa-psk wifi-sec.psk "hotel-password" \
+    connection.autoconnect yes connection.autoconnect-priority 25
+
+# 2. Set cloned MAC address (CRITICAL!)
+nmcli connection modify "Hotel dei Pini" 802-11-wireless.cloned-mac-address "c8:26:e2:6c:58:ba"
+
+# 3. Verify configuration
+nmcli connection show "Hotel dei Pini" | grep -E "cloned-mac-address|autoconnect-priority"
+
+# 4. Test connection
+nmcli connection up "Hotel dei Pini"
+
+# 5. Verify MAC address
+ip link show wlan0 | grep -oP '(?<=link/ether )[^ ]+'
+```
+
+### Quick Reference: Network Priority Guidelines
+
+| Priority | Network Type | Examples |
+|----------|-------------|----------|
+| 25-30 | Temporary high-priority | Hotels, cafes, temporary hotspots |
+| 20 | Personal mobile hotspots | tobi-matebook, tobi-s24 |
+| 15 | Secondary networks | Backup home/office networks |
+| 5-10 | Primary networks | tobi-wlan (home router) |
+| 0-5 | Fallback networks | uzh-iot (university network) |
+
+### Troubleshooting New Networks
+
+**Problem**: Network connects but uses wrong MAC address
+- **Solution**: Verify cloned MAC address is set: `nmcli connection show "Network-Name" | grep cloned-mac-address`
+
+**Problem**: Network doesn't connect automatically
+- **Solution**: Check autoconnect is enabled: `nmcli connection modify "Network-Name" connection.autoconnect yes`
+
+**Problem**: Network connects but has low priority
+- **Solution**: Increase priority: `nmcli connection modify "Network-Name" connection.autoconnect-priority 25`
+
+**Problem**: Network requires MAC address whitelisting
+- **Solution**: Ensure cloned MAC address (`c8:26:e2:6c:58:ba`) is whitelisted on the network's access point/router
+
 ## Configuration Customization
 
-### Adding New Preferred Networks
+### Adding New Preferred Networks to Reconnection Script
 
 Edit `/usr/local/bin/wifi_reconnect.sh`:
 
