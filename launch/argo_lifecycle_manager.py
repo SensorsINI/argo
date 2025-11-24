@@ -193,9 +193,15 @@ class ArgoLifecycleManager:
             threading.Thread(target=query_initial_pause_state, daemon=True).start()
         
         
-        # Setup signal handlers
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        # Setup signal handlers only from main thread (signal handlers can only be set from main thread)
+        # Use threading.main_thread() to check if we're in the main thread
+        if threading.current_thread() is threading.main_thread():
+            try:
+                signal.signal(signal.SIGINT, self._signal_handler)
+                signal.signal(signal.SIGTERM, self._signal_handler)
+            except ValueError:
+                # Signal handlers can only be set from main thread - ignore if called from background thread
+                pass
     
     def _load_nodes_from_yaml(self):
         """Load and parse node definitions from argo_nodes.yaml."""

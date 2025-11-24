@@ -1842,6 +1842,18 @@ class ArgoWebDashboard(ArgoBaseNode):
                     'display_name': 'Patrol',
                     'icon': '🛥️',
                     'description': 'Autonomous patrol within geofence area'
+                },
+                {
+                    'type': 'crosser',
+                    'display_name': 'Crosser',
+                    'icon': '↔️',
+                    'description': 'Crosses pond from side to side, targeting middle waypoint'
+                },
+                {
+                    'type': 'human',
+                    'display_name': 'Human',
+                    'icon': '👤',
+                    'description': 'Manual control via keyboard/radio commands (pass-through mode)'
                 }
             ]
             return jsonify({'success': True, 'controllers': controllers})
@@ -1853,7 +1865,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             controller_type = data.get('type', '')
             
             # Valid controller types from controller.py _on_parameters_set callback
-            valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol']
+            valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol', 'crosser', 'human']
             if controller_type not in valid_types:
                 return jsonify({'success': False, 'message': f'Invalid controller type. Valid types: {", ".join(valid_types)}'}), 400
             

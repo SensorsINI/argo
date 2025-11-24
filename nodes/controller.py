@@ -249,10 +249,16 @@ class DataCollector:
 
 class ControllerNode(ArgoBaseNode):
     """High-level autonomous controller node."""
+    
+    # Grace period after startup to ignore I2C failures (allows nodes to start up)
+    I2C_FAILURE_GRACE_PERIOD_SECONDS = 30.0
 
     def __init__(self, debug_mode=False):
         super().__init__('controller_node')
         self.get_logger().info('Controller node starting...')
+        
+        # Track startup time for grace period enforcement
+        self._startup_time = time.time()
         
         # Set initial health status - controller is healthy when running
         self.set_healthy("Controller node running")
@@ -804,27 +810,42 @@ class ControllerNode(ArgoBaseNode):
         # Always process critical failures, even when paused
         i2c_failed = msg.data
         old_state = self._i2c_failure_active
-        self._i2c_failure_active = i2c_failed
+        
+        # Check if we're still in the grace period after startup
+        time_since_startup = time.time() - self._startup_time
+        in_grace_period = time_since_startup < self.I2C_FAILURE_GRACE_PERIOD_SECONDS
         
         if i2c_failed and not old_state:
-            # I2C failure just detected - switch to RTH immediately
-            self.get_logger().error(
-                "🔴 CRITICAL I2C BUS FAILURE DETECTED - Battery/wind sensors unavailable. "
-                "Automatically switching to Return-to-Home mode for safety.")
-            
-            # Switch to RTH controller if not already in RTH mode
-            if not isinstance(self.controller, ReturnToHomeController):
-                old_controller_name = self.controller.name if self.controller else "None"
-                self.switch_controller('return_to_home')
-                self._rth_switched_due_to_i2c = True
-                self.get_logger().error(
-                    f"Controller automatically switched from {old_controller_name} to ReturnToHomeController "
-                    f"due to critical I2C bus failure")
+            # I2C failure just detected
+            if in_grace_period:
+                # Ignore I2C failures during startup grace period (nodes may still be starting)
+                remaining_grace = self.I2C_FAILURE_GRACE_PERIOD_SECONDS - time_since_startup
+                self.get_logger().debug(
+                    f"I2C failure detected during startup grace period (ignoring, {remaining_grace:.1f}s remaining). "
+                    f"This is normal during node startup.")
+                # Don't update _i2c_failure_active state during grace period
+                return
             else:
-                self.get_logger().info("Already in RTH mode - maintaining RTH due to I2C failure")
+                # I2C failure detected after grace period - switch to RTH immediately
+                self._i2c_failure_active = i2c_failed
+                self.get_logger().error(
+                    "🔴 CRITICAL I2C BUS FAILURE DETECTED - Battery/wind sensors unavailable. "
+                    "Automatically switching to Return-to-Home mode for safety.")
+                
+                # Switch to RTH controller if not already in RTH mode
+                if not isinstance(self.controller, ReturnToHomeController):
+                    old_controller_name = self.controller.name if self.controller else "None"
+                    self.switch_controller('return_to_home')
+                    self._rth_switched_due_to_i2c = True
+                    self.get_logger().error(
+                        f"Controller automatically switched from {old_controller_name} to ReturnToHomeController "
+                        f"due to critical I2C bus failure")
+                else:
+                    self.get_logger().info("Already in RTH mode - maintaining RTH due to I2C failure")
         
         elif not i2c_failed and old_state:
             # I2C recovery detected
+            self._i2c_failure_active = i2c_failed
             self.get_logger().info(
                 "✅ I2C BUS RECOVERY DETECTED - Critical sensors restored. "
                 "Controller will remain in current mode (RTH or manual switch required to exit RTH).")

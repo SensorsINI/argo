@@ -631,8 +631,52 @@
             });
             
             // Update controller button highlighting based on current controller type
-            // Controller publishes class names like "ProportionalHeadingController", "WindAwareController", "ReturnToHomeController", "PatrolController"
+            // Controller publishes class names like "ProportionalHeadingController", "WindAwareController", etc.
             const controllerType = (data.controller_type || '').toLowerCase();
+            
+            // Mapping of controller type patterns to button types
+            // Each entry maps controller name patterns (array) to button type
+            const controllerMapping = [
+                {
+                    patterns: ['proportionalheading', 'proportional'],
+                    buttonType: 'proportional'
+                },
+                {
+                    patterns: ['windaware', 'wind_aware'],
+                    buttonType: 'wind_aware'
+                },
+                {
+                    patterns: ['returntohome', 'return_to_home'],
+                    buttonType: 'return_to_home',
+                    // Special case: must contain both 'return' and 'home' to avoid false matches
+                    matchAll: true
+                },
+                {
+                    patterns: ['patrol'],
+                    buttonType: 'patrol'
+                },
+                {
+                    patterns: ['crosser'],
+                    buttonType: 'crosser'
+                },
+                {
+                    patterns: ['human'],
+                    buttonType: 'human'
+                }
+            ];
+            
+            // Helper function to check if controller type matches a mapping entry
+            function matchesControllerType(controllerType, mapping) {
+                // Check if any pattern matches
+                const patternMatch = mapping.patterns.some(pattern => controllerType.includes(pattern));
+                
+                // For return_to_home, also require both 'return' and 'home' to avoid false matches
+                if (mapping.buttonType === 'return_to_home' && mapping.matchAll) {
+                    return patternMatch && controllerType.includes('return') && controllerType.includes('home');
+                }
+                
+                return patternMatch;
+            }
             
             // Update all controller buttons dynamically
             const container = document.getElementById('controller-buttons-container');
@@ -643,15 +687,9 @@
                     // Reset to secondary
                     btn.className = 'btn btn-secondary';
                     
-                    // Highlight active controller
-                    if ((controllerType.includes('proportionalheading') || controllerType.includes('proportional')) && btnType === 'proportional') {
-                        btn.className = 'btn btn-warning';
-                    } else if ((controllerType.includes('windaware') || controllerType.includes('wind_aware')) && btnType === 'wind_aware') {
-                        btn.className = 'btn btn-warning';
-                    } else if ((controllerType.includes('returntohome') || controllerType.includes('return_to_home') || 
-                               (controllerType.includes('return') && controllerType.includes('home'))) && btnType === 'return_to_home') {
-                        btn.className = 'btn btn-warning';
-                    } else if (controllerType.includes('patrol') && btnType === 'patrol') {
+                    // Find matching controller mapping and highlight if button type matches
+                    const mapping = controllerMapping.find(m => matchesControllerType(controllerType, m));
+                    if (mapping && mapping.buttonType === btnType) {
                         btn.className = 'btn btn-warning';
                     }
                 });
