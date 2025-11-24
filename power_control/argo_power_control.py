@@ -2751,22 +2751,6 @@ class PowerController(ArgoBaseNode):
         except Exception as e:
             self.get_logger().error(f"Error preparing shutdown message: {e}")
 
-        # Stop battery monitoring
-        self.battery_monitoring_active = False
-
-        # Stop WiFi monitoring
-        self.wifi_monitoring_active = False
-
-        # Stop SOS LED pattern if active
-        self.sos_led_active = False
-
-        # Release control of the green LED back to the kernel
-        self.release_sysfs_led()
-
-        # Clear critical battery flag if set
-        if self.critical_battery_detected:
-            self._clear_critical_battery_flag()
-
     def initiate_shutdown(self):
         """Initiate system shutdown sequence"""
         if self.shutdown_initiated:
@@ -2794,11 +2778,35 @@ class PowerController(ArgoBaseNode):
             else:
                 self.get_logger().warning("⚠️  Failed to stop recording before shutdown, proceeding anyway...")
 
-        # Start 1Hz LED pattern immediately to show shutdown initiated
-        threading.Thread(
+        # Stop background monitoring threads early in shutdown sequence
+        self.get_logger().info("Stopping background monitoring threads...")
+        self.battery_monitoring_active = False
+        self.wifi_monitoring_active = False
+        self.sos_led_active = False
+        self.charge_state_led_active = False
+        self.charging_state_active = False
+        self.service_wait_active = False
+
+        # Clear critical battery flag if set
+        if self.critical_battery_detected:
+            self._clear_critical_battery_flag()
+
+        # Start 1Hz LED pattern briefly to show shutdown initiated
+        # This runs for a short time before we release control to kernel
+        shutdown_pattern_thread = threading.Thread(
             target=self.shutdown_led_pattern,
             daemon=True
-        ).start()
+        )
+        shutdown_pattern_thread.start()
+        
+        # Brief delay to show shutdown pattern, then release control to kernel
+        time.sleep(2)  # Show shutdown pattern for 2 seconds
+        
+        # CRITICAL: Release control of green LED back to kernel EARLY in shutdown
+        # This ensures kernel heartbeat is restored before process is killed
+        # The shutdown LED pattern will stop working after this, but kernel heartbeat takes over
+        self.get_logger().info("Releasing green LED control to kernel for heartbeat...")
+        self.release_sysfs_led()
 
         # Broadcast wall message to all users
         self.broadcast_shutdown_message()
