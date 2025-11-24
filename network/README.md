@@ -20,6 +20,55 @@ NetworkManager 1.36.6 has a known limitation: it doesn't automatically switch to
 - Reduced timer frequency (every 5 minutes instead of 2)
 - Comprehensive logging and error handling
 
+## MAC Address Cloning (Hardware Replacement)
+
+**Problem**: When replacing Orange Pi SBC hardware (due to damage), the new hardware has a different MAC address, which can break network configurations that depend on a specific MAC address (e.g., `uzh-iot`, ZeroTier, `tobi-wlan`).
+
+**Solution**: The Argo system uses NetworkManager's cloned MAC address feature to freeze the WiFi MAC address to a consistent value stored in `ARGO_MAC_ID.txt`. This allows the same SD card to work across different hardware while maintaining the same network identity.
+
+### MAC Address Management
+
+- **Frozen MAC Address**: `c8:26:e2:6c:58:ba` (stored in `network/ARGO_MAC_ID.txt`)
+- **Configuration**: All WiFi connections use NetworkManager's `cloned-mac-address` setting
+- **Persistence**: MAC address persists across hardware changes when using the same SD card
+- **Script**: `scripts/freeze_mac_address.sh` - Automatically configures MAC address from git repo or logs
+
+### Usage
+
+```bash
+# Freeze MAC address to value from ARGO_MAC_ID.txt (recommended)
+make freeze-mac-address
+
+# Or use script directly
+./scripts/freeze_mac_address.sh --from-logs
+
+# Or specify MAC address directly
+./scripts/freeze_mac_address.sh c8:26:e2:6c:58:ba
+```
+
+### How It Works
+
+1. **MAC Address Source**: The script first checks `network/ARGO_MAC_ID.txt` (committed to git)
+2. **NetworkManager Configuration**: Sets `802-11-wireless.cloned-mac-address` for all WiFi connections
+3. **Automatic Application**: MAC address is applied when WiFi connections are activated
+4. **Verification**: Check current MAC with `ip link show wlan0`
+
+### Files
+
+- `network/ARGO_MAC_ID.txt` - Frozen MAC address (committed to git)
+- `scripts/freeze_mac_address.sh` - MAC address configuration script
+- NetworkManager connections - Each WiFi connection has `cloned-mac-address` set
+
+### When to Use
+
+- **After hardware replacement**: Run `make freeze-mac-address` after replacing SBC
+- **Initial setup**: MAC address is automatically configured from git repo
+- **Network issues**: If network access fails after hardware change, verify MAC address
+
+### ZeroTier Note
+
+ZeroTier uses its own virtual MAC address and doesn't depend on the WiFi MAC address. No ZeroTier configuration changes are needed when freezing the WiFi MAC address.
+
 ## Solution Components
 
 ### 1. WiFi Reconnection Script (`scripts/wifi_reconnect.sh`)
@@ -86,6 +135,7 @@ sudo ./network/install/install_network_improvements.sh
 ```
 network/
 ├── README.md                           # This documentation
+├── ARGO_MAC_ID.txt                     # Frozen MAC address for hardware replacement
 ├── scripts/
 │   └── wifi_reconnect.sh              # WiFi reconnection script
 ├── config/
