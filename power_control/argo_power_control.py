@@ -2760,6 +2760,14 @@ class PowerController(ArgoBaseNode):
 
         self.get_logger().info("Initiating shutdown sequence...")
 
+        # IMMEDIATE: Start shutdown LED pattern first for instant visual feedback
+        # This runs in a daemon thread and does not block other actions
+        shutdown_pattern_thread = threading.Thread(
+            target=self.shutdown_led_pattern,
+            daemon=True
+        )
+        shutdown_pattern_thread.start()
+
         # Publish button event
         self._publish_button_event("long_press_shutdown")
 
@@ -2791,14 +2799,6 @@ class PowerController(ArgoBaseNode):
         if self.critical_battery_detected:
             self._clear_critical_battery_flag()
 
-        # Start 1Hz LED pattern briefly to show shutdown initiated
-        # This runs for a short time before we release control to kernel
-        shutdown_pattern_thread = threading.Thread(
-            target=self.shutdown_led_pattern,
-            daemon=True
-        )
-        shutdown_pattern_thread.start()
-        
         # Brief delay to show shutdown pattern, then release control to kernel
         time.sleep(2)  # Show shutdown pattern for 2 seconds
         
