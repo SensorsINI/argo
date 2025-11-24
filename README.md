@@ -89,6 +89,7 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 ## Other READMEs
 - [**Systemd Services Architecture**](docs/README-services.md) - Service dependencies, boot sequence, and troubleshooting
 - [**Network Improvements**](network/README.md) - WiFi reconnection, MAC address cloning, and NetworkManager configuration
+- [**ZeroTier VPN Setup**](docs/README_zerotier.md) - ZeroTier VPN configuration, SSH access, and network management
 - [Simulation System Overview](simulator/README.md)  
 - [Power Control System](power_control/README.md)  
 - [Foxglove Visualization](foxglove/README.md)  
