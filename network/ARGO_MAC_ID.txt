@@ -1,0 +1,11 @@
+# Argo WiFi MAC Address
+# This is the frozen MAC address used across all WiFi connections
+# Set via NetworkManager cloned-mac-address configuration
+# 
+# This MAC address persists across hardware changes when using the same SD card
+# Last updated: 2025-11-24
+#
+# MAC Address: c8:26:e2:6c:58:ba
+
+c8:26:e2:6c:58:ba
+
