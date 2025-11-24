@@ -50,8 +50,24 @@ make freeze-mac-address
 
 1. **MAC Address Source**: The script first checks `network/ARGO_MAC_ID.txt` (committed to git)
 2. **NetworkManager Configuration**: Sets `802-11-wireless.cloned-mac-address` for all WiFi connections
-3. **Automatic Application**: MAC address is applied when WiFi connections are activated
-4. **Verification**: Check current MAC with `ip link show wlan0`
+3. **Storage**: Connection profiles are stored in `/etc/NetworkManager/system-connections/*.nmconnection` (on SD card)
+4. **Automatic Application**: MAC address is applied automatically during boot when NetworkManager activates WiFi connections
+5. **Verification**: Check current MAC with `ip link show wlan0`
+
+### Boot Process
+
+When you swap Orange Pi hardware and boot with the same SD card:
+
+1. **System Boots** → Linux kernel initializes hardware (new SBC has different hardware MAC)
+2. **NetworkManager Starts** → Reads connection profiles from `/etc/NetworkManager/system-connections/`
+3. **Connection Activation** → NetworkManager activates WiFi connection (e.g., `tobi-wlan`)
+4. **MAC Address Applied** → NetworkManager reads `cloned-mac-address=C8:26:E2:6C:58:BA` from connection profile
+5. **Interface Configured** → WiFi interface `wlan0` is set to use cloned MAC address instead of hardware MAC
+6. **Network Ready** → WiFi connects using frozen MAC address, maintaining network identity
+
+**Result**: The new hardware automatically uses the frozen MAC address (`c8:26:e2:6c:58:ba`) without any manual intervention, because the connection profiles are stored on the SD card and applied automatically by NetworkManager during boot.
+
+**No Manual Steps Required**: If the connection profiles already have the cloned MAC address configured (which they do after running `make freeze-mac-address`), the MAC address will be applied automatically on the new hardware during boot.
 
 ### Files
 
