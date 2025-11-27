@@ -22,8 +22,10 @@ class HumanController(BaseController):
     (state.radio_rudder and state.radio_sail). Useful for studying simulator
     dynamics with full manual control.
     
-    After human_override_timeout, this controller takes over but continues
-    to pass through keyboard/radio commands, allowing pure manual control.
+    Behavior:
+    - Always passes through radio/keyboard input when available
+    - If radio is lost (None or zero), returns neutral (0.0) which may trigger RTH
+    - If radio turns back on, immediately resumes passing through radio commands
     """
 
     def __init__(self, config, logger=None, parent_node=None):
@@ -36,8 +38,10 @@ class HumanController(BaseController):
         # Publish controller state
         self.publish_state('human')
         
-        # Pass through radio/keyboard commands - no autonomous control
-        # If no radio input available, return neutral commands
+        # Always pass through radio/keyboard commands directly
+        # If radio is None (not received), use 0.0 (neutral)
+        # If radio is 0.0 (center position or lost), use 0.0 (neutral)
+        # This allows RTH to trigger when radio is lost (handled elsewhere)
         cmd_rudder = state.radio_rudder if state.radio_rudder is not None else 0.0
         cmd_sail = state.radio_sail if state.radio_sail is not None else 0.0
         
@@ -46,4 +50,3 @@ class HumanController(BaseController):
             sail=cmd_sail,
             timestamp=state.timestamp
         )
-
