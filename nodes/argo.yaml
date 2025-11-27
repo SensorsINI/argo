@@ -100,7 +100,7 @@
       yaw_offset_deg: 59.25
 controller_node:
   ros__parameters:
-    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
+    controller_type: human  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
     controller_initially_paused: false  # Start controller in paused (manual) mode if true
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
