@@ -120,7 +120,7 @@ BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/dis
 HUMIDITY_ALERT_THRESHOLD_PCT = 75.0  # %, triggers warning, makes node unhealthy
 
 # Saltwater alert threshold
-SALTWATER_ALERT_THRESHOLD_V = 1.0  # V, triggers warning, makes node unhealthy
+SALTWATER_ALERT_THRESHOLD_V = 1.5  # V, triggers warning, makes node unhealthy
 
 # Charging anomaly detection threshold (negative slope while charging)
 # Considered significant if voltage is falling faster than this while charging
