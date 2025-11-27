@@ -636,8 +636,12 @@ class BatteryWaterNode(ArgoBaseNode):
     def _log_to_csv(self, battery_voltage, battery_remaining_pct, saltwater_voltage,
                     sail_current, temperature, humidity, battery_low_alert,
                     saltwater_alert, humidity_alert, health_status, charging_status,
-                    ac_power_present):
-        """Log current sensor data to CSV file"""
+                    ac_power_present, adc_stale=False):
+        """Log current sensor data to CSV file
+        
+        Args:
+            adc_stale: If True, marks this entry as having stale ADC data (I2C failure)
+        """
         if not self._csv_file_initialized:
             return
 
@@ -653,17 +657,28 @@ class BatteryWaterNode(ArgoBaseNode):
             charging_csv = 1 if charging_status else 0
             ac_power_csv = 1 if ac_power_present else 0
 
-            # Handle None values
-            battery_remaining_pct = battery_remaining_pct if battery_remaining_pct is not None else ""
+            # Handle None values - mark as "FAILED" if ADC is stale and value is 0 or None
+            if adc_stale and battery_voltage == 0.0:
+                battery_voltage_str = "FAILED"
+            else:
+                battery_voltage_str = battery_voltage
+                
+            battery_remaining_pct = battery_remaining_pct if battery_remaining_pct is not None else ("FAILED" if adc_stale else "")
             temperature = temperature if temperature is not None else ""
             humidity = humidity if humidity is not None else ""
+            
+            # Mark saltwater as FAILED if ADC is stale and value is 0
+            if adc_stale and saltwater_voltage == 0.0:
+                saltwater_voltage_str = "FAILED"
+            else:
+                saltwater_voltage_str = saltwater_voltage
 
             # Write CSV row
             with open(self.csv_file_path, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
                 writer.writerow([
-                    timestamp, battery_voltage, battery_remaining_pct,
-                    saltwater_voltage, sail_current, temperature,
+                    timestamp, battery_voltage_str, battery_remaining_pct,
+                    saltwater_voltage_str, sail_current, temperature,
                     humidity, battery_low_csv, saltwater_alert_csv,
                     humidity_alert_csv, health_csv, charging_csv, ac_power_csv
                 ])
@@ -2233,6 +2248,8 @@ class BatteryWaterNode(ArgoBaseNode):
         current_time = time.monotonic()
         
         # Read critical ADC sensors (battery and saltwater) - these are essential
+        # CRITICAL: Continue with last known values on failure to allow power control to detect stale data
+        adc_read_successful = False
         try:
             # ADC averages for battery and saltwater
             raw0 = self._read_adc_channel_avg(0)
@@ -2263,10 +2280,18 @@ class BatteryWaterNode(ArgoBaseNode):
             # Update latest critical sensor values
             self._latest_battery_voltage = battery_voltage
             self._latest_saltwater_voltage = saltwater_voltage
+            adc_read_successful = True
             
         except Exception as e:
             self._handle_io_error(e, "ADC sensors")
-            return  # Skip publishing on error - ADC failure is critical
+            # CRITICAL FIX: Continue with last known values instead of returning early
+            # This allows power control to detect stale data and make safety decisions
+            # Use last known good values (or 0.0 if never read)
+            battery_voltage = self._latest_battery_voltage if self._latest_battery_voltage > 0 else 0.0
+            saltwater_voltage = self._latest_saltwater_voltage if self._latest_saltwater_voltage >= 0 else 0.0
+            self.get_logger().warn(
+                f"ADC read failed, using last known values: battery={battery_voltage:.3f}V, "
+                f"saltwater={saltwater_voltage:.3f}V (data may be stale)")
         
         # Read SHT45 sensor separately - this is non-critical and can fail gracefully
         temperature, humidity = self._read_sht45_robust()
@@ -2277,16 +2302,20 @@ class BatteryWaterNode(ArgoBaseNode):
         if not self._sht_sensor_available:
             self._attempt_sht45_recovery()
 
-        # Calculate battery remaining percentage
+        # Calculate battery remaining percentage (only if we have valid voltage reading)
         battery_remaining_pct = None
-        try:
-            cells = max(1, int(self.batt_series_cells))
-            v_cell = battery_voltage / float(cells) if cells > 0 else battery_voltage
-            base = 1.0 + (max(0.0, v_cell) / max(1e-9, self.soc_V0)) ** self.soc_A
-            soc = self.soc_S - (self.soc_S / (base ** self.soc_B))
-            battery_remaining_pct = float(max(0.0, min(100.0, soc)))
-        except Exception:
-            pass
+        if adc_read_successful and battery_voltage > 0:
+            try:
+                cells = max(1, int(self.batt_series_cells))
+                v_cell = battery_voltage / float(cells) if cells > 0 else battery_voltage
+                base = 1.0 + (max(0.0, v_cell) / max(1e-9, self.soc_V0)) ** self.soc_A
+                soc = self.soc_S - (self.soc_S / (base ** self.soc_B))
+                battery_remaining_pct = float(max(0.0, min(100.0, soc)))
+            except Exception:
+                pass
+        # Use last known percentage if ADC read failed
+        elif not adc_read_successful and self._latest_battery_remaining_pct is not None:
+            battery_remaining_pct = self._latest_battery_remaining_pct
         self._latest_battery_remaining_pct = battery_remaining_pct
 
         # Check MP2672 availability and read charging status (I2C primary if host control enabled, GPIO fallback)
@@ -2508,12 +2537,14 @@ class BatteryWaterNode(ArgoBaseNode):
         self._update_bars(battery_voltage, saltwater_voltage, self._latest_sail_current, temperature, humidity)
 
         if current_time - self._last_csv_log_time >= self.csv_log_interval:
+            # Log to CSV even when ADC fails (mark as stale/unreliable)
             self._log_to_csv(
                 battery_voltage, battery_remaining_pct, saltwater_voltage,
                 self._latest_sail_current, temperature, humidity,
                 self._latest_battery_low_alert, self._latest_saltwater_alert,
                 self._latest_humidity_alert, self.health_status,
-                charging_status, ac_power_present
+                charging_status, ac_power_present,
+                adc_stale=not adc_read_successful  # Mark as stale if ADC read failed
             )
             self._last_csv_log_time = current_time
         

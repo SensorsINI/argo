@@ -3076,7 +3076,9 @@ class PowerController(ArgoBaseNode):
                 self.is_fully_charged = is_fully_charged_now
                 
                 # Update charge state based on AC power and battery status
-                charge_state_should_be_active = is_charging_now or is_fully_charged_now
+                # CRITICAL: Charge state pattern should ONLY be active when AC power is present
+                # Even if battery is fully charged, don't show charge state pattern without AC power
+                charge_state_should_be_active = (ac_power is True) and (is_charging_now or is_fully_charged_now)
                 
                 # Handle low battery + AC power transition
                 if self.low_battery_detected and not self.critical_battery_detected:
@@ -3088,6 +3090,9 @@ class PowerController(ArgoBaseNode):
                             if self.charge_state_led_active:
                                 self.charge_state_led_active = False
                                 self.charging_state_active = False
+                                # Immediately turn off charge state LED
+                                led_setter = self._get_charge_state_led_setter()
+                                led_setter(False)
                             threading.Thread(target=self.sos_led_pattern, daemon=True).start()
                     else:
                         # AC power present - stop SOS, start charge state
@@ -3111,7 +3116,23 @@ class PowerController(ArgoBaseNode):
                         self.get_logger().info("Immediate charge state update: charging ended")
                         self.charging_state_active = False
                         self.charge_state_led_active = False
-                        self.resume_heartbeat(reason="charging_state_ended")
+                        
+                        # CRITICAL: Immediately turn off charge state LED to prevent it staying on
+                        # The pattern thread will exit, but we need to turn off LED now to avoid delay
+                        led_setter = self._get_charge_state_led_setter()
+                        led_setter(False)
+                        
+                        # When AC power is removed, check if we should show SOS (low battery) or resume heartbeat
+                        if battery_voltage < LOW_BATTERY_THRESHOLD_V and not self.critical_battery_detected:
+                            # Battery is low - start SOS pattern
+                            if not self.sos_led_active:
+                                self.get_logger().info(
+                                    f"AC power removed with low battery ({battery_voltage:.3f}V) - starting SOS pattern")
+                                self.pause_heartbeat(reason="low_battery")
+                                threading.Thread(target=self.sos_led_pattern, daemon=True).start()
+                        else:
+                            # Battery is OK - resume normal heartbeat
+                            self.resume_heartbeat(reason="charging_state_ended")
         except Exception as e:
             self.get_logger().error(f"Error in immediate charge state update: {e}")
 
@@ -3171,7 +3192,9 @@ class PowerController(ArgoBaseNode):
         # Track consecutive failures for safety
         consecutive_service_failures = 0
         consecutive_invalid_readings = 0
-        MAX_CONSECUTIVE_FAILURES = 3  # 90 seconds of failures = assume critical
+        MAX_CONSECUTIVE_FAILURES = 3  # 90 seconds of failures = log warning
+        BATTERY_SERVICE_FAILURE_TIMEOUT = 10  # 5 minutes (10 * 30s) of failures = initiate safe shutdown
+        battery_service_failure_start_time = None  # Track when service failures started
 
         # Startup grace period - don't count failures until battery service has been seen at least once
         # This prevents false critical alerts if argo_battery_water.service starts after power_control.service
@@ -3187,8 +3210,9 @@ class PowerController(ArgoBaseNode):
                 # Call battery service to get voltage
                 battery_data = self._call_battery_service()
                 if battery_data:
-                    # Service call succeeded
+                    # Service call succeeded - reset failure tracking
                     consecutive_service_failures = 0
+                    battery_service_failure_start_time = None  # Reset failure start time
 
                     # Mark that we've seen the battery service available at least once
                     if not battery_service_ever_available:
@@ -3278,6 +3302,9 @@ class PowerController(ArgoBaseNode):
                             if self.charge_state_led_active:
                                 self.charge_state_led_active = False
                                 self.charging_state_active = False
+                                # Immediately turn off charge state LED
+                                led_setter = self._get_charge_state_led_setter()
+                                led_setter(False)
                             self.initiate_critical_battery_halt(battery_voltage)
 
                     # Check for low battery (SOS warning)
@@ -3301,6 +3328,9 @@ class PowerController(ArgoBaseNode):
                                 if self.charge_state_led_active:
                                     self.charge_state_led_active = False
                                     self.charging_state_active = False
+                                    # Immediately turn off charge state LED
+                                    led_setter = self._get_charge_state_led_setter()
+                                    led_setter(False)
                                 # Start SOS LED pattern in separate thread
                                 threading.Thread(target=self.sos_led_pattern, daemon=True).start()
                                 # Send desktop notification
@@ -3337,7 +3367,9 @@ class PowerController(ArgoBaseNode):
                         self.is_fully_charged = is_fully_charged_now
                         
                         # Determine if charge state should be active
-                        charge_state_should_be_active = is_charging_now or is_fully_charged_now
+                        # CRITICAL: Charge state pattern should ONLY be active when AC power is present
+                        # Even if battery is fully charged, don't show charge state pattern without AC power
+                        charge_state_should_be_active = (ac_power is True) and (is_charging_now or is_fully_charged_now)
                         
                         # Start charge state pattern if needed
                         if charge_state_should_be_active and not self.charging_state_active:
@@ -3380,6 +3412,9 @@ class PowerController(ArgoBaseNode):
                                 f"Charging state ended: voltage={battery_voltage:.3f}V, percentage={percentage:.1f}%")
                             self.charging_state_active = False
                             self.charge_state_led_active = False  # This will stop the pattern thread
+                            # Immediately turn off charge state LED
+                            led_setter = self._get_charge_state_led_setter()
+                            led_setter(False)
                             # Resume heartbeat now that charging state is inactive
                             self.resume_heartbeat(reason="charging_state_ended")
 
@@ -3438,21 +3473,49 @@ class PowerController(ArgoBaseNode):
                     else:
                         # Service was available before but now failing - count consecutive failures
                         consecutive_service_failures += 1
-                        self.get_logger().error(
-                            f"Battery service failure - service was available but now unreachable "
-                            f"(count: {consecutive_service_failures}/{MAX_CONSECUTIVE_FAILURES})")
+                        
+                        # Track when service failures started
+                        if battery_service_failure_start_time is None:
+                            battery_service_failure_start_time = time.time()
+                            self.get_logger().error(
+                                f"Battery service failure detected - service was available but now unreachable "
+                                f"(count: {consecutive_service_failures}/{MAX_CONSECUTIVE_FAILURES})")
+                        else:
+                            failure_duration = time.time() - battery_service_failure_start_time
+                            self.get_logger().error(
+                                f"Battery service still failing - unreachable for {failure_duration:.0f}s "
+                                f"(count: {consecutive_service_failures}/{BATTERY_SERVICE_FAILURE_TIMEOUT})")
 
-                        # After multiple consecutive service failures, log critical error but DO NOT HALT
+                        # After multiple consecutive service failures, log critical error
                         if consecutive_service_failures >= MAX_CONSECUTIVE_FAILURES:
                             self.get_logger().error(
                                 f"CRITICAL: Battery service failed {consecutive_service_failures} times consecutively!")
                             self.get_logger().error(
                                 "Battery monitoring is NOT working - system continues WITHOUT battery protection!")
                             self.get_logger().error(
-                                "Service failures indicate a monitoring problem, NOT a battery emergency!")
+                                "Service failures indicate a monitoring problem - check argo_battery_water.service")
+                        
+                        # CRITICAL FIX: After extended service failure (5 minutes), assume battery may be draining
+                        # and initiate safe shutdown to prevent battery damage
+                        if consecutive_service_failures >= BATTERY_SERVICE_FAILURE_TIMEOUT:
+                            failure_duration = time.time() - battery_service_failure_start_time
                             self.get_logger().error(
-                                "Check argo_battery_water.service: sudo systemctl status argo_battery_water.service")
-                            # DO NOT HALT - service failures are monitoring problems, not battery emergencies
+                                f"🔴 CRITICAL: Battery service has been failing for {failure_duration:.0f}s "
+                                f"({consecutive_service_failures} consecutive failures)")
+                            self.get_logger().error(
+                                "Battery monitoring unavailable - cannot verify battery voltage!")
+                            self.get_logger().error(
+                                "⚠️  SAFETY SHUTDOWN: Initiating safe shutdown to prevent battery damage")
+                            self.get_logger().error(
+                                "This may be due to I2C failure, service crash, or akill killing the service")
+                            self.get_logger().error(
+                                "Check logs: journalctl -u argo_battery_water.service -n 50")
+                            
+                            # Initiate safe shutdown due to extended battery monitoring failure
+                            # Use voltage=0.0 to indicate unknown voltage (monitoring unavailable)
+                            self.initiate_critical_battery_halt(battery_voltage=0.0, reason="battery_service_failure_timeout")
+                            # Note: initiate_critical_battery_halt will handle the shutdown sequence
+                            break  # Exit monitoring loop after initiating shutdown
 
                 self.last_battery_check_time = time.time()
 
@@ -3925,8 +3988,12 @@ class PowerController(ArgoBaseNode):
             self.get_logger().error(f"❌ Failed to pause Argo system: {message}")
             return False
 
-    def initiate_critical_battery_halt(self, battery_voltage):
+    def initiate_critical_battery_halt(self, battery_voltage, reason=None):
         """Initiate critical battery halt sequence with timeout-based confirmation
+
+        Args:
+            battery_voltage: Battery voltage (use 0.0 if voltage is unknown/unavailable)
+            reason: Optional reason string for logging (e.g., "battery_service_failure_timeout")
 
         Shows a confirmation dialog with 30-second timeout:
         - If user clicks "Cancel": Halt is cancelled (allows intervention)
@@ -3937,10 +4004,19 @@ class PowerController(ArgoBaseNode):
         - Autonomous safety: Timeout = halt proceeds (not cancelled)
         - Developer control: Active cancellation stops halt if user intervenes
         """
+        # Format voltage string (handle unknown voltage)
+        if battery_voltage > 0:
+            voltage_str = f"{battery_voltage:.3f}V"
+        else:
+            voltage_str = "UNKNOWN (monitoring unavailable)"
+        
+        # Format reason string
+        reason_str = f" - {reason}" if reason else ""
+        
         # Log critical battery mode based on configuration flag
         if CRITICAL_BATTERY_USE_SHUTDOWN:
             self.get_logger().error(
-                f"CRITICAL BATTERY SHUTDOWN: {battery_voltage:.3f}V - System will shutdown and CUT POWER")
+                f"CRITICAL BATTERY SHUTDOWN: {voltage_str}{reason_str} - System will shutdown and CUT POWER")
             self.get_logger().error(
                 "⚠️  DEVELOPMENT MODE: Using normal shutdown (cuts power) instead of halt")
             self.get_logger().error(
@@ -3948,7 +4024,7 @@ class PowerController(ArgoBaseNode):
             shutdown_mode = "shutdown (power cut)"
         else:
             self.get_logger().error(
-                f"CRITICAL BATTERY HALT: {battery_voltage:.3f}V - System will halt to preserve power")
+                f"CRITICAL BATTERY HALT: {voltage_str}{reason_str} - System will halt to preserve power")
             self.get_logger().error(
                 "PRODUCTION MODE: Using halt to preserve power for manual sailing")
             shutdown_mode = "halt (power preserved)"
@@ -3965,7 +4041,10 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("Critical battery flag NOT set - shutdown hook will cut power normally")
 
         # Send critical notification with appropriate message
-        notification_message = f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will {shutdown_mode} in 30 seconds unless cancelled\nTimeout = automatic shutdown (safe default)"
+        if battery_voltage > 0:
+            notification_message = f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will {shutdown_mode} in 30 seconds unless cancelled\nTimeout = automatic shutdown (safe default)"
+        else:
+            notification_message = f"Battery monitoring unavailable{reason_str}\nSystem will {shutdown_mode} in 30 seconds unless cancelled\nTimeout = automatic shutdown (safe default)"
         self.send_desktop_notification(
             "CRITICAL BATTERY",
             notification_message,
@@ -3983,7 +4062,7 @@ class PowerController(ArgoBaseNode):
                 action_desc = "HALT to preserve battery power"
                 mode_desc = "halt to preserve battery for manual sailing operation (PRODUCTION MODE)"
 
-            message = f"""CRITICAL BATTERY ALERT: {battery_voltage:.3f}V at {timestamp}
+            message = f"""CRITICAL BATTERY ALERT: {voltage_str}{reason_str} at {timestamp}
 
 ⚠️  System will {action_desc} in 30 seconds.
 
@@ -4016,7 +4095,7 @@ If you take no action within 30 seconds, the system will automatically
             # Send cancellation notification
             self.send_desktop_notification(
                 "SHUTDOWN CANCELLED BY USER",
-                f"Critical battery {shutdown_mode} was cancelled by user\nBattery: {battery_voltage:.3f}V - PLUG IN CHARGER NOW!",
+                f"Critical battery {shutdown_mode} was cancelled by user\nBattery: {voltage_str} - PLUG IN CHARGER NOW!",
                 "critical",
                 0  # Stays visible
             )
@@ -4111,6 +4190,12 @@ If you take no action within 30 seconds, the system will automatically
             # Stop charge state LED pattern if active
             self.charge_state_led_active = False
             self.charging_state_active = False
+            # Immediately turn off charge state LED
+            try:
+                led_setter = self._get_charge_state_led_setter()
+                led_setter(False)
+            except Exception:
+                pass  # Ignore errors during cleanup
 
             # Stop service wait pattern if active
             self.service_wait_active = False
