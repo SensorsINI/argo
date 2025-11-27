@@ -6,12 +6,13 @@ set -euo pipefail
 
 log() { printf '%s\n' "$*" >&2; }
 
-# Critical systemd services that must NEVER be killed (battery monitoring, power control, health monitoring)
+# Critical systemd services that must NEVER be killed (battery monitoring, power control, health monitoring, IMU driver)
 # These services are essential for system safety and must remain running
 CRITICAL_SERVICES=(
   "argo_battery_water.service"
   "argo_power_control.service"
   "argo_health_monitor.service"
+  "argo_bno085.service"
 )
 
 # No-arg killer: always target the full simulation set and ensure complete shutdown
