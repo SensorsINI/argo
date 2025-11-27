@@ -561,6 +561,15 @@ class RudderSailRadioNode(ArgoBaseNode):
         # between our own messages and external ones in the callback
         self.create_subscription(
             Vector3, '/rudder_sail_radio', self.external_control_callback, 10)
+        
+        # From controllers (human controller signals servo release)
+        # When True, servos should be released (high impedance mode) so radio directly controls them
+        # When False, normal PWM control via arbitration
+        self.release_servos = False  # Default to False (normal operation)
+        self.last_release_servos_time = time.time()  # Track last message time for timeout
+        self.RELEASE_SERVOS_TIMEOUT = 3.0  # If no message for 3 seconds, assume False (allows for jitter with 1Hz publish rate)
+        self.create_subscription(
+            Bool, '/release_servos', self.release_servos_callback, 10)
 
         # --- Timers ---
         self.control_loop_period = DEFAULT_CONTROL_LOOP_PERIOD  # 20 Hz for responsive control
@@ -904,6 +913,26 @@ class RudderSailRadioNode(ArgoBaseNode):
         self.last_auto_update = time.time()
         self._last_activity_time = time.time()  # Track activity for adaptive timers
 
+    def release_servos_callback(self, msg):
+        """Receive release_servos command from controllers.
+        
+        When True, servos should be released (high impedance mode) so radio
+        directly controls them without PWM interference.
+        When False, normal PWM control via arbitration.
+        """
+        self.release_servos = msg.data
+        self.last_release_servos_time = time.time()
+        
+        # Log state changes
+        if not hasattr(self, '_last_release_servos_state'):
+            self._last_release_servos_state = None
+        if self.release_servos != self._last_release_servos_state:
+            if self.release_servos:
+                self.get_logger().info("Servo release requested - setting servos to high impedance mode (radio direct control)")
+            else:
+                self.get_logger().info("Servo release cancelled - resuming normal PWM control")
+            self._last_release_servos_state = self.release_servos
+
     def determine_control_authority(self):
         """
         Determine who has control authority based on human activity.
@@ -1166,34 +1195,57 @@ class RudderSailRadioNode(ArgoBaseNode):
         # 6. Apply safety limits
         cmd_rudder, cmd_sail = self.apply_safety_limits(cmd_rudder, cmd_sail)
 
+        # 6.5. Check for servo release request (from human controller)
+        # If release_servos is True, set servos to high impedance mode and skip PWM writes
+        # This allows radio to directly control servos without PWM interference
+        current_time = time.time()
+        # Check for timeout: if no message received for timeout period, assume False (normal operation)
+        if (current_time - self.last_release_servos_time) > self.RELEASE_SERVOS_TIMEOUT:
+            if self.release_servos:  # Only log if we're transitioning from True to False
+                self.get_logger().warn(
+                    f"No release_servos message for {current_time - self.last_release_servos_time:.1f}s - "
+                    "assuming normal operation (resuming PWM control)")
+            self.release_servos = False
+        
         # 7. Convert commands to pulse widths and write to hardware (no in-node direction inversion)
         # CRITICAL: Check shutdown flag again before writing to hardware
         if hasattr(self, 'shutdown_requested') and self.shutdown_requested:
             return  # Don't write to servos during shutdown
         
-        servo_rudder_pw_us = cmd_to_pw_us(cmd_rudder)
-        servo_sail_pw_us = cmd_to_pw_us(cmd_sail)
+        if self.release_servos:
+            # Servo release mode: set servos to high impedance (write 0)
+            # This allows radio to directly control servos without PWM interference
+            self.write_sysfs_pw(SERVO_RUDDER_PATH, 0)
+            self.write_sysfs_pw(SERVO_SAIL_PATH, 0)
+            # Don't publish servo commands when in release mode (servos are not being controlled by PWM)
+            # But continue reading and publishing radio inputs for monitoring
+        else:
+            # Normal operation: write PWM commands to servos
+            servo_rudder_pw_us = cmd_to_pw_us(cmd_rudder)
+            servo_sail_pw_us = cmd_to_pw_us(cmd_sail)
 
-        self.write_sysfs_pw(SERVO_RUDDER_PATH, servo_rudder_pw_us)
-        self.write_sysfs_pw(SERVO_SAIL_PATH, servo_sail_pw_us)
+            self.write_sysfs_pw(SERVO_RUDDER_PATH, servo_rudder_pw_us)
+            self.write_sysfs_pw(SERVO_SAIL_PATH, servo_sail_pw_us)
 
         # 8. Publish actual servo commands (only on significant change or timeout)
-        servo_changed = (
-            self.prev_published_servo_rudder is None or
-            abs(cmd_rudder - self.prev_published_servo_rudder) > self.PUBLISH_CHANGE_THRESHOLD or
-            abs(cmd_sail - self.prev_published_servo_sail) > self.PUBLISH_CHANGE_THRESHOLD or
-            (current_time - self.last_servo_publish_time) > self.MAX_PUBLISH_INTERVAL
-        )
-        
-        if servo_changed:
-            self._servo_msg_cache.x = cmd_rudder
-            self._servo_msg_cache.y = cmd_sail
-            self._servo_msg_cache.z = 0.0
-            self.pub_rudder_sail_servo.publish(self._servo_msg_cache)
-            self.prev_published_servo_rudder = cmd_rudder
-            self.prev_published_servo_sail = cmd_sail
-            self.last_servo_publish_time = current_time
-            self._last_activity_time = current_time  # Track activity for adaptive timers
+        # Skip publishing when in release mode (servos are not being controlled by PWM)
+        if not self.release_servos:
+            servo_changed = (
+                self.prev_published_servo_rudder is None or
+                abs(cmd_rudder - self.prev_published_servo_rudder) > self.PUBLISH_CHANGE_THRESHOLD or
+                abs(cmd_sail - self.prev_published_servo_sail) > self.PUBLISH_CHANGE_THRESHOLD or
+                (current_time - self.last_servo_publish_time) > self.MAX_PUBLISH_INTERVAL
+            )
+            
+            if servo_changed:
+                self._servo_msg_cache.x = cmd_rudder
+                self._servo_msg_cache.y = cmd_sail
+                self._servo_msg_cache.z = 0.0
+                self.pub_rudder_sail_servo.publish(self._servo_msg_cache)
+                self.prev_published_servo_rudder = cmd_rudder
+                self.prev_published_servo_sail = cmd_sail
+                self.last_servo_publish_time = current_time
+                self._last_activity_time = current_time  # Track activity for adaptive timers
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals by ensuring safe exit.

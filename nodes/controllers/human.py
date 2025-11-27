@@ -30,13 +30,39 @@ class HumanController(BaseController):
 
     def __init__(self, config, logger=None, parent_node=None):
         super().__init__(config, logger=logger, parent_node=parent_node)
+        # Force publisher creation immediately so it shows up in ros2 node info
+        self._get_release_servos_publisher()
         if logger:
             logger.info("HumanController initialized - passing through keyboard/radio commands only")
 
+    def reset(self):
+        """Reset controller state (called when switching to this controller).
+        
+        Publishes release_servos=True immediately when switching to human controller.
+        """
+        # Force publisher creation if not already created
+        self._get_release_servos_publisher()
+        # Publish True immediately (force=True) when switching to human controller
+        # This bypasses throttling since controller switch is a critical state change
+        self.publish_release_servos(True, force=True)
+
     def generate_control(self, state: BoatState) -> ControlCommand:
-        """Pass through keyboard/radio commands (no autonomous control)."""
+        """Pass through keyboard/radio commands (no autonomous control).
+        
+        When this controller is active, it publishes release_servos=True to signal
+        that rudder_sail_radio.py should release servos (set to high impedance mode),
+        allowing radio to directly control servos without PWM interference.
+        """
         # Publish controller state
         self.publish_state('human')
+        
+        # Publish release_servos=True to signal servo release
+        # This tells rudder_sail_radio.py to set servos to high impedance mode
+        # so radio can directly control servos without PWM interference
+        # Use force=True to ensure it publishes immediately (bypasses throttling)
+        # IMPORTANT: Always use force=True here to ensure continuous publishing
+        # This is critical for maintaining servo release state
+        self.publish_release_servos(True, force=True)
         
         # Always pass through radio/keyboard commands directly
         # If radio is None (not received), use 0.0 (neutral)

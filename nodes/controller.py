@@ -531,6 +531,11 @@ class ControllerNode(ArgoBaseNode):
 
         self.get_logger().info(
             f"Initialized controller: {self.controller.name}")
+        
+        # Call reset() to ensure controller is properly initialized
+        # This is especially important for HumanController to publish release_servos=True
+        if self.controller:
+            self.controller.reset()
 
     def switch_controller(self, controller_type: str = None):
         """Switch to a different controller type.
@@ -923,7 +928,11 @@ class ControllerNode(ArgoBaseNode):
                 safe_publish(self.pub_controller_state, state_msg, self)
             
             # Check if node is paused - when paused, skip all processing and logging
-            if self.is_paused():
+            # EXCEPTION: HumanController must still run to publish release_servos=True
+            # This ensures servos stay in high impedance mode for human control
+            is_human_controller = isinstance(self.controller, HumanController)
+            
+            if self.is_paused() and not is_human_controller:
                 # When paused, no autonomous commands are published, which causes
                 # rudder_sail_radio.py to default to human control due to stale auto commands.
                 # This effectively hands control back to the human operator immediately.
@@ -953,13 +962,16 @@ class ControllerNode(ArgoBaseNode):
                 self.last_logged_human_control = self.boat_state.human_controlled
 
             # Check for minimum required data
-            if self.boat_state.compass_heading is None:
+            # EXCEPTION: HumanController doesn't need compass_heading - it just passes through radio commands
+            if self.boat_state.compass_heading is None and not is_human_controller:
                 self.get_logger().debug("Waiting for initial compass heading...", throttle_duration_sec=5)
                 return
 
             if self.boat_state.human_controlled:
                 # Human control mode - update target heading for when robot takes over
-                self.boat_state.target_heading = self.boat_state.compass_heading
+                # Only update if compass_heading is available (not needed for HumanController)
+                if self.boat_state.compass_heading is not None:
+                    self.boat_state.target_heading = self.boat_state.compass_heading
 
                 # Collect training data if enabled
                 if (self.data_collector.enabled and
@@ -974,7 +986,22 @@ class ControllerNode(ArgoBaseNode):
                     self.data_collector.record_sample(
                         self.boat_state, human_action)
 
-                # No autonomous command published - rudder_sail_radio.py handles human input
+                # CRITICAL: HumanController must run even in human control mode to publish release_servos=True
+                # This ensures servos stay in high impedance mode for direct radio control
+                if isinstance(self.controller, HumanController):
+                    if self.controller is not None:
+                        control_command = self.controller.generate_control(self.boat_state)
+                        # Publish the command (HumanController passes through radio commands)
+                        if control_command:
+                            safe_publish(self.pub_rudder_sail_cmd, control_command.to_vector3(), self)
+                        else:
+                            self.get_logger().warn("HumanController.generate_control() returned None")
+                    else:
+                        self.get_logger().warn("HumanController instance is None")
+                else:
+                    # No autonomous command published - rudder_sail_radio.py handles human input
+                    self.get_logger().debug(f"Controller is not HumanController (type: {type(self.controller).__name__}) - no command published")
+                    pass
 
             else:
                 # Autonomous control mode
@@ -1041,6 +1068,8 @@ class ControllerNode(ArgoBaseNode):
 
                 # **THE CORE ARCHITECTURE: Single generate_control function**
                 # (Pause check already done at start of timer_callback - no need to check again)
+                # CRITICAL: HumanController must always run to publish release_servos=True
+                # This ensures servos stay in high impedance mode even after human control timeout
                 control_command = self.controller.generate_control(self.boat_state)
 
                 # Publish control command to rudder_sail_radio.py

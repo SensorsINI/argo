@@ -160,13 +160,23 @@ class BaseController:
         self.parent_node = parent_node
         self._captains_log_pub = None
         self._controller_state_pub = None
+        self._release_servos_pub = None
+        self._last_release_servos_state = None
+        self._last_release_servos_publish_time = 0.0
+        self.RELEASE_SERVOS_PUBLISH_INTERVAL = 1.0  # Publish at 1Hz maximum
 
     def generate_control(self, state: BoatState) -> ControlCommand:
         raise NotImplementedError
 
     def reset(self):
-        """Reset controller state (called when switching to this controller)."""
-        pass
+        """Reset controller state (called when switching to this controller).
+        
+        By default, publishes release_servos=False to ensure normal PWM operation
+        when switching to non-human controllers. HumanController overrides this.
+        """
+        # Publish False immediately (force=True) to ensure normal PWM operation
+        # This bypasses throttling since controller switch is a critical state change
+        self.publish_release_servos(False, force=True)
 
     def update_config(self, config: Dict[str, Any]):
         """Update controller configuration."""
@@ -187,6 +197,54 @@ class BaseController:
             self._controller_state_pub = self.parent_node.create_publisher(
                 String, '/controller/state', 10)
         return self._controller_state_pub
+
+    def _get_release_servos_publisher(self):
+        """Get or create the release_servos publisher."""
+        if self.parent_node and self._release_servos_pub is None:
+            from std_msgs.msg import Bool
+            self._release_servos_pub = self.parent_node.create_publisher(
+                Bool, '/release_servos', 10)
+        return self._release_servos_pub
+
+    def publish_release_servos(self, release: bool, force: bool = False):
+        """Publish release_servos topic to signal servo release state.
+        
+        Throttled to 1Hz maximum to reduce overhead. Publishes immediately if:
+        - force=True (e.g., on controller switch)
+        - State changed from last published value
+        - At least 1 second has passed since last publication
+        
+        Args:
+            release: True to release servos (high impedance), False for normal PWM
+            force: If True, publish immediately regardless of throttling
+        """
+        current_time = time.time()
+        state_changed = (self._last_release_servos_state is None or 
+                        self._last_release_servos_state != release)
+        time_elapsed = (current_time - self._last_release_servos_publish_time) >= self.RELEASE_SERVOS_PUBLISH_INTERVAL
+        
+        # Publish if forced, state changed, or enough time has passed
+        if force or state_changed or time_elapsed:
+            pub = self._get_release_servos_publisher()
+            if pub and self.parent_node:
+                from std_msgs.msg import Bool
+                msg = Bool(data=release)
+                try:
+                    # Try direct publish first (more reliable)
+                    pub.publish(msg)
+                    self._last_release_servos_state = release
+                    self._last_release_servos_publish_time = current_time
+                except Exception as e:
+                    # Fallback to safe_publish if direct publish fails
+                    from safe_publish import safe_publish
+                    success = safe_publish(pub, msg, self.parent_node)
+                    if not success and self.logger:
+                        self.logger.warn(f"Failed to publish release_servos={release}: {e}")
+                    else:
+                        self._last_release_servos_state = release
+                        self._last_release_servos_publish_time = current_time
+            elif self.logger:
+                self.logger.warn(f"Cannot publish release_servos: pub={pub is not None}, parent_node={self.parent_node is not None}")
 
     def log_entry(self, message: str, level: str = "INFO"):
         """
@@ -241,5 +299,3 @@ class BaseController:
         if state_parts:
             self.log_entry(f"State: {', '.join(state_parts)}", level="INFO")
         self._last_periodic_log_time = current_time
-
-
