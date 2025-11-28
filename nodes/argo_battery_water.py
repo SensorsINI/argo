@@ -101,7 +101,7 @@ HOST_CTL_GPIO_LINE = 229  # PH5/SPI1_CS0 (pin 24) - HOST_CTL to MP2672GD (not us
 
 # Sample rate configuration - dual timers for different sensor requirements
 SAIL_CURRENT_RATE_HZ = 5.0  # Hz for sail current (control critical)
-BATTERY_SAFETY_INTERVAL_S = 10.0  # seconds for battery/saltwater/humidity (safety critical)
+BATTERY_SAFETY_INTERVAL_S = 5.0  # seconds for battery/saltwater/humidity (safety critical)
 
 # only publish if the change is greater than this percentage
 THRESHOLD_CHANGE_PCT = 0.1  # Reduced from 1.0 to 0.1% for more frequent publishing
@@ -204,7 +204,7 @@ class BatteryWaterNode(ArgoBaseNode):
         # Note: When battery is fully charged, MP2672GD cycles between charging
         # and supplementing modes. We track "recently charging" over a time window.
         self._charging_window_s = 30.0  # Report "charging" if seen in last 30s
-        self._ac_power_window_s = 30.0   # Report "AC power" if seen in last 30s
+        self._ac_power_window_s = 5.0   # Report "AC power" if seen in last 5s (matches publication interval)
         self._last_charging_true_time = 0.0
         self._last_ac_power_true_time = 0.0
         self._charging_conflict_log_interval = 60.0
@@ -2239,9 +2239,9 @@ class BatteryWaterNode(ArgoBaseNode):
         except Exception as e:
             self._handle_io_error(e, "ADC (sail current)")
 
-    # ---------- Low-frequency battery safety sensors (30s) ----------
+    # ---------- Low-frequency battery safety sensors (5s) ----------
     def read_battery_safety_sensors(self):
-        """Low-frequency reading of battery, saltwater, temperature, humidity (30s interval)"""
+        """Low-frequency reading of battery, saltwater, temperature, humidity (5s interval)"""
         if self._shutdown_requested:
             return
 

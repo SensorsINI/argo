@@ -37,9 +37,9 @@
 #
 # LED INDICATORS (Rev3 PCB - Active LOW):
 #   - Green LED: Heartbeat when system is running (1Hz normal, 2Hz with Argo, 3-flash when recording)
+#                OR charging status when AC power is present (via battery !CHARGING signal)
 #   - Both LEDs: Gradual frequency increase during button press (2Hz → 20Hz)
 #   - Both LEDs: Short-long pattern during shutdown sequence (1Hz, 5% duty)
-#   - Blue LED: Show charging status via battery !CHARGING signal reported by the battery monitor
 #   - Red LED: SOS patterns for low battery warning (slow SOS for low battery, fast SOS for critical battery)
 #   - Red/Green LEDs: Alternating pattern when WiFi connectivity is lost (0.5Hz alternating)
 #   - All LEDs: Active LOW control (GPIO LOW = LED ON, GPIO HIGH = LED OFF)
@@ -345,12 +345,12 @@ SOS_PATTERN_DURATION_S = 2.0       # Total duration of one SOS pattern cycle (se
 
 # Charging State LED Pattern Configuration
 # LED to use for charging state indication (easy to change later)
-CHARGE_STATE_LED = 'red'  # Options: 'red', 'green', 'blue' (currently using red due to green LED issues)
+CHARGE_STATE_LED = 'green'  # Options: 'red', 'green', 'blue' (currently using green LED)
 CHARGE_STATE_PERIOD_S = 3.0        # Total period for charge state flash pattern (seconds)
 CHARGE_STATE_DUTY_CYCLE = 0.2      # Duty cycle for charge state flashes (20% on, 80% off) - increased from 0.1 for better visibility
 CHARGE_STATE_LOG_INTERVAL_S = 30.0 # Log charge state pattern every 30 seconds when active
 # Battery voltage range for percentage calculation (2S LiPo typical values)
-BATTERY_VOLTAGE_MIN_V = 6.0        # Fully discharged voltage (2 cells × 3.0V)
+BATTERY_VOLTAGE_MIN_V = 6.2        # Fully discharged voltage (2 cells × 3.0V)
 BATTERY_VOLTAGE_MAX_V = 8.4        # Fully charged voltage (2 cells × 4.2V)
 
 # WiFi Monitoring
