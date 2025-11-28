@@ -9,7 +9,11 @@
 #   3. Download firmware file for NEO-M9N
 #
 # Usage:
-#   ./scripts/gps_firmware_flash_wine.sh [firmware_file.ubx] [port]
+#   ./scripts/gps_firmware_flash_wine.sh <firmware_file> [port] [ubxfwupdate.exe] [flash.xml]
+#
+# Examples:
+#   ./scripts/gps_firmware_flash_wine.sh firmware.bin /dev/ttyACM0
+#   ./scripts/gps_firmware_flash_wine.sh firmware.bin /dev/ttyACM0 ./ubxfwupdate.exe flash.xml
 #
 
 set -e
@@ -17,6 +21,7 @@ set -e
 FIRMWARE_FILE="${1:-}"
 PORT="${2:-/dev/ttyS5}"
 UBXFWUPDATE="${3:-./ubxfwupdate.exe}"
+FLASH_XML="${4:-}"
 
 echo "============================================================"
 echo "GPS Firmware Flash using Wine"
@@ -44,10 +49,11 @@ fi
 if [ -z "$FIRMWARE_FILE" ]; then
     echo "ERROR: Firmware file not specified"
     echo ""
-    echo "Usage: $0 <firmware_file.ubx> [port] [ubxfwupdate.exe]"
+    echo "Usage: $0 <firmware_file> [port] [ubxfwupdate.exe] [flash.xml]"
     echo ""
-    echo "Example:"
-    echo "  $0 NEO-M9N-02.01.hex /dev/ttyS5 ./ubxfwupdate.exe"
+    echo "Examples:"
+    echo "  $0 firmware.bin /dev/ttyACM0"
+    echo "  $0 firmware.bin /dev/ttyACM0 ./ubxfwupdate.exe flash.xml"
     exit 1
 fi
 
@@ -55,6 +61,49 @@ fi
 if [ ! -f "$FIRMWARE_FILE" ]; then
     echo "ERROR: Firmware file not found: $FIRMWARE_FILE"
     exit 1
+fi
+
+# Look for flash.xml file (Flash Information Structure)
+# It's needed for firmware updates unless --no-fis is used
+# flash.xml is typically included in the u-center installer
+if [ -z "$FLASH_XML" ]; then
+    # Check common locations
+    if [ -f "flash.xml" ]; then
+        FLASH_XML="flash.xml"
+    elif [ -f "firmware/flash.xml" ]; then
+        FLASH_XML="firmware/flash.xml"
+    elif [ -f "./flash.xml" ]; then
+        FLASH_XML="./flash.xml"
+    # Check if ubxfwupdate.exe is in same directory (might have flash.xml there)
+    elif [ -f "$(dirname "$UBXFWUPDATE")/flash.xml" ]; then
+        FLASH_XML="$(dirname "$UBXFWUPDATE")/flash.xml"
+    # Check Wine u-center installation directory
+    elif [ -f "$HOME/.wine/drive_c/Program Files/u-blox/u-center/flash.xml" ]; then
+        FLASH_XML="$HOME/.wine/drive_c/Program Files/u-blox/u-center/flash.xml"
+    else
+        echo "WARNING: flash.xml not found"
+        echo "  ubxfwupdate needs flash.xml for proper firmware updates"
+        echo "  flash.xml should be in the u-center installer (extract it)"
+        echo ""
+        echo "Options:"
+        echo "  1. Extract flash.xml from u-center installer and place in current directory"
+        echo "  2. Specify path: $0 $FIRMWARE_FILE $PORT $UBXFWUPDATE <path/to/flash.xml>"
+        echo "  3. Continue with --no-fis (may work but not recommended)"
+        echo ""
+        read -p "Continue with --no-fis? (y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+        FLASH_XML=""  # Will use --no-fis
+    fi
+fi
+
+# Check if flash.xml exists if specified
+if [ -n "$FLASH_XML" ] && [ ! -f "$FLASH_XML" ]; then
+    echo "WARNING: Specified flash.xml not found: $FLASH_XML"
+    echo "  Continuing without explicit FIS file (will use default or fail)"
+    FLASH_XML=""
 fi
 
 # ubxfwupdate.exe supports Linux device names directly (e.g., /dev/ttyACM0, /dev/ttyS5)
@@ -65,6 +114,7 @@ echo ""
 echo "Configuration:"
 echo "  Port: $PORT"
 echo "  Firmware: $FIRMWARE_FILE"
+echo "  Flash XML: ${FLASH_XML:-<default or --no-fis>}"
 echo "  Tool: $UBXFWUPDATE"
 echo ""
 echo "WARNING: Firmware flashing can brick the device if interrupted!"
@@ -73,16 +123,21 @@ sleep 5
 
 echo ""
 echo "Running ubxfwupdate via Wine..."
-echo "Command: wine $UBXFWUPDATE -p $PORT -b 9600:9600:115200 -s 1 -v 1 $FIRMWARE_FILE"
-echo ""
 
-# Run ubxfwupdate via Wine
-# -p: port (Linux device name works directly, e.g., /dev/ttyACM0 or /dev/ttyS5)
-# -b: baud rates (current:safeboot:update) - 9600:9600:115200
-# -s: enter safeboot before updating (1 = yes, default)
-# -v: verbose mode (1 = on, for better feedback)
-# firmware file: positional argument at the end (NOT -f, that's for flash definition file)
-wine "$UBXFWUPDATE" -p "$PORT" -b 9600:9600:115200 -s 1 -v 1 "$FIRMWARE_FILE"
+# Build command with optional flash.xml
+if [ -n "$FLASH_XML" ]; then
+    echo "Command: wine $UBXFWUPDATE -p $PORT -b 9600:9600:115200 -s 1 -v 1 -F $FLASH_XML $FIRMWARE_FILE"
+    echo ""
+    # -F: specify flash.xml file
+    wine "$UBXFWUPDATE" -p "$PORT" -b 9600:9600:115200 -s 1 -v 1 -F "$FLASH_XML" "$FIRMWARE_FILE"
+else
+    echo "Command: wine $UBXFWUPDATE -p $PORT -b 9600:9600:115200 -s 1 -v 1 --no-fis 1 $FIRMWARE_FILE"
+    echo ""
+    echo "NOTE: Using --no-fis 1 (no Flash Information Structure)"
+    echo "  This may work, but FIS merging is recommended for proper updates"
+    # --no-fis 1: don't merge FIS (use if flash.xml not available)
+    wine "$UBXFWUPDATE" -p "$PORT" -b 9600:9600:115200 -s 1 -v 1 --no-fis 1 "$FIRMWARE_FILE"
+fi
 
 echo ""
 echo "============================================================"
