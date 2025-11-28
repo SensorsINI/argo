@@ -225,4 +225,3 @@ This is normal - GPS resets to factory defaults (38400 baud, UBX output only).
   - Flashed: November 2024
   - Fixed bootloader mode issue
   - Restored NMEA output functionality
-

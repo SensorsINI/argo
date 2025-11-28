@@ -48,6 +48,10 @@ class GpsNode(ArgoBaseNode):
     - Baud Rate: 38400 (factory default after firmware update)
     - Frame ID: 'argo_gps' (configurable parameter)
     - PPS Output: 1Hz pulse, 100ms duration, active when GPS locked
+    
+    Firmware Updates:
+    - If GPS is in bootloader mode (shows "ROM BOOT" version), firmware update is required
+    - See firmware/sparkfun_neo_n9m/README.md for firmware flashing instructions
 
     Key Features:
     - Automatic GPS communication verification and setup
@@ -744,6 +748,10 @@ class GpsNode(ArgoBaseNode):
                                     self.get_logger().error("✗ GPS firmware may be corrupted or GPS needs firmware update")
                                     self.get_logger().error("✗ GPS will NOT acquire satellites or output NMEA in bootloader mode")
                                     self.get_logger().error("✗ This explains why there are no PPS pulses - GPS is not running normal firmware")
+                                    self.get_logger().error("")
+                                    self.get_logger().error("✗ SOLUTION: Flash firmware to restore GPS functionality")
+                                    self.get_logger().error("✗ See firmware/sparkfun_neo_n9m/README.md for detailed instructions")
+                                    self.get_logger().error("✗ Quick start: ./scripts/gps_firmware_flash_wine.sh firmware/sparkfun_neo_n9m/u-blox-m9n-v4.04-firmware.bin /dev/ttyS5 firmware/sparkfun_neo_n9m/ubxfwupdate.exe firmware/sparkfun_neo_n9m/flash.xml")
                             
                             # Hardware version is null-terminated string starting after software version
                             hw_start = 6 + 30
