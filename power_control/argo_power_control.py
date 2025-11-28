@@ -1971,13 +1971,13 @@ class PowerController(ArgoBaseNode):
         """LED pattern for charging state indication
         
         Pattern:
-        - Fully charged (100%): Steady ON
-        - 75-99%: 4 flashes over CHARGE_STATE_PERIOD_S
-        - 50-75%: 3 flashes over CHARGE_STATE_PERIOD_S
-        - 25-50%: 2 flashes over CHARGE_STATE_PERIOD_S
-        - 0-25%: 1 flash over CHARGE_STATE_PERIOD_S
+        - The LED duty cycle directly represents battery charge percentage
+        - Over a 3-second period (CHARGE_STATE_PERIOD_S):
+          * 0% charge: LED on for 0% of period (essentially off)
+          * 50% charge: LED on for 50% of period (1.5s on, 1.5s off)
+          * 100% charge: LED on for 100% of period (steady ON)
         
-        Uses the LED specified by CHARGE_STATE_LED constant (currently red).
+        Uses the LED specified by CHARGE_STATE_LED constant (currently green).
         """
         self.get_logger().info("Starting charge state LED pattern")
         self.charge_state_led_active = True
@@ -1995,8 +1995,11 @@ class PowerController(ArgoBaseNode):
                     time.sleep(0.5)
                     continue
                 
+                # Clamp percentage to valid range (0-100)
+                percentage = max(0.0, min(100.0, percentage))
+                
                 # If battery service reports fully charged, show steady ON regardless of percentage
-                if is_fully_charged:
+                if is_fully_charged or percentage >= 100.0:
                     led_setter(True)
                     # Sleep for the period, checking periodically for shutdown
                     sleep_time = 0
@@ -2005,68 +2008,45 @@ class PowerController(ArgoBaseNode):
                         sleep_time += 0.1
                     continue
                 
-                # Determine flash count based on percentage (only if not fully charged)
-                flash_count = self._get_flash_count_from_percentage(percentage)
+                # Calculate duty cycle directly from percentage
+                # duty_cycle = percentage / 100.0 (e.g., 50% charge = 0.5 duty cycle)
+                duty_cycle = percentage / 100.0
                 
-                # Fully charged by percentage (100%): steady ON
-                if flash_count == 0:
-                    led_setter(True)
-                    # Sleep for the period, checking periodically for shutdown
-                    sleep_time = 0
-                    while sleep_time < CHARGE_STATE_PERIOD_S and self.running and self.charge_state_led_active and self.charging_state_active:
-                        time.sleep(0.1)
-                        sleep_time += 0.1
-                    continue
-                
-                # Calculate timing for flashes
-                # Each flash cycle: on_time + off_time
-                # Total period divided by number of flashes
-                flash_cycle_time = CHARGE_STATE_PERIOD_S / flash_count
-                on_time = flash_cycle_time * CHARGE_STATE_DUTY_CYCLE
-                off_time = flash_cycle_time * (1.0 - CHARGE_STATE_DUTY_CYCLE)
+                # Calculate on_time and off_time based on duty cycle
+                on_time = CHARGE_STATE_PERIOD_S * duty_cycle
+                off_time = CHARGE_STATE_PERIOD_S * (1.0 - duty_cycle)
                 
                 # Log the pattern for debugging
                 self.get_logger().debug(
-                    f"Charge state pattern: {flash_count} flashes, "
-                    f"on_time={on_time*1000:.1f}ms, off_time={off_time*1000:.1f}ms, "
-                    f"percentage={percentage:.1f}%")
+                    f"Charge state pattern: {percentage:.1f}% charge = {duty_cycle*100:.1f}% duty cycle, "
+                    f"on_time={on_time*1000:.1f}ms, off_time={off_time*1000:.1f}ms")
                 
-                # Execute flash pattern - complete all flashes in one cycle
-                for flash in range(flash_count):
-                    if not self.running or not self.charge_state_led_active or not self.charging_state_active:
-                        break
-                    
-                    # Flash ON
+                # Execute pattern: LED ON for on_time, then OFF for off_time
+                # If percentage is very low (near 0%), on_time will be very short
+                # If percentage is high (near 100%), off_time will be very short
+                
+                # LED ON phase
+                if on_time > 0.01:  # Only turn on if on_time is significant (>10ms)
                     led_setter(True)
                     sleep_time = 0
                     while sleep_time < on_time and self.running and self.charge_state_led_active and self.charging_state_active:
                         time.sleep(0.01)
                         sleep_time += 0.01
-                    
-                    if not self.running or not self.charge_state_led_active or not self.charging_state_active:
-                        break
-                    
-                    # Flash OFF (except after last flash)
-                    if flash < flash_count - 1:  # Don't turn off after the last flash until after pause
-                        led_setter(False)
-                        sleep_time = 0
-                        while sleep_time < off_time and self.running and self.charge_state_led_active and self.charging_state_active:
-                            time.sleep(0.01)
-                            sleep_time += 0.01
                 
-                # Turn off LED after completing all flashes
-                led_setter(False)
+                if not self.running or not self.charge_state_led_active or not self.charging_state_active:
+                    break
                 
-                # Pause between cycles - wait for remaining time in period, then add extra pause
-                # This makes the pattern more visible and prevents rapid restarting
-                cycle_elapsed = flash_count * (on_time + off_time)
-                remaining_time = max(0, CHARGE_STATE_PERIOD_S - cycle_elapsed)
-                pause_time = remaining_time + 0.5  # Add 0.5s pause between cycles for visibility
-                
-                sleep_time = 0
-                while sleep_time < pause_time and self.running and self.charge_state_led_active and self.charging_state_active:
-                    time.sleep(0.1)
-                    sleep_time += 0.1
+                # LED OFF phase
+                if off_time > 0.01:  # Only turn off if off_time is significant (>10ms)
+                    led_setter(False)
+                    sleep_time = 0
+                    while sleep_time < off_time and self.running and self.charge_state_led_active and self.charging_state_active:
+                        time.sleep(0.01)
+                        sleep_time += 0.01
+                else:
+                    # If off_time is very short, LED stays on (near 100% charge)
+                    # This ensures smooth transition to steady ON at 100%
+                    pass
                     
             except Exception as e:
                 self.get_logger().error(f"Error in charge state LED pattern: {e}")
@@ -3389,14 +3369,13 @@ class PowerController(ArgoBaseNode):
                             current_time = time.time()
                             if current_time - self.last_charge_state_log_time >= CHARGE_STATE_LOG_INTERVAL_S:
                                 # If battery service reports fully charged, show steady ON in log
-                                if is_fully_charged_now:
-                                    pattern_desc = "steady ON (fully charged by battery service)"
+                                if is_fully_charged_now or percentage >= 100.0:
+                                    pattern_desc = "steady ON (fully charged)"
                                 else:
-                                    flash_count = self._get_flash_count_from_percentage(percentage)
-                                    if flash_count == 0:
-                                        pattern_desc = "steady ON (fully charged by percentage)"
-                                    else:
-                                        pattern_desc = f"{flash_count} flash{'es' if flash_count > 1 else ''} ({percentage:.1f}%)"
+                                    # Duty cycle directly represents charge percentage
+                                    duty_cycle = percentage / 100.0
+                                    on_time = CHARGE_STATE_PERIOD_S * duty_cycle
+                                    pattern_desc = f"{percentage:.1f}% charge = {duty_cycle*100:.1f}% duty cycle ({on_time*1000:.0f}ms on, {CHARGE_STATE_PERIOD_S*1000 - on_time*1000:.0f}ms off)"
                                 
                                 self.get_logger().info(
                                     f"Charge state pattern: {pattern_desc}, "
