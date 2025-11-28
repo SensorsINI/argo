@@ -57,15 +57,13 @@ if [ ! -f "$FIRMWARE_FILE" ]; then
     exit 1
 fi
 
-# Convert Linux serial port to Wine COM port format
-# Wine typically maps /dev/ttyS* to COM ports
-# /dev/ttyS0 -> COM1, /dev/ttyS1 -> COM2, etc.
-PORT_NUM=$(echo "$PORT" | sed 's/.*ttyS\([0-9]*\)/\1/')
-COM_PORT="COM$((PORT_NUM + 1))"
+# ubxfwupdate.exe supports Linux device names directly (e.g., /dev/ttyACM0, /dev/ttyS5)
+# No need to convert to COM port format
+# According to ubxfwupdate help: "/dev/ttySy - serial (RS232) port y (Linux)"
 
 echo ""
 echo "Configuration:"
-echo "  Port: $PORT (Wine: $COM_PORT)"
+echo "  Port: $PORT"
 echo "  Firmware: $FIRMWARE_FILE"
 echo "  Tool: $UBXFWUPDATE"
 echo ""
@@ -75,11 +73,14 @@ sleep 5
 
 echo ""
 echo "Running ubxfwupdate via Wine..."
-echo "Command: wine $UBXFWUPDATE -p $COM_PORT -f $FIRMWARE_FILE"
+echo "Command: wine $UBXFWUPDATE -p $PORT -f $FIRMWARE_FILE -b 9600:9600:115200"
 echo ""
 
 # Run ubxfwupdate via Wine
-wine "$UBXFWUPDATE" -p "$COM_PORT" -f "$FIRMWARE_FILE"
+# -p: port (Linux device name works directly)
+# -f: firmware file
+# -b: baud rates (current:safeboot:update) - 9600:9600:115200 is default but explicit is better
+wine "$UBXFWUPDATE" -p "$PORT" -f "$FIRMWARE_FILE" -b 9600:9600:115200
 
 echo ""
 echo "============================================================"
