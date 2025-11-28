@@ -73,14 +73,16 @@ sleep 5
 
 echo ""
 echo "Running ubxfwupdate via Wine..."
-echo "Command: wine $UBXFWUPDATE -p $PORT -f $FIRMWARE_FILE -b 9600:9600:115200"
+echo "Command: wine $UBXFWUPDATE -p $PORT -b 9600:9600:115200 -s 1 -v 1 $FIRMWARE_FILE"
 echo ""
 
 # Run ubxfwupdate via Wine
-# -p: port (Linux device name works directly)
-# -f: firmware file
-# -b: baud rates (current:safeboot:update) - 9600:9600:115200 is default but explicit is better
-wine "$UBXFWUPDATE" -p "$PORT" -f "$FIRMWARE_FILE" -b 9600:9600:115200
+# -p: port (Linux device name works directly, e.g., /dev/ttyACM0 or /dev/ttyS5)
+# -b: baud rates (current:safeboot:update) - 9600:9600:115200
+# -s: enter safeboot before updating (1 = yes, default)
+# -v: verbose mode (1 = on, for better feedback)
+# firmware file: positional argument at the end (NOT -f, that's for flash definition file)
+wine "$UBXFWUPDATE" -p "$PORT" -b 9600:9600:115200 -s 1 -v 1 "$FIRMWARE_FILE"
 
 echo ""
 echo "============================================================"
