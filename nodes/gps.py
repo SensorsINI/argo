@@ -45,7 +45,7 @@ class GpsNode(ArgoBaseNode):
 
     Hardware Configuration:
     - GPS: u-blox NEO-M9N via UART5 (/dev/ttyS5)
-    - Baud Rate: 9600 (temporarily changed for testing - normally 38400)
+    - Baud Rate: 38400 (factory default after firmware update)
     - Frame ID: 'argo_gps' (configurable parameter)
     - PPS Output: 1Hz pulse, 100ms duration, active when GPS locked
 
@@ -141,8 +141,8 @@ class GpsNode(ArgoBaseNode):
         # UART5 is enabled via the "ph-uart5" overlay in orangepiEnv.txt
         # UART5 pins are TX=11 (PH2) and RX=13 (PH3) on the Orange Pi Zero 2W
         self.declare_parameter('serial_port', '/dev/ttyS5')
-        # u-blox NEO-M9N default baud rate (temporarily 9600 for testing)
-        self.declare_parameter('baud_rate', 9600)
+        # u-blox NEO-M9N default baud rate (38400 is factory default after firmware update)
+        self.declare_parameter('baud_rate', 38400)
         self.declare_parameter('gps_frame_id', 'argo_gps')
 
         self.serial_port_name = self.get_parameter(
@@ -801,43 +801,101 @@ class GpsNode(ArgoBaseNode):
         self.get_logger().info(
             "Publishing standard NavSatFix messages to /fix topic (for mapping)")
 
+    def _enable_nmea_protocol_cfg_valset(self) -> bool:
+        """Enable NMEA output protocol using CFG-VALSET (newer, more reliable method).
+        
+        CFG-VALSET is preferred over CFG-PRT as it works better after firmware updates.
+        Reference: u-blox M9-MDR-2.16 Interface Description (UBX-22037308), Protocol version 35.16
+        """
+        # CFG-VALSET format:
+        # Version (1 byte): 0x01 = transaction mode (safer)
+        # Layers (1 byte): 0x07 = RAM + BBR + Flash (save to all layers)
+        # Reserved (2 bytes): 0x0000
+        # Key-Value pairs: Key (4 bytes, little-endian) + Value (variable length)
+        
+        # CFG-UART1OUTPROT-NMEA: Enable NMEA on UART1 output
+        # Key: 0x10730002 (CFG-UART1OUTPROT-NMEA)
+        # Value: 1 byte, 0x01 = enabled
+        
+        # CFG-UART1OUTPROT-UBX: Keep UBX enabled (for compatibility)
+        # Key: 0x10730001 (CFG-UART1OUTPROT-UBX)
+        # Value: 1 byte, 0x01 = enabled
+        
+        version = 0x01  # Transaction mode
+        layers = 0x07   # RAM + BBR + Flash
+        reserved = 0x0000
+        
+        # Enable NMEA on UART1 output
+        nmea_key = 0x10730002  # CFG-UART1OUTPROT-NMEA
+        nmea_value = 0x01      # Enabled
+        
+        # Enable UBX on UART1 output (keep both enabled)
+        ubx_key = 0x10730001   # CFG-UART1OUTPROT-UBX
+        ubx_value = 0x01      # Enabled
+        
+        payload = bytes([
+            version,
+            layers,
+            reserved & 0xFF, (reserved >> 8) & 0xFF,
+            # NMEA key (little-endian)
+            nmea_key & 0xFF, (nmea_key >> 8) & 0xFF, (nmea_key >> 16) & 0xFF, (nmea_key >> 24) & 0xFF,
+            # NMEA value
+            nmea_value,
+            # UBX key (little-endian)
+            ubx_key & 0xFF, (ubx_key >> 8) & 0xFF, (ubx_key >> 16) & 0xFF, (ubx_key >> 24) & 0xFF,
+            # UBX value
+            ubx_value
+        ])
+        
+        self.get_logger().debug("Configuring NMEA output protocol using CFG-VALSET...")
+        result = self._send_ubx(0x06, 0x8A, payload, expect_ack=True, timeout=2.0)
+        
+        if result:
+            self.get_logger().debug("✓ CFG-VALSET ACK received - NMEA output protocol enabled")
+            return True
+        else:
+            self.get_logger().warn("⚠ CFG-VALSET not acknowledged - trying fallback CFG-PRT method...")
+            return False
+
     def enable_nmea_sentences(self):
         """Enable RMC, VTG, and GGA NMEA sentences on u-blox NEO-N9M for navigation and satellite data."""
         self.get_logger().info("Configuring u-blox NEO-N9M to enable navigation sentences...")
 
-        # CRITICAL: First configure UART port (CFG-PRT) to ensure NMEA protocol is enabled
-        # Reference: u-blox M9-MDR-2.16 Interface Description (UBX-22037308), Protocol version 35.16
-        # The port must have NMEA output protocol enabled, or no NMEA sentences will be sent
-        # Even if CFG-MSG enables specific NMEA messages, they won't output if protocol is disabled
-        # Format: portID=1 (UART1), txReady=0, mode=4 bytes (8N1, 9600 baud),
-        #         inProtoMask=0x07 (UBX + NMEA + RTCM3 input), outProtoMask=0x07 (UBX + NMEA + RTCM3 output)
-        # Mode format: [charLen(4 bits)|reserved(4 bits), parity(2 bits)|nStopBits(2 bits)|reserved(4 bits), 
-        #               baudRate(16 bits, little-endian)]
-        # For 9600 baud 8N1: charLen=8 (0x08), parity=none (0x0), nStopBits=1 (0x0), baudRate=9600 (0x2580)
-        # Note: Temporarily using 9600 baud for testing (normally 38400)
-        # Protocol masks: 0x07 = UBX(bit0=1) + NMEA(bit1=1) + RTCM3(bit2=1) = all protocols enabled
-        uart1_cfg_prt = bytes([0xB5, 0x62,  # Sync chars
-                              0x06, 0x00,  # Class: CFG, ID: PRT
-                              0x14, 0x00,  # Length: 20 bytes
-                              0x01,        # Port ID: 1 (UART1)
-                              0x00,        # Reserved
-                              0x00, 0x00,  # TX Ready: disabled (little-endian)
-                              0x08,        # Mode[0]: charLen=8 (bits 0-3), reserved (bits 4-7)
-                              0x00,        # Mode[1]: parity=none (bits 0-1), nStopBits=1 (bits 2-3), reserved (bits 4-7)
-                              0x80, 0x25,  # Mode[2:3]: baudRate=9600 (0x2580, little-endian 16-bit)
-                              0x00, 0x00,  # Reserved
-                              0x07, 0x00,  # In Protocol Mask: 0x07 = UBX(1) + NMEA(2) + RTCM3(4) input enabled
-                              0x07, 0x00,  # Out Protocol Mask: 0x07 = UBX(1) + NMEA(2) + RTCM3(4) output enabled
-                              0x00, 0x00,  # Flags
-                              0x00, 0x00, 0x00, 0x00])  # Reserved
+        # First try CFG-VALSET (newer, more reliable method)
+        nmea_protocol_enabled = self._enable_nmea_protocol_cfg_valset()
         
-        # Calculate checksum for CFG-PRT
-        prt_ck_a = 0
-        prt_ck_b = 0
-        for byte in uart1_cfg_prt[2:]:  # Skip sync chars
-            prt_ck_a = (prt_ck_a + byte) & 0xFF
-            prt_ck_b = (prt_ck_b + prt_ck_a) & 0xFF
-        uart1_cfg_prt += bytes([prt_ck_a, prt_ck_b])
+        # Fallback to CFG-PRT if CFG-VALSET failed
+        if not nmea_protocol_enabled:
+            # CRITICAL: Configure UART port (CFG-PRT) to ensure NMEA protocol is enabled
+            # Reference: u-blox M9-MDR-2.16 Interface Description (UBX-22037308), Protocol version 35.16
+            # Format: portID=1 (UART1), txReady=0, mode=4 bytes (8N1, 38400 baud),
+            #         inProtoMask=0x07 (UBX + NMEA + RTCM3 input), outProtoMask=0x07 (UBX + NMEA + RTCM3 output)
+            # Mode format: [charLen(4 bits)|reserved(4 bits), parity(2 bits)|nStopBits(2 bits)|reserved(4 bits), 
+            #               baudRate(16 bits, little-endian)]
+            # For 38400 baud 8N1: charLen=8 (0x08), parity=none (0x0), nStopBits=1 (0x0), baudRate=38400 (0x9600)
+            # Protocol masks: 0x07 = UBX(bit0=1) + NMEA(bit1=1) + RTCM3(bit2=1) = all protocols enabled
+            uart1_cfg_prt = bytes([0xB5, 0x62,  # Sync chars
+                                  0x06, 0x00,  # Class: CFG, ID: PRT
+                                  0x14, 0x00,  # Length: 20 bytes
+                                  0x01,        # Port ID: 1 (UART1)
+                                  0x00,        # Reserved
+                                  0x00, 0x00,  # TX Ready: disabled (little-endian)
+                                  0x08,        # Mode[0]: charLen=8 (bits 0-3), reserved (bits 4-7)
+                                  0x00,        # Mode[1]: parity=none (bits 0-1), nStopBits=1 (bits 2-3), reserved (bits 4-7)
+                                  0x00, 0x96,  # Mode[2:3]: baudRate=38400 (0x9600, little-endian 16-bit)
+                                  0x00, 0x00,  # Reserved
+                                  0x07, 0x00,  # In Protocol Mask: 0x07 = UBX(1) + NMEA(2) + RTCM3(4) input enabled
+                                  0x07, 0x00,  # Out Protocol Mask: 0x07 = UBX(1) + NMEA(2) + RTCM3(4) output enabled
+                                  0x00, 0x00,  # Flags
+                                  0x00, 0x00, 0x00, 0x00])  # Reserved
+            
+            # Calculate checksum for CFG-PRT
+            prt_ck_a = 0
+            prt_ck_b = 0
+            for byte in uart1_cfg_prt[2:]:  # Skip sync chars
+                prt_ck_a = (prt_ck_a + byte) & 0xFF
+                prt_ck_b = (prt_ck_b + prt_ck_a) & 0xFF
+            uart1_cfg_prt += bytes([prt_ck_a, prt_ck_b])
 
         # UBX-CFG-MSG commands to enable NMEA sentences
         # Format: Class ID, Message ID, Rate for each port (DDC, UART1, UART2, USB, SPI, Reserved)
@@ -907,23 +965,23 @@ class GpsNode(ArgoBaseNode):
         # Send configuration commands
         if self.serial_port and self.serial_port.is_open:
             try:
-                # CRITICAL: Configure UART port to enable NMEA protocol output first
-                # Without this, even if sentences are enabled, they won't be output
-                # Reference: u-blox M9-MDR-2.16 Interface Description (UBX-22037308), Protocol version 35.16
-                self.get_logger().debug("Configuring UART1 port to enable NMEA protocol...")
-                # Extract payload (skip sync chars and checksum)
-                prt_payload = uart1_cfg_prt[6:-2]
-                prt_result = self._send_ubx(0x06, 0x00, prt_payload, expect_ack=True, timeout=2.0)
-                if prt_result:
-                    self.get_logger().debug("✓ UART1 port configuration ACK received")
-                else:
-                    # GPS rejected port configuration - this can happen if:
-                    # 1. GPS is already configured correctly (factory defaults may match)
-                    # 2. GPS doesn't allow port reconfiguration in current state
-                    # 3. Configuration parameters are invalid
-                    self.get_logger().warn("⚠ UART1 port configuration rejected (ACK-NAK)")
-                    self.get_logger().info("  GPS may already be configured correctly, or using factory defaults")
-                    self.get_logger().info("  Continuing with NMEA sentence configuration...")
+                # If CFG-VALSET failed, try CFG-PRT as fallback
+                if not nmea_protocol_enabled:
+                    self.get_logger().debug("Trying CFG-PRT fallback method...")
+                    # Extract payload (skip sync chars and checksum)
+                    prt_payload = uart1_cfg_prt[6:-2]
+                    prt_result = self._send_ubx(0x06, 0x00, prt_payload, expect_ack=True, timeout=2.0)
+                    if prt_result:
+                        self.get_logger().debug("✓ UART1 port configuration ACK received (CFG-PRT)")
+                        nmea_protocol_enabled = True
+                    else:
+                        # GPS rejected port configuration - this can happen if:
+                        # 1. GPS is already configured correctly (factory defaults may match)
+                        # 2. GPS doesn't allow port reconfiguration in current state
+                        # 3. Configuration parameters are invalid
+                        self.get_logger().warn("⚠ UART1 port configuration rejected (ACK-NAK)")
+                        self.get_logger().info("  GPS may already be configured correctly, or using factory defaults")
+                        self.get_logger().info("  Continuing with NMEA sentence configuration...")
                 
                 self.get_logger().debug("Enabling NMEA GGA sentences...")
                 gga_payload = gga_enable[6:-2]
