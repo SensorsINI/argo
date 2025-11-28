@@ -31,6 +31,8 @@ class GpsNode(ArgoBaseNode):
 
     Interfaces with u-blox NEO-M9N GPS module via UART5 (/dev/ttyS5) and publishes
     comprehensive navigation data for both autonomous control and Foxglove 3D mapping.
+    
+    Protocol Reference: u-blox M9-MDR-2.16 Interface Description (UBX-22037308), Protocol version 35.16
 
     Published Topics:
     - /gps_data (std_msgs/String): Raw NMEA sentences from GPS module
@@ -43,7 +45,7 @@ class GpsNode(ArgoBaseNode):
 
     Hardware Configuration:
     - GPS: u-blox NEO-M9N via UART5 (/dev/ttyS5)
-    - Baud Rate: 38400 (u-blox default)
+    - Baud Rate: 9600 (temporarily changed for testing - normally 38400)
     - Frame ID: 'argo_gps' (configurable parameter)
     - PPS Output: 1Hz pulse, 100ms duration, active when GPS locked
 
@@ -139,8 +141,8 @@ class GpsNode(ArgoBaseNode):
         # UART5 is enabled via the "ph-uart5" overlay in orangepiEnv.txt
         # UART5 pins are TX=11 (PH2) and RX=13 (PH3) on the Orange Pi Zero 2W
         self.declare_parameter('serial_port', '/dev/ttyS5')
-        # u-blox NEO-M9N default baud rate
-        self.declare_parameter('baud_rate', 38400)
+        # u-blox NEO-M9N default baud rate (temporarily 9600 for testing)
+        self.declare_parameter('baud_rate', 9600)
         self.declare_parameter('gps_frame_id', 'argo_gps')
 
         self.serial_port_name = self.get_parameter(
@@ -284,23 +286,66 @@ class GpsNode(ArgoBaseNode):
         ck = self._ubx_checksum(bytes([ubx_class & 0xFF, ubx_id & 0xFF, length & 0xFF, (length >> 8) & 0xFF]) + payload)
         frame = header + payload + ck
         try:
+            # Flush input buffer before sending to avoid reading stale data
+            if self.serial_port.in_waiting > 0:
+                self.serial_port.read(self.serial_port.in_waiting)
+            
             self.serial_port.write(frame)
+            if self.debug_mode:
+                self.get_logger().debug(f"Sent UBX: class=0x{ubx_class:02X} id=0x{ubx_id:02X} payload_len={length}")
+            
             if not expect_ack:
                 return True
-            # Simple ACK wait loop (reads a small number of bytes with short timeout)
+            
+            # Wait for ACK with multiple read attempts (GPS may be slow to respond)
             original_timeout = self.serial_port.timeout
-            self.serial_port.timeout = timeout
-            resp = self.serial_port.read(32)
+            self.serial_port.timeout = 0.1  # Short timeout per read
+            resp = bytearray()
+            start_time = time.time()
+            
+            # Read multiple times up to the timeout
+            while time.time() - start_time < timeout:
+                if self.serial_port.in_waiting > 0:
+                    chunk = self.serial_port.read(self.serial_port.in_waiting)
+                    resp.extend(chunk)
+                time.sleep(0.05)  # Small delay between reads
+            
             self.serial_port.timeout = original_timeout
-            # Look for UBX-ACK-ACK (class 0x05, id 0x01) matching our class/id
-            # ACK payload: clsID, msgID
-            for i in range(max(0, len(resp) - 10)):
-                if i + 10 <= len(resp) and resp[i:i+2] == b"\xB5\x62" and resp[i+2] == 0x05:
-                    if resp[i+3] in (0x01, 0x00):  # ACK-ACK or ACK-NAK
-                        # length should be 2
-                        if i+6 < len(resp) and resp[i+4] == 0x02 and resp[i+5] == 0x00:
-                            if i+8 < len(resp) and resp[i+6] == (ubx_class & 0xFF) and resp[i+7] == (ubx_id & 0xFF):
-                                return resp[i+3] == 0x01  # True if ACK-ACK
+            
+            if self.debug_mode and len(resp) > 0:
+                self.get_logger().debug(f"UBX response ({len(resp)} bytes): {resp.hex()[:80]}")
+            
+            # Look for UBX-ACK-ACK (class 0x05, id 0x01) or ACK-NAK (class 0x05, id 0x00) matching our class/id
+            # ACK frame: 0xB5 0x62 0x05 0x01/0x00 length(LSB,MSB) clsID msgID CK_A CK_B
+            # Total length: 10 bytes (2 sync + 1 class + 1 id + 2 length + 2 payload + 2 checksum)
+            # Convert bytearray to bytes for easier slicing
+            resp_bytes = bytes(resp) if isinstance(resp, bytearray) else resp
+            
+            for i in range(len(resp_bytes) - 9):  # Need at least 10 bytes, so i can go up to len-10
+                if i + 10 <= len(resp_bytes) and resp_bytes[i:i+2] == b"\xB5\x62" and resp_bytes[i+2] == 0x05:
+                    # Check if this is an ACK (0x01) or NAK (0x00)
+                    if resp_bytes[i+3] in (0x01, 0x00):
+                        # Check length is 2 bytes (little-endian: LSB=0x02, MSB=0x00)
+                        if resp_bytes[i+4] == 0x02 and resp_bytes[i+5] == 0x00:
+                            # Check if this ACK matches our command (class and id)
+                            if resp_bytes[i+6] == (ubx_class & 0xFF) and resp_bytes[i+7] == (ubx_id & 0xFF):
+                                # Verify checksum
+                                ack_payload = resp_bytes[i+2:i+8]  # Class through msgID
+                                ck_a, ck_b = self._ubx_checksum(ack_payload)
+                                if resp_bytes[i+8] == ck_a and resp_bytes[i+9] == ck_b:
+                                    is_ack = resp_bytes[i+3] == 0x01
+                                    if self.debug_mode:
+                                        ack_type = "ACK-ACK" if is_ack else "ACK-NAK"
+                                        self.get_logger().debug(f"Received UBX {ack_type} for class=0x{ubx_class:02X} id=0x{ubx_id:02X}")
+                                    return is_ack
+                                elif self.debug_mode:
+                                    self.get_logger().debug(f"ACK checksum mismatch: expected {ck_a:02X}{ck_b:02X}, got {resp_bytes[i+8]:02X}{resp_bytes[i+9]:02X}")
+                            elif self.debug_mode:
+                                self.get_logger().debug(f"ACK class/id mismatch: expected class=0x{ubx_class:02X} id=0x{ubx_id:02X}, got class=0x{resp_bytes[i+6]:02X} id=0x{resp_bytes[i+7]:02X}")
+            
+            if self.debug_mode and len(resp) > 0:
+                self.get_logger().debug(f"No matching ACK found in response. Looking for class=0x{ubx_class:02X} id=0x{ubx_id:02X}")
+            
             return False
         except Exception as e:
             self.get_logger().warn(f"UBX send failed: class=0x{ubx_class:02X} id=0x{ubx_id:02X}: {e}")
@@ -615,7 +660,7 @@ class GpsNode(ArgoBaseNode):
 
         # First, listen briefly for any automatic output
         self.get_logger().debug("Listening for automatic GPS output...")
-        time.sleep(0.5)  # Brief pause to let any automatic data come through
+        time.sleep(1.0)  # Brief pause to let any automatic data come through
 
         # Check if there's any data waiting
         if self.serial_port.in_waiting > 0:
@@ -637,7 +682,7 @@ class GpsNode(ArgoBaseNode):
         communication_ok = False
         self.get_logger().debug("No automatic output detected. Testing GPS communication...")
 
-        # Test 1: Request software version (works on most GPS modules)
+        # Test 1: Request software version (works on NEO-N9M GPS modules)
         self.get_logger().debug("Sending software version query...")
         # MTK command for version info
         response = self.send_cmd("$PMTK605", timeout=1.0)
@@ -669,6 +714,75 @@ class GpsNode(ArgoBaseNode):
         # Log communication status
         if communication_ok:
             self.get_logger().info("✓ GPS communication verified - device is responding correctly")
+            
+            # Test if GPS accepts UBX commands and query software version
+            self.get_logger().debug("Testing UBX command acceptance and querying software version...")
+            # Send UBX MON-VER (version query) - no ACK expected for this query
+            ubx_test = self._send_ubx(0x0A, 0x04, b'', expect_ack=False, timeout=1.0)
+            time.sleep(0.5)
+            
+            if self.serial_port.in_waiting > 0:
+                ubx_resp = self.serial_port.read(self.serial_port.in_waiting)
+                if len(ubx_resp) >= 8 and ubx_resp[0:2] == b'\xB5\x62':
+                    self.get_logger().info("✓ GPS accepts UBX commands")
+                    
+                    # Parse MON-VER response if we got one
+                    if ubx_resp[2] == 0x0A and ubx_resp[3] == 0x04:  # MON-VER response
+                        # MON-VER format: sync(2) class(1) id(1) length(2) software_version(30) hardware_version(10) extension...
+                        # Length is little-endian at bytes 4-5
+                        length = ubx_resp[4] + (ubx_resp[5] << 8)
+                        if length >= 30 and len(ubx_resp) >= 8 + length:
+                            # Software version is null-terminated string starting at byte 6
+                            sw_version_end = ubx_resp.find(b'\x00', 6, 6 + 30)
+                            if sw_version_end > 6:
+                                sw_version = ubx_resp[6:sw_version_end].decode('ascii', errors='ignore')
+                                self.get_logger().info(f"✓ GPS Software Version: {sw_version}")
+                                
+                                # Check for bootloader mode or firmware issues
+                                if "ROM BOOT" in sw_version.upper() or "BOOT" in sw_version.upper():
+                                    self.get_logger().error("✗ CRITICAL: GPS appears to be in BOOTLOADER mode!")
+                                    self.get_logger().error("✗ GPS firmware may be corrupted or GPS needs firmware update")
+                                    self.get_logger().error("✗ GPS will NOT acquire satellites or output NMEA in bootloader mode")
+                                    self.get_logger().error("✗ This explains why there are no PPS pulses - GPS is not running normal firmware")
+                            
+                            # Hardware version is null-terminated string starting after software version
+                            hw_start = 6 + 30
+                            if len(ubx_resp) >= hw_start + 10:
+                                hw_version_end = ubx_resp.find(b'\x00', hw_start, hw_start + 10)
+                                if hw_version_end > hw_start:
+                                    hw_version = ubx_resp[hw_start:hw_version_end].decode('ascii', errors='ignore')
+                                    self.get_logger().info(f"✓ GPS Hardware Version: {hw_version}")
+                            
+                            # Extension strings (if present)
+                            ext_start = 6 + 30 + 10
+                            if len(ubx_resp) > ext_start:
+                                # Extension strings are null-terminated, multiple strings possible
+                                ext_data = ubx_resp[ext_start:]
+                                ext_strings = []
+                                i = 0
+                                while i < len(ext_data):
+                                    if ext_data[i] == 0:
+                                        i += 1
+                                        continue
+                                    ext_end = ext_data.find(b'\x00', i)
+                                    if ext_end > i:
+                                        ext_str = ext_data[i:ext_end].decode('ascii', errors='ignore')
+                                        if ext_str:
+                                            ext_strings.append(ext_str)
+                                        i = ext_end + 1
+                                    else:
+                                        break
+                                if ext_strings:
+                                    self.get_logger().info(f"✓ GPS Extension Info: {', '.join(ext_strings)}")
+                        else:
+                            self.get_logger().debug(f"MON-VER response too short: length={length}, received={len(ubx_resp)}")
+                    else:
+                        self.get_logger().debug(f"Received UBX response but not MON-VER: class=0x{ubx_resp[2]:02X} id=0x{ubx_resp[3]:02X}")
+                else:
+                    self.get_logger().warn("⚠ GPS may not be accepting UBX commands - responses may not be UBX format")
+            else:
+                self.get_logger().warn("⚠ No UBX response received - GPS may not accept UBX commands")
+            
             # Enable SOG/COG sentences since we have communication
             self.enable_nmea_sentences()
             self.get_logger().info("GPS setup completed. Waiting for NMEA data...")
@@ -692,14 +806,15 @@ class GpsNode(ArgoBaseNode):
         self.get_logger().info("Configuring u-blox NEO-N9M to enable navigation sentences...")
 
         # CRITICAL: First configure UART port (CFG-PRT) to ensure NMEA protocol is enabled
+        # Reference: u-blox M9-MDR-2.16 Interface Description (UBX-22037308), Protocol version 35.16
         # The port must have NMEA output protocol enabled, or no NMEA sentences will be sent
         # Even if CFG-MSG enables specific NMEA messages, they won't output if protocol is disabled
-        # Format: portID=1 (UART1), txReady=0, mode=4 bytes (8N1, 38400 baud),
+        # Format: portID=1 (UART1), txReady=0, mode=4 bytes (8N1, 9600 baud),
         #         inProtoMask=0x07 (UBX + NMEA + RTCM3 input), outProtoMask=0x07 (UBX + NMEA + RTCM3 output)
         # Mode format: [charLen(4 bits)|reserved(4 bits), parity(2 bits)|nStopBits(2 bits)|reserved(4 bits), 
         #               baudRate(16 bits, little-endian)]
-        # For 38400 baud 8N1: charLen=8 (0x08), parity=none (0x0), nStopBits=1 (0x0), baudRate=38400 (0x9600)
-        # Note: Baud rate is already verified correct (version query works), preserving existing 38400 baud 8N1
+        # For 9600 baud 8N1: charLen=8 (0x08), parity=none (0x0), nStopBits=1 (0x0), baudRate=9600 (0x2580)
+        # Note: Temporarily using 9600 baud for testing (normally 38400)
         # Protocol masks: 0x07 = UBX(bit0=1) + NMEA(bit1=1) + RTCM3(bit2=1) = all protocols enabled
         uart1_cfg_prt = bytes([0xB5, 0x62,  # Sync chars
                               0x06, 0x00,  # Class: CFG, ID: PRT
@@ -709,7 +824,7 @@ class GpsNode(ArgoBaseNode):
                               0x00, 0x00,  # TX Ready: disabled (little-endian)
                               0x08,        # Mode[0]: charLen=8 (bits 0-3), reserved (bits 4-7)
                               0x00,        # Mode[1]: parity=none (bits 0-1), nStopBits=1 (bits 2-3), reserved (bits 4-7)
-                              0x00, 0x96,  # Mode[2:3]: baudRate=38400 (0x9600, little-endian 16-bit)
+                              0x80, 0x25,  # Mode[2:3]: baudRate=9600 (0x2580, little-endian 16-bit)
                               0x00, 0x00,  # Reserved
                               0x07, 0x00,  # In Protocol Mask: 0x07 = UBX(1) + NMEA(2) + RTCM3(4) input enabled
                               0x07, 0x00,  # Out Protocol Mask: 0x07 = UBX(1) + NMEA(2) + RTCM3(4) output enabled
@@ -794,20 +909,44 @@ class GpsNode(ArgoBaseNode):
             try:
                 # CRITICAL: Configure UART port to enable NMEA protocol output first
                 # Without this, even if sentences are enabled, they won't be output
+                # Reference: u-blox M9-MDR-2.16 Interface Description (UBX-22037308), Protocol version 35.16
                 self.get_logger().debug("Configuring UART1 port to enable NMEA protocol...")
-                self.serial_port.write(uart1_cfg_prt)
-                time.sleep(0.2)  # Give GPS time to process port configuration
+                # Extract payload (skip sync chars and checksum)
+                prt_payload = uart1_cfg_prt[6:-2]
+                prt_result = self._send_ubx(0x06, 0x00, prt_payload, expect_ack=True, timeout=2.0)
+                if prt_result:
+                    self.get_logger().debug("✓ UART1 port configuration ACK received")
+                else:
+                    # GPS rejected port configuration - this can happen if:
+                    # 1. GPS is already configured correctly (factory defaults may match)
+                    # 2. GPS doesn't allow port reconfiguration in current state
+                    # 3. Configuration parameters are invalid
+                    self.get_logger().warn("⚠ UART1 port configuration rejected (ACK-NAK)")
+                    self.get_logger().info("  GPS may already be configured correctly, or using factory defaults")
+                    self.get_logger().info("  Continuing with NMEA sentence configuration...")
                 
                 self.get_logger().debug("Enabling NMEA GGA sentences...")
-                self.serial_port.write(gga_enable)
+                gga_payload = gga_enable[6:-2]
+                if self._send_ubx(0x06, 0x01, gga_payload, expect_ack=True, timeout=1.0):
+                    self.get_logger().debug("✓ GGA enable ACK received")
+                else:
+                    self.get_logger().warn("⚠ GGA enable sent but no ACK received")
                 time.sleep(0.1)
 
                 self.get_logger().debug("Enabling NMEA RMC sentences...")
-                self.serial_port.write(rmc_enable)
+                rmc_payload = rmc_enable[6:-2]
+                if self._send_ubx(0x06, 0x01, rmc_payload, expect_ack=True, timeout=1.0):
+                    self.get_logger().debug("✓ RMC enable ACK received")
+                else:
+                    self.get_logger().warn("⚠ RMC enable sent but no ACK received")
                 time.sleep(0.1)
-
+                
                 self.get_logger().debug("Enabling NMEA VTG sentences...")
-                self.serial_port.write(vtg_enable)
+                vtg_payload = vtg_enable[6:-2]
+                if self._send_ubx(0x06, 0x01, vtg_payload, expect_ack=True, timeout=1.0):
+                    self.get_logger().debug("✓ VTG enable ACK received")
+                else:
+                    self.get_logger().warn("⚠ VTG enable sent but no ACK received")
                 time.sleep(0.1)
 
                 self.get_logger().info("✓ Navigation sentences (GGA, RMC, VTG) enabled on GPS module")
@@ -933,6 +1072,9 @@ class GpsNode(ArgoBaseNode):
             # Configure PPS (Pulse Per Second) output
             self.configure_pps_output()
             
+            # Query GPS status to diagnose hardware issues
+            self.query_gps_status()
+            
             self.get_logger().info("✓ GPS configured for hot start capability")
             
         except Exception as e:
@@ -975,6 +1117,124 @@ class GpsNode(ArgoBaseNode):
             
         except Exception as e:
             self.get_logger().warn(f"Failed to configure PPS output: {e}")
+    
+    def query_gps_status(self):
+        """Query GPS status to diagnose hardware and fix acquisition issues."""
+        self.get_logger().info("Querying GPS status for diagnostics...")
+        
+        try:
+            # Query NAV-STATUS to check fix status
+            # UBX-NAV-STATUS: Class 0x01, ID 0x03
+            self.get_logger().debug("Querying NAV-STATUS...")
+            # Flush buffer before query
+            if self.serial_port.in_waiting > 0:
+                self.serial_port.read(self.serial_port.in_waiting)
+            status_result = self._send_ubx(0x01, 0x03, b'', expect_ack=False, timeout=1.5)
+            time.sleep(0.5)  # Give GPS time to respond
+            
+            if self.serial_port.in_waiting > 0:
+                status_resp = self.serial_port.read(self.serial_port.in_waiting)
+                # Search for NAV-STATUS message in response (might be mixed with other data)
+                for i in range(len(status_resp) - 15):
+                    if (i + 16 <= len(status_resp) and 
+                        status_resp[i:i+2] == b'\xB5\x62' and 
+                        status_resp[i+2] == 0x01 and status_resp[i+3] == 0x03):
+                        # Parse NAV-STATUS: iTOW(4), gpsFix(1), flags(1), fixStat(1), flags2(1), ttff(4), msss(4)
+                        # Skip sync(2) + class(1) + id(1) + length(2) + iTOW(4) = 10 bytes
+                        gps_fix = status_resp[i+10]  # gpsFix byte
+                        flags = status_resp[i+11]    # flags byte
+                        gps_fix_ok = (flags & 0x01) != 0  # gpsFixOk flag
+                        diff_soln = (flags & 0x02) != 0   # diffSoln flag
+                        
+                        fix_names = {0: "No Fix", 1: "Dead Reckoning", 2: "2D Fix", 3: "3D Fix", 4: "GPS+DR", 5: "Time Only"}
+                        fix_name = fix_names.get(gps_fix, f"Unknown({gps_fix})")
+                        
+                        self.get_logger().info(f"  GPS Fix Status: {fix_name} (0x{gps_fix:02X})")
+                        self.get_logger().info(f"  GPS Fix OK: {gps_fix_ok}, Differential Solution: {diff_soln}")
+                        
+                        if gps_fix == 0:
+                            self.get_logger().warn("  ⚠ GPS has NO FIX - PPS will not be active")
+                            self.get_logger().warn("  ⚠ This may indicate hardware fault if outside with clear sky")
+                        break
+                else:
+                    self.get_logger().warn("  ⚠ NAV-STATUS response not found in received data")
+            
+            # Query NAV-SAT to check satellites in view
+            # UBX-NAV-SAT: Class 0x01, ID 0x35
+            self.get_logger().debug("Querying NAV-SAT (satellites in view)...")
+            # Flush buffer before query
+            if self.serial_port.in_waiting > 0:
+                self.serial_port.read(self.serial_port.in_waiting)
+            sat_result = self._send_ubx(0x01, 0x35, b'', expect_ack=False, timeout=1.5)
+            time.sleep(0.5)  # Give GPS time to respond
+            
+            if self.serial_port.in_waiting > 0:
+                sat_resp = self.serial_port.read(self.serial_port.in_waiting)
+                # Search for NAV-SAT message in response
+                for i in range(len(sat_resp) - 11):
+                    if (i + 12 <= len(sat_resp) and 
+                        sat_resp[i:i+2] == b'\xB5\x62' and 
+                        sat_resp[i+2] == 0x01 and sat_resp[i+3] == 0x35):
+                        # Parse NAV-SAT header: iTOW(4), version(1), numSvs(1), reserved1(2), reserved2(4)
+                        # Skip sync(2) + class(1) + id(1) + length(2) + iTOW(4) + version(1) = 11 bytes
+                        num_svs = sat_resp[i+11]  # numSvs byte
+                        self.get_logger().info(f"  Satellites in view: {num_svs}")
+                        
+                        if num_svs == 0:
+                            self.get_logger().error("  ✗ NO SATELLITES IN VIEW - Hardware fault likely!")
+                            self.get_logger().error("  ✗ Check: antenna connection, antenna power, GPS module power")
+                        elif num_svs < 4:
+                            self.get_logger().warn(f"  ⚠ Only {num_svs} satellites in view - may not be enough for fix")
+                        else:
+                            self.get_logger().info(f"  ✓ {num_svs} satellites visible - should be able to acquire fix")
+                        break
+                else:
+                    self.get_logger().warn("  ⚠ NAV-SAT response not found in received data")
+            
+            # Query MON-HW to check hardware status
+            # UBX-MON-HW: Class 0x0A, ID 0x09
+            self.get_logger().debug("Querying MON-HW (hardware status)...")
+            # Flush buffer before query
+            if self.serial_port.in_waiting > 0:
+                self.serial_port.read(self.serial_port.in_waiting)
+            hw_result = self._send_ubx(0x0A, 0x09, b'', expect_ack=False, timeout=1.5)
+            time.sleep(0.5)  # Give GPS time to respond
+            
+            if self.serial_port.in_waiting > 0:
+                hw_resp = self.serial_port.read(self.serial_port.in_waiting)
+                # Search for MON-HW message in response
+                for i in range(len(hw_resp) - 59):
+                    if (i + 60 <= len(hw_resp) and 
+                        hw_resp[i:i+2] == b'\xB5\x62' and 
+                        hw_resp[i+2] == 0x0A and hw_resp[i+3] == 0x09):
+                        # Parse MON-HW: pinSel(4), pinBank(4), pinDir(4), pinVal(4), noisePerMS(2), agcCnt(2), 
+                        #              aStatus(1), aPower(1), flags(1), reserved1(1), usedMask(4), VP(25), jamInd(1), reserved2(2), pinIrq(4), pullH(4), pullL(4)
+                        # Skip sync(2) + class(1) + id(1) + length(2) + pinSel(4) + pinBank(4) + pinDir(4) + pinVal(4) + noisePerMS(2) + agcCnt(2) = 24 bytes
+                        a_status = hw_resp[i+24]  # aStatus byte (antenna status)
+                        a_power = hw_resp[i+25]   # aPower byte (antenna power status)
+                    
+                        ant_status_names = {0: "Init", 1: "Dont know", 2: "OK", 3: "Short", 4: "Open"}
+                        ant_status = ant_status_names.get(a_status, f"Unknown({a_status})")
+                        ant_power = "ON" if a_power == 1 else "OFF"
+                        
+                        self.get_logger().info(f"  Antenna Status: {ant_status} (0x{a_status:02X})")
+                        self.get_logger().info(f"  Antenna Power: {ant_power}")
+                        
+                        if a_status == 3:  # Short
+                            self.get_logger().error("  ✗ ANTENNA SHORT DETECTED - Hardware fault!")
+                        elif a_status == 4:  # Open
+                            self.get_logger().error("  ✗ ANTENNA OPEN DETECTED - Check antenna connection!")
+                        elif a_status == 2:  # OK
+                            self.get_logger().info("  ✓ Antenna status OK")
+                        
+                        if a_power == 0:
+                            self.get_logger().error("  ✗ ANTENNA POWER OFF - Check power supply!")
+                        break
+                else:
+                    self.get_logger().warn("  ⚠ MON-HW response not found in received data")
+        
+        except Exception as e:
+            self.get_logger().warn(f"Failed to query GPS status: {e}")
 
     def parse_rmc_sentence(self, sentence):
         """
@@ -1446,13 +1706,20 @@ class GpsNode(ArgoBaseNode):
             not has_satellites and
             not reset_recent and
             not reset_pending):
-            self.get_logger().error(
-                f"CRITICAL: GPS communication timeout - no data received for {self.gps_timeout_seconds} seconds")
-            self.get_logger().error(
-                "CRITICAL: GPS device appears to have stopped communicating (no satellites in view). Exiting.")
-            self.set_unhealthy("GPS device not accessible")
-            import sys
-            sys.exit(1)
+            self.get_logger().warn(
+                f"GPS communication timeout - no data received for {self.gps_timeout_seconds} seconds")
+            self.get_logger().warn(
+                "GPS device appears to have stopped communicating. Attempting cold start reset...")
+            self.set_unhealthy("GPS communication timeout - attempting reset")
+            
+            # Instead of exiting, try a cold start reset to recover
+            if self.gps_cold_start():
+                self.get_logger().info("Cold start reset completed. Waiting for GPS to reacquire...")
+                self.last_reset_time = current_time
+                self.last_data_received_time = current_time  # Reset timeout after reset
+            else:
+                self.get_logger().error("Cold start reset failed. Will retry on next timeout check.")
+                # Don't exit - allow the reset check timer to handle further recovery attempts
         elif (current_time - self.last_data_received_time > self.gps_timeout_seconds and 
               not has_satellites):
             # Log why we're not exiting (for debugging)
