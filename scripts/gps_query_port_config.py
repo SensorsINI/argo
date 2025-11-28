@@ -105,7 +105,14 @@ def main():
         port = serial.Serial(port_name, baud_rate, timeout=1.0)
         time.sleep(0.5)
         
-        # Flush any existing data
+        # Flush any existing data - GPS might be outputting continuously
+        print("Flushing existing data...")
+        for _ in range(3):
+            if port.in_waiting > 0:
+                discarded = port.read(port.in_waiting)
+                print(f"  Discarded {len(discarded)} bytes of existing data")
+            time.sleep(0.2)
+        
         port.reset_input_buffer()
         port.reset_output_buffer()
         
@@ -113,8 +120,7 @@ def main():
         print("Sending UBX-CFG-PRT query...")
         
         # Query CFG-PRT for UART1 (port ID 1)
-        # First, we need to send a CFG-PRT GET with port ID
-        # Actually, CFG-PRT GET requires port ID in payload
+        # CFG-PRT GET requires port ID in payload (1 byte)
         payload = bytes([0x01])  # Port ID 1 (UART1)
         msg_class = 0x06
         msg_id = 0x00
@@ -126,18 +132,24 @@ def main():
         msg += payload
         msg += calculate_ubx_checksum(msg[2:])
         
+        print(f"Sending: {msg.hex()}")
         port.write(msg)
         port.flush()
         
-        print("Waiting for response...")
-        time.sleep(0.5)
+        print("Waiting for response (reading for 2 seconds)...")
+        # Read for longer to catch the response (GPS might be slow or outputting other data)
+        response = bytearray()
+        start_time = time.time()
+        while time.time() - start_time < 2.0:
+            if port.in_waiting > 0:
+                chunk = port.read(port.in_waiting)
+                response.extend(chunk)
+            time.sleep(0.1)
         
-        # Read response
-        if port.in_waiting > 0:
-            response = port.read(port.in_waiting)
-            print(f"Response ({len(response)} bytes): {response.hex()}")
+        if len(response) > 0:
+            print(f"Response ({len(response)} bytes): {response.hex()[:200]}...")
             
-            config = parse_cfg_prt_response(response)
+            config = parse_cfg_prt_response(bytes(response))
             if config:
                 print("\n=== Port Configuration ===")
                 print(f"Port ID: {config['port_id']} (1=UART1)")
@@ -162,8 +174,48 @@ def main():
                     print("\n✓ NMEA output is enabled")
             else:
                 print("Could not parse CFG-PRT response")
+                print("\nTrying alternative: Query MON-VER to verify GPS is responding...")
+                # Try MON-VER query as a test
+                mon_ver_payload = b''
+                mon_ver_msg = bytes([0xB5, 0x62, 0x0A, 0x04, 0x00, 0x00])
+                mon_ver_msg += calculate_ubx_checksum(mon_ver_msg[2:])
+                
+                port.reset_input_buffer()
+                port.write(mon_ver_msg)
+                port.flush()
+                time.sleep(0.5)
+                
+                if port.in_waiting > 0:
+                    mon_ver_resp = port.read(port.in_waiting)
+                    print(f"MON-VER response ({len(mon_ver_resp)} bytes): {mon_ver_resp.hex()[:100]}...")
+                    if b'\xB5\x62\x0A\x04' in mon_ver_resp:
+                        print("✓ GPS is responding to UBX queries")
+                    else:
+                        print("⚠ GPS response doesn't look like MON-VER")
+                else:
+                    print("⚠ No response to MON-VER query")
         else:
             print("No response received")
+            print("\nTrying MON-VER query to verify GPS communication...")
+            # Try MON-VER as a simpler test
+            mon_ver_msg = bytes([0xB5, 0x62, 0x0A, 0x04, 0x00, 0x00])
+            mon_ver_msg += calculate_ubx_checksum(mon_ver_msg[2:])
+            
+            port.reset_input_buffer()
+            port.write(mon_ver_msg)
+            port.flush()
+            time.sleep(0.5)
+            
+            if port.in_waiting > 0:
+                mon_ver_resp = port.read(port.in_waiting)
+                print(f"MON-VER response ({len(mon_ver_resp)} bytes): {mon_ver_resp.hex()[:100]}...")
+                if b'\xB5\x62\x0A\x04' in mon_ver_resp:
+                    print("✓ GPS is responding to UBX queries")
+                    print("  CFG-PRT query might have failed, but GPS is communicating")
+                else:
+                    print("⚠ GPS response doesn't look like MON-VER")
+            else:
+                print("⚠ No response to MON-VER query - GPS may not be responding")
         
         port.close()
         
@@ -178,4 +230,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
