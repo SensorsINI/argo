@@ -492,14 +492,32 @@ class ArgoUnifiedSimulatorBridge(Node):
         
         # CRITICAL FIX: When switching to robot control, apply latest auto commands immediately
         # This ensures smooth handover from human to robot control in simulation
+        # BUT: Only apply if commands are fresh (within 1 second) to avoid applying stale commands
+        # after simulation reset or long periods of inactivity
         if old_human_controlled and not self.human_controlled:
-            # Just switched to robot control - apply latest auto commands if available
-            if self.last_auto_update > 0.0 and hasattr(self, 'auto_rudder') and hasattr(self, 'auto_sail'):
+            # Just switched to robot control - apply latest auto commands if available and fresh
+            if (self.last_auto_update > 0.0 and 
+                hasattr(self, 'auto_rudder') and hasattr(self, 'auto_sail') and
+                time_since_auto_update < 1.0):  # Only apply if commands are fresh (< 1 second old)
                 self._apply_control_to_simulator(self.auto_rudder, self.auto_sail)
                 self.get_logger().info(
                     f'🤖 Applied auto commands on switch to robot control: '
                     f'rudder={self.auto_rudder:.3f}, sail={self.auto_sail:.3f}'
                 )
+            else:
+                # Commands are stale or not available - reset to neutral to avoid unwanted turns
+                # The controller will publish fresh commands shortly
+                self._apply_control_to_simulator(0.0, 0.0)
+                if self.last_auto_update > 0.0:
+                    self.get_logger().info(
+                        f'🤖 Switched to robot control: auto commands stale ({time_since_auto_update:.1f}s old), '
+                        f'resetting to neutral (0.0, 0.0) - controller will publish fresh commands'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'🤖 Switched to robot control: no auto commands received yet, '
+                        f'resetting to neutral (0.0, 0.0) - waiting for controller'
+                    )
         
         # Debug logging when state changes or periodically
         if not hasattr(self, '_last_arbitration_log_time'):
@@ -2488,7 +2506,7 @@ def main(args=None):
     parser.add_argument('--test-heading', type=float,
                        help='Test mode: override initial heading calculation with specified heading in degrees (0-360)')
     parser.add_argument('--force-mock', action='store_true',
-                       help='Force use of mock simulator even if real simulator (sailboat-playground) is available')
+                       help='Use mock simulator (default behavior - can be omitted). Overrides real simulator if available.')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug tracing (verbose position and control logging)')
     
@@ -2518,10 +2536,13 @@ def main(args=None):
     print(f"\nMode: {parsed_args.mode.upper()}")
     if parsed_args.mode == 'local':
         print("  - Running simulator locally")
+        # Determine which simulator will be used
         if parsed_args.force_mock:
-            print("  - Using mock simulator (--force-mock enabled)")
+            print("  - Using mock simulator (default)")
+        elif SIMULATOR_AVAILABLE:
+            print("  - Using real simulator (sailboat-playground)")
         else:
-            print("  - Using sailboat-playground or mock simulator")
+            print("  - Using mock simulator (sailboat-playground not available)")
     else:
         print("  - Connecting to remote simulator")
         print("  - Forwarding sensor data and control commands")

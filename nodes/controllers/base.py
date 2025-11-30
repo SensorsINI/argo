@@ -161,7 +161,8 @@ class BaseController:
 
     def __init__(self, config: Dict[str, Any], logger=None, parent_node=None):
         self.config = config
-        self.name = self.__class__.__name__
+        # Subclasses should set self.name in their own __init__ methods
+        self.name = None
         self.logger = logger
         self.parent_node = parent_node
         self._captains_log_pub = None
@@ -236,6 +237,8 @@ class BaseController:
         if current_time - self._last_periodic_log_time < interval_sec:
             return
         state_parts = []
+        # Always include controller name to avoid confusion
+        state_parts.append(f"Controller: {self.name}")
         if state.compass_heading is not None:
             state_parts.append(f"heading={state.compass_heading:.1f}°")
         if state.gps_sog is not None:

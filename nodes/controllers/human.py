@@ -28,6 +28,7 @@ class HumanController(BaseController):
 
     def __init__(self, config, logger=None, parent_node=None):
         super().__init__(config, logger=logger, parent_node=parent_node)
+        self.name = 'HumanController'
         if logger:
             logger.info("HumanController initialized - passing through keyboard/radio commands only")
 
