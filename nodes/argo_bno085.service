@@ -2,8 +2,12 @@
 Description=Argo BNO085 IMU Driver Service
 Documentation=file://%h/argo/nodes/README_BNO085.md
 After=network.target
-DefaultDependencies=no
-Before=argo_launch_standard.service shutdown.target
+Before=argo_launch_standard.service
+# REMOVED: DefaultDependencies=no and Before=shutdown.target
+# These caused 60-90 second shutdown hangs because the service tried to
+# shut down gracefully after ROS2 infrastructure was already dead.
+# Service now stops normally (< 1 second) when ROS2 is still alive.
+# Note: Kept Before=argo_launch_standard.service to ensure IMU ready before launch
 
 [Service]
 Type=simple

@@ -119,21 +119,49 @@ The logger itself was killed before capturing the full shutdown. Improvements:
 | argo_health_monitor | 15s | control-group | Force-killed at timeout |
 | argo_radio_servo_module | 30s | control-group | Unknown |
 
-## Next Steps
+## Resolution (2025-12-04)
 
-1. **Test battery_water shutdown** in isolation:
-   ```bash
-   sudo systemctl stop argo_battery_water.service
-   # Check how long it actually takes
-   time sudo systemctl stop argo_battery_water.service
-   ```
+### Fix Applied
 
-2. **Test bno085 shutdown** in isolation:
-   ```bash
-   time sudo systemctl stop argo_bno085.service
-   ```
+Removed `Before=shutdown.target` and `DefaultDependencies=no` from both services:
+- `argo_battery_water.service`
+- `argo_bno085.service`
 
-3. **Check if these services have the spin_once() fix** from the previous graceful shutdown work
+### Testing Results
 
-4. **Monitor next shutdown** with improved logger to see if fixes work
+**Individual service stops** (verified BEFORE fix):
+```bash
+$ time sudo systemctl stop argo_battery_water.service
+real    0m0.681s  ✓
 
+$ time sudo systemctl stop argo_bno085.service
+real    0m1.008s  ✓
+```
+
+**After fix** (services stop normally):
+```bash
+$ time sudo systemctl stop argo_battery_water.service
+real    0m0.766s  ✓
+
+$ time sudo systemctl stop argo_bno085.service
+real    0m1.094s  ✓
+```
+
+### Expected Shutdown Timing
+
+- **Previous**: 60-90 seconds (services hung waiting for dead ROS2)
+- **Now**: 10-15 seconds (services stop gracefully while ROS2 alive)
+
+### Safety Verification
+
+- ✅ **Power relay control**: Unchanged, handled by independent `argo_poweroff.shutdown` hook
+- ✅ **Persistent logging**: Unchanged, both services use `tee -a /var/log.hdd/persistent/...`
+- ✅ **Graceful ROS2 cleanup**: Now works properly (ROS2 alive during shutdown)
+
+### Next System Shutdown
+
+Monitor with shutdown logger to verify total shutdown time < 20 seconds:
+```bash
+# After next shutdown, check:
+ls -ltr /var/log.hdd/persistent/shutdown-*.log | tail -1
+```

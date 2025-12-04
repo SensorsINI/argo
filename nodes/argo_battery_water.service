@@ -2,8 +2,10 @@
 Description=Argo Battery and Water Monitoring Service
 Documentation=file://%h/argo/nodes/argo_battery_water.py
 After=network.target
-DefaultDependencies=no
-Before=shutdown.target
+# REMOVED: DefaultDependencies=no and Before=shutdown.target
+# These caused 60-90 second shutdown hangs because the service tried to
+# shut down gracefully after ROS2 infrastructure was already dead.
+# Service now stops normally (< 1 second) when ROS2 is still alive.
 
 [Service]
 Type=simple

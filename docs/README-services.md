@@ -83,12 +83,13 @@ argo_thermal_monitor.service
    - Launch service MUST wait for radio/servo hardware
    - Essential for control interface
 
-5. **battery_water → shutdown.target** (`Before`)
-   - Battery monitoring stays active late into shutdown
-   - Critical for safe power-off
+5. **battery_water → shutdown** (Normal shutdown timing)
+   - Stops early in shutdown sequence for clean ROS2 cleanup
+   - Previously used `Before=shutdown.target` but caused 60-90s hangs
 
-6. **bno085 → shutdown.target** (`Before`)
-   - IMU driver stays active late into shutdown
+6. **bno085 → shutdown** (Normal shutdown timing)
+   - Stops early in shutdown sequence for clean ROS2 cleanup
+   - Previously used `Before=shutdown.target` but caused 60-90s hangs
    - Proper hardware cleanup
 
 ## Boot Sequence
@@ -175,30 +176,22 @@ argo_thermal_monitor.service
     └─ argo_thermal_monitor.service stops
        - Temperature monitoring ends
     ↓
-[T+3s] Late shutdown services continue
+[T+3s] ROS2 services stop normally
     ↓
-    ├─ argo_bno085.service still running
-    │  - IMU driver active (Before=shutdown.target)
-    │  - Continues publishing data
+    ├─ argo_bno085.service stops (< 1 second)
+    │  - IMU driver graceful shutdown
+    │  - ROS2 cleanup completes
     │
-    └─ argo_battery_water.service still running
-       - Battery monitoring active (Before=shutdown.target)
-       - Critical battery status available
+    └─ argo_battery_water.service stops (< 1 second)
+       - Battery monitoring graceful shutdown
+       - Saves battery slopes data
+       - ROS2 cleanup completes
     ↓
-[T+5s] Power control prepares for shutdown
+[T+4s] Power control prepares for shutdown
     ↓
     └─ argo_power_control.service final actions
        - LED patterns indicate shutdown
        - Monitors shutdown progress
-       - Last service to stop
-    ↓
-[T+6s] Late shutdown services stop
-    ↓
-    ├─ argo_bno085.service stops
-    │  - IMU driver cleanup
-    │
-    └─ argo_battery_water.service stops
-       - Battery monitoring cleanup
     ↓
 [T+8s] shutdown.target completes
     ↓
@@ -207,10 +200,11 @@ argo_thermal_monitor.service
 
 ### Important Shutdown Notes
 
-- **Late Shutdown**: Battery and BNO085 services use `Before=shutdown.target` to stay active longer
-- **Power Control**: Handles shutdown LED patterns and hardware cleanup
-- **Graceful Stop**: Services now shut down cleanly in 1-2 seconds (previously required SIGKILL)
+- **Normal Shutdown Timing**: Battery and BNO085 services stop early (< 1 second each)
+- **Power Relay**: Controlled by independent shutdown hook (`argo_poweroff.shutdown`), runs after all services
+- **Graceful Stop**: Services shut down cleanly in < 1 second with proper ROS2 cleanup
 - **Safe State**: Servos automatically go to high impedance (radio control) on shutdown
+- **Historical Note**: Previously used `Before=shutdown.target` for "late shutdown" but this caused 60-90s hangs
 
 ### Graceful Shutdown Implementation (Dec 2025)
 
@@ -303,8 +297,7 @@ WantedBy=multi-user.target
 [Unit]
 Description=Argo Battery and Water Monitoring Service
 After=network.target
-Before=shutdown.target
-DefaultDependencies=no
+# Normal shutdown timing (removed Before=shutdown.target to fix 60-90s hangs)
 
 [Service]
 Type=simple
@@ -326,7 +319,7 @@ WantedBy=multi-user.target
 
 **Dependencies**:
 - Requires: network.target
-- Before: shutdown.target (late shutdown)
+- Normal shutdown timing (stops early in shutdown sequence)
 - Started by: multi-user.target
 - Wanted by: argo_power_control.service
 
@@ -367,7 +360,7 @@ WantedBy=multi-user.target
 **Dependencies**:
 - Requires: network.target
 - Before: argo_launch_standard.service (blocks launch)
-- Before: shutdown.target (late shutdown)
+- Normal shutdown timing (stops early in shutdown sequence)
 - Started by: multi-user.target
 - Required by: argo_launch_standard.service (via Wants)
 
@@ -681,17 +674,18 @@ systemctl list-dependencies argo_launch_standard.service
 
 ---
 
-#### Late Shutdown Not Working
+#### Shutdown Takes > 60 Seconds
 
-**Symptom**: Battery/BNO085 services stop too early during shutdown
+**Symptom**: System shutdown hangs for 60-90 seconds
 
 **Diagnosis**:
 ```bash
-# Check service configuration
+# Check for Before=shutdown.target (causes ROS2 cleanup after ROS2 is dead)
 grep "Before=shutdown.target" /etc/systemd/system/argo_battery_water.service
+grep "Before=shutdown.target" /etc/systemd/system/argo_bno085.service
 ```
 
-**Solution**: Ensure service has `Before=shutdown.target` directive
+**Solution**: Remove `Before=shutdown.target` and `DefaultDependencies=no` to allow services to stop while ROS2 is still alive
 
 ---
 
