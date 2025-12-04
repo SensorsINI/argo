@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import yaml
+import signal
 import subprocess
 from typing import Dict, Optional
 from datetime import datetime
@@ -35,6 +36,11 @@ class ArgoHealthMonitor(ArgoBaseNode):
     def __init__(self):
         super().__init__('argo_health_monitor')
         self.get_logger().info("=== HEALTH_MONITOR_NODE STARTUP ===")
+        
+        # Signal handling for graceful shutdown
+        self.shutdown_requested = False
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
         
         # Load node configuration
         argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -202,13 +208,17 @@ class ArgoHealthMonitor(ArgoBaseNode):
         import os
         current_time = time.time()
         
+        # Exit early if shutdown requested (before potentially blocking subprocess call)
+        if self.shutdown_requested:
+            return
+        
         # Get list of running ROS2 nodes
         try:
             result = subprocess.run(
                 ['ros2', 'node', 'list'],
                 capture_output=True,
                 text=True,
-                timeout=5.0
+                timeout=2.0  # Reduced from 5.0 to 2.0 for faster shutdown response
             )
             
             if result.returncode == 0:
@@ -317,6 +327,10 @@ class ArgoHealthMonitor(ArgoBaseNode):
     
     def publish_status(self):
         """Publish health status summary"""
+        # Exit early if shutdown requested
+        if self.shutdown_requested:
+            return
+        
         healthy_count = sum(1 for h in self.node_health.values() if h['healthy'] is True)
         unhealthy_count = sum(1 for h in self.node_health.values() if h['healthy'] is False)
         total_count = len(self.node_health)
@@ -390,13 +404,13 @@ class ArgoHealthMonitor(ArgoBaseNode):
                         special_nodes_missing.append(cfg)
             
             # If we have missing special nodes, trigger a quick health check
-            if special_nodes_missing:
+            if special_nodes_missing and not self.shutdown_requested:
                 try:
                     result = subprocess.run(
                         ['ros2', 'node', 'list'],
                         capture_output=True,
                         text=True,
-                        timeout=2.0
+                        timeout=1.0  # Very short timeout for service callbacks
                     )
                     if result.returncode == 0:
                         node_lines = [line.strip() for line in result.stdout.strip().split('\n') 
@@ -497,6 +511,13 @@ class ArgoHealthMonitor(ArgoBaseNode):
         
         return response
 
+    def _signal_handler(self, signum, frame):
+        """Handle termination signals gracefully"""
+        signal_name = 'SIGTERM' if signum == signal.SIGTERM else 'SIGINT' if signum == signal.SIGINT else f'Signal {signum}'
+        self.get_logger().info(f"Received {signal_name}, initiating graceful shutdown...")
+        self.shutdown_requested = True
+        rclpy.shutdown()
+
     def _cleanup_on_exit(self):
         """Custom cleanup on shutdown."""
         self.get_logger().info("=== HEALTH_MONITOR_NODE SHUTDOWN START ===")
@@ -505,8 +526,44 @@ class ArgoHealthMonitor(ArgoBaseNode):
 
 
 def main(args=None):
-    # Standardized run function from ArgoBaseNode
-    ArgoBaseNode.run_node(ArgoHealthMonitor, args)
+    """Main entry point with custom spin loop for responsive signal handling"""
+    parser = ArgoBaseNode.create_standard_parser(
+        'Argo Health Monitor Node',
+        epilog='Monitors health status of all Argo ROS2 nodes'
+    )
+    
+    node = None
+    try:
+        rclpy.init(args=args)
+        node = ArgoHealthMonitor()
+        
+        # Custom spin loop with frequent shutdown checks for responsive signal handling
+        # This allows the node to respond quickly to SIGTERM during shutdown
+        while rclpy.ok() and not node.shutdown_requested:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        
+    except KeyboardInterrupt:
+        if node:
+            node.get_logger().info("Keyboard interrupt, shutting down gracefully...")
+    except rclpy.executors.ExternalShutdownException:
+        if node:
+            node.get_logger().info("External shutdown received, exiting gracefully...")
+    except Exception as e:
+        if node:
+            node.get_logger().error(f"Unexpected error: {e}")
+        else:
+            print(f"Error before node creation: {e}")
+    finally:
+        if node:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
