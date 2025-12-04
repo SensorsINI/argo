@@ -13,13 +13,13 @@ WorkingDirectory=/home/orangepi/argo/nodes
 Environment=ROS_DOMAIN_ID=0
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
-ExecStart=/bin/bash -c 'set -eo pipefail; /home/orangepi/argo/nodes/bno085_driver_launcher.sh |& tee -a /var/log.hdd/persistent/argo-bno085.log'
+ExecStart=/bin/bash -c 'set -eo pipefail; exec /home/orangepi/argo/nodes/bno085_driver_launcher.sh |& tee -a /var/log.hdd/persistent/argo-bno085.log'
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 TimeoutStopSec=10
-KillMode=mixed
+KillMode=control-group
 KillSignal=SIGTERM
 FinalKillSignal=SIGKILL
 
