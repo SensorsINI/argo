@@ -214,7 +214,7 @@ journalctl_cmd+=" --output=short-iso-precise"
 full_cmd="$journalctl_cmd 2>/dev/null"
 
 # Filter out foxglove bridge spam (Advertising/Removing channel messages)
-full_cmd+=" | grep --line-buffered -v 'foxglove_bridge.*\(Advertising\|Removing\) channel'"
+full_cmd+=" | grep --line-buffered -v -E 'foxglove_bridge.*(Advertising|Removing).*channel'"
 
 # Apply filters: when -ef is used with pattern, we need both error keywords AND pattern
 if [ "$ERROR_CHECK" = true ]; then
