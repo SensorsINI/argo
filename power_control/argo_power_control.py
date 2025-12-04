@@ -3098,7 +3098,6 @@ class PowerController(ArgoBaseNode):
 
     def _i2c_failure_callback(self, msg):
         """Receive I2C failure status updates from topic - triggers SOS pattern for critical failures"""
-        self.get_logger().info(f"I2C failure callback received: {msg.data} (current state: {self.i2c_failure_detected})")
         old_i2c_failure = self.i2c_failure_detected
         self.i2c_failure_detected = msg.data
         
