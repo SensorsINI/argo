@@ -414,7 +414,7 @@ class PowerController(ArgoBaseNode):
     def __init__(self, test_mode=False, threshold=1.0):
         # Initialize the ROS2 node first
         super().__init__('argo_power_control')
-        self.get_logger().info("--- PowerController __init__ starting ---")
+        self.get_logger().info("=== POWER_CONTROL_NODE STARTUP ===")
 
         self.running = True
         self.power_button_pressed = False
@@ -506,6 +506,10 @@ class PowerController(ArgoBaseNode):
         self.sos_led_active = False
         self.last_logged_battery_voltage = None  # Track last logged voltage for throttling
         self.last_battery_voltage = None  # Last valid battery voltage reading
+        
+        # I2C failure monitoring state
+        self.i2c_failure_detected = False  # True when critical I2C failure is active
+        self.i2c_failure_sos_active = False  # True when SOS pattern is active due to I2C failure
         
         # Charging state monitoring
         self.charging_state_active = False  # True when charging or fully charged
@@ -1912,6 +1916,67 @@ class PowerController(ArgoBaseNode):
         self.sos_led_active = False
         self.get_logger().info("SOS LED pattern completed")
 
+    def sos_led_pattern_i2c_failure(self):
+        """SOS LED pattern for I2C failure warning - Red LED blinks SOS in Morse code"""
+        self.get_logger().info("Starting SOS LED pattern for I2C failure warning")
+        self.i2c_failure_sos_active = True
+
+        # SOS in Morse code: ... --- ... (short-short-short, long-long-long, short-short-short)
+        # Base timing: short = 0.2s, long = 0.6s, pause between letters = 0.6s, pause between SOS = 1.8s
+        # Total base duration: 3.6s (scaled to SOS_PATTERN_DURATION_S to maintain duty cycle)
+        base_duration = 3.6
+        scale_factor = SOS_PATTERN_DURATION_S / base_duration
+        
+        sos_pattern = [
+            # S: ... (short-short-short)
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.6 * scale_factor, False),  # Long pause between letters
+
+            # O: --- (long-long-long)
+            (0.6 * scale_factor, True),   # Long on
+            (0.2 * scale_factor, False),  # Short off
+            (0.6 * scale_factor, True),   # Long on
+            (0.2 * scale_factor, False),  # Short off
+            (0.6 * scale_factor, True),   # Long on
+            (0.6 * scale_factor, False),  # Long pause between letters
+
+            # S: ... (short-short-short)
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (0.2 * scale_factor, False),  # Short off
+            (0.2 * scale_factor, True),   # Short on
+            (1.8 * scale_factor, False),  # Long pause between SOS cycles
+        ]
+
+        while self.running and self.i2c_failure_sos_active and self.i2c_failure_detected and not self.critical_battery_detected:
+            try:
+                for duration, led_state in sos_pattern:
+                    if not self.running or not self.i2c_failure_sos_active or not self.i2c_failure_detected or self.critical_battery_detected:
+                        break
+
+                    # Set red LED state for SOS warning
+                    self.set_red_led(led_state)
+
+                    # Sleep in small increments for responsive shutdown
+                    sleep_time = 0
+                    while sleep_time < duration and self.running and self.i2c_failure_sos_active and self.i2c_failure_detected and not self.critical_battery_detected:
+                        time.sleep(0.01)  # Sleep in 10ms increments
+                        sleep_time += 0.01
+
+            except Exception as e:
+                self.get_logger().error(f"Error in I2C failure SOS LED pattern: {e}")
+                break
+
+        # Turn off red LED when done
+        self.set_red_led(False)
+        self.i2c_failure_sos_active = False
+        self.get_logger().info("I2C failure SOS LED pattern completed")
+
     def _calculate_battery_percentage(self, voltage: float) -> float:
         """Calculate battery percentage from voltage
         
@@ -2865,6 +2930,10 @@ class PowerController(ArgoBaseNode):
             self.ac_power_sub = self.create_subscription(
                 Bool, '/ac_power_present', self._ac_power_callback, 10)
             
+            # I2C failure monitoring (critical - battery monitoring unavailable)
+            self.i2c_failure_sub = self.create_subscription(
+                Bool, '/argo/critical/i2c_failure', self._i2c_failure_callback, 10)
+            
             # Health monitor service client for comprehensive health status
             self.health_monitor_client = self.create_client(
                 Trigger, '/argo/health/status')
@@ -2880,6 +2949,7 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("  - /argo/power/button_events (topic)")
             self.get_logger().info("  - /controller_pause_state (subscription)")
             self.get_logger().info("  - /ac_power_present (subscription - for fast charge state updates)")
+            self.get_logger().info("  - /argo/critical/i2c_failure (subscription - for critical I2C failure detection)")
         except Exception as e:
             self.get_logger().error(f"Failed to create power services: {e}")
 
@@ -3026,6 +3096,97 @@ class PowerController(ArgoBaseNode):
             # First update - just log
             self.get_logger().debug(f"AC power status (from topic): {msg.data}")
 
+    def _i2c_failure_callback(self, msg):
+        """Receive I2C failure status updates from topic - triggers SOS pattern for critical failures"""
+        self.get_logger().info(f"I2C failure callback received: {msg.data} (current state: {self.i2c_failure_detected})")
+        old_i2c_failure = self.i2c_failure_detected
+        self.i2c_failure_detected = msg.data
+        
+        # Always clear SOS pattern if receiving False, even if state didn't change
+        # This handles the case where power control starts after battery service and misses initial False
+        if not self.i2c_failure_detected and self.i2c_failure_sos_active:
+            self.get_logger().info("✅ I2C failure cleared (received False) - stopping SOS pattern")
+            self.i2c_failure_sos_active = False
+            self.resume_heartbeat(reason="i2c_failure_cleared")
+            return
+        
+        # Only trigger SOS pattern if I2C failure status actually changed
+        if old_i2c_failure != self.i2c_failure_detected:
+            if self.i2c_failure_detected:
+                # Critical I2C failure detected - start SOS pattern
+                self.get_logger().error("🔴 CRITICAL I2C FAILURE detected - battery monitoring unavailable!")
+                self.get_logger().error("Starting SOS LED pattern for I2C failure warning")
+                
+                # Stop charge state pattern if running (I2C failure takes priority)
+                if self.charge_state_led_active:
+                    self.charge_state_led_active = False
+                    self.charging_state_active = False
+                    # Immediately turn off charge state LED
+                    led_setter = self._get_charge_state_led_setter()
+                    led_setter(False)
+                
+                # Pause heartbeat to make SOS pattern visible
+                self.pause_heartbeat(reason="i2c_failure")
+                
+                # Start SOS LED pattern in separate thread (if not already active)
+                if not self.i2c_failure_sos_active and not self.sos_led_active:
+                    self.i2c_failure_sos_active = True
+                    threading.Thread(target=self.sos_led_pattern_i2c_failure, daemon=True).start()
+                
+                # Send desktop notification
+                self.send_desktop_notification(
+                    "CRITICAL I2C FAILURE",
+                    "Battery monitoring unavailable due to I2C bus failure\nSOS LED pattern activated\nCheck I2C connections and argo_battery_water.service",
+                    "critical"
+                )
+            else:
+                # I2C failure recovered - stop SOS pattern
+                self.get_logger().info("✅ I2C failure recovered - battery monitoring restored")
+                self.i2c_failure_sos_active = False
+                
+                # Resume heartbeat now that I2C failure is cleared
+                self.resume_heartbeat(reason="i2c_failure_recovered")
+                
+                # Send desktop notification
+                self.send_desktop_notification(
+                    "I2C Recovery",
+                    "I2C communication restored - battery monitoring active",
+                    "normal"
+                )
+    
+    def _check_initial_i2c_failure_state(self):
+        """Check initial I2C failure state from battery service on startup.
+        This ensures we have the correct state even if we missed the initial topic message."""
+        try:
+            # Wait a moment for services to be ready
+            time.sleep(2)
+            
+            # Call battery service to get current I2C failure state
+            battery_data = self._call_battery_service()
+            if battery_data:
+                i2c_failure = battery_data.get('i2c_failure', False)
+                self.get_logger().info(f"Initial I2C failure state from battery service: {i2c_failure}")
+                
+                # Update state and handle accordingly
+                old_state = self.i2c_failure_detected
+                self.i2c_failure_detected = i2c_failure
+                
+                # If I2C is working (False) but SOS is active, clear it
+                if not i2c_failure and self.i2c_failure_sos_active:
+                    self.get_logger().info("Clearing I2C failure SOS pattern based on battery service status")
+                    self.i2c_failure_sos_active = False
+                    self.resume_heartbeat(reason="i2c_failure_cleared_on_startup")
+                # If I2C is failing (True) but SOS is not active, start it
+                elif i2c_failure and not self.i2c_failure_sos_active and not self.sos_led_active:
+                    self.get_logger().warning("Starting I2C failure SOS pattern based on battery service status")
+                    self.pause_heartbeat(reason="i2c_failure")
+                    self.i2c_failure_sos_active = True
+                    threading.Thread(target=self.sos_led_pattern_i2c_failure, daemon=True).start()
+            else:
+                self.get_logger().warning("Could not get initial I2C failure state from battery service")
+        except Exception as e:
+            self.get_logger().warning(f"Error checking initial I2C failure state: {e}")
+
     def _immediate_charge_state_update(self):
         """Immediately update charge state based on current AC power and battery status"""
         try:
@@ -3150,6 +3311,9 @@ class PowerController(ArgoBaseNode):
 
         # Create ROS2 services for remote control
         self._create_power_services()
+        
+        # Check initial I2C failure state from battery service (in case we missed the topic message)
+        self._check_initial_i2c_failure_state()
 
         # Publish initial status
         self._publish_power_status("Power control system running")
@@ -3278,6 +3442,9 @@ class PowerController(ArgoBaseNode):
                             # Stop SOS pattern if running (critical takes priority)
                             if self.sos_led_active:
                                 self.sos_led_active = False
+                            # Stop I2C failure SOS pattern if running (critical takes priority)
+                            if self.i2c_failure_sos_active:
+                                self.i2c_failure_sos_active = False
                             # Stop charge state pattern if running (critical takes priority)
                             if self.charge_state_led_active:
                                 self.charge_state_led_active = False
@@ -4154,6 +4321,7 @@ If you take no action within 30 seconds, the system will automatically
 
     def cleanup(self):
         """Clean up resources"""
+        self.get_logger().info("=== POWER_CONTROL_NODE CLEANUP ===")
         self.get_logger().info("Cleaning up power controller...")
 
         try:
@@ -4165,6 +4333,7 @@ If you take no action within 30 seconds, the system will automatically
 
             # Stop SOS LED pattern if active
             self.sos_led_active = False
+            self.i2c_failure_sos_active = False
 
             # Stop charge state LED pattern if active
             self.charge_state_led_active = False
@@ -4620,6 +4789,7 @@ def main():
 
     # --- SERVICE MODE ---
     # If no test/simulation flags are provided, run as a full ROS2 node.
+    temp_logger.info("=== POWER_CONTROL_NODE STARTUP ===")
     temp_logger.info("Starting power control system in ROS2 Node mode...")
     
     node = None
@@ -4635,19 +4805,21 @@ def main():
         rclpy.spin(node)
         
     except KeyboardInterrupt:
+        temp_logger.info('=== POWER_CONTROL_NODE SHUTDOWN START ===')
         temp_logger.info('Keyboard interrupt, shutting down.')
     except rclpy.executors.ExternalShutdownException:
+        temp_logger.info('=== POWER_CONTROL_NODE SHUTDOWN START ===')
         temp_logger.info('External shutdown requested.')
     finally:
-        temp_logger.info("Entering cleanup phase...")
         if node:
+            temp_logger.info("Entering cleanup phase...")
             temp_logger.info("Cleaning up node...")
             node.cleanup()
             node.destroy_node()
         if ROS2_AVAILABLE and rclpy.ok():
             temp_logger.info("Shutting down rclpy...")
             rclpy.shutdown()
-        temp_logger.info("Power control node shutdown complete.")
+        temp_logger.info("=== POWER_CONTROL_NODE SHUTDOWN COMPLETE ===")
 
 
 if __name__ == "__main__":

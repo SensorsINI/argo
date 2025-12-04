@@ -34,6 +34,7 @@ class ArgoHealthMonitor(ArgoBaseNode):
     
     def __init__(self):
         super().__init__('argo_health_monitor')
+        self.get_logger().info("=== HEALTH_MONITOR_NODE STARTUP ===")
         
         # Load node configuration
         argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -498,7 +499,9 @@ class ArgoHealthMonitor(ArgoBaseNode):
 
     def _cleanup_on_exit(self):
         """Custom cleanup on shutdown."""
+        self.get_logger().info("=== HEALTH_MONITOR_NODE SHUTDOWN START ===")
         self.get_logger().info("Argo Health Monitor shutting down.")
+        self.get_logger().info("=== HEALTH_MONITOR_NODE SHUTDOWN COMPLETE ===")
 
 
 def main(args=None):

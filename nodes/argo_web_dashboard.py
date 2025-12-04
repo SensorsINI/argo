@@ -1521,10 +1521,14 @@ class ArgoWebDashboard(ArgoBaseNode):
                         saltwater_voltage = raw_data.get('saltwater_voltage')
                         time_to_full = raw_data.get('time_to_full_hours')
                         time_to_empty = raw_data.get('time_to_empty_hours')
+                        # NOTE: I2C failure status comes ONLY from topic subscription (/argo/critical/i2c_failure)
+                        # Service call timeout indicates battery service not running, which is a different error
                         
                         # Only update if we got valid data and topic data is still missing
                         # This prevents overriding topic data if it arrived between check and response
                         with self.state_lock:
+                            # I2C failure state is managed ONLY by topic subscription (i2c_failure_cb)
+                            # Do not update i2c_failure from service - service timeout is different error
                             self.get_logger().debug(f"Battery status response: {battery_data}")
                             # Always update charging status from service (service is authoritative)
                             if charging_status is not None:
