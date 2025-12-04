@@ -41,6 +41,7 @@ SERVICE_ARGO="argo_launch_standard.service"
 SERVICE_BATTERY="argo_battery_water.service"
 SERVICE_POWER="argo_power_control.service"
 SERVICE_IMU="argo_bno085.service"
+SERVICE_HEALTH="argo_health_monitor.service"
 
 # Parse command line options
 while getopts "n:fet:ha" opt; do
@@ -88,6 +89,7 @@ while getopts "n:fet:ha" opt; do
             echo "  - ${SERVICE_BATTERY} (yellow)"
             echo "  - ${SERVICE_POWER} (green)"
             echo "  - ${SERVICE_IMU} (magenta)"
+            echo "  - ${SERVICE_HEALTH} (cyan)"
             echo ""
             echo "Priority highlighting:"
             echo "  - ERROR lines              (bold bright red)"
@@ -152,6 +154,7 @@ echo -e "${COLOR_ARGO_LAUNCH}●${RESET} ${SERVICE_ARGO} (cyan)"
 echo -e "${COLOR_BATTERY}●${RESET} ${SERVICE_BATTERY} (yellow)"
 echo -e "${COLOR_POWER}●${RESET} ${SERVICE_POWER} (green)"
 echo -e "${COLOR_IMU}●${RESET} ${SERVICE_IMU} (magenta)"
+echo -e "${COLOR_ARGO_LAUNCH}●${RESET} ${SERVICE_HEALTH} (cyan)"
 echo -e "${COLOR_ERROR}●${RESET} ERROR lines (bold bright red)"
 echo -e "${COLOR_WARN}●${RESET} WARN lines (bold dark yellow)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -182,7 +185,7 @@ colorize_logs() {
 
 # Construct the journalctl command
 journalctl_cmd="journalctl --no-pager"
-journalctl_cmd+=" -u $SERVICE_ARGO -u $SERVICE_BATTERY -u $SERVICE_POWER -u $SERVICE_IMU"
+journalctl_cmd+=" -u $SERVICE_ARGO -u $SERVICE_BATTERY -u $SERVICE_POWER -u $SERVICE_IMU -u $SERVICE_HEALTH"
 
 # Add options based on flags
 if [ "$ALL_LOGS" = true ]; then
@@ -209,6 +212,9 @@ journalctl_cmd+=" --output=short-iso-precise"
 
 # Build the full command pipeline
 full_cmd="$journalctl_cmd 2>/dev/null"
+
+# Filter out foxglove bridge spam (Advertising/Removing channel messages)
+full_cmd+=" | grep --line-buffered -v 'foxglove_bridge.*\(Advertising\|Removing\) channel'"
 
 # Apply filters: when -ef is used with pattern, we need both error keywords AND pattern
 if [ "$ERROR_CHECK" = true ]; then
