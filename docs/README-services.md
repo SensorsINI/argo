@@ -925,12 +925,3 @@ The Argo systemd service architecture provides:
 ✅ **Graceful shutdown** - Services stop cleanly in 1-2 seconds with proper signal handling
 
 All services work together to provide a reliable, safe autonomous sailboat control system.
-
-
-
-
-
-
-
-
-

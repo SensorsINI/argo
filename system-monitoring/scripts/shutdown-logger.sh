@@ -31,7 +31,23 @@ for service in argo_launch_standard argo_power_control argo_battery_water argo_b
                argo_radio_servo_module; do
     if systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
         STATE=$(systemctl is-active "$service.service" 2>/dev/null || echo "inactive")
-        TIMEOUT=$(systemctl show -p TimeoutStopUSec --value "$service.service" 2>/dev/null | sed 's/us$//' | awk '{printf "%.1fs", $1/1000000}')
+        # Get timeout - systemd returns it in various formats: "10s", "1min 30s", "infinity", or raw microseconds
+        TIMEOUT_RAW=$(systemctl show -p TimeoutStopUSec --value "$service.service" 2>/dev/null)
+        # Parse and normalize the timeout
+        if [[ "$TIMEOUT_RAW" == "infinity" ]]; then
+            TIMEOUT="∞"
+        elif [[ "$TIMEOUT_RAW" =~ ^[0-9]+s$ ]]; then
+            # Format like "10s" - already in seconds
+            TIMEOUT="$TIMEOUT_RAW"
+        elif [[ "$TIMEOUT_RAW" =~ ^[0-9]+min ]]; then
+            # Format like "1min 30s" - convert to seconds
+            TIMEOUT="$TIMEOUT_RAW"
+        elif [[ "$TIMEOUT_RAW" =~ ^[0-9]+$ ]]; then
+            # Raw microseconds - convert to seconds
+            TIMEOUT=$(echo "$TIMEOUT_RAW" | awk '{printf "%.1fs", $1/1000000}')
+        else
+            TIMEOUT="$TIMEOUT_RAW"
+        fi
         KILLMODE=$(systemctl show -p KillMode --value "$service.service" 2>/dev/null)
         log_msg "  $service: state=$STATE, timeout=$TIMEOUT, killmode=$KILLMODE"
     fi

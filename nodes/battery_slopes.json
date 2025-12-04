@@ -1,6 +1,7 @@
 {
-  "charging_slope_v_per_s": 8.45e-5,
-  "discharging_slope_v_per_s": -2.72e-4,
-  "timestamp": "2025-11-13T20:21:39.448730",
-  "sample_count": 60
+  "charging_slope_v_per_s": 0.000202,
+  "discharging_slope_v_per_s": -0.000157,
+  "timestamp": "2025-12-04T18:47:36.047229",
+  "sample_count": 1,
+  "ac_power_plug_in_time": "2025-12-04T18:47:36.043573"
 }
