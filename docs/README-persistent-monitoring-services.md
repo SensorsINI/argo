@@ -142,13 +142,13 @@ make -C system-monitoring install-all
 ### 1. Boot History Logger Service
 
 **Service**: `boot-history-logger.service`  
-**Script**: `system-monitoring/scripts/boot-logger.sh`  
+**Script**: `/usr/local/bin/boot-logger.sh`  
 **Installation**: `make -C system-monitoring install-boot-logger`
 
 **Log Files**:
-- `boot-history.log`
-- `dmesg-YYYYMMDD.log` (boot-time dmesg)
-- `journalctl-YYYYMMDD-HHMMSS.log` (boot-time journal)
+- `boot-history.log` - Boot event log (appends all boots)
+- `dmesg-YYYYMMDD.log` - Daily dmesg (appends all boots from that day)
+- `journalctl-YYYYMMDD-HHMMSS.log` - Per-boot journal backup (timestamped)
 
 **Purpose**: Logs boot events and captures boot-time system messages  
 **Features**:
@@ -156,6 +156,7 @@ make -C system-monitoring install-all
 - Captures dmesg output at boot time
 - Saves systemd journal for each boot
 - Runs once per boot via systemd service
+- **Installed**: 2025-10-08 to enable persistent boot logging across reboots
 
 ### 2. Cursor Process Monitor Service
 
@@ -299,10 +300,13 @@ ForwardToSyslog=no
 ```
 
 **Key Settings**:
-- **Storage**: `persistent` - Logs stored in `/var/log/journal/`
+- **Storage**: `persistent` - Logs stored in `/var/log/journal/` (changed from `volatile` on 2025-10-08 to preserve boot logs across reboots)
 - **SystemMaxUse**: `500M` - Maximum disk usage for journal
 - **MaxRetentionSec**: `2week` - Maximum retention time
 - **Compress**: `yes` - Compress old journal files
+
+**Configuration History**:
+- **2025-10-08**: Changed `Storage` from `volatile` to `persistent` to ensure boot logs survive reboots. Journal location: `/var/log/journal/ce4def9bd6a04cd594e94f8205bbe671/`
 
 ### Persistent Log Manager Configuration
 
@@ -498,6 +502,67 @@ du -sh /var/log.hdd/persistent/*
 
 # Clean old logs (be careful!)
 find /var/log.hdd/persistent/ -name "*.log" -mtime +30 -delete
+```
+
+### System Hang Diagnosis
+
+#### Case Study: Disk I/O Storm (October 7, 2025 ~08:59 AM)
+
+**Root Cause**: Disk I/O storm causing system hang
+
+**Timeline**:
+- **08:57:57**: Normal - Load 3.32, CPU 85%, I/O 3%
+- **08:58:39**: I/O storm begins - Load 6.62, CPU 97%, I/O 67%
+- **08:59:45**: Critical - Load 23.08, CPU 97%, I/O 67%
+- **Result**: System hung due to I/O wait
+
+**Contributing Factors**:
+- 67% I/O wait indicates all processes blocked on disk
+- Load jumped 7x (3.32 → 23.08) in 2 minutes
+- Likely causes:
+  - Heavy file indexing/search
+  - Log rotation or sync operations
+  - Database/cache updates
+- Low memory conditions (35MB free) may have triggered swapping
+
+#### Investigating System Hangs
+
+**Use These Commands**:
+```bash
+# Check boot history across reboots
+cat /var/log.hdd/persistent/boot-history.log
+
+# View journal from previous boots
+sudo journalctl --list-boots
+sudo journalctl -b -1  # Previous boot
+sudo journalctl -b -2  # Two boots ago
+
+# Check persistent dmesg logs
+cat /var/log.hdd/persistent/dmesg-$(date +%Y%m%d).log
+
+# View monitoring data before hang
+cat /var/log.hdd/persistent/orangepi-monitor-$(date +%Y%m%d).log.1
+```
+
+**What to Look For**:
+1. High I/O wait percentages (>50%)
+2. Load average spikes (>10)
+3. Memory exhaustion (free <50MB)
+4. OOM killer events
+5. Disk errors or timeouts
+6. Heavy cursor/indexing processes
+
+### Verification
+
+Test that logging works across reboots:
+```bash
+# Before reboot - note current boot ID
+sudo journalctl --list-boots
+
+# After reboot - verify previous boot is preserved
+sudo journalctl --list-boots
+sudo journalctl -b -1 | head -50
+cat /var/log.hdd/persistent/boot-history.log
 ```
 
 ## Integration with Argo Lifecycle Manager
