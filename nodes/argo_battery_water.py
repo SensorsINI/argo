@@ -116,6 +116,10 @@ BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression
 BATTERY_LIFETIME_MIN_SAMPLES = 5     # Minimum samples required for estimation
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
 
+# MP2672 CHG timer configuration (safety timer that disables charging after timeout)
+# Default: 20 hours (bits [2:1] = 10), can be disabled (00), 8hrs (01), or 12hrs (11)
+MP2672_CHG_TIMER_HOURS = 20.0  # Default 20-hour safety timer
+
 # Humidity alert threshold
 HUMIDITY_ALERT_THRESHOLD_PCT = 75.0  # %, triggers warning, makes node unhealthy
 
@@ -155,6 +159,7 @@ _HAS_MPL = False
 class BatteryWaterNode(ArgoBaseNode):
     def __init__(self, debug_mode=False):
         super().__init__('battery_water_node')
+        self.get_logger().info('=== BATTERY_WATER_NODE STARTUP ===')
         self.get_logger().info('Initializing Battery/Water node...')
 
         # Debug flag
@@ -210,6 +215,13 @@ class BatteryWaterNode(ArgoBaseNode):
         self._charging_conflict_log_interval = 60.0
         self._last_charging_conflict_log_time = 0.0
         
+        # AC power plug-in/plug-out tracking for MP2672 CHG timer monitoring
+        # Track when AC power is plugged in to monitor 20-hour safety timer
+        self._ac_power_plug_in_time = None  # Monotonic time when AC was plugged in (for calculations)
+        self._ac_power_plug_in_time_persistent = None  # Wall clock time when AC was plugged in (for persistence)
+        self._ac_power_plug_out_time_persistent = None  # Wall clock time when AC was unplugged (for persistence)
+        self._mp2672_chg_timer_hours = MP2672_CHG_TIMER_HOURS  # CHG timer duration (default 20h, can be read from MP2672)
+        
         # Battery lifetime estimation publisher
         self.pub_battery_lifetime_hours = self.create_publisher(
             Float32, 'battery_lifetime_hours', 10)
@@ -235,6 +247,8 @@ class BatteryWaterNode(ArgoBaseNode):
         self._latest_charging_status = None
         self._latest_ac_power_present = None
         self._latest_timestamp = None
+        # Track data staleness (when using last known values due to I2C failure)
+        self._data_stale = False
         # Derived diagnostics
         self._latest_voltage_slope_vph = None
         self._latest_charging_anomaly = False
@@ -270,6 +284,11 @@ class BatteryWaterNode(ArgoBaseNode):
             'mp2672_status': None,  # Dict with parsed status register (REG 03H)
             'mp2672_faults': None,  # Dict with parsed fault register (REG 04H)
             'mp2672_battery_missing_fault': False,  # BATTFLOAT_STAT from REG 03H
+            # I2C failure and data staleness tracking
+            'i2c_failure': False,  # True when critical I2C failure is active
+            'stale_data': False,  # True when using last known values due to I2C failure
+            # AC power plug-in tracking for MP2672 CHG timer
+            'charging_time_remaining_hours': None,  # Remaining time until CHG timer expires (None if AC not present or timer disabled)
             'timestamp': None
         }
         
@@ -329,6 +348,17 @@ class BatteryWaterNode(ArgoBaseNode):
         self._critical_i2c_failure = False
         self._adc_failure_timeout = 30.0  # Consider critical after 30s of ADC failures
         self._adc_failure_start_time = None
+        # Track last published I2C failure state to prevent topic spam (only publish on state changes)
+        self._last_published_i2c_failure_state = None  # None = never published, True/False = last published state
+        # Sustained recovery tracking - require multiple consecutive successful reads before declaring recovery
+        self._consecutive_successful_reads = 0  # Count of consecutive successful reads
+        self._recovery_required_reads = 10  # Require 10 consecutive successful reads (at 1Hz = 10 seconds)
+        self._recovery_start_time = None  # Time when recovery sequence started
+        
+        # I2C failure periodic republishing (using existing sensor read callbacks)
+        self._last_i2c_failure_republish_time = 0.0
+        self._i2c_failure_republish_interval = 5.0  # Republish every 5 seconds (both True and False states)
+        self._initial_republish_done = False  # Track if we've done initial republish for late-joining subscribers
 
         # Timing and change detection for optimized publishing
         self._startup_time = time.monotonic()
@@ -503,6 +533,13 @@ class BatteryWaterNode(ArgoBaseNode):
         # Read battery safety sensors (includes ADC, SHT45, GPIO, and lifetime estimation)
         self.read_battery_safety_sensors()
         
+        # Publish initial I2C failure state (False if I2C is working, which it should be after successful reads)
+        # This ensures late-joining subscribers (like power control) receive the current state
+        if self._last_published_i2c_failure_state is None:
+            # Never published before - publish current state
+            self._publish_i2c_failure(self._critical_i2c_failure, force=True)
+            self.get_logger().info(f"Published initial I2C failure state: {self._critical_i2c_failure}")
+        
         # Log initial status summary
         self.get_logger().info(
             f"Initial readings complete - Battery={self._latest_battery_voltage:.3f}V, "
@@ -516,14 +553,41 @@ class BatteryWaterNode(ArgoBaseNode):
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully and save slopes"""
+        self.get_logger().info('=== BATTERY_WATER_NODE SHUTDOWN START ===')
         self.get_logger().info(f"Received signal {signum}, saving slopes and shutting down...")
+        
+        # Set shutdown flags to stop both timer callbacks and main spin loop
+        self._shutdown_requested = True
+        self.shutdown_requested = True  # Flag checked by spin_once() loop
+        
+        # Cancel all timers immediately to prevent blocking I2C operations during shutdown
+        try:
+            if hasattr(self, 'sail_current_timer') and self.sail_current_timer is not None:
+                self.sail_current_timer.cancel()
+            if hasattr(self, 'battery_safety_timer') and self.battery_safety_timer is not None:
+                self.battery_safety_timer.cancel()
+            if hasattr(self, 'gpio_status_timer') and self.gpio_status_timer is not None:
+                self.gpio_status_timer.cancel()
+            if hasattr(self, 'retry_timer') and self.retry_timer is not None:
+                self.retry_timer.cancel()
+        except Exception as e:
+            self.get_logger().warn(f"Error cancelling timers during shutdown: {e}")
+        
+        # Save slopes
         try:
             self._save_battery_slopes()
         except Exception as e:
             self.get_logger().error(f"Error saving slopes during shutdown: {e}")
-        # Let ROS2 handle the actual shutdown
-        if rclpy.ok():
-            rclpy.shutdown()
+        
+        # Shutdown ROS2 context - this will cause spin_once() loop to exit
+        # The spin_once() loop checks both rclpy.ok() and shutdown_requested flag
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+                self.get_logger().info('=== BATTERY_WATER_NODE SHUTDOWN COMPLETE ===')
+        except Exception as e:
+            # Ignore errors - context may already be shutting down
+            print(f"Warning: Error during ROS2 shutdown: {e}")
     
     def _update_service_buffer(self):
         """Atomically update the service buffer with latest complete sensor values"""
@@ -551,6 +615,12 @@ class BatteryWaterNode(ArgoBaseNode):
                 'mp2672_status': getattr(self, '_mp2672_status_info', None),
                 'mp2672_faults': getattr(self, '_mp2672_fault_info', None),
                 'mp2672_battery_missing_fault': getattr(self, '_mp2672_battery_missing_fault', False),
+                # I2C failure and data staleness tracking
+                'i2c_failure': self._critical_i2c_failure,
+                'stale_data': self._data_stale,
+                # AC power plug-in tracking for MP2672 CHG timer
+                'charging_time_remaining_hours': self._calculate_charging_time_remaining(),
+                'battery_water_health': self.health_status,  # Include health status in buffer
                 'timestamp': time.monotonic()
             })
 
@@ -588,10 +658,13 @@ class BatteryWaterNode(ArgoBaseNode):
             return
         
         # All criteria met
-        self.set_healthy(f"Battery: {battery_voltage:.2f}V, No saltwater, Humidity: {humidity:.1f}%")
+        # Use generic details string to avoid logging on every update (actual values in combined sensor states log)
+        # The base class only logs when health_status or details change, so using a static string prevents spam
+        self.set_healthy("Battery OK, No saltwater, Humidity OK")
 
     def _cleanup_on_exit(self):
         """Battery/Water node specific cleanup on exit"""
+        self.get_logger().info('=== BATTERY_WATER_NODE CLEANUP ===')
         # Cancel any remaining timers
         if hasattr(self, 'sail_current_timer'):
             try:
@@ -687,12 +760,18 @@ class BatteryWaterNode(ArgoBaseNode):
             self.get_logger().error(f"Failed to write to CSV: {e}")
 
     def battery_status_callback(self, request, response):
-        """Service callback to provide latest battery and sensor status as JSON string"""
+        """Service callback to provide latest battery and sensor status as JSON string
+        
+        IMPORTANT: This callback is NON-BLOCKING - it only reads from the thread-safe buffer.
+        It never performs I2C operations, so it will always respond quickly even during I2C failures.
+        The buffer is updated asynchronously by timer callbacks running in separate threads.
+        """
         try:
             # Get current timestamp
             now = self.get_clock().now()
             
             # Use thread-safe double buffer to ensure consistent state
+            # Lock is held only for dictionary copy operation (microseconds) - never during I2C operations
             with self._buffer_lock:
                 buffer_copy = self._service_buffer.copy()
 
@@ -709,7 +788,7 @@ class BatteryWaterNode(ArgoBaseNode):
                 'humidity_alert': buffer_copy['humidity_alert'],
                 'charging_status': buffer_copy['charging_status'] if buffer_copy['charging_status'] is not None else False,
                 'ac_power_present': buffer_copy['ac_power_present'] if buffer_copy['ac_power_present'] is not None else False,
-                'battery_water_health': self.health_status,
+                'battery_water_health': buffer_copy.get('battery_water_health', 'UNKNOWN'),
                 'timestamp_sec': now.seconds_nanoseconds()[0],
                 'timestamp_nanosec': now.seconds_nanoseconds()[1],
                 'time_to_full_hours': buffer_copy['time_to_full_hours'],
@@ -722,7 +801,12 @@ class BatteryWaterNode(ArgoBaseNode):
                 'mp2672_available': buffer_copy.get('mp2672_available', False),
                 'mp2672_status': buffer_copy.get('mp2672_status'),
                 'mp2672_faults': buffer_copy.get('mp2672_faults'),
-                'mp2672_battery_missing_fault': buffer_copy.get('mp2672_battery_missing_fault', False)
+                'mp2672_battery_missing_fault': buffer_copy.get('mp2672_battery_missing_fault', False),
+                # I2C failure and data staleness
+                'i2c_failure': buffer_copy.get('i2c_failure', False),
+                'stale_data': buffer_copy.get('stale_data', False),
+                # AC power plug-in tracking for MP2672 CHG timer
+                'charging_time_remaining_hours': buffer_copy.get('charging_time_remaining_hours')
             }
             
             # Determine MP2672 fault condition summary for alerts
@@ -787,6 +871,14 @@ class BatteryWaterNode(ArgoBaseNode):
             # MP2672 battery missing/balance cable fault (from status register)
             if battery_data.get('mp2672_battery_missing_fault'):
                 active_alerts.append('⚠️ BATTERY MISSING OR BALANCE CABLE FAULT')
+            
+            # I2C failure alert (critical - battery monitoring unavailable)
+            if battery_data.get('i2c_failure'):
+                active_alerts.append('🔴 CRITICAL I2C FAILURE - Battery monitoring unavailable')
+            
+            # Stale data warning (data may be outdated due to I2C failure)
+            if battery_data.get('stale_data'):
+                active_alerts.append('⚠️ STALE DATA - Using last known values (I2C failure)')
 
             critical_alerts = " | ".join(
                 active_alerts) if active_alerts else None
@@ -799,26 +891,42 @@ class BatteryWaterNode(ArgoBaseNode):
             }
 
             # Convert to JSON string and return in Trigger response
+            # Use compact JSON (no indent) for faster serialization
             response.success = True
-            response.message = json.dumps(response_data, indent=2)
+            response.message = json.dumps(response_data, separators=(',', ':'))
 
-            self.get_logger().debug(f"Battery status service called - returning formatted data")
             return response
 
         except Exception as e:
-            self.get_logger().error(f"Error in battery status service: {e}")
+            self.get_logger().error(f"Error in battery status service: {e}", exc_info=True)
+            # Always return a response, even on error - don't let service hang
             response.success = False
-            response.message = f"Error: {str(e)}"
+            response.message = json.dumps({'error': str(e), 'i2c_failure': self._critical_i2c_failure, 'stale_data': self._data_stale})
             return response
     
     def _load_battery_slopes(self):
-        """Load persistent battery charging/discharging slopes from file"""
+        """Load persistent battery charging/discharging slopes and AC power plug-in time from file"""
         try:
             if os.path.exists(self._slopes_file_path):
                 with open(self._slopes_file_path, 'r') as f:
                     slopes_data = json.load(f)
                     self._charging_slope_v_per_s = slopes_data.get('charging_slope_v_per_s')
                     self._discharging_slope_v_per_s = slopes_data.get('discharging_slope_v_per_s')
+                    
+                    # Load AC power plug-in time (for persistence across reboots)
+                    ac_plug_in_iso = slopes_data.get('ac_power_plug_in_time')
+                    if ac_plug_in_iso:
+                        try:
+                            from datetime import datetime
+                            plug_in_dt = datetime.fromisoformat(ac_plug_in_iso)
+                            # Convert to monotonic time reference (approximate - use current time as reference)
+                            # This is an approximation since we can't convert wall clock to monotonic directly
+                            # We'll use the stored time to calculate elapsed time if AC is still present
+                            self._ac_power_plug_in_time_persistent = plug_in_dt.timestamp()
+                            self.get_logger().info(f"Loaded AC power plug-in time: {ac_plug_in_iso}")
+                        except Exception as e:
+                            self.get_logger().warning(f"Failed to parse AC power plug-in time: {e}")
+                    
                     self.get_logger().info(
                         f"Loaded battery slopes: charging={self._charging_slope_v_per_s:.6f} V/s, "
                         f"discharging={self._discharging_slope_v_per_s:.6f} V/s" if self._charging_slope_v_per_s and self._discharging_slope_v_per_s else
@@ -834,24 +942,46 @@ class BatteryWaterNode(ArgoBaseNode):
             # Check if slopes file already exists
             file_exists = os.path.exists(self._slopes_file_path)
             
-            # Only save if file doesn't exist OR we have at least minimum samples
-            should_save = not file_exists or len(self._voltage_samples) >= self.battery_lifetime_min_samples
-            
-            if not should_save:
-                self.get_logger().info(f"Skipping slope save - file exists and insufficient samples (< {self.battery_lifetime_min_samples})")
-                return
-            
-            # Load existing slopes to preserve valid data
+            # Load existing slopes and AC power plug-in time to preserve valid data
             existing_charging_slope = None
             existing_discharging_slope = None
+            existing_ac_plug_in_time = None
             if file_exists:
                 try:
                     with open(self._slopes_file_path, 'r') as f:
                         existing_data = json.load(f)
                         existing_charging_slope = existing_data.get('charging_slope_v_per_s')
                         existing_discharging_slope = existing_data.get('discharging_slope_v_per_s')
+                        # Load existing AC power plug-in time for comparison
+                        existing_ac_plug_in_iso = existing_data.get('ac_power_plug_in_time')
+                        if existing_ac_plug_in_iso:
+                            try:
+                                existing_ac_plug_in_time = datetime.fromisoformat(existing_ac_plug_in_iso).timestamp()
+                            except Exception:
+                                pass
                 except Exception as e:
                     self.get_logger().warning(f"Failed to load existing slopes: {e}")
+            
+            # Check if AC power plug-in time has changed (always save if it has, regardless of slopes)
+            ac_plug_in_time_changed = False
+            if self._ac_power_plug_in_time_persistent is None:
+                # AC power is not present - check if it was present before
+                if existing_ac_plug_in_time is not None:
+                    ac_plug_in_time_changed = True
+            else:
+                # AC power is present - check if plug-in time is different
+                if existing_ac_plug_in_time is None:
+                    ac_plug_in_time_changed = True
+                elif abs(self._ac_power_plug_in_time_persistent - existing_ac_plug_in_time) > 1.0:  # More than 1 second difference
+                    ac_plug_in_time_changed = True
+            
+            # Only save if file doesn't exist OR we have at least minimum samples OR AC power plug-in time changed
+            # AC power plug-in time changes must always be saved for CHG timer tracking
+            should_save = not file_exists or len(self._voltage_samples) >= self.battery_lifetime_min_samples or ac_plug_in_time_changed
+            
+            if not should_save:
+                self.get_logger().info(f"Skipping slope save - file exists and insufficient samples (< {self.battery_lifetime_min_samples})")
+                return
             
             # Validate that slopes are meaningful (not None, not zero, within reasonable range)
             # Use same minimum thresholds as in slope update to avoid saving near-zero slopes
@@ -880,8 +1010,9 @@ class BatteryWaterNode(ArgoBaseNode):
             final_charging_slope = self._charging_slope_v_per_s if valid_charging_slope else existing_charging_slope
             final_discharging_slope = self._discharging_slope_v_per_s if valid_discharging_slope else existing_discharging_slope
             
-            # Only proceed if we have at least one valid slope (new or existing)
-            if final_charging_slope is None and final_discharging_slope is None:
+            # Only proceed if we have at least one valid slope (new or existing) OR AC power plug-in time changed
+            # AC power plug-in time changes must always be saved for CHG timer tracking
+            if final_charging_slope is None and final_discharging_slope is None and not ac_plug_in_time_changed:
                 self.get_logger().info("No valid battery slopes to save (insufficient data or mixed charging states)")
                 return
             
@@ -908,7 +1039,8 @@ class BatteryWaterNode(ArgoBaseNode):
             discharging_changed = not slopes_equal(final_discharging_slope, existing_discharging_slope)
             
             # Only write file if there's an actual change OR if this is the first time (file doesn't exist)
-            if not file_exists or charging_changed or discharging_changed:
+            # OR if AC power plug-in time changed (must always save for CHG timer tracking)
+            if not file_exists or charging_changed or discharging_changed or ac_plug_in_time_changed:
                 # Format slope values to 3 significant digits in scientific notation
                 def format_slope_3_sig_digits(value):
                     """Format a slope value to exactly 3 significant digits in scientific notation"""
@@ -938,19 +1070,28 @@ class BatteryWaterNode(ArgoBaseNode):
                 charging_str = format_slope_3_sig_digits(final_charging_slope) if final_charging_slope is not None else None
                 discharging_str = format_slope_3_sig_digits(final_discharging_slope) if final_discharging_slope is not None else None
                 
-                # Build JSON manually to use formatted strings for slopes
-                json_lines = [
-                    '{',
-                    f'  "charging_slope_v_per_s": {charging_str if charging_str is not None else "null"},',
-                    f'  "discharging_slope_v_per_s": {discharging_str if discharging_str is not None else "null"},',
-                    f'  "timestamp": {json.dumps(datetime.now().isoformat())},',
-                    f'  "sample_count": {len(self._voltage_samples)}',
-                    '}'
-                ]
-                json_str = '\n'.join(json_lines)
+                # Build JSON data structure (use json.dump for proper formatting)
+                # Include AC power plug-in time for persistence across reboots
+                ac_plug_in_iso = None
+                if self._ac_power_plug_in_time_persistent is not None:
+                    try:
+                        ac_plug_in_iso = datetime.fromtimestamp(self._ac_power_plug_in_time_persistent).isoformat()
+                    except Exception:
+                        pass
                 
+                # Build data dictionary with formatted slope strings
+                json_data = {
+                    "charging_slope_v_per_s": float(charging_str) if charging_str is not None else None,
+                    "discharging_slope_v_per_s": float(discharging_str) if discharging_str is not None else None,
+                    "timestamp": datetime.now().isoformat(),
+                    "sample_count": len(self._voltage_samples)
+                }
+                if ac_plug_in_iso:
+                    json_data["ac_power_plug_in_time"] = ac_plug_in_iso
+                
+                # Write JSON with proper formatting using json.dump (avoids manual string building errors)
                 with open(self._slopes_file_path, 'w') as f:
-                    f.write(json_str)
+                    json.dump(json_data, f, indent=2)
                 
                 # Build descriptive log message
                 slope_info = []
@@ -1141,6 +1282,9 @@ class BatteryWaterNode(ArgoBaseNode):
 
     # ---------- I2C helpers ----------
     def _i2c_write(self, addr: int, byte_val: int) -> None:
+        # Skip I2C operations during shutdown to prevent blocking
+        if self._shutdown_requested:
+            raise RuntimeError('I2C operation skipped - shutdown in progress')
         if self.use_smbus2 and i2c_msg is not None:
             msg = i2c_msg.write(addr, bytes([byte_val & 0xFF]))
             with smbus2.SMBus(I2C_BUS_NUMBER) as b:
@@ -1149,6 +1293,9 @@ class BatteryWaterNode(ArgoBaseNode):
             raise RuntimeError('smbus2 required for this node')
 
     def _i2c_read(self, addr: int, n: int) -> list:
+        # Skip I2C operations during shutdown to prevent blocking
+        if self._shutdown_requested:
+            raise RuntimeError('I2C operation skipped - shutdown in progress')
         if self.use_smbus2 and i2c_msg is not None:
             r = i2c_msg.read(addr, n)
             with smbus2.SMBus(I2C_BUS_NUMBER) as b:
@@ -1158,6 +1305,9 @@ class BatteryWaterNode(ArgoBaseNode):
             raise RuntimeError('smbus2 required for this node')
 
     def _i2c_write_read(self, addr: int, write_byte: int, n: int) -> list:
+        # Skip I2C operations during shutdown to prevent blocking
+        if self._shutdown_requested:
+            raise RuntimeError('I2C operation skipped - shutdown in progress')
         if self.use_smbus2 and i2c_msg is not None:
             w = i2c_msg.write(addr, bytes([write_byte & 0xFF]))
             r = i2c_msg.read(addr, n)
@@ -1199,11 +1349,17 @@ class BatteryWaterNode(ArgoBaseNode):
         return crc & 0xFF
 
     def _read_sht45(self):
+        # Skip I2C operations during shutdown to prevent blocking
+        if self._shutdown_requested:
+            raise RuntimeError('SHT45 read skipped - shutdown in progress')
         # pure write command
         w = i2c_msg.write(self.sht_addr, [self.SHT45_HIGH_PRECISION_CMD])
         with smbus2.SMBus(I2C_BUS_NUMBER) as b:
             b.i2c_rdwr(w)
         time.sleep(self.SHT45_MEASUREMENT_DELAY)
+        # Check shutdown again before read (measurement delay may have allowed shutdown)
+        if self._shutdown_requested:
+            raise RuntimeError('SHT45 read skipped - shutdown in progress')
         # pure read of 6 bytes
         r = i2c_msg.read(self.sht_addr, 6)
         with smbus2.SMBus(I2C_BUS_NUMBER) as b:
@@ -1818,6 +1974,92 @@ class BatteryWaterNode(ArgoBaseNode):
         
         return charging_status, ac_power_present
 
+    # ---------- AC Power Plug-in/Plug-out Tracking for MP2672 CHG Timer ----------
+    def _track_ac_power_state_change(self, ac_power_present: Optional[bool]):
+        """Track AC power plug-in/plug-out events for MP2672 CHG timer monitoring"""
+        if ac_power_present is None:
+            return
+        
+        current_time = time.monotonic()
+        current_wall_time = time.time()
+        
+        # Detect state change
+        prev_ac_power = self._prev_ac_power_present
+        if prev_ac_power is None:
+            # First reading - check if AC is present and we have stored plug-in time (reboot case)
+            if ac_power_present and self._ac_power_plug_in_time_persistent is not None:
+                # AC is present and we have a stored plug-in time - restore it
+                # Calculate elapsed time since stored plug-in time
+                elapsed_since_plug_in = current_wall_time - self._ac_power_plug_in_time_persistent
+                # Also set monotonic time for consistency (though we use wall clock for calculations)
+                self._ac_power_plug_in_time = current_time
+                remaining = self._calculate_charging_time_remaining()
+                if remaining is not None:
+                    self.get_logger().info(
+                        f"AC power already present on startup - restored plug-in time "
+                        f"(elapsed: {elapsed_since_plug_in/3600:.2f}h, remaining: {remaining:.2f}h)")
+                else:
+                    self.get_logger().warning(
+                        f"AC power present but CHG timer has expired "
+                        f"(elapsed: {elapsed_since_plug_in/3600:.2f}h > {self._mp2672_chg_timer_hours:.1f}h)")
+            elif ac_power_present:
+                # AC is present but no stored time - record new plug-in
+                self._ac_power_plug_in_time = current_time
+                self._ac_power_plug_in_time_persistent = current_wall_time
+                self._ac_power_plug_out_time_persistent = None
+                self.get_logger().info("AC power plugged in - starting CHG timer")
+                # Save immediately to persist across reboots
+                self._save_battery_slopes()
+            # If AC not present, no action needed
+        elif prev_ac_power != ac_power_present:
+            # State changed
+            if ac_power_present:
+                # AC power plugged in
+                self._ac_power_plug_in_time = current_time
+                self._ac_power_plug_in_time_persistent = current_wall_time
+                self._ac_power_plug_out_time_persistent = None
+                self.get_logger().info(
+                    f"AC power plugged in - starting CHG timer ({self._mp2672_chg_timer_hours:.1f}h)")
+                # Save immediately to persist across reboots
+                self._save_battery_slopes()
+            else:
+                # AC power unplugged
+                self._ac_power_plug_out_time_persistent = current_wall_time
+                self._ac_power_plug_in_time = None
+                self._ac_power_plug_in_time_persistent = None
+                self.get_logger().info("AC power unplugged - CHG timer stopped")
+                # Save to clear plug-in time
+                self._save_battery_slopes()
+    
+    def _calculate_charging_time_remaining(self) -> Optional[float]:
+        """Calculate remaining time until MP2672 CHG timer expires
+        
+        Uses wall clock time for accuracy across reboots.
+        
+        Returns:
+            Remaining time in hours, or None if:
+            - AC power not present
+            - CHG timer is disabled
+            - Plug-in time not available
+        """
+        if self._ac_power_plug_in_time_persistent is None:
+            return None
+        
+        if self._mp2672_chg_timer_hours is None:
+            # CHG timer is disabled
+            return None
+        
+        # Use wall clock time for accuracy across reboots
+        current_wall_time = time.time()
+        elapsed_hours = (current_wall_time - self._ac_power_plug_in_time_persistent) / 3600.0
+        remaining_hours = self._mp2672_chg_timer_hours - elapsed_hours
+        
+        # Return None if timer has already expired (negative remaining time)
+        if remaining_hours < 0:
+            return None
+        
+        return remaining_hours
+
     # ---------- I2C Recovery Methods (similar to imu.py) ----------
     def _handle_io_error(self, error, sensor_name="I2C"):
         """Handle I2C IOError with health tracking and throttled logging"""
@@ -1841,6 +2083,14 @@ class BatteryWaterNode(ArgoBaseNode):
         
         # Check for critical I2C failure (ADC sensor failure = critical for battery monitoring)
         if sensor_name == "ADC sensors" or "ADC" in sensor_name:
+            # Reset recovery tracking on any new failure (interrupts recovery sequence)
+            if self._recovery_start_time is not None:
+                self.get_logger().warn(
+                    f"I2C recovery interrupted by new failure (had {self._consecutive_successful_reads} "
+                    f"consecutive successful reads)")
+                self._consecutive_successful_reads = 0
+                self._recovery_start_time = None
+            
             if self._adc_failure_start_time is None:
                 self._adc_failure_start_time = current_time
                 self.get_logger().warn("ADC failure detected - starting critical failure timer")
@@ -1850,6 +2100,7 @@ class BatteryWaterNode(ArgoBaseNode):
             if failure_duration >= self._adc_failure_timeout and not self._critical_i2c_failure:
                 self._critical_i2c_failure = True
                 self._publish_i2c_failure(True)
+                self._last_i2c_failure_republish_time = current_time  # Initialize republish timer
                 self.get_logger().error(
                     f"🔴 CRITICAL I2C FAILURE: ADC sensor has been failing for {failure_duration:.1f}s. "
                     f"Battery monitoring unavailable - controller should switch to RTH mode.")
@@ -1949,6 +2200,42 @@ class BatteryWaterNode(ArgoBaseNode):
                 self._last_successful_read_time = time.monotonic()
                 self._consecutive_io_errors = 0
                 
+                # Track sustained recovery - require multiple consecutive successful reads before clearing critical failure
+                if self._critical_i2c_failure:
+                    # We're in critical failure state - track consecutive successful reads
+                    if self._recovery_start_time is None:
+                        self._recovery_start_time = time.monotonic()
+                        self._consecutive_successful_reads = 0
+                        self.get_logger().info("I2C recovery sequence started (retry mode) - monitoring for sustained recovery...")
+                    
+                    self._consecutive_successful_reads += 1
+                    
+                    # Check if we have sustained recovery (enough consecutive successful reads)
+                    if self._consecutive_successful_reads >= self._recovery_required_reads:
+                        # Sustained recovery achieved - clear critical failure
+                        recovery_duration = time.monotonic() - self._recovery_start_time
+                        self._adc_failure_start_time = None
+                        self._critical_i2c_failure = False
+                        self._consecutive_successful_reads = 0
+                        self._recovery_start_time = None
+                        self._publish_i2c_failure(False)
+                        self._last_i2c_failure_republish_time = 0.0  # Reset republish timer
+                        self.get_logger().info(
+                            f"✅ I2C recovery: Sustained recovery achieved after {self._recovery_required_reads} "
+                            f"consecutive successful reads ({recovery_duration:.1f}s) - critical failure cleared")
+                    else:
+                        # Still in recovery sequence - log progress periodically
+                        if self._consecutive_successful_reads % 5 == 0:
+                            self.get_logger().info(
+                                f"I2C recovery progress (retry mode): {self._consecutive_successful_reads}/{self._recovery_required_reads} "
+                                f"consecutive successful reads")
+                else:
+                    # Not in critical failure - reset recovery tracking
+                    if self._adc_failure_start_time is not None:
+                        self._adc_failure_start_time = None
+                    self._consecutive_successful_reads = 0
+                    self._recovery_start_time = None
+                
                 # Automatic recovery on successful read
                 if not self.node_healthy:
                     self.node_healthy = True
@@ -1957,11 +2244,17 @@ class BatteryWaterNode(ArgoBaseNode):
                     self._recovery_attempt_count = 0
                     self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
         except Exception as e:
+            # CRITICAL: Call _handle_io_error to check for critical failure timeout
+            # This ensures the 30-second critical failure check happens even in retry mode
+            self._handle_io_error(e, "ADC sensors")
             # Continue in retry mode
             pass
         
         # Attempt SHT45 sensor recovery (non-blocking)
         self._attempt_sht45_recovery()
+        
+        # Periodically republish I2C failure state if in failure (uses existing timer)
+        self._maybe_republish_i2c_failure()
 
     # ---------- Test: RC decay of REFOUT on AIN3 with sampling & PNG ----------
     def _set_ain3_mode(self, sel_bits: int):
@@ -2129,18 +2422,68 @@ class BatteryWaterNode(ArgoBaseNode):
             fill = width
         return '[' + ('#' * fill) + ('-' * (width - fill)) + ']'
 
-    def _publish_i2c_failure(self, failed: bool):
-        """Publish I2C failure status to critical failure topic"""
+    def _publish_i2c_failure(self, failed: bool, force: bool = False):
+        """Publish I2C failure status to critical failure topic
+        
+        IMPORTANT: This method is THROTTLED - it only publishes when the state changes.
+        However, if force=True, it will republish even if state hasn't changed (for subscribers
+        that may have missed the initial message).
+        
+        Publishing occurs:
+        - When critical failure is detected (after 30s of ADC failures): publishes True
+        - When I2C recovers (sustained successful reads): publishes False
+        - Periodically when force=True (allows subscribers to catch up)
+        """
+        # Throttle: Only publish when state actually changes OR if forced
+        if not force and self._last_published_i2c_failure_state == failed:
+            # State hasn't changed and not forced - don't spam ROS topic
+            return
+        
         try:
+            # Check if publisher is ready (node must be fully initialized)
+            if not rclpy.ok() or self.pub_i2c_failure is None:
+                self.get_logger().warning("Cannot publish I2C failure status - publisher not ready")
+                return
+            
             msg = Bool(data=failed)
             self.pub_i2c_failure.publish(msg)
             self._i2c_failure_state = failed
+            self._last_published_i2c_failure_state = failed  # Track published state
+            
             if failed:
-                self.get_logger().error("Published CRITICAL I2C failure - controller should switch to RTH")
+                if force:
+                    self.get_logger().debug("Republished CRITICAL I2C failure (periodic update)")
+                else:
+                    self.get_logger().error("Published CRITICAL I2C failure - controller should switch to RTH")
             else:
-                self.get_logger().info("Published I2C recovery - critical failure cleared")
+                if force:
+                    self.get_logger().debug("Republished I2C failure state: False (periodic update)")
+                else:
+                    self.get_logger().info("Published I2C recovery - critical failure cleared")
         except Exception as e:
             self.get_logger().error(f"Error publishing I2C failure status: {e}")
+    
+    def _maybe_republish_i2c_failure(self):
+        """Periodically republish I2C failure state so subscribers can catch up if they missed initial message.
+        Called from existing sensor read callbacks - no separate timer needed.
+        
+        Republishes both True and False states periodically so late-joining subscribers (like topic echo)
+        can always see the current state."""
+        current_time = time.monotonic()
+        
+        # Always do initial republish once (for late-joining subscribers like power control)
+        if not self._initial_republish_done and self._last_published_i2c_failure_state is not None:
+            self._publish_i2c_failure(self._critical_i2c_failure, force=True)
+            self._last_i2c_failure_republish_time = current_time
+            self._initial_republish_done = True
+            self.get_logger().debug(f"Initial I2C failure state republished: {self._critical_i2c_failure}")
+            return
+        
+        # Periodic republish of current state (both True and False) so late-joining subscribers can catch up
+        if current_time - self._last_i2c_failure_republish_time >= self._i2c_failure_republish_interval:
+            # Republish current state (force=True to bypass throttling)
+            self._publish_i2c_failure(self._critical_i2c_failure, force=True)
+            self._last_i2c_failure_republish_time = current_time
     
     def _request_shutdown(self):
         """Request node shutdown due to critical sensor failure"""
@@ -2215,6 +2558,42 @@ class BatteryWaterNode(ArgoBaseNode):
             # Update successful read time
             self._last_successful_read_time = time.monotonic()
             
+            # Track sustained recovery - require multiple consecutive successful reads before clearing critical failure
+            if self._critical_i2c_failure:
+                # We're in critical failure state - track consecutive successful reads
+                if self._recovery_start_time is None:
+                    self._recovery_start_time = time.monotonic()
+                    self._consecutive_successful_reads = 0
+                    self.get_logger().info("I2C recovery sequence started - monitoring for sustained recovery...")
+                
+                self._consecutive_successful_reads += 1
+                
+                # Check if we have sustained recovery (enough consecutive successful reads)
+                if self._consecutive_successful_reads >= self._recovery_required_reads:
+                    # Sustained recovery achieved - clear critical failure
+                    recovery_duration = time.monotonic() - self._recovery_start_time
+                    self._adc_failure_start_time = None
+                    self._critical_i2c_failure = False
+                    self._consecutive_successful_reads = 0
+                    self._recovery_start_time = None
+                    self._publish_i2c_failure(False)
+                    self._last_i2c_failure_republish_time = 0.0  # Reset republish timer
+                    self.get_logger().info(
+                        f"✅ I2C recovery: Sustained recovery achieved after {self._recovery_required_reads} "
+                        f"consecutive successful reads ({recovery_duration:.1f}s) - critical failure cleared")
+                else:
+                    # Still in recovery sequence - log progress periodically
+                    if self._consecutive_successful_reads % 5 == 0:
+                        self.get_logger().info(
+                            f"I2C recovery progress: {self._consecutive_successful_reads}/{self._recovery_required_reads} "
+                            f"consecutive successful reads")
+            else:
+                # Not in critical failure - reset recovery tracking
+                if self._adc_failure_start_time is not None:
+                    self._adc_failure_start_time = None
+                self._consecutive_successful_reads = 0
+                self._recovery_start_time = None
+            
             # If we were unhealthy but now have successful reads, recover to normal mode
             if not self.node_healthy:
                 self.node_healthy = True
@@ -2235,6 +2614,9 @@ class BatteryWaterNode(ArgoBaseNode):
             
             # Update service buffer with latest sail current
             self._update_service_buffer()
+            
+            # Periodically republish I2C failure state if in failure (uses existing timer)
+            self._maybe_republish_i2c_failure()
             
         except Exception as e:
             self._handle_io_error(e, "ADC (sail current)")
@@ -2261,12 +2643,18 @@ class BatteryWaterNode(ArgoBaseNode):
             # Update successful read time for critical sensors
             self._last_successful_read_time = time.monotonic()
             
+            # Publish initial I2C failure state if never published before (for late-joining subscribers)
+            if self._last_published_i2c_failure_state is None:
+                self._publish_i2c_failure(self._critical_i2c_failure, force=True)
+                self.get_logger().info(f"Published initial I2C failure state (from sensor read): {self._critical_i2c_failure}")
+            
             # Reset ADC failure timer on successful read
             if self._adc_failure_start_time is not None:
                 self._adc_failure_start_time = None
                 if self._critical_i2c_failure:
                     self._critical_i2c_failure = False
                     self._publish_i2c_failure(False)
+                    self._last_i2c_failure_republish_time = 0.0  # Reset republish timer
                     self.get_logger().info("✅ I2C recovery: ADC sensor communication restored - critical failure cleared")
             
             # If we were unhealthy but now have successful reads, recover to normal mode
@@ -2281,6 +2669,7 @@ class BatteryWaterNode(ArgoBaseNode):
             self._latest_battery_voltage = battery_voltage
             self._latest_saltwater_voltage = saltwater_voltage
             adc_read_successful = True
+            self._data_stale = False  # Data is fresh
             
         except Exception as e:
             self._handle_io_error(e, "ADC sensors")
@@ -2289,6 +2678,7 @@ class BatteryWaterNode(ArgoBaseNode):
             # Use last known good values (or 0.0 if never read)
             battery_voltage = self._latest_battery_voltage if self._latest_battery_voltage > 0 else 0.0
             saltwater_voltage = self._latest_saltwater_voltage if self._latest_saltwater_voltage >= 0 else 0.0
+            self._data_stale = True  # Mark data as stale
             self.get_logger().warn(
                 f"ADC read failed, using last known values: battery={battery_voltage:.3f}V, "
                 f"saltwater={saltwater_voltage:.3f}V (data may be stale)")
@@ -2321,7 +2711,32 @@ class BatteryWaterNode(ArgoBaseNode):
         # Check MP2672 availability and read charging status (I2C primary if host control enabled, GPIO fallback)
         if MP2672_HOST_CONTROL:
             self._check_mp2672_availability()
+            # Read MP2672 CHG timer configuration if available
+            if self.mp2672_available:
+                reg02_info = self._read_mp2672_register_02()
+                if reg02_info is not None:
+                    chg_tmr = reg02_info.get('chg_tmr')
+                    # Map CHG timer bits to hours: 00=disable, 01=8hrs, 10=20hrs, 11=12hrs
+                    chg_timer_map = {0b00: None, 0b01: 8.0, 0b10: 20.0, 0b11: 12.0}
+                    self._mp2672_chg_timer_hours = chg_timer_map.get(chg_tmr, MP2672_CHG_TIMER_HOURS)
+        
         charging_status, ac_power_present = self._read_charging_status()
+        
+        # Track AC power plug-in/plug-out events for MP2672 CHG timer monitoring
+        self._track_ac_power_state_change(ac_power_present)
+        
+        # Calculate remaining charging time (for service response)
+        charging_time_remaining = self._calculate_charging_time_remaining()
+        if charging_time_remaining is not None:
+            # Warn if timer is getting low (< 2 hours remaining)
+            if charging_time_remaining < 2.0:
+                self.get_logger().warning(
+                    f"⚠️ MP2672 CHG timer low: {charging_time_remaining:.2f} hours remaining "
+                    f"(timer will expire and disable charging after {self._mp2672_chg_timer_hours:.1f}h)")
+            elif charging_time_remaining < 4.0:
+                self.get_logger().info(
+                    f"MP2672 CHG timer: {charging_time_remaining:.2f} hours remaining")
+        
         self._latest_charging_status = charging_status
         self._latest_ac_power_present = ac_power_present
         
@@ -2415,6 +2830,9 @@ class BatteryWaterNode(ArgoBaseNode):
                         self.get_logger().info(f"AC power status changed: {self._prev_ac_power_present} -> {ac_power_present}")
             except Exception:
                 pass
+
+        # Periodically republish I2C failure state if in failure (uses existing timer)
+        self._maybe_republish_i2c_failure()
 
         # Update previous values
         self._prev_battery_voltage = battery_voltage
@@ -2593,11 +3011,11 @@ class BatteryWaterNode(ArgoBaseNode):
 
     def _log_sensor_states(self, battery_voltage, battery_remaining_pct, saltwater_voltage,
                           sail_current, temperature, humidity, charging_status, ac_power_present):
-        """Log sensor states for debugging"""
+        """Log sensor states and health status combined (throttled to once per minute)"""
         current_time = time.monotonic()
         time_since_last_log = current_time - self._last_log_time
         
-        if time_since_last_log >= 30.0:
+        if time_since_last_log >= 60.0:  # Throttle to once per minute
             battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
             temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
             
@@ -2634,10 +3052,16 @@ class BatteryWaterNode(ArgoBaseNode):
                 ac_icon = "⚡" if ac_power_present else "🔌"
                 charging_str = f", AC={ac_icon}{ac_power_present}"
 
+            # Include health status in combined log
+            health_status_str = ""
+            if hasattr(self, 'health_status') and hasattr(self, 'health_details'):
+                health_icon = "🟢" if self.health_status else "🔴"
+                health_status_str = f" | Health: {health_icon} {self.health_details}"
+            
             self.get_logger().info(
-                f"Sensor states: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
+                f"Status: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
                 f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
-                f"{temp_humid_str}{charging_str}{slope_str}{lifetime_str}"
+                f"{temp_humid_str}{charging_str}{slope_str}{lifetime_str}{health_status_str}"
             )
             self._last_log_time = current_time
 
@@ -2680,12 +3104,50 @@ HARDWARE:
     parser.add_argument('--test-adc', action='store_true',
                         help='Perform RC decay test on AIN3 and save plot (requires matplotlib)')
     
+    # Use custom spin loop instead of ArgoBaseNode.run_node() for better shutdown responsiveness
+    node = None
     try:
-        ArgoBaseNode.run_node(BatteryWaterNode, args, parser)
+        # Parse arguments
+        parsed_args, unknown_args = parser.parse_known_args(args)
+        
+        # Initialize ROS2
+        rclpy.init(args=unknown_args)
+        
+        # Create node
+        node = BatteryWaterNode()
+        
+        # Custom spin loop with frequent shutdown checks
+        # This allows signal handler to break the loop quickly instead of waiting for rclpy.spin()
+        while rclpy.ok() and not node.shutdown_requested:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        
+    except KeyboardInterrupt:
+        if node:
+            node.get_logger().info("Keyboard interrupt, shutting down gracefully...")
+    except rclpy.executors.ExternalShutdownException:
+        if node:
+            node.get_logger().info("External shutdown received, exiting gracefully...")
     except Exception as e:
         print(f"CRITICAL: Failed to initialize Battery/Water node: {e}")
         print("CRITICAL: Check I2C permissions and hardware connections.")
+        if node:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
         sys.exit(1)
+    finally:
+        # Clean shutdown
+        if node:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+        
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
