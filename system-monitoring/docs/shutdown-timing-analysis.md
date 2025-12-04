@@ -121,24 +121,13 @@ The logger itself was killed before capturing the full shutdown. Improvements:
 
 ## Resolution (2025-12-04)
 
-### Fix Applied
+### Fix 1: Battery and BNO085 Services (60-90s hang)
 
 Removed `Before=shutdown.target` and `DefaultDependencies=no` from both services:
 - `argo_battery_water.service`
 - `argo_bno085.service`
 
-### Testing Results
-
-**Individual service stops** (verified BEFORE fix):
-```bash
-$ time sudo systemctl stop argo_battery_water.service
-real    0m0.681s  ✓
-
-$ time sudo systemctl stop argo_bno085.service
-real    0m1.008s  ✓
-```
-
-**After fix** (services stop normally):
+**Individual service stops** (verified):
 ```bash
 $ time sudo systemctl stop argo_battery_water.service
 real    0m0.766s  ✓
@@ -147,21 +136,51 @@ $ time sudo systemctl stop argo_bno085.service
 real    0m1.094s  ✓
 ```
 
+### Fix 2: Health Monitor Service (15s hang - 2025-12-04 19:07)
+
+**Problem**: `argo_health_monitor` was being force-killed after 15s timeout during shutdown.
+
+**Root Cause**:
+1. Used blocking `rclpy.spin()` which doesn't respond to signals quickly
+2. `subprocess.run(['ros2', 'node', 'list'], timeout=5.0)` calls blocked during shutdown
+3. Signal handler never executed because subprocess was blocking
+
+**Solution**:
+1. Replace `rclpy.spin()` with `rclpy.spin_once()` loop (same pattern as battery node)
+2. Add signal handlers for SIGTERM/SIGINT with `shutdown_requested` flag
+3. Reduce subprocess timeouts: 5s → 2s (main loop), 2s → 1s (service callbacks)
+4. Add early exit checks for `shutdown_requested` before blocking operations
+
+**Testing Results**:
+```bash
+# Before fix:
+$ time sudo systemctl stop argo_health_monitor.service
+real    0m15.299s  ❌ (force-killed with SIGKILL)
+
+# After fix:
+$ time sudo systemctl stop argo_health_monitor.service
+real    0m0.570s  ✅ (graceful shutdown, no SIGKILL)
+```
+
+### Updated Service Status
+
+| Service | Timeout | Shutdown Time | Status |
+|---------|---------|---------------|--------|
+| argo_battery_water | 10s | 0.77s | ✅ Fixed |
+| argo_bno085 | 10s | 1.09s | ✅ Fixed |
+| argo_health_monitor | 15s | 0.57s | ✅ Fixed |
+| argo_power_control | 30s | ~1s | ✅ Fixed (previous commit) |
+
 ### Expected Shutdown Timing
 
-- **Previous**: 60-90 seconds (services hung waiting for dead ROS2)
-- **Now**: 10-15 seconds (services stop gracefully while ROS2 alive)
-
-### Safety Verification
-
-- ✅ **Power relay control**: Unchanged, handled by independent `argo_poweroff.shutdown` hook
-- ✅ **Persistent logging**: Unchanged, both services use `tee -a /var/log.hdd/persistent/...`
-- ✅ **Graceful ROS2 cleanup**: Now works properly (ROS2 alive during shutdown)
+- **Before all fixes**: 60-90 seconds (services hung)
+- **After Fix 1**: ~30 seconds (health monitor still force-killed)
+- **After Fix 2**: < 10 seconds (all services graceful)
 
 ### Next System Shutdown
 
-Monitor with shutdown logger to verify total shutdown time < 20 seconds:
+Monitor with shutdown logger to verify total shutdown time < 10 seconds:
 ```bash
 # After next shutdown, check:
-ls -ltr /var/log.hdd/persistent/shutdown-*.log | tail -1
+tail /var/log.hdd/persistent/shutdown-*.log | tail -1
 ```
