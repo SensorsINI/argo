@@ -55,7 +55,7 @@ IS_ORANGEPI := $(shell if [ -f /proc/device-tree/compatible ] && grep -q "orange
 REQUIREMENTS_FILE := $(if $(filter 1,$(IS_ORANGEPI)),requirements.txt,requirements-host.txt)
 PLATFORM_NAME := $(if $(filter 1,$(IS_ORANGEPI)),Orange Pi Robot,Host Computer)
 
-.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks freeze-mac-address install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm
+.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks freeze-mac-address install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm install-watchdog status-watchdog disable-watchdog test-watchdog
 
 VM_REQUIREMENTS_FILE := requirements-host.txt
 VM_INSTALL_SCOPE := $(shell if [ $$(id -u) -eq 0 ]; then printf 'system'; else printf 'user'; fi)
@@ -114,6 +114,12 @@ help:
 	@echo "  setup-wifi-networks  - Configure WiFi networks with proper priority order"
 	@echo "  install-network-improvements - Install WiFi reconnection system and NetworkManager optimizations"
 	@echo "  freeze-mac-address  - Freeze WiFi MAC address to previous value (from logs) or specified value"
+	@echo ""
+	@echo "Hardware Watchdog:"
+	@echo "  install-watchdog     - Install hardware watchdog protection (requires HDMI console)"
+	@echo "  status-watchdog      - Show watchdog status and configuration"
+	@echo "  disable-watchdog     - Disable hardware watchdog"
+	@echo "  test-watchdog        - Test watchdog functionality (causes reboot!)"
 	@echo ""
 	@echo "Network Testing:"
 	@echo "  test-wifi-reconnection - Start WiFi reconnection test (3min, background)"
@@ -979,6 +985,104 @@ wifi-reconnect-start:
 	@echo "Starting WiFi reconnection service..."
 	@sudo systemctl start argo_wifi_reconnect.timer
 	@echo "✅ WiFi reconnection service started"
+
+# ==================== HARDWARE WATCHDOG ====================
+
+install-watchdog:
+	@echo "Installing hardware watchdog protection..."
+	@if [ -f scripts/install_watchdog.sh ]; then \
+		./scripts/install_watchdog.sh; \
+	else \
+		echo "❌ Error: scripts/install_watchdog.sh not found!"; \
+		exit 1; \
+	fi
+
+status-watchdog:
+	@echo "Hardware Watchdog Status"
+	@echo "======================="
+	@echo ""
+	@echo "🔍 Hardware Device:"
+	@if [ -e /dev/watchdog ]; then \
+		echo "  ✅ /dev/watchdog exists"; \
+		ls -l /dev/watchdog | sed 's/^/     /'; \
+	else \
+		echo "  ❌ /dev/watchdog not found"; \
+	fi
+	@echo ""
+	@echo "🔍 Kernel Driver:"
+	@if dmesg | grep -q "sunxi-wdt"; then \
+		echo "  ✅ sunxi-wdt driver loaded"; \
+		dmesg | grep "sunxi-wdt" | tail -1 | sed 's/^/     /'; \
+	else \
+		echo "  ❌ sunxi-wdt driver not found"; \
+	fi
+	@echo ""
+	@echo "🔍 Systemd Configuration:"
+	@if grep -q "^RuntimeWatchdogSec=" /etc/systemd/system.conf; then \
+		echo "  ✅ Watchdog ENABLED"; \
+		grep "^RuntimeWatchdogSec" /etc/systemd/system.conf | sed 's/^/     /'; \
+		grep "^RebootWatchdogSec" /etc/systemd/system.conf | sed 's/^/     /'; \
+		grep "^WatchdogDevice" /etc/systemd/system.conf | sed 's/^/     /'; \
+	else \
+		echo "  ⚪ Watchdog DISABLED (not configured)"; \
+	fi
+	@echo ""
+	@echo "🔍 Watchdog Daemon:"
+	@if systemctl is-masked --quiet watchdog.service 2>/dev/null; then \
+		echo "  ✅ watchdog.service masked (correct - we use systemd watchdog)"; \
+	elif systemctl is-active --quiet watchdog.service 2>/dev/null; then \
+		echo "  ⚠️  watchdog.service ACTIVE (may conflict with systemd watchdog)"; \
+	else \
+		echo "  ⚪ watchdog.service inactive"; \
+	fi
+	@echo ""
+	@echo "📖 Documentation:"
+	@echo "  • docs/README-watchdog.md - Watchdog setup guide"
+	@echo "  • .cursor/rules/argo-watchdog-configuration.mdc - Configuration rules"
+
+disable-watchdog:
+	@echo "Disabling hardware watchdog..."
+	@if [ ! -f /etc/systemd/system.conf ]; then \
+		echo "❌ /etc/systemd/system.conf not found"; \
+		exit 1; \
+	fi
+	@echo "Creating backup..."
+	@sudo cp /etc/systemd/system.conf /etc/systemd/system.conf.bak-$$(date +%Y%m%d_%H%M%S)
+	@echo "Commenting out watchdog settings..."
+	@sudo sed -i 's/^RuntimeWatchdogSec=/#RuntimeWatchdogSec=/' /etc/systemd/system.conf
+	@sudo sed -i 's/^RebootWatchdogSec=/#RebootWatchdogSec=/' /etc/systemd/system.conf
+	@sudo sed -i 's/^WatchdogDevice=/#WatchdogDevice=/' /etc/systemd/system.conf
+	@echo "Reloading systemd configuration..."
+	@sudo systemctl daemon-reexec
+	@echo "✅ Hardware watchdog disabled"
+	@echo ""
+	@echo "Current status:"
+	@make status-watchdog
+
+test-watchdog:
+	@echo "=================================================================="
+	@echo "⚠️  WARNING: WATCHDOG REBOOT TEST"
+	@echo "=================================================================="
+	@echo ""
+	@echo "This will trigger a kernel panic to test watchdog functionality."
+	@echo "If watchdog is working, system will reboot within ~20 seconds."
+	@echo "If watchdog is NOT working, system will hang indefinitely."
+	@echo ""
+	@echo "⚠️  Only run this test if:"
+	@echo "  • Watchdog is installed and active"
+	@echo "  • You have console access (HDMI monitor)"
+	@echo "  • You can afford a system reboot"
+	@echo ""
+	@read -p "Are you SURE you want to trigger a reboot test? (yes/no): " confirm; \
+	if [ "$$confirm" = "yes" ]; then \
+		echo ""; \
+		echo "Triggering kernel panic in 3 seconds..."; \
+		sleep 1; echo "2..."; sleep 1; echo "1..."; sleep 1; \
+		echo "Triggering panic NOW!"; \
+		echo c | sudo tee /proc/sysrq-trigger; \
+	else \
+		echo "Test cancelled."; \
+	fi
 
 # ==================== SYSTEM MONITORING SERVICES ====================
 
