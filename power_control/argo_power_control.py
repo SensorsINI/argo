@@ -337,6 +337,10 @@ LOW_BATTERY_THRESHOLD_V = 7.6      # Low battery warning threshold (SOS LED patt
 CRITICAL_BATTERY_THRESHOLD_V = 7.2  # Critical battery voltage threshold (halt system)
 BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage interval (seconds)
 BATTERY_LOG_THRESHOLD_V = 0.05     # Only log battery voltage if it changes by more than 50mV
+# AC power timeout: If AC power was plugged in more than this time ago, charger may have timed out
+AC_POWER_TIMEOUT_HOURS = 20.0       # Hours - if AC power plug-in time is older than this, trigger shutdown
+AC_POWER_TIMEOUT_S = AC_POWER_TIMEOUT_HOURS * 3600.0  # Convert to seconds
+BATTERY_SLOPES_JSON_PATH = Path(__file__).parent.parent / 'nodes' / 'battery_slopes.json'  # Path to battery slopes JSON file
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
 
@@ -3422,36 +3426,125 @@ class PowerController(ArgoBaseNode):
 
                     # Check for critical battery first (highest priority)
                     if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
-                        if not self.critical_battery_detected:
-                            # Always log critical battery events regardless of voltage change threshold
-                            charging_str = ""
-                            if charging_status is not None or ac_power_present is not None:
-                                charging_parts = []
-                                if ac_power_present is not None:
-                                    charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
-                                if charging_status is not None:
-                                    charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
-                                charging_str = f", {', '.join(charging_parts)}"
+                        # CRITICAL FIX: If AC power is present and charging is active, don't trigger shutdown
+                        # The battery is being charged and will recover - shutdown is not needed
+                        # Use topic value (ac_power) for faster updates, fallback to service value
+                        is_in_charging_state = (charging_status is True) or (ac_power is True)
+                        
+                        # Check if AC power plug-in time has exceeded timeout (charger may have timed out)
+                        ac_power_timed_out, plug_in_time_str = self._check_ac_power_timeout()
+                        
+                        if is_in_charging_state and not ac_power_timed_out:
+                            # AC power present and charging active - battery will recover, don't shutdown
+                            if self.critical_battery_detected:
+                                # Critical battery was previously detected but AC power is now present - clear the flag
+                                charging_str = ""
+                                if charging_status is not None or ac_power_present is not None:
+                                    charging_parts = []
+                                    if ac_power_present is not None:
+                                        charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
+                                    if charging_status is not None:
+                                        charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
+                                    charging_str = f", {', '.join(charging_parts)}"
+                                
+                                self.get_logger().info(
+                                    f"CRITICAL BATTERY FLAG CLEARED - AC POWER DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
+                                self.get_logger().info(
+                                    "Battery is being charged - critical battery shutdown cancelled. Voltage will recover during charging.")
+                                self.critical_battery_detected = False
+                                self._clear_critical_battery_flag()
+                                # Resume heartbeat - let charge state pattern handle LED indication
+                                self.resume_heartbeat(reason="ac_power_detected_during_critical")
+                            elif not self.critical_battery_detected:
+                                # First time detecting critical voltage with AC power present
+                                charging_str = ""
+                                if charging_status is not None or ac_power_present is not None:
+                                    charging_parts = []
+                                    if ac_power_present is not None:
+                                        charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
+                                    if charging_status is not None:
+                                        charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
+                                    charging_str = f", {', '.join(charging_parts)}"
+                                
+                                self.get_logger().warning(
+                                    f"CRITICAL BATTERY VOLTAGE DETECTED but AC POWER PRESENT: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
+                                self.get_logger().warning(
+                                    "Battery is being charged - shutdown cancelled. Voltage will recover during charging.")
+                                # Don't set critical_battery_detected flag - allow normal operation to continue
+                                # Don't pause heartbeat - let charge state pattern handle LED indication
+                                # Don't stop charge state pattern - it should continue showing charging status
+                            # Continue monitoring - voltage should increase during charging
+                        elif is_in_charging_state and ac_power_timed_out:
+                            # AC power is present but charger has timed out (> 20h) - trigger shutdown
+                            if not self.critical_battery_detected:
+                                charging_str = ""
+                                if charging_status is not None or ac_power_present is not None:
+                                    charging_parts = []
+                                    if ac_power_present is not None:
+                                        charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
+                                    if charging_status is not None:
+                                        charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
+                                    charging_str = f", {', '.join(charging_parts)}"
+                                
+                                hours_ago = (time.time() - datetime.fromisoformat(plug_in_time_str).timestamp()) / 3600.0 if plug_in_time_str else None
+                                hours_str = f" ({hours_ago:.1f}h ago)" if hours_ago else ""
+                                
+                                self.get_logger().error(
+                                    f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
+                                self.get_logger().error(
+                                    f"AC POWER TIMEOUT: Charger plugged in {hours_ago:.1f}h ago (timeout: {AC_POWER_TIMEOUT_HOURS}h) - "
+                                    f"charger may have timed out. Shutdown required to allow user to replug charger.")
+                                self.critical_battery_detected = True
+                                # Pause heartbeat for critical battery
+                                self.pause_heartbeat(reason="critical_battery")
+                                # Stop SOS pattern if running (critical takes priority)
+                                if self.sos_led_active:
+                                    self.sos_led_active = False
+                                # Stop I2C failure SOS pattern if running (critical takes priority)
+                                if self.i2c_failure_sos_active:
+                                    self.i2c_failure_sos_active = False
+                                # Stop charge state pattern if running (critical takes priority)
+                                if self.charge_state_led_active:
+                                    self.charge_state_led_active = False
+                                    self.charging_state_active = False
+                                    # Immediately turn off charge state LED
+                                    led_setter = self._get_charge_state_led_setter()
+                                    led_setter(False)
+                                self.initiate_critical_battery_halt(
+                                    battery_voltage, 
+                                    reason=f"ac_power_timeout_{hours_ago:.1f}h" if hours_ago else "ac_power_timeout")
+                        else:
+                            # No AC power or not charging - critical battery shutdown is needed
+                            if not self.critical_battery_detected:
+                                # Always log critical battery events regardless of voltage change threshold
+                                charging_str = ""
+                                if charging_status is not None or ac_power_present is not None:
+                                    charging_parts = []
+                                    if ac_power_present is not None:
+                                        charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
+                                    if charging_status is not None:
+                                        charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
+                                    charging_str = f", {', '.join(charging_parts)}"
 
-                            self.get_logger().error(
-                                f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
-                            self.critical_battery_detected = True
-                            # Pause heartbeat for critical battery
-                            self.pause_heartbeat(reason="critical_battery")
-                            # Stop SOS pattern if running (critical takes priority)
-                            if self.sos_led_active:
-                                self.sos_led_active = False
-                            # Stop I2C failure SOS pattern if running (critical takes priority)
-                            if self.i2c_failure_sos_active:
-                                self.i2c_failure_sos_active = False
-                            # Stop charge state pattern if running (critical takes priority)
-                            if self.charge_state_led_active:
-                                self.charge_state_led_active = False
-                                self.charging_state_active = False
-                                # Immediately turn off charge state LED
-                                led_setter = self._get_charge_state_led_setter()
-                                led_setter(False)
-                            self.initiate_critical_battery_halt(battery_voltage)
+                                self.get_logger().error(
+                                    f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
+                                self.critical_battery_detected = True
+                                # Pause heartbeat for critical battery
+                                self.pause_heartbeat(reason="critical_battery")
+                                # Stop SOS pattern if running (critical takes priority)
+                                if self.sos_led_active:
+                                    self.sos_led_active = False
+                                # Stop I2C failure SOS pattern if running (critical takes priority)
+                                if self.i2c_failure_sos_active:
+                                    self.i2c_failure_sos_active = False
+                                # Stop charge state pattern if running (critical takes priority)
+                                if self.charge_state_led_active:
+                                    self.charge_state_led_active = False
+                                    self.charging_state_active = False
+                                    # Immediately turn off charge state LED
+                                    led_setter = self._get_charge_state_led_setter()
+                                    led_setter(False)
+                                self.initiate_critical_battery_halt(battery_voltage)
 
                     # Check for low battery (SOS warning)
                     # SOS pattern only shows when AC power is NOT present
@@ -3746,6 +3839,45 @@ class PowerController(ArgoBaseNode):
 
         self.get_logger().info("WiFi connectivity monitoring thread stopped")
 
+    def _check_ac_power_timeout(self) -> tuple[bool, Optional[str]]:
+        """Check if AC power plug-in time is older than AC_POWER_TIMEOUT_HOURS
+        
+        Returns:
+            tuple: (is_timed_out: bool, plug_in_time_str: Optional[str])
+                - is_timed_out: True if AC power was plugged in more than AC_POWER_TIMEOUT_HOURS ago
+                - plug_in_time_str: ISO format timestamp string of when AC power was plugged in, or None if not found
+        """
+        try:
+            if not BATTERY_SLOPES_JSON_PATH.exists():
+                self.get_logger().debug(f"Battery slopes file not found: {BATTERY_SLOPES_JSON_PATH}")
+                return False, None
+            
+            with open(BATTERY_SLOPES_JSON_PATH, 'r') as f:
+                slopes_data = json.load(f)
+            
+            plug_in_time_str = slopes_data.get('ac_power_plug_in_time')
+            if not plug_in_time_str:
+                self.get_logger().debug("No ac_power_plug_in_time found in battery_slopes.json")
+                return False, None
+            
+            # Parse ISO format timestamp
+            plug_in_time = datetime.fromisoformat(plug_in_time_str)
+            time_since_plug_in = time.time() - plug_in_time.timestamp()
+            
+            is_timed_out = time_since_plug_in > AC_POWER_TIMEOUT_S
+            
+            if is_timed_out:
+                hours_ago = time_since_plug_in / 3600.0
+                self.get_logger().warning(
+                    f"AC power plug-in time exceeded timeout: {plug_in_time_str} "
+                    f"({hours_ago:.1f} hours ago, timeout: {AC_POWER_TIMEOUT_HOURS}h)")
+            
+            return is_timed_out, plug_in_time_str
+            
+        except (json.JSONDecodeError, KeyError, ValueError, OSError) as e:
+            self.get_logger().debug(f"Error checking AC power timeout: {e}")
+            return False, None
+
     def _call_battery_service(self) -> Optional[Dict[str, Any]]:
         """Call argo_battery_water service to get current battery data using rclpy"""
         success, message = self._call_trigger_service(
@@ -3972,8 +4104,12 @@ class PowerController(ArgoBaseNode):
             failures += 1
         return failures
 
-    def show_critical_battery_confirmation_dialog(self, battery_voltage):
+    def show_critical_battery_confirmation_dialog(self, battery_voltage, reason=None):
         """Show desktop confirmation dialog for critical battery shutdown
+
+        Args:
+            battery_voltage: Battery voltage (for display)
+            reason: Optional reason string (e.g., "ac_power_timeout_20.5h")
 
         Returns:
             True: User actively CANCELLED the halt (clicked Cancel button)
@@ -3981,6 +4117,23 @@ class PowerController(ArgoBaseNode):
 
         CRITICAL: Timeout or dialog failure = return False (proceed with halt for safety)
         """
+        # Check if this is an AC power timeout situation
+        is_ac_power_timeout = reason and reason.startswith("ac_power_timeout")
+        hours_ago = None
+        if is_ac_power_timeout and "_" in reason:
+            try:
+                # Extract hours from reason string like "ac_power_timeout_20.5h"
+                hours_str = reason.split("_")[-1].rstrip("h")
+                hours_ago = float(hours_str)
+            except (ValueError, IndexError):
+                pass
+        
+        # Format voltage string
+        if battery_voltage > 0:
+            voltage_str = f"{battery_voltage:.3f}V"
+        else:
+            voltage_str = "UNKNOWN"
+        
         try:
             # Set up environment for desktop dialogs
             env = os.environ.copy()
@@ -3990,12 +4143,36 @@ class PowerController(ArgoBaseNode):
                 # Fallback if display detection failed
                 env['DISPLAY'] = ':0'
 
+            # Customize dialog message based on reason
+            if is_ac_power_timeout and hours_ago:
+                dialog_title = "AC POWER TIMEOUT - CRITICAL BATTERY"
+                dialog_text = (
+                    f"Battery voltage critically low: {voltage_str}\n\n"
+                    f"⚠️ AC POWER TIMEOUT: Charger plugged in {hours_ago:.1f}h ago (timeout: {AC_POWER_TIMEOUT_HOURS}h)\n"
+                    f"Charger chip may have timed out charging or supplemental power.\n"
+                    f"System will shutdown in 30 seconds to allow you to replug charger.\n\n"
+                    f"⚠️ TIMEOUT = AUTOMATIC SHUTDOWN (safe default)\n\n"
+                    f"Click 'Cancel' ONLY if you can replug charger NOW.\n"
+                    f"Click 'Shutdown Now' to shutdown immediately.\n"
+                    f"No action = automatic shutdown after 30 seconds.\n\n"
+                    f"To abort from CLI: pkill -f zenity")
+            else:
+                dialog_title = "CRITICAL BATTERY SHUTDOWN"
+                dialog_text = (
+                    f"Battery voltage critically low: {voltage_str}\n\n"
+                    f"System will halt in 30 seconds to preserve power for manual sailing.\n\n"
+                    f"⚠️ TIMEOUT = AUTOMATIC HALT (safe default)\n\n"
+                    f"Click 'Cancel' ONLY if you can plug in charger NOW.\n"
+                    f"Click 'Shutdown Now' to halt immediately.\n"
+                    f"No action = automatic halt after 30 seconds.\n\n"
+                    f"To abort from CLI: pkill -f zenity")
+
             # Try to show a zenity dialog first (most reliable on desktop)
             dialog_cmd = [
                 'zenity',
                 '--question',
-                '--title=CRITICAL BATTERY SHUTDOWN',
-                f'--text=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\n⚠️ TIMEOUT = AUTOMATIC HALT (safe default)\n\nClick "Cancel" ONLY if you can plug in charger NOW.\nClick "Shutdown Now" to halt immediately.\nNo action = automatic halt after 30 seconds.',
+                f'--title={dialog_title}',
+                f'--text={dialog_text}',
                 '--ok-label=Shutdown Now',
                 '--cancel-label=Cancel (I will plug in charger)',
                 '--timeout=30',
@@ -4041,11 +4218,34 @@ class PowerController(ArgoBaseNode):
         except FileNotFoundError:
             self.get_logger().warning("zenity not found - trying kdialog...")
             try:
-                # Fallback to kdialog
+                # Fallback to kdialog - use same customized messages
+                if is_ac_power_timeout and hours_ago:
+                    kdialog_title = "AC POWER TIMEOUT - CRITICAL BATTERY"
+                    kdialog_text = (
+                        f"Battery voltage critically low: {voltage_str}\n\n"
+                        f"⚠️ AC POWER TIMEOUT: Charger plugged in {hours_ago:.1f}h ago (timeout: {AC_POWER_TIMEOUT_HOURS}h)\n"
+                        f"Charger chip may have timed out charging or supplemental power.\n"
+                        f"System will shutdown in 30 seconds to allow you to replug charger.\n\n"
+                        f"TIMEOUT = AUTOMATIC SHUTDOWN (safe default)\n\n"
+                        f"Click 'No' ONLY if you can replug charger NOW.\n"
+                        f"Click 'Yes' to shutdown immediately.\n"
+                        f"No action = automatic shutdown after 30 seconds.\n\n"
+                        f"To abort from CLI: pkill -f kdialog")
+                else:
+                    kdialog_title = "CRITICAL BATTERY SHUTDOWN"
+                    kdialog_text = (
+                        f"Battery voltage critically low: {voltage_str}\n\n"
+                        f"System will halt in 30 seconds to preserve power for manual sailing.\n\n"
+                        f"TIMEOUT = AUTOMATIC HALT (safe default)\n\n"
+                        f"Click 'No' ONLY if you can plug in charger NOW.\n"
+                        f"Click 'Yes' to halt immediately.\n"
+                        f"No action = automatic halt after 30 seconds.\n\n"
+                        f"To abort from CLI: pkill -f kdialog")
+                
                 dialog_cmd = [
                     'kdialog',
-                    '--title=CRITICAL BATTERY SHUTDOWN',
-                    f'--yesno=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\nTIMEOUT = AUTOMATIC HALT (safe default)\n\nClick "No" ONLY if you can plug in charger NOW.\nClick "Yes" to halt immediately.\nNo action = automatic halt after 30 seconds.',
+                    f'--title={kdialog_title}',
+                    f'--yesno={kdialog_text}',
                     '--yes-label=Shutdown Now',
                     '--no-label=Cancel (I will plug in charger)'
                 ]
@@ -4078,11 +4278,32 @@ class PowerController(ArgoBaseNode):
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 self.get_logger().warning("kdialog also not available or timed out - trying yad...")
                 try:
-                    # Fallback to yad (Yet Another Dialog)
+                    # Fallback to yad (Yet Another Dialog) - use same customized messages
+                    if is_ac_power_timeout and hours_ago:
+                        yad_title = "AC POWER TIMEOUT - CRITICAL BATTERY"
+                        yad_text = (
+                            f"Battery voltage critically low: {voltage_str}\n\n"
+                            f"⚠️ AC POWER TIMEOUT: Charger plugged in {hours_ago:.1f}h ago (timeout: {AC_POWER_TIMEOUT_HOURS}h)\n"
+                            f"Charger chip may have timed out charging or supplemental power.\n"
+                            f"System will shutdown in 30 seconds to allow you to replug charger.\n\n"
+                            f"TIMEOUT = AUTOMATIC SHUTDOWN (safe default)\n\n"
+                            f"Click 'Cancel' ONLY if you can replug charger NOW.\n"
+                            f"No action = automatic shutdown after 30 seconds.\n\n"
+                            f"To abort from CLI: pkill -f yad")
+                    else:
+                        yad_title = "CRITICAL BATTERY SHUTDOWN"
+                        yad_text = (
+                            f"Battery voltage critically low: {voltage_str}\n\n"
+                            f"System will halt in 30 seconds to preserve power for manual sailing.\n\n"
+                            f"TIMEOUT = AUTOMATIC HALT (safe default)\n\n"
+                            f"Click 'Cancel' ONLY if you can plug in charger NOW.\n"
+                            f"No action = automatic halt after 30 seconds.\n\n"
+                            f"To abort from CLI: pkill -f yad")
+                    
                     dialog_cmd = [
                         'yad',
-                        '--title=CRITICAL BATTERY SHUTDOWN',
-                        f'--text=Battery voltage critically low: {battery_voltage:.3f}V\n\nSystem will halt in 30 seconds to preserve power for manual sailing.\n\nTIMEOUT = AUTOMATIC HALT (safe default)\n\nClick "Cancel" ONLY if you can plug in charger NOW.\nNo action = automatic halt after 30 seconds.',
+                        f'--title={yad_title}',
+                        f'--text={yad_text}',
                         '--button=Shutdown Now:0',
                         '--button=Cancel (I will plug in charger):1',
                         '--timeout=30',
@@ -4185,13 +4406,40 @@ class PowerController(ArgoBaseNode):
         else:
             self.get_logger().info("Critical battery flag NOT set - shutdown hook will cut power normally")
 
+        # Check if this is an AC power timeout situation
+        is_ac_power_timeout = reason and reason.startswith("ac_power_timeout")
+        hours_ago = None
+        if is_ac_power_timeout and "_" in reason:
+            try:
+                # Extract hours from reason string like "ac_power_timeout_20.5h"
+                hours_str = reason.split("_")[-1].rstrip("h")
+                hours_ago = float(hours_str)
+            except (ValueError, IndexError):
+                pass
+        
         # Send critical notification with appropriate message
-        if battery_voltage > 0:
-            notification_message = f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will {shutdown_mode} in 30 seconds unless cancelled\nTimeout = automatic shutdown (safe default)"
+        if is_ac_power_timeout:
+            if battery_voltage > 0:
+                notification_message = (
+                    f"Battery voltage critically low: {battery_voltage:.3f}V\n"
+                    f"AC POWER TIMEOUT: Charger plugged in {hours_ago:.1f}h ago (timeout: {AC_POWER_TIMEOUT_HOURS}h)\n"
+                    f"Charger may have timed out - replug charger to resume charging\n"
+                    f"System will {shutdown_mode} in 30 seconds unless cancelled\n"
+                    f"Timeout = automatic shutdown (safe default)")
+            else:
+                notification_message = (
+                    f"AC POWER TIMEOUT: Charger plugged in {hours_ago:.1f}h ago (timeout: {AC_POWER_TIMEOUT_HOURS}h)\n"
+                    f"Charger may have timed out - replug charger to resume charging\n"
+                    f"System will {shutdown_mode} in 30 seconds unless cancelled\n"
+                    f"Timeout = automatic shutdown (safe default)")
         else:
-            notification_message = f"Battery monitoring unavailable{reason_str}\nSystem will {shutdown_mode} in 30 seconds unless cancelled\nTimeout = automatic shutdown (safe default)"
+            if battery_voltage > 0:
+                notification_message = f"Battery voltage critically low: {battery_voltage:.3f}V\nSystem will {shutdown_mode} in 30 seconds unless cancelled\nTimeout = automatic shutdown (safe default)"
+            else:
+                notification_message = f"Battery monitoring unavailable{reason_str}\nSystem will {shutdown_mode} in 30 seconds unless cancelled\nTimeout = automatic shutdown (safe default)"
+        
         self.send_desktop_notification(
-            "CRITICAL BATTERY",
+            "CRITICAL BATTERY" if not is_ac_power_timeout else "AC POWER TIMEOUT",
             notification_message,
             "critical",
             30000  # 30 second timeout
@@ -4207,12 +4455,31 @@ class PowerController(ArgoBaseNode):
                 action_desc = "HALT to preserve battery power"
                 mode_desc = "halt to preserve battery for manual sailing operation (PRODUCTION MODE)"
 
-            message = f"""CRITICAL BATTERY ALERT: {voltage_str}{reason_str} at {timestamp}
+            if is_ac_power_timeout:
+                message = f"""AC POWER TIMEOUT ALERT: {voltage_str}{reason_str} at {timestamp}
+
+⚠️  AC POWER TIMEOUT: Charger plugged in {hours_ago:.1f}h ago (timeout: {AC_POWER_TIMEOUT_HOURS}h)
+   Charger chip may have timed out charging or supplemental power.
+   System will {action_desc} in 30 seconds to allow user to replug charger.
+
+To CANCEL the shutdown from CLI (close the confirmation dialog):
+  pkill -f zenity
+  # Or kill all dialog processes:
+  pkill -f "zenity|kdialog|yad"
+
+If you take no action within 30 seconds, the system will automatically
+{mode_desc}.
+
+After shutdown, replug the AC charger to resume charging."""
+            else:
+                message = f"""CRITICAL BATTERY ALERT: {voltage_str}{reason_str} at {timestamp}
 
 ⚠️  System will {action_desc} in 30 seconds.
 
 To CANCEL the shutdown from CLI (close the confirmation dialog):
   pkill -f zenity
+  # Or kill all dialog processes:
+  pkill -f "zenity|kdialog|yad"
 
 If you take no action within 30 seconds, the system will automatically
 {mode_desc}."""
@@ -4226,7 +4493,7 @@ If you take no action within 30 seconds, the system will automatically
         # CRITICAL: Timeout or "Shutdown Now" = proceed with halt
         # Only "Cancel" button stops the halt
         self.get_logger().info("Showing critical battery confirmation dialog (timeout = halt proceeds)...")
-        user_cancelled = self.show_critical_battery_confirmation_dialog(battery_voltage)
+        user_cancelled = self.show_critical_battery_confirmation_dialog(battery_voltage, reason=reason)
 
         if user_cancelled:
             # User ACTIVELY cancelled the halt/shutdown
