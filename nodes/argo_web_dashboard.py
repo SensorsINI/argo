@@ -779,15 +779,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Skip processing in low-power mode (no viewers)
         if self.low_power_mode:
             return
-        
+
         now = time.time()
-        
+
         with self.state_lock:
             if source == 'wifi':
                 self.last_wifi_update['wind'] = now
                 self.state['wind_speed'] = msg.x
                 self.state['wind_angle'] = msg.y
                 self.state['wind_temp'] = msg.z
+                # Also update air_temp for UI display (temperature from anemometer)
+                self.state['air_temp'] = msg.z
                 self.state['data_source'] = 'WiFi'
             elif source == 'lora':
                 self.last_lora_update['wind'] = now
@@ -796,6 +798,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.state['wind_speed'] = msg.x
                     self.state['wind_angle'] = msg.y
                     self.state['wind_temp'] = msg.z
+                    # Also update air_temp for UI display (temperature from anemometer)
+                    self.state['air_temp'] = msg.z
                     self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()

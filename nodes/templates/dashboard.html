@@ -260,6 +260,14 @@
                 if (isConnected) {
                     statusElement.textContent = '🟢 CONNECTED';
                     statusElement.className = 'status-badge status-ok';
+                    
+                    // Reset shutdown button when reconnecting (after reboot)
+                    const shutdownBtn = document.getElementById('shutdown-btn');
+                    if (shutdownBtn && shutdownBtn.disabled) {
+                        shutdownBtn.disabled = false;
+                        shutdownBtn.textContent = '🔌 Shutdown System';
+                        shutdownBtn.className = 'btn btn-danger';
+                    }
                 } else {
                     statusElement.textContent = '🔴 DISCONNECTED';
                     statusElement.className = 'status-badge status-error';
