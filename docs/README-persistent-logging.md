@@ -1,6 +1,6 @@
-# Persistent Monitoring Services Documentation
+# Persistent Logging Documentation
 
-This document provides a comprehensive overview of all services that generate log files in `/var/log.hdd/persistent/` on the Argo autonomous sailboat system.
+This document provides a comprehensive overview of the Argo autonomous sailboat logging system, including persistent log storage, log viewing tools, and all services that generate log files in `/var/log.hdd/persistent/`.
 
 ## Overview
 
@@ -30,6 +30,155 @@ The Argo system uses a dual logging architecture:
 | **System Services** | ❌ Not needed | ✅ Standard | Managed by systemd/journald |
 | **Development Services** | ✅ Recommended | ✅ Optional | Debugging and analysis |
 | **Boot-time Services** | ✅ Required | ✅ Optional | Boot diagnostics |
+
+## Log Viewing Tools
+
+### Argo Multi-Service Log Viewer
+
+`argo_logs.sh` is a helper script that tails logs from multiple Argo system services with color-coded output for easy identification.
+
+#### Services Monitored
+
+- **argo_launch_standard.service** (cyan) - Main ROS2 node launcher
+- **argo_battery_water.service** (yellow) - Battery and water monitoring
+- **argo_power_control.service** (green) - Power control and button handling
+- **argo_bno085.service** (magenta) - IMU driver and bridge
+- **argo_health_monitor.service** (cyan) - Node health aggregation
+
+#### Usage
+
+**Via Alias (Recommended)**
+```bash
+alog              # Follow all service logs with color coding
+```
+
+**Direct Script Usage**
+```bash
+# Follow mode (default) - shows last 20 lines then follows
+./scripts/argo_logs.sh
+
+# Show last 50 lines per service then follow
+./scripts/argo_logs.sh -n 50
+
+# Error check mode: search all logs for ERROR/WARN/FATAL
+./scripts/argo_logs.sh -e
+
+# Show recent errors then follow
+./scripts/argo_logs.sh -ef
+
+# Show all logs from last 2 boots
+./scripts/argo_logs.sh -a
+
+# Filter logs by pattern
+./scripts/argo_logs.sh "controller"
+./scripts/argo_logs.sh "(controller|dashboard)"
+
+# Show help
+./scripts/argo_logs.sh -h
+```
+
+#### Features
+
+- **Color-coded output**: Each service has a distinct color for easy visual scanning
+- **Priority highlighting**: ERROR lines (bold bright red), WARN lines (bold dark yellow)
+- **Multi-service support**: Uses `journalctl` with multiple `-u` flags for efficient log following
+- **Real-time following**: Continuously tails all services simultaneously
+- **Error detection**: Can filter for ERROR/WARN/FATAL messages across all services
+- **Pattern filtering**: Supports extended regex patterns for log filtering
+- **No sudo required**: Works with user permissions
+
+#### Technical Details
+
+**Implementation**
+- Uses `journalctl -f -u <service1> -u <service2> ...` for efficient multi-service following
+- Colors applied via real-time processing as logs stream
+- Timestamps shown in ISO-precise format for accurate correlation
+- Filters out foxglove bridge spam (Advertising/Removing channel messages)
+
+**Color Codes**
+```bash
+COLOR_ARGO_LAUNCH='\e[0;96m'   # Cyan
+COLOR_BATTERY='\e[0;93m'        # Yellow
+COLOR_POWER='\e[0;92m'          # Green
+COLOR_IMU='\e[0;95m'            # Magenta
+COLOR_ERROR='\e[1;91m'          # Bold bright red
+COLOR_WARN='\e[1;33m'           # Bold dark yellow
+```
+
+#### Examples
+
+**Normal Usage**
+```bash
+$ alog
+📋 Argo Multi-Service Logs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● argo_launch_standard.service (cyan)
+● argo_battery_water.service (yellow)
+● argo_power_control.service (green)
+● argo_bno085.service (magenta)
+● argo_health_monitor.service (cyan)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2025-10-13T07:35:05.123456+00:00 orangepizero2w systemd[1]: Started Argo Robot ROS2 Launch Service.
+2025-10-13T07:35:06.234567+00:00 orangepizero2w python3[1234]: [INFO] Battery voltage: 7.698V
+2025-10-13T07:35:07.345678+00:00 orangepizero2w python3[1235]: [INFO] Power controller initialized
+```
+
+**Show More History**
+```bash
+# Show last 100 lines per service
+alog -n 100
+```
+
+**Error Detection**
+```bash
+# Find all errors across all services
+alog -e
+
+# Find errors for specific node
+alog -e "controller"
+
+# Follow errors in real-time
+alog -ef
+```
+
+#### Integration with Dotfiles
+
+The `alog` alias is defined in `dotfiles/bash_aliases`:
+```bash
+alias alog='~/argo/scripts/argo_logs.sh'
+```
+
+After updating dotfiles, reload with:
+```bash
+source ~/.bashrc
+# or
+relogin
+```
+
+### Alternative Log Viewing Methods
+
+**Direct journalctl**
+```bash
+# View specific service logs
+journalctl -u argo_launch_standard.service -f
+
+# View multiple services
+journalctl -u argo_launch_standard.service -u argo_power_control.service -f
+
+# View logs from previous boot
+journalctl -u argo_launch_standard.service -b -1
+```
+
+**Persistent Log Files**
+```bash
+# Monitor all persistent logs
+tail -f /var/log.hdd/persistent/*.log
+
+# Monitor specific service
+tail -f /var/log.hdd/persistent/argo-power-control.log
+tail -f /var/log.hdd/persistent/thermal-$(date +%Y%m%d).log
+```
 
 ## Argo-Specific Monitoring Services
 
@@ -121,9 +270,9 @@ The Argo system uses a dual logging architecture:
 
 **Features**:
 - Rotates each Argo service log at boot before dependent services start
-- Maintains boot-specific log snapshots for retrospective analysis
+- Maintains boot-specific log snapshots for retrospective analysis (automatically compressed to save ~90% space)
 - Prunes oldest log artifacts only when persistent storage usage crosses the threshold
-- Disables the legacy `/etc/logrotate.d/persistent-logs` daily rotation policy
+- Installs size-based logrotate configuration (rotates at 10MB, keeps 2 copies) to prevent unbounded growth between reboots
 - Hourly pruning timer that does nothing unless the threshold is exceeded
 
 ## System-Level Monitoring Services (Optional)
@@ -293,25 +442,27 @@ Storage=persistent
 Compress=yes
 RateLimitIntervalSec=30s
 RateLimitBurst=10000
-SystemMaxUse=500M
+SystemMaxUse=100M
 SystemKeepFree=1G
-MaxRetentionSec=2week
+MaxRetentionSec=2day
 ForwardToSyslog=no
 ```
 
 **Key Settings**:
 - **Storage**: `persistent` - Logs stored in `/var/log/journal/` (changed from `volatile` on 2025-10-08 to preserve boot logs across reboots)
-- **SystemMaxUse**: `500M` - Maximum disk usage for journal
-- **MaxRetentionSec**: `2week` - Maximum retention time
+- **SystemMaxUse**: `100M` - Maximum disk usage for journal (reduced from 500M on 2025-12-16)
+- **MaxRetentionSec**: `2day` - Maximum retention time (reduced from 2week on 2025-12-16)
 - **Compress**: `yes` - Compress old journal files
 
 **Configuration History**:
 - **2025-10-08**: Changed `Storage` from `volatile` to `persistent` to ensure boot logs survive reboots. Journal location: `/var/log/journal/ce4def9bd6a04cd594e94f8205bbe671/`
+- **2025-12-16**: Reduced `SystemMaxUse` from 500M to 100M and `MaxRetentionSec` from 2week to 2day to reduce log storage requirements
 
 ### Persistent Log Manager Configuration
 
-- The `install-persistent-log-manager` target **disables** the legacy `/etc/logrotate.d/persistent-logs` policy.
-- `/usr/local/bin/argo_persistent_log_manager.sh` rotates Argo service logs at boot and creates timestamped `*.boot.log` snapshots.
+- The `install-persistent-log-manager` target installs a new size-based logrotate configuration at `/etc/logrotate.d/persistent-logs`.
+- `/usr/local/bin/argo_persistent_log_manager.sh` rotates Argo service logs at boot and creates timestamped `*.boot.log.gz` snapshots (automatically compressed).
+- **Size-based rotation**: Logrotate rotates Argo service logs when they exceed 10MB, keeping 2 rotated copies (compressed). This prevents unbounded growth between reboots.
 - The companion timer (`argo-persistent-logs-prune.timer`) triggers an hourly check that only removes files when the persistent log partition exceeds the configurable threshold (default: 85%).
 - System logs outside the persistent directory continue to be rotated by the stock logrotate configuration in `/etc/logrotate.d/rsyslog`.
 
@@ -319,9 +470,10 @@ ForwardToSyslog=no
 
 | Log Type | Rotation Frequency | Retention | Compression | Location |
 |----------|-------------------|-----------|-------------|----------|
-| **Persistent Logs** | On boot + threshold | Oldest snapshots pruned when usage ≥ threshold | Optional (manual) | `/var/log.hdd/persistent/` |
-| **System Logs** | Weekly (logrotate) | 4 weeks | Yes (delayed) | `/var/log.hdd/` |
-| **Systemd Journal** | Automatic | 2 weeks | Yes | `/var/log/journal/` |
+| **Argo Service Logs** | Size-based (10MB) + boot | 2 rotated copies + boot snapshots | Yes (automatic) | `/var/log.hdd/persistent/` |
+| **Boot Log Snapshots** | Per boot | Pruned when usage ≥ 85% | Yes (automatic) | `/var/log.hdd/persistent/` |
+| **System Logs** | Daily (logrotate) | 2 days | Yes (delayed) | `/var/log.hdd/` |
+| **Systemd Journal** | Automatic | 2 days, 100MB max | Yes | `/var/log/journal/` |
 | **Boot History** | Per boot | Unlimited (timestamped files) | No (plain text) | `/var/log.hdd/persistent/` |
 
 ### Log Rotation Troubleshooting
@@ -381,6 +533,8 @@ These services are configured to log to `/var/log.hdd/persistent/`:
 4. **argo_launch_standard.service** logs to `argo-launch-standard.log` using the same `tee` approach and retains journald output for `journalctl` consumers.
 
 5. **argo_thermal_monitor.service** and **boot-history-logger.service** use shell redirection (`>>`) to append directly to persistent files.
+
+**Log Rotation**: All Argo service logs (items 1-4) are automatically rotated by logrotate when they exceed 10MB, preventing unbounded growth. Boot snapshots are automatically compressed to save space.
 
 #### Services with System Logging Only
 These services log only to systemd journal:
@@ -542,6 +696,11 @@ cat /var/log.hdd/persistent/dmesg-$(date +%Y%m%d).log
 
 # View monitoring data before hang
 cat /var/log.hdd/persistent/orangepi-monitor-$(date +%Y%m%d).log.1
+
+# Use argo_logs.sh for error detection
+alog -e                    # Find all errors
+alog -ef                   # Follow errors in real-time
+alog -a "ERROR\|FATAL"     # Search all boots for critical errors
 ```
 
 **What to Look For**:
@@ -580,6 +739,8 @@ The Argo lifecycle manager (`launch/argo_lifecycle_manager.py`) integrates with 
 3. **Service Health**: Ensure all monitoring services are running
 4. **Alert Thresholds**: Configure appropriate alert levels for each service
 5. **Backup**: Consider backing up critical log files for long-term analysis
+6. **Use Log Viewer**: Use `alog` for efficient multi-service log monitoring
+7. **Error Detection**: Regularly run `alog -e` to catch errors early
 
 ## Related Documentation
 
@@ -588,3 +749,4 @@ The Argo lifecycle manager (`launch/argo_lifecycle_manager.py`) integrates with 
 - [Network Improvements](network/README.md)
 - [Power Control System](power_control/README.md)
 - [Battery Monitoring](scripts/README-plot-battery-water.md)
+

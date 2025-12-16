@@ -694,6 +694,4 @@ ros2 node list | grep battery_water
 
 - [Power Control System](../power_control/README.md)
 - [Battery Monitoring Installation](../scripts/README-plot-battery-water.md)
-- [Persistent Monitoring Services](README-persistent-monitoring-services.md)
-
-
+- [Persistent Logging](README-persistent-logging.md)
