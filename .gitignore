@@ -148,3 +148,6 @@ patrol_test_result.png
 nodes/battery_slopes.json.backup
 pcb/MP2672 lipo 2s battery charger chip.pdf
 nodes/battery_slopes.json
+scripts/i2c_gpio_recovery.sh
+scripts/install_i2c_reset_sudoers.sh
+scripts/reset_i2c_bus.sh
