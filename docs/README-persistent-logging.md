@@ -749,4 +749,3 @@ The Argo lifecycle manager (`launch/argo_lifecycle_manager.py`) integrates with 
 - [Network Improvements](network/README.md)
 - [Power Control System](power_control/README.md)
 - [Battery Monitoring](scripts/README-plot-battery-water.md)
-

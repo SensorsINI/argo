@@ -3342,6 +3342,13 @@ class PowerController(ArgoBaseNode):
         MAX_CONSECUTIVE_FAILURES = 3  # 90 seconds of failures = log warning
         BATTERY_SERVICE_FAILURE_TIMEOUT = 10  # 5 minutes (10 * 30s) of failures = initiate safe shutdown
         battery_service_failure_start_time = None  # Track when service failures started
+        
+        # Track sustained invalid readings (I2C/sensor failures)
+        # Short-term failures are OK (external sensor shorts during sailing)
+        # But sustained failures (>1 hour) indicate serious problem and should trigger shutdown
+        INVALID_READING_TIMEOUT_S = 3600.0  # 1 hour = 3600 seconds
+        INVALID_READING_TIMEOUT_CHECKS = int(INVALID_READING_TIMEOUT_S / BATTERY_MONITORING_INTERVAL_S)  # ~120 checks at 30s intervals
+        invalid_reading_start_time = None  # Track when invalid readings started
 
         # Startup grace period - don't count failures until battery service has been seen at least once
         # This prevents false critical alerts if argo_battery_water.service starts after power_control.service
@@ -3377,28 +3384,78 @@ class PowerController(ArgoBaseNode):
 
                     # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
                     # Invalid readings (0V, very low, or impossibly high) indicate sensor/communication errors
-                    # NEVER halt on invalid readings - only on valid low voltage readings
+                    # Short-term failures are OK (external sensor shorts during sailing)
+                    # But sustained failures (>1 hour) indicate serious problem and should trigger shutdown
                     if battery_voltage <= 0 or battery_voltage < 3.0 or battery_voltage > 30.0:
                         consecutive_invalid_readings += 1
-                        self.get_logger().error(
-                            f"Invalid battery voltage reading: {battery_voltage:.3f}V "
-                            f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely sensor/I2C error")
-                        self.get_logger().error(
-                            f"⚠️  System will NOT halt on invalid readings - only on valid low voltage!")
-
-                        # Do NOT halt on invalid readings - they indicate hardware/communication problems, not battery issues
-                        # Just log the error and continue monitoring
-                        if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
+                        
+                        # Track when invalid readings started
+                        if invalid_reading_start_time is None:
+                            invalid_reading_start_time = time.time()
                             self.get_logger().error(
-                                f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings!")
+                                f"Invalid battery voltage reading: {battery_voltage:.3f}V "
+                                f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely sensor/I2C error")
+                            self.get_logger().error(
+                                f"⚠️  Short-term invalid readings are OK (external sensor failures), but sustained failures >1 hour will trigger shutdown")
+                        else:
+                            # Calculate duration of invalid readings
+                            invalid_duration = time.time() - invalid_reading_start_time
+                            invalid_duration_hours = invalid_duration / 3600.0
+                            
+                            # Log periodically (every 10 minutes) to show sustained failure
+                            if consecutive_invalid_readings % 20 == 0:  # Every 20 checks = ~10 minutes
+                                self.get_logger().error(
+                                    f"Invalid battery voltage reading: {battery_voltage:.3f}V "
+                                    f"(count: {consecutive_invalid_readings}, duration: {invalid_duration_hours:.2f}h) - likely sensor/I2C error")
+                                self.get_logger().error(
+                                    f"⚠️  Sustained invalid readings for {invalid_duration_hours:.2f}h - shutdown will trigger if >1 hour")
+
+                        # Check if invalid readings have persisted for >1 hour
+                        if invalid_reading_start_time is not None:
+                            invalid_duration = time.time() - invalid_reading_start_time
+                            if invalid_duration >= INVALID_READING_TIMEOUT_S:
+                                invalid_duration_hours = invalid_duration / 3600.0
+                                self.get_logger().error(
+                                    f"🔴 CRITICAL: Invalid battery readings have persisted for {invalid_duration_hours:.2f}h "
+                                    f"({consecutive_invalid_readings} consecutive readings)")
+                                self.get_logger().error(
+                                    f"This indicates a serious sensor/I2C communication problem!")
+                                self.get_logger().error(
+                                    f"⚠️  SAFETY SHUTDOWN: Initiating safe shutdown to prevent battery damage")
+                                self.get_logger().error(
+                                    f"Battery monitoring unavailable - cannot verify battery voltage!")
+                                self.get_logger().error(
+                                    f"Check I2C bus and argo_battery_water.service status")
+                                
+                                # Initiate safe shutdown due to sustained invalid readings
+                                # Use voltage=0.0 to indicate unknown voltage (monitoring unavailable)
+                                self.initiate_critical_battery_halt(
+                                    battery_voltage=0.0, 
+                                    reason=f"sustained_invalid_readings_{invalid_duration_hours:.1f}h")
+                                # Note: initiate_critical_battery_halt will handle the shutdown sequence
+                                break  # Exit monitoring loop after initiating shutdown
+
+                        # Log warning for short-term failures (but don't shutdown yet)
+                        if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
+                            invalid_duration_str = ""
+                            if invalid_reading_start_time is not None:
+                                invalid_duration = time.time() - invalid_reading_start_time
+                                invalid_duration_hours = invalid_duration / 3600.0
+                                invalid_duration_str = f" (duration: {invalid_duration_hours:.2f}h)"
+                            
+                            self.get_logger().error(
+                                f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings{invalid_duration_str}!")
                             self.get_logger().error(
                                 f"This indicates a sensor/communication problem, NOT a battery problem!")
                             self.get_logger().error(
-                                f"System will continue running - check argo_battery_water.service status")
+                                f"System will continue running - but will shutdown if failures persist >1 hour")
+                            self.get_logger().error(
+                                f"Check argo_battery_water.service status and I2C bus connections")
                         continue
 
-                    # Valid reading - reset invalid counter
+                    # Valid reading - reset invalid counter and start time
                     consecutive_invalid_readings = 0
+                    invalid_reading_start_time = None  # Reset invalid reading start time
 
                     # Check if voltage has changed significantly since last log
                     should_log_voltage = True
