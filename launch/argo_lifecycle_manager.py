@@ -2531,19 +2531,60 @@ class ArgoLifecycleManager:
     
     def quick_status(self) -> None:
         """Show condensed one-line status of Argo system (optimized for quick checks)"""
+        # Set up abort detection for Enter key (only if stdin is a TTY)
+        abort_requested = threading.Event()
+        abort_thread = None
+        
+        def monitor_abort():
+            """Background thread to monitor for Enter key press"""
+            try:
+                # Only monitor if stdin is a TTY (not piped)
+                if sys.stdin.isatty():
+                    stdin_fd = sys.stdin.fileno()
+                    # Continuously check for input until abort is requested or thread is stopped
+                    while not abort_requested.is_set():
+                        # Check if input is available (non-blocking check using file descriptor)
+                        ready, _, _ = select.select([stdin_fd], [], [], 0.1)
+                        if ready:
+                            # Input available, read it (this will get the Enter key press)
+                            line = sys.stdin.readline()
+                            if line:  # Any input triggers abort
+                                abort_requested.set()
+                                break
+            except Exception:
+                pass  # Ignore errors in abort monitoring
+        
+        # Start abort monitoring thread if stdin is a TTY
+        if sys.stdin.isatty():
+            abort_thread = threading.Thread(target=monitor_abort, daemon=True)
+            abort_thread.start()
+        
+        def check_abort():
+            """Check if abort was requested and exit if so"""
+            if abort_requested.is_set():
+                print("\r🚢 ARGO: Status check aborted", flush=True)
+                return True
+            return False
+        
         try:
             # Get node status
             node_status = self._get_node_status()
+            if check_abort():
+                return
             running_count = sum(1 for status in node_status.values() if "RUNNING" in status)
             total_count = len(node_status)
             
             # Get CPU usage (quick check with minimal interval)
             cpu_percent = psutil.cpu_percent(interval=0.2)
+            if check_abort():
+                return
             
             # Get memory and disk info (quick check)
             memory = psutil.virtual_memory()
             disk = psutil.disk_usage("/")
             free_disk_gb = disk.free / (1024**3)
+            if check_abort():
+                return
             
             # Get CPU temperature (quick check)
             cpu_temp = None
@@ -2556,6 +2597,8 @@ class ArgoLifecycleManager:
                 return
             except Exception:
                 pass
+            if check_abort():
+                return
             
             # Get battery info and power status if available (with retry for robustness)
             battery_summary = None
@@ -2571,6 +2614,8 @@ class ArgoLifecycleManager:
                 if battery_service_running:
                     # Try to get battery info, with retry on failure
                     for attempt in range(2):
+                        if check_abort():
+                            return
                         try:
                             battery_summary, _, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours = self._get_battery_water_status_alerts()
                             if battery_summary:
@@ -2585,6 +2630,8 @@ class ArgoLifecycleManager:
                 return
             except Exception:
                 pass
+            if check_abort():
+                return
             
             # Count healthy nodes
             healthy_count = 0
@@ -2595,6 +2642,8 @@ class ArgoLifecycleManager:
                     healthy_count += 1
                 elif health_status is False:
                     unhealthy_count += 1
+            if check_abort():
+                return
             
             # Get controller pause state
             controller_paused = None
@@ -2602,6 +2651,8 @@ class ArgoLifecycleManager:
                 # Query current pause state to ensure we have the latest
                 self._query_controller_pause_state()
                 controller_paused = self.controller_pause_state
+            if check_abort():
+                return
             
             # Use unified formatting function
             status_line = self._format_status_summary(
