@@ -1,0 +1,375 @@
+(footprint "I2C_header"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(tags "705410073 ")
+	(property "Reference" "I2C"
+		(at 3.6 3.5 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "24c97502-2128-42a7-bd77-1823c308c364")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "Conn_I2C"
+		(at -3.81 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "ea39acde-6bf2-4e61-8f41-2a4775c9bede")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://www.molex.com/en-us/products/part-detail/705410073"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "ce788e89-66a2-408a-a5e2-855013088aec")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Generic connector, single row, 01x04, script generated (kicad-library-utils/schlib/autogen/connector/)"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "e98c6419-49ed-466e-ae82-2a773c2ab175")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Order" "https://ch.farnell.com/en-CH/sensirion/sdp32-125pa-tr-250pcs/pressure-sensor-diff-125pa-digital/dp/2886658"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "abbb72dd-c0ad-46be-b2d5-d612fb48187b")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr through_hole)
+	(fp_line
+		(start -12.8408 2)
+		(end 5.0408 2)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "36e4426e-3b5e-4eb5-a30a-05e4df088dc3")
+	)
+	(fp_line
+		(start -12.7508 -3.1)
+		(end -12.7508 -2.524183)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "6f3c9535-487a-4b7c-a7fc-f74efc8fc2bc")
+	)
+	(fp_line
+		(start -12.7508 1.000183)
+		(end -12.7508 2)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "404793ff-4ff4-4e09-86ef-99475883c528")
+	)
+	(fp_line
+		(start 5.1308 -2.524183)
+		(end 5.1408 -3.1)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "ae8a5181-0c1c-44ce-9261-107481958e0d")
+	)
+	(fp_line
+		(start 5.1308 2)
+		(end 5.1308 1.000183)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "389644e9-13ae-4715-8999-aea8037d58e0")
+	)
+	(fp_line
+		(start 5.1408 -3.1)
+		(end -12.7408 -3.1)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "d5993807-dbf7-4cdb-a7f4-f001d0ce17f7")
+	)
+	(fp_rect
+		(start -7.6 -5.2)
+		(end 0.4 -3.2)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "fe813dcd-262d-48ea-8773-136ad3709060")
+	)
+	(fp_circle
+		(center 6.8072 0)
+		(end 7.1882 0)
+		(stroke
+			(width 0.508)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "76aa3aac-6827-4e15-b25b-fed9348b5c6d")
+	)
+	(fp_circle
+		(center 6.8072 0)
+		(end 7.1882 0)
+		(stroke
+			(width 0.508)
+			(type solid)
+		)
+		(fill no)
+		(layer "B.SilkS")
+		(uuid "53b894a7-0b08-4826-86e8-6ff1607c198b")
+	)
+	(fp_line
+		(start -13.6652 -4.318)
+		(end -13.6652 2.794)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "1f63889e-2604-4e88-b65b-5e1fd54b204e")
+	)
+	(fp_line
+		(start -13.6652 2.794)
+		(end 6.0452 2.794)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "a817340e-b17b-4bbf-b569-b486dc2801c8")
+	)
+	(fp_line
+		(start 6.0452 -4.318)
+		(end -13.6652 -4.318)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "57f78ec9-c32f-45de-9833-190b618a7fc8")
+	)
+	(fp_line
+		(start 6.0452 2.794)
+		(end 6.0452 -4.318)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "c4b36d0e-401b-4507-bb56-42d68741a067")
+	)
+	(fp_line
+		(start -12.6238 -4.064)
+		(end -12.6238 2.54)
+		(stroke
+			(width 0.0254)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "7a2230aa-9b42-4602-b37b-b4eec7eb494e")
+	)
+	(fp_line
+		(start -12.6238 2.54)
+		(end 5.0038 2.54)
+		(stroke
+			(width 0.0254)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "a9807f74-cc66-41e3-832c-bdcdab29d4cd")
+	)
+	(fp_line
+		(start 5.0038 -4.064)
+		(end -12.6238 -4.064)
+		(stroke
+			(width 0.0254)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "76643a5b-e54a-448c-ab94-8036f8dd4ec5")
+	)
+	(fp_line
+		(start 5.0038 2.54)
+		(end 5.0038 -4.064)
+		(stroke
+			(width 0.0254)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "84a9f229-d5dc-4ffd-9d0b-68dd87abeaea")
+	)
+	(fp_circle
+		(center 0 0)
+		(end 0.381 0)
+		(stroke
+			(width 0.508)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "fa95701e-b4eb-4b47-8498-b4639c204739")
+	)
+	(fp_text user "5V"
+		(at -1.905 5.08 90)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "64f2fdae-1c5f-410a-b5ec-c9ed962ddcef")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+			(justify left bottom)
+		)
+	)
+	(fp_text user "SCK"
+		(at -6.985 5.715 90)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "80a9abff-cb21-4443-a3c1-c839e1dd946c")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+			(justify left bottom)
+		)
+	)
+	(fp_text user "SDA"
+		(at -4.445 5.715 90)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "95d702aa-ddc5-42fb-9289-b12f006fddaa")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+			(justify left bottom)
+		)
+	)
+	(fp_text user "GND"
+		(at 0.635 5.715 90)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "e76949db-ebaa-429d-9255-6e3d0183afca")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+			(justify left bottom)
+		)
+	)
+	(fp_text user "${REFERENCE}"
+		(at -3.81 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "82888fbe-2afa-4a20-a414-5a68d1898c6a")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "" np_thru_hole circle
+		(at -11.684 -0.762)
+		(size 3.4544 3.4544)
+		(drill 3.4544)
+		(layers)
+		(uuid "f2abbb40-1996-4113-b11d-c4b10efd8410")
+	)
+	(pad "" np_thru_hole circle
+		(at 4.064 -0.762)
+		(size 3.4544 3.4544)
+		(drill 3.4544)
+		(layers)
+		(uuid "7192e783-cbf8-4bc2-b9d5-786079955b8b")
+	)
+	(pad "1" thru_hole rect
+		(at 0 0)
+		(size 1.6764 1.6764)
+		(drill 1.1684)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(uuid "34756196-cfb5-44e3-9908-faf48a13eed3")
+	)
+	(pad "2" thru_hole circle
+		(at -2.54 0)
+		(size 1.6764 1.6764)
+		(drill 1.1684)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(uuid "618f4a10-27ff-4ef5-997a-545f4092e567")
+	)
+	(pad "3" thru_hole circle
+		(at -5.08 0)
+		(size 1.6764 1.6764)
+		(drill 1.1684)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(uuid "ea44489c-edb3-4817-9638-1d1051425cbc")
+	)
+	(pad "4" thru_hole circle
+		(at -7.62 0)
+		(size 1.6764 1.6764)
+		(drill 1.1684)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(uuid "9170b317-28f9-45dd-a730-f8999f6c82ae")
+	)
+	(embedded_fonts no)
+	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/0705410073.stp"
+		(offset
+			(xyz -4 0 6)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz -0 -0 -0)
+		)
+	)
+)

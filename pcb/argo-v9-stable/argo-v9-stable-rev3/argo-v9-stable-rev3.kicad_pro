@@ -60,71 +60,27 @@
       ],
       "drc_exclusions": [
         [
-          "footprint_filters_mismatch|118400000|49400000|a280e2c7-1d7e-4d92-a213-4c9e35ff6918|00000000-0000-0000-0000-000000000000",
+          "silk_edge_clearance|151998000|69227000|f884842e-f5b9-4e71-9b7e-4b1e5dc154ab|3fe9d4ff-2004-4cef-8fb2-c9fa8cc55f60",
           ""
         ],
         [
-          "footprint_filters_mismatch|130600000|33200000|8c89d9df-71d2-41d9-9d73-ffdded3e88e2|00000000-0000-0000-0000-000000000000",
+          "silk_edge_clearance|151998000|79627000|f884842e-f5b9-4e71-9b7e-4b1e5dc154ab|31929a71-9bc1-40ad-beed-7b9ce49c9eff",
           ""
         ],
         [
-          "footprint_filters_mismatch|135890000|89408000|bbf59103-c3d8-4b29-8eb5-caa7f733245c|00000000-0000-0000-0000-000000000000",
+          "starved_thermal|109017500|78040000|4350aafc-0b3d-4f47-8541-fe4d7c49f010|38d1d1f1-b818-42b8-b358-3810618259b6|F.Cu",
           ""
         ],
         [
-          "footprint_filters_mismatch|138250000|72000000|4c8f9c69-cbb8-44c2-9f86-17b812ca2e07|00000000-0000-0000-0000-000000000000",
+          "starved_thermal|121908550|75807150|4350aafc-0b3d-4f47-8541-fe4d7c49f010|b882becd-94bc-485b-8cde-896cf4fcd654|F.Cu",
           ""
         ],
         [
-          "footprint_filters_mismatch|145820500|76967000|c91bdd39-a614-41cf-b68b-035f25c376b4|00000000-0000-0000-0000-000000000000",
+          "starved_thermal|63411320|74281320|c7c53ed3-ebd0-4fce-92f6-4f4dff824e55|b5b9dce8-0ab9-4155-a471-d35b2b03bb5e|B.Cu",
           ""
         ],
         [
-          "footprint_filters_mismatch|147875000|53150000|d23368bc-c566-4fce-a4ff-e6590939528b|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "footprint_filters_mismatch|148300000|93200000|7160be3a-deed-4885-9c5a-720c51d97de0|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "footprint_filters_mismatch|87397300|52297200|125e11f0-e81e-4805-a2ce-c40c7653cac8|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|117100000|86425000|d9195412-a222-4221-bd10-1524006fb9ed|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|118082500|49400000|a280e2c7-1d7e-4d92-a213-4c9e35ff6918|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|80545303|80911000|ff84b8a9-e765-4665-9efa-c9dc42ec6173|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|82700000|80200000|ddd14fa7-2829-43b1-b9b5-8b552dc4c7f7|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|83000000|74025000|8d3a3a41-913b-40f0-a104-201b5ade9656|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "starved_thermal|117910393|60692894|c7c53ed3-ebd0-4fce-92f6-4f4dff824e55|7083ac4b-5459-448e-ae73-3ea7de83b4cc|B.Cu",
-          ""
-        ],
-        [
-          "starved_thermal|133456000|51054000|4350aafc-0b3d-4f47-8541-fe4d7c49f010|31e95adf-1e36-4a9a-8aa7-275e3203c9d3|F.Cu",
-          ""
-        ],
-        [
-          "starved_thermal|133700000|63500000|4350aafc-0b3d-4f47-8541-fe4d7c49f010|b3fa14cb-6b08-49a0-bffc-c7ccc49dfc37|F.Cu",
-          ""
-        ],
-        [
-          "starved_thermal|63534455|55322953|c7c53ed3-ebd0-4fce-92f6-4f4dff824e55|5663b4db-112a-4f1c-b76d-ed71676a37eb|B.Cu",
+          "starved_thermal|64948680|53961319|c7c53ed3-ebd0-4fce-92f6-4f4dff824e55|5663b4db-112a-4f1c-b76d-ed71676a37eb|B.Cu",
           ""
         ]
       ],
@@ -260,7 +216,9 @@
         0.2,
         0.4,
         0.5,
+        0.75,
         1.0,
+        1.5,
         2.0
       ],
       "tuning_pattern_settings": {
@@ -566,7 +524,7 @@
     ]
   },
   "meta": {
-    "filename": "argo-v9-stable-rev2.kicad_pro",
+    "filename": "argo-v9-stable-rev3.kicad_pro",
     "version": 3
   },
   "net_settings": {
@@ -679,6 +637,14 @@
       {
         "netclass": "power",
         "pattern": "5V"
+      },
+      {
+        "netclass": "power",
+        "pattern": "+3.3V"
+      },
+      {
+        "netclass": "power",
+        "pattern": "/VBUS"
       }
     ]
   },

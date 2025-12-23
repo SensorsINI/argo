@@ -1,0 +1,293 @@
+(footprint "PCAP_10x10-ELECT_NCA"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(tags "UUD1A102MNL1GS ")
+	(property "Reference" "C8"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(hide yes)
+		(uuid "dabf6b51-efec-4484-b1fa-06b8d080de2d")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "1000uF"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "984c79f0-343a-404b-b4f7-039bf71ba638")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://www.nichicon.co.jp/english/series_items/catalog_pdf/e-uud.pdf"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "cde46d13-64bc-4ec9-881f-32d28e26fba5")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Polarized capacitor, US symbol"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "e91f6098-4c32-4f95-b96f-5a6823eae0c7")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "digikey" "have 4 in lab"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "101e5b01-de1e-4835-adbc-a071a4b95572")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "marking" "1000V UD, bar is -"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "76a0b076-6749-432c-88d9-61e1cb457c30")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -7.62 1.143)
+		(end -7.62 1.905)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "4d4b0b0f-f6b0-446c-8982-fe5f9b722cc4")
+	)
+	(fp_line
+		(start -7.239 1.524)
+		(end -8.001 1.524)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "518d0123-a00b-4e65-83ab-bf9698313437")
+	)
+	(fp_line
+		(start -5.3721 -5.3721)
+		(end -5.3721 -1.08204)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "3efeb1c4-68b9-4d63-91e1-d9cfd20fa376")
+	)
+	(fp_line
+		(start -5.3721 1.08204)
+		(end -5.3721 5.3721)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "a53e25f6-dc6f-428f-9390-3d2254f7ffe5")
+	)
+	(fp_line
+		(start -5.3721 5.3721)
+		(end 5.3721 5.3721)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "ae97cc91-9e31-4e56-b9a6-48abe6cfbfe2")
+	)
+	(fp_line
+		(start -5.2451 -2.62255)
+		(end -2.62255 -5.2451)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "115eb814-19d7-41a4-8b71-cad3a8a0df60")
+	)
+	(fp_line
+		(start -5.2451 2.62255)
+		(end -2.62255 5.2451)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "38700dea-7919-41eb-8aed-8ac752f077b5")
+	)
+	(fp_line
+		(start 5.3721 -5.3721)
+		(end -5.3721 -5.3721)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "5e0038a6-3d0d-4214-a30d-11f131a2595e")
+	)
+	(fp_line
+		(start 5.3721 -1.08204)
+		(end 5.3721 -5.3721)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "160022f7-966b-48ac-88d6-1c40d58a01bc")
+	)
+	(fp_line
+		(start 5.3721 5.3721)
+		(end 5.3721 1.08204)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "0a5649d7-a2f2-4e33-9320-ac9dc6a4cd94")
+	)
+	(fp_rect
+		(start 3.81 -5.08)
+		(end 5.3721 5.08)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "8c2674c8-0d15-445c-b876-466cbae64490")
+	)
+	(fp_line
+		(start -7.62 1.143)
+		(end -7.62 1.905)
+		(stroke
+			(width 0.0254)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "fc1e7dc7-5571-4084-ae40-a510e7868510")
+	)
+	(fp_line
+		(start -7.239 1.524)
+		(end -8.001 1.524)
+		(stroke
+			(width 0.0254)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "f9ae083b-8a9a-42c4-b3ed-a0d96ed473e3")
+	)
+	(fp_rect
+		(start -5.2 -5.2)
+		(end 5.2 5.2)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "25b33845-d541-432b-bbd2-88e65abadb2a")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "c3f3e988-1836-4426-ab39-d9980a1e9ac7")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at -4.90855 -0.05715)
+		(size 5.4229 1.3843)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "e06ca426-4c2d-44a7-9b66-dbf2c29c117b")
+	)
+	(pad "2" smd rect
+		(at 4.90855 0)
+		(size 5.4229 1.4986)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "e47cfb42-5183-49e4-bdf9-5df8298d1dd2")
+	)
+	(zone
+		(net 0)
+		(net_name "")
+		(layer "F.Cu")
+		(uuid "40b9f3c5-517a-4d12-a51c-7f63251d4171")
+		(hatch full 0.508)
+		(connect_pads
+			(clearance 0)
+		)
+		(min_thickness 0.254)
+		(filled_areas_thickness no)
+		(keepout
+			(tracks not_allowed)
+			(vias not_allowed)
+			(pads allowed)
+			(copperpour not_allowed)
+			(footprints allowed)
+		)
+		(placement
+			(enabled no)
+			(sheetname "")
+		)
+		(fill
+			(thermal_gap 0.508)
+			(thermal_bridge_width 0.508)
+		)
+		(polygon
+			(pts
+				(xy -2.3495 -0.8001) (xy 2.3495 -0.8001) (xy 2.3495 0.8001) (xy -2.3495 0.8001)
+			)
+		)
+	)
+	(embedded_fonts no)
+	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/U2-P_NCH.step"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
+)

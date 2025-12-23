@@ -1,0 +1,189 @@
+(footprint "Converter_DCDC_TRACO_TSR1-xxxxE_THT"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "DCDC-Converter, TRACO, TSR1-xxxxE, 1A, Rev. October 31. 2023, https://www.tracopower.com/products/tsr1e.pdf, generated with kicad-footprint-generator StandardBox_generator.py")
+	(tags "DCDC-Converter SWITCHING-REGULATOR STEP-DOWN TRACO TSR1E 2.54MM THT SIP-3 1A")
+	(property "Reference" "REF**"
+		(at 1.7 -4.21 0)
+		(layer "F.SilkS")
+		(uuid "9a7d17fe-af51-4929-81ee-7f6ad2873cf4")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "Converter_DCDC_TRACO_TSR1-xxxxE_THT"
+		(at 1.7 9.29 0)
+		(layer "F.Fab")
+		(uuid "298ed8e7-e100-411b-b2d2-78d46d0ef761")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "abdaea18-c730-446d-b0de-57118cec86e7")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "e1b60c5d-5a19-4ea2-a641-68bd3fd03379")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr through_hole)
+	(fp_line
+		(start -2.16 -3.37)
+		(end 5.56 -3.37)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "3ecf7893-c909-4f1d-9287-9ecea9260e3b")
+	)
+	(fp_line
+		(start -2.16 -0.296)
+		(end -2.16 -3.37)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "f4cff379-e6a3-453b-8ae6-3b0b3d3a4f5e")
+	)
+	(fp_line
+		(start -2.16 8.45)
+		(end -2.16 0.296)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "92448877-c49b-4703-8bce-c9f40d9c172e")
+	)
+	(fp_line
+		(start 5.56 -3.37)
+		(end 5.56 8.45)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "f34f69e1-1d2b-4add-949d-7d47249713d8")
+	)
+	(fp_line
+		(start 5.56 8.45)
+		(end -2.16 8.45)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "54f9e7a4-a3a7-42a6-922b-5db117a48fe7")
+	)
+	(fp_poly
+		(pts
+			(xy -2.16 0) (xy -2.63 0.34) (xy -2.63 -0.34)
+		)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.SilkS")
+		(uuid "ad31df08-a934-49f2-9571-429b3d0097ce")
+	)
+	(fp_rect
+		(start -2.3 -3.51)
+		(end 5.7 8.59)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.CrtYd")
+		(uuid "4b44ffda-bb63-4b8b-b22e-dab2517c2be7")
+	)
+	(fp_poly
+		(pts
+			(xy -2.05 -2.26) (xy -2.05 8.34) (xy 5.45 8.34) (xy 5.45 -3.26) (xy -1.05 -3.26)
+		)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "24718a39-1410-449e-a5f3-162aa4c2caac")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 1.7 2.54 0)
+		(layer "F.Fab")
+		(uuid "1bd17d25-bea4-406e-8510-83909ea616cb")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" thru_hole roundrect
+		(at 0 0)
+		(size 1.5 1.5)
+		(drill 1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(roundrect_rratio 0.166667)
+		(uuid "2ef2ed8d-4a50-4c25-86bf-ab5b0a8ede7e")
+	)
+	(pad "2" thru_hole circle
+		(at 0 2.54)
+		(size 1.5 1.5)
+		(drill 1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(uuid "aa8b588d-ba91-4ed6-8f72-52178c88f431")
+	)
+	(pad "3" thru_hole circle
+		(at 0 5.08)
+		(size 1.5 1.5)
+		(drill 1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(uuid "ccbd3d94-2ec1-49a5-ab77-8f15eaf5cca4")
+	)
+	(embedded_fonts no)
+	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/tsr1e_3d_drawing.stp"
+		(opacity 0.9400)
+		(offset
+			(xyz 3.81 130.81 -58.42)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz -90 -0 90)
+		)
+	)
+)
