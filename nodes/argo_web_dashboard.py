@@ -1564,26 +1564,30 @@ class ArgoWebDashboard(ArgoBaseNode):
                             # Always update time estimates from service (topics don't provide this)
                             # CRITICAL: Always update (even if None) to clear stale values
                             # Respect charging status: if charging, clear TTE; if discharging, clear TTF
-                            if charging_status is True:
+                            # Use state['battery_charging'] as authoritative (may be from topics), fallback to service value
+                            authoritative_charging_status = self.state.get('battery_charging')
+                            if authoritative_charging_status is None:
+                                # If state doesn't have charging status, use service value
+                                authoritative_charging_status = charging_status
+                            
+                            if authoritative_charging_status is True:
                                 # Charging: use TTF, clear TTE
                                 self.state['battery_time_to_full'] = time_to_full
                                 self.state['battery_time_to_empty'] = None
                                 if time_to_full is not None:
                                     self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
-                            elif charging_status is False:
+                            elif authoritative_charging_status is False:
                                 # Discharging: use TTE, clear TTF
                                 self.state['battery_time_to_full'] = None
                                 self.state['battery_time_to_empty'] = time_to_empty
                                 if time_to_empty is not None:
                                     self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
                             else:
-                                # Unknown charging status: update both (let template decide)
-                                self.state['battery_time_to_full'] = time_to_full
-                                self.state['battery_time_to_empty'] = time_to_empty
-                                if time_to_full is not None:
-                                    self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
-                                if time_to_empty is not None:
-                                    self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
+                                # Unknown charging status: clear both to avoid showing wrong estimate
+                                # Don't update time estimates if we don't know charging status
+                                self.state['battery_time_to_full'] = None
+                                self.state['battery_time_to_empty'] = None
+                                self.get_logger().debug("Charging status unknown - cleared time estimates")
                     except (json.JSONDecodeError, KeyError) as e:
                         self.get_logger().debug(f"Error parsing battery status response: {e}")
         except Exception as e:
