@@ -1,0 +1,7 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "myLib")(type "KiCad")(uri "${ARGO}/WindSensor/myLib.kicad_sym")(options "")(descr ""))
+  (lib (name "NewLib")(type "KiCad")(uri "${ARGO}/WindSensor/NewLib.kicad_sym")(options "")(descr ""))
+  (lib (name "WindSensor-rescue")(type "Legacy")(uri "${ARGO}/WindSensor/WindSensor-rev1/WindSensor-rescue.lib")(options "")(descr ""))
+  (lib (name "LP5814DRLR")(type "KiCad")(uri "${ARGO}/WindSensor/WindSensor.pretty/LP5814DRLR.kicad_sym")(options "")(descr ""))
+)
