@@ -440,11 +440,21 @@ class BatteryWaterNode(ArgoBaseNode):
                 # Initialize GPIO chip
                 self.gpio_chip = gpiod.Chip("/dev/gpiochip0")
                 # Request charging status GPIO line (PC12, line 76)
+                # MP2672 pulls this line LOW when charging, so we need pullup to detect HIGH when not charging
                 self.charging_gpio_line = self.gpio_chip.get_line(CHARGING_GPIO_LINE)
-                self.charging_gpio_line.request(consumer="battery_water_node", type=gpiod.LINE_REQ_DIR_IN)
+                self.charging_gpio_line.request(
+                    consumer="battery_water_node", 
+                    type=gpiod.LINE_REQ_DIR_IN,
+                    flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP
+                )
                 # Request AC power status GPIO line (PH9, line 233)
+                # MP2672 pulls this line LOW when USB power is present, so we need pullup to detect HIGH when not powered
                 self.acok_gpio_line = self.gpio_chip.get_line(ACOK_GPIO_LINE)
-                self.acok_gpio_line.request(consumer="battery_water_node", type=gpiod.LINE_REQ_DIR_IN)
+                self.acok_gpio_line.request(
+                    consumer="battery_water_node", 
+                    type=gpiod.LINE_REQ_DIR_IN,
+                    flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP
+                )
                 self.gpio_available = True
                 self.get_logger().info('GPIO setup complete for MP2672GD charger monitoring')
             except Exception as e:
