@@ -265,9 +265,8 @@ system-monitoring/
 
 ## Related Documentation
 
-- [Persistent Monitoring Services](../docs/README-persistent-monitoring-services.md)
+- [Persistent Logging](../docs/README-persistent-logging.md)
 - [Argo Lifecycle Management](../README.md#node-lifecycle-management)
 - [Thermal Monitor Installation](../launch/README-thermal-monitor.md)
 - [Network Improvements](../network/README.md)
 - [Power Control System](../power_control/README.md)
-

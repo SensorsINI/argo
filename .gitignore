@@ -148,3 +148,7 @@ patrol_test_result.png
 nodes/battery_slopes.json.backup
 pcb/MP2672 lipo 2s battery charger chip.pdf
 pcb/argo-v9-stable/argo-v9-stable-rev3/argo-v9-stable-rev3.kicad_sch-bak
+nodes/battery_slopes.json
+scripts/i2c_gpio_recovery.sh
+scripts/install_i2c_reset_sudoers.sh
+# Note: reset_i2c_bus.sh is tracked (not ignored) - it's a required script for the ai2creset alias

@@ -779,15 +779,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Skip processing in low-power mode (no viewers)
         if self.low_power_mode:
             return
-        
+
         now = time.time()
-        
+
         with self.state_lock:
             if source == 'wifi':
                 self.last_wifi_update['wind'] = now
                 self.state['wind_speed'] = msg.x
                 self.state['wind_angle'] = msg.y
                 self.state['wind_temp'] = msg.z
+                # Also update air_temp for UI display (temperature from anemometer)
+                self.state['air_temp'] = msg.z
                 self.state['data_source'] = 'WiFi'
             elif source == 'lora':
                 self.last_lora_update['wind'] = now
@@ -796,6 +798,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.state['wind_speed'] = msg.x
                     self.state['wind_angle'] = msg.y
                     self.state['wind_temp'] = msg.z
+                    # Also update air_temp for UI display (temperature from anemometer)
+                    self.state['air_temp'] = msg.z
                     self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()
@@ -1521,10 +1525,14 @@ class ArgoWebDashboard(ArgoBaseNode):
                         saltwater_voltage = raw_data.get('saltwater_voltage')
                         time_to_full = raw_data.get('time_to_full_hours')
                         time_to_empty = raw_data.get('time_to_empty_hours')
+                        # NOTE: I2C failure status comes ONLY from topic subscription (/argo/critical/i2c_failure)
+                        # Service call timeout indicates battery service not running, which is a different error
                         
                         # Only update if we got valid data and topic data is still missing
                         # This prevents overriding topic data if it arrived between check and response
                         with self.state_lock:
+                            # I2C failure state is managed ONLY by topic subscription (i2c_failure_cb)
+                            # Do not update i2c_failure from service - service timeout is different error
                             self.get_logger().debug(f"Battery status response: {battery_data}")
                             # Always update charging status from service (service is authoritative)
                             if charging_status is not None:

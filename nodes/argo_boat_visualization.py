@@ -483,7 +483,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
             else:
                 self._tf_fallback_counter = 0
             if self._tf_fallback_counter % 100 == 0:  # Log fallback periodically
-                self.get_logger().warn(f"TF lookup failed, using GPS fallback: {ex}")
+                self.get_logger().debug(f"TF lookup failed, using GPS fallback: {ex}")
             return (self.boat_pos_x, self.boat_pos_y)
 
     def _update_heading_trail(self):

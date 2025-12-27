@@ -4930,150 +4930,6 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "argo-v9:Adafruit_BNO085"
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(property "Reference" "U?"
-				(at 15.24 8.89 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" ""
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" "Argo footprint Library:I2C_header"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Datasheet" "https://www.ceva-dsp.com/wp-content/uploads/2019/10/BNO080_085-Datasheet.pdf"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Description" "Sparkfun IMU module for 9-DoF ICM-20948"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(symbol "Adafruit_BNO085_0_1"
-				(rectangle
-					(start 0 10.16)
-					(end 16.51 0)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "Adafruit_BNO085_1_1"
-				(text "Adafruit\nBosch/\n9-DoF IMU\nBNO085"
-					(at 9.144 5.08 0)
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(pin input line
-					(at -2.54 8.89 0)
-					(length 2.54)
-					(name "SCK"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "4"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin bidirectional line
-					(at -2.54 6.35 0)
-					(length 2.54)
-					(name "SDA"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "3"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin power_in line
-					(at -2.54 3.81 0)
-					(length 2.54)
-					(name "5V"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin power_in line
-					(at -2.54 1.27 0)
-					(length 2.54)
-					(name "GND"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 		(symbol "argo-v9:CH221K"
 			(exclude_from_sim no)
 			(in_bom yes)
@@ -5264,7 +5120,7 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "argo-v9:Conn_I2C"
+		(symbol "argo-v9:Conn_I2C_Molex_705450003"
 			(pin_names
 				(offset 1.016)
 				(hide yes)
@@ -5280,7 +5136,7 @@
 					)
 				)
 			)
-			(property "Value" "Conn_I2C"
+			(property "Value" "Conn_I2C_Molex_705450003"
 				(at 0 -7.62 0)
 				(effects
 					(font
@@ -5289,7 +5145,7 @@
 				)
 			)
 			(property "Footprint" "Argo footprint Library:I2C_header"
-				(at 0 0 0)
+				(at -0.762 -20.066 0)
 				(effects
 					(font
 						(size 1.27 1.27)
@@ -5297,8 +5153,8 @@
 					(hide yes)
 				)
 			)
-			(property "Datasheet" "~"
-				(at 0 0 0)
+			(property "Datasheet" "https://www.molex.com/en-us/products/part-detail/705450003?display=pdf"
+				(at 2.794 -10.922 0)
 				(effects
 					(font
 						(size 1.27 1.27)
@@ -5307,7 +5163,25 @@
 				)
 			)
 			(property "Description" "Generic connector, single row, 01x04, script generated (kicad-library-utils/schlib/autogen/connector/)"
-				(at 0 0 0)
+				(at 4.064 -13.208 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Product page" "https://www.molex.com/en-us/products/part-detail/705450003"
+				(at 1.778 -17.272 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Drawing" "https://www.molex.com/content/dam/molex/molex-dot-com/products/automated/en-us/salesdrawingpdf/705/70545/705450003_sd.pdf?inline"
+				(at 2.286 -15.24 0)
 				(effects
 					(font
 						(size 1.27 1.27)
@@ -5333,7 +5207,7 @@
 					(hide yes)
 				)
 			)
-			(symbol "Conn_I2C_1_1"
+			(symbol "Conn_I2C_Molex_705450003_1_1"
 				(rectangle
 					(start -1.27 3.81)
 					(end 10.16 -6.35)
@@ -5429,7 +5303,7 @@
 						(justify left)
 					)
 				)
-				(pin output line
+				(pin input line
 					(at -5.08 2.54 0)
 					(length 3.81)
 					(name "SCLK"
@@ -9436,7 +9310,7 @@
 	)
 	(wire
 		(pts
-			(xy 222.25 72.39) (xy 227.33 72.39)
+			(xy 209.55 72.39) (xy 204.47 72.39)
 		)
 		(stroke
 			(width 0)
@@ -10528,7 +10402,7 @@
 	)
 	(wire
 		(pts
-			(xy 222.25 77.47) (xy 227.33 77.47)
+			(xy 209.55 77.47) (xy 204.47 77.47)
 		)
 		(stroke
 			(width 0)
@@ -10688,7 +10562,7 @@
 	)
 	(wire
 		(pts
-			(xy 222.25 80.01) (xy 227.33 80.01)
+			(xy 209.55 80.01) (xy 204.47 80.01)
 		)
 		(stroke
 			(width 0)
@@ -11399,7 +11273,7 @@
 	)
 	(wire
 		(pts
-			(xy 222.25 74.93) (xy 227.33 74.93)
+			(xy 209.55 74.93) (xy 204.47 74.93)
 		)
 		(stroke
 			(width 0)
@@ -28411,12 +28285,12 @@
 		(uuid "044318b1-6aec-4480-ab6b-e02084632128")
 	)
 	(label "GND"
-		(at 227.33 80.01 180)
+		(at 204.47 80.01 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify right bottom)
+			(justify left bottom)
 		)
 		(uuid "04579dcb-c9fd-4e57-a0ee-50261f9fcff8")
 	)
@@ -29341,12 +29215,12 @@
 		(uuid "9220cd54-9788-4328-a895-5fed2ef8f2e3")
 	)
 	(label "SDA"
-		(at 227.33 74.93 180)
+		(at 204.47 74.93 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify right bottom)
+			(justify left bottom)
 		)
 		(uuid "92cdf73d-2717-4f0d-a860-9a0ae4778833")
 	)
@@ -29651,12 +29525,12 @@
 		(uuid "c21baf64-1fef-4fae-961a-d3e6915dea79")
 	)
 	(label "5V"
-		(at 227.33 77.47 180)
+		(at 204.47 77.47 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify right bottom)
+			(justify left bottom)
 		)
 		(uuid "c45d93b0-aaec-4b33-ac86-aa69ceaddad3")
 	)
@@ -29751,12 +29625,12 @@
 		(uuid "cde4bfb2-a6fb-4e22-b219-990af662c728")
 	)
 	(label "SCK"
-		(at 227.33 72.39 180)
+		(at 204.47 72.39 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify right bottom)
+			(justify left bottom)
 		)
 		(uuid "cf56772d-1546-4616-a63c-77a17bcbdc88")
 	)
@@ -30069,90 +29943,6 @@
 			(justify right bottom)
 		)
 		(uuid "f9e45f8d-2084-478f-9bf7-7816fc09d864")
-	)
-	(symbol
-		(lib_id "argo-v9:Conn_I2C")
-		(at 214.63 93.98 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "0077f9db-19dc-4187-ba54-a8a2ffa78e20")
-		(property "Reference" "WIND1"
-			(at 219.202 93.218 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "Conn_I2C"
-			(at 218.186 96.012 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Argo footprint Library:I2C_header"
-			(at 214.63 93.98 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 214.63 93.98 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Generic connector, single row, 01x04, script generated (kicad-library-utils/schlib/autogen/connector/)"
-			(at 214.63 93.98 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Order" "https://ch.farnell.com/en-CH/sensirion/sdp32-125pa-tr-250pcs/pressure-sensor-diff-125pa-digital/dp/2886658"
-			(at 214.63 93.98 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "4"
-			(uuid "40bdbdbc-1b03-4f41-9571-c80ba1dfd7ef")
-		)
-		(pin "2"
-			(uuid "901b6b25-3abd-44a8-b33c-44d536f61f98")
-		)
-		(pin "3"
-			(uuid "0ffed764-5c2a-4c33-9464-206ba94484f4")
-		)
-		(pin "1"
-			(uuid "71a9bc91-d5a2-4063-81d1-b925a93446c8")
-		)
-		(instances
-			(project "argo-v9-stable"
-				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
-					(reference "WIND1")
-					(unit 1)
-				)
-			)
-		)
 	)
 	(symbol
 		(lib_id "Transistor_FET:BSD840N")
@@ -34862,6 +34652,100 @@
 		)
 	)
 	(symbol
+		(lib_id "argo-v9:Conn_I2C_Molex_705450003")
+		(at 214.63 74.93 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "87ad2441-e2cd-4379-9691-74b915cdaadb")
+		(property "Reference" "J5"
+			(at 226.06 74.9299 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "Conn_I2C_Molex_705450003"
+			(at 226.06 77.4699 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Argo footprint Library:I2C_header"
+			(at 213.868 94.996 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.molex.com/en-us/products/part-detail/705450003?display=pdf"
+			(at 217.424 85.852 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Generic connector, single row, 01x04, script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 218.694 88.138 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Product page" "https://www.molex.com/en-us/products/part-detail/705450003"
+			(at 216.408 92.202 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Drawing" "https://www.molex.com/content/dam/molex/molex-dot-com/products/automated/en-us/salesdrawingpdf/705/70545/705450003_sd.pdf?inline"
+			(at 216.916 90.17 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "5d1d8763-8eef-46ca-9930-a2f9768b3c1a")
+		)
+		(pin "3"
+			(uuid "6a00e968-6d02-4c09-899e-1525e027d3b4")
+		)
+		(pin "1"
+			(uuid "e6e44523-f09a-4cc1-b474-294b236e6cbf")
+		)
+		(pin "4"
+			(uuid "3ad5f282-b9dd-44a9-9401-df97799112bf")
+		)
+		(instances
+			(project "argo-v9-stable-rev3"
+				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
+					(reference "J5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:Fuse")
 		(at 222.25 162.56 90)
 		(unit 1)
@@ -35548,6 +35432,100 @@
 			(project ""
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "D1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "argo-v9:Conn_I2C_Molex_705450003")
+		(at 214.63 93.98 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "a1c5d690-c95d-458a-ae75-a133bfbed75e")
+		(property "Reference" "J4"
+			(at 226.06 93.9799 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "Conn_I2C_Molex_705450003"
+			(at 226.06 96.5199 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Argo footprint Library:I2C_header"
+			(at 213.868 114.046 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.molex.com/en-us/products/part-detail/705450003?display=pdf"
+			(at 217.424 104.902 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Generic connector, single row, 01x04, script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 218.694 107.188 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Product page" "https://www.molex.com/en-us/products/part-detail/705450003"
+			(at 216.408 111.252 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Drawing" "https://www.molex.com/content/dam/molex/molex-dot-com/products/automated/en-us/salesdrawingpdf/705/70545/705450003_sd.pdf?inline"
+			(at 216.916 109.22 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "19a7a10e-2ed0-4ed4-a8bf-a4f55ef35056")
+		)
+		(pin "3"
+			(uuid "4f12ee47-c438-4a19-ab70-5db1f8a55122")
+		)
+		(pin "1"
+			(uuid "e82007a2-a1d2-4866-b44f-4e9036ec0832")
+		)
+		(pin "4"
+			(uuid "bb0664e1-b1ad-4b26-a664-04ae11fe9b5e")
+		)
+		(instances
+			(project ""
+				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
+					(reference "J4")
 					(unit 1)
 				)
 			)
@@ -37323,80 +37301,6 @@
 			(project ""
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP6")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "argo-v9:Adafruit_BNO085")
-		(at 219.71 81.28 0)
-		(mirror y)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "e78a50c4-55d8-4395-9fda-f42538728c51")
-		(property "Reference" "U4"
-			(at 204.47 72.898 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "~"
-			(at 211.455 68.58 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Argo footprint Library:I2C_header"
-			(at 219.71 81.28 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "https://www.ceva-dsp.com/wp-content/uploads/2019/10/BNO080_085-Datasheet.pdf"
-			(at 219.71 81.28 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Sparkfun IMU module for 9-DoF ICM-20948"
-			(at 219.71 81.28 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "4"
-			(uuid "00abedf6-1449-490c-b7c2-5dfe0f230d26")
-		)
-		(pin "2"
-			(uuid "ffc81656-eea2-441b-aad8-7728f5844167")
-		)
-		(pin "1"
-			(uuid "8f6d1a73-e889-466b-b1e1-6cb2b690abbf")
-		)
-		(pin "3"
-			(uuid "a7b8b4dd-3c78-4dd2-97cf-88ad9fb6d857")
-		)
-		(instances
-			(project ""
-				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
-					(reference "U4")
 					(unit 1)
 				)
 			)

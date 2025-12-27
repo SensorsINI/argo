@@ -1,0 +1,26 @@
+# Argo persistent service logs rotation
+# Rotate when files exceed 10MB, keep 2 rotated copies
+# This prevents unbounded growth between reboots
+
+/var/log.hdd/persistent/argo-power-control.log
+/var/log.hdd/persistent/argo-battery-water.log
+/var/log.hdd/persistent/argo-health-monitor.log
+/var/log.hdd/persistent/argo-launch-standard.log
+/var/log.hdd/persistent/argo-bno085.log
+/var/log.hdd/persistent/argo-radio-servo-module.log
+{
+    rotate 2
+    size 10M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 0664 orangepi orangepi
+    su orangepi orangepi
+    sharedscripts
+    postrotate
+        # Signal services to reopen log files if needed
+        # Most services use tee -a which handles file rotation gracefully
+    endscript
+}

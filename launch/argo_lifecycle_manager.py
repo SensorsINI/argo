@@ -84,6 +84,10 @@ try:
 except ImportError:
     REMOTE_CONFIG = None
 
+# MP2672 CHG timer warning threshold (hours)
+# Warn users when remaining charging time drops below this threshold
+CHARGING_TIME_WARNING_THRESHOLD_HOURS = 5.0
+
 
 class ArgoLifecycleManager:
     def __init__(self,
@@ -2349,7 +2353,7 @@ class ArgoLifecycleManager:
 
             # Battery and alerts
             # Note: argo_battery_water.py runs as independent service
-            battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = None, None, None, None, None, None
+            battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours = None, None, None, None, None, None, None
             # Check if argo_battery_water service is running independently
             battery_service_running = False
             try:
@@ -2360,7 +2364,7 @@ class ArgoLifecycleManager:
                 pass
 
             if battery_service_running:
-                battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = self._get_battery_water_status_alerts()
+                battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours = self._get_battery_water_status_alerts()
             
             # Use unified formatting function for system info line
             system_info = self._format_status_summary(
@@ -2397,6 +2401,16 @@ class ArgoLifecycleManager:
                     print(f"⏱️  Est. battery lifetime: {minutes} min")
                 else:
                     print(f"⏱️  Est. battery lifetime: {time_to_empty_hours:.1f} hours")
+            
+            # Display MP2672 CHG timer remaining time if AC power is present
+            if charging_time_remaining_hours is not None and usb_power_status:
+                if charging_time_remaining_hours < 0.1:
+                    print(f"⚠️  MP2672 CHG timer: EXPIRED (charging disabled by safety timer)")
+                elif charging_time_remaining_hours < 1.0:
+                    minutes = int(charging_time_remaining_hours * 60)
+                    print(f"⏱️  MP2672 CHG timer: {minutes} min remaining")
+                else:
+                    print(f"⏱️  MP2672 CHG timer: {charging_time_remaining_hours:.1f} hours remaining")
             
             # Display critical alerts if any
             if critical_alerts:
@@ -2549,6 +2563,7 @@ class ArgoLifecycleManager:
             usb_power_status = None
             time_to_full_hours = None
             time_to_empty_hours = None
+            charging_time_remaining_hours = None
             try:
                 result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
                                         capture_output=True, text=True, timeout=2)
@@ -2557,7 +2572,7 @@ class ArgoLifecycleManager:
                     # Try to get battery info, with retry on failure
                     for attempt in range(2):
                         try:
-                            battery_summary, _, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = self._get_battery_water_status_alerts()
+                            battery_summary, _, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours = self._get_battery_water_status_alerts()
                             if battery_summary:
                                 break  # Success
                             time.sleep(0.1)  # Brief delay before retry
@@ -2608,6 +2623,17 @@ class ArgoLifecycleManager:
             )
             
             print(status_line, flush=True)
+            
+            # Warn if MP2672 CHG timer is getting low (when AC power is present)
+            if charging_time_remaining_hours is not None and usb_power_status:
+                if charging_time_remaining_hours < CHARGING_TIME_WARNING_THRESHOLD_HOURS:
+                    if charging_time_remaining_hours < 0.1:
+                        print(f"⚠️  WARNING: MP2672 CHG timer has EXPIRED - charging disabled by safety timer!", flush=True)
+                    elif charging_time_remaining_hours < 1.0:
+                        minutes = int(charging_time_remaining_hours * 60)
+                        print(f"⚠️  WARNING: MP2672 CHG timer low: {minutes} min remaining (charging will disable after timer expires)", flush=True)
+                    else:
+                        print(f"⚠️  WARNING: MP2672 CHG timer low: {charging_time_remaining_hours:.1f} hours remaining (charging will disable after {CHARGING_TIME_WARNING_THRESHOLD_HOURS:.0f}h)", flush=True)
             
             # Update timestamp file to prevent redundant quick timer checks
             try:
@@ -2922,8 +2948,8 @@ class ArgoLifecycleManager:
             print(f"❌ Toggle pause failed: {message}")
             return False
 
-    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool], Optional[float], Optional[float]]:
-        """Get battery info, alerts, charging status, USB power status, and lifetime estimates using the battery Trigger service client"""
+    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool], Optional[float], Optional[float], Optional[float]]:
+        """Get battery info, alerts, charging status, USB power status, lifetime estimates, and charging time remaining using the battery Trigger service client"""
         try:
             # Ensure ROS2 node is initialized (required for service calls)
             self._ensure_ros2_node()
@@ -2944,13 +2970,14 @@ class ArgoLifecycleManager:
                 usb_power_status = raw_data.get('ac_power_present')
                 time_to_full_hours = raw_data.get('time_to_full_hours')
                 time_to_empty_hours = raw_data.get('time_to_empty_hours')
-                return battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours
+                charging_time_remaining_hours = raw_data.get('charging_time_remaining_hours')
+                return battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours
             else:
-                return None, None, None, None, None, None
+                return None, None, None, None, None, None, None
 
         except Exception as e:
             print(f"    Error getting battery and alerts: {e}")
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
 
     def _call_battery_service_client(self) -> Optional[Dict[str, Any]]:
         """Call battery service using centralized Trigger service call"""
