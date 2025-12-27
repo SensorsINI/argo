@@ -38,8 +38,8 @@
         "other_text_upright": false,
         "pads": {
           "drill": 1.0,
-          "height": 1.5,
-          "width": 1.5
+          "height": 1.3,
+          "width": 1.3
         },
         "silk_line_width": 0.1,
         "silk_text_italic": false,
@@ -68,15 +68,7 @@
           ""
         ],
         [
-          "silk_over_copper|143691272|53691272|cb3c82a0-e83e-4503-8be5-f448850ca83f|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
           "starved_thermal|109017500|77951061|4350aafc-0b3d-4f47-8541-fe4d7c49f010|38d1d1f1-b818-42b8-b358-3810618259b6|F.Cu",
-          ""
-        ],
-        [
-          "starved_thermal|121908550|75807150|4350aafc-0b3d-4f47-8541-fe4d7c49f010|b882becd-94bc-485b-8cde-896cf4fcd654|F.Cu",
           ""
         ],
         [

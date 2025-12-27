@@ -1,0 +1,133 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Import
+import os
+from PySide import QtWidgets
+
+# ========================================================
+#  CONFIGURATION
+#  Enter the amount (in mm) to chop off the right side.
+# ========================================================
+ANTENNA_TRIM_MM = 0
+# ========================================================
+
+def get_root_label(obj):
+    """Finds the top-level name for the file."""
+    curr = obj
+    limit = 10 
+    while curr.InList and limit > 0:
+        parent = curr.InList[0]
+        if hasattr(parent, "Group") or hasattr(parent, "OutList"):
+            curr = parent
+        else:
+            break
+        limit -= 1
+    return curr.Label.replace(" ", "_")
+
+def get_drills_compound(obj):
+    edges = []
+    def collect(o):
+        children = []
+        if hasattr(o, "Group"): children = o.Group
+        elif hasattr(o, "OutList"): children = o.OutList
+        if hasattr(o, "Shape") and o.Shape.isValid():
+             try: edges.extend(o.Shape.Edges)
+             except: pass
+        for c in children: collect(c)
+    collect(obj)
+    if not edges: return None
+    return Part.makeCompound(edges)
+
+def create_trimmed_board():
+    doc = App.ActiveDocument
+    sel = Gui.Selection.getSelection()
+    
+    # 1. Validation
+    if len(sel) < 1:
+        App.Console.PrintError("Error: Select 'F.SilkS_outline_' first, then 'TH-Drills'.\n")
+        return
+
+    outline_obj = sel[0]
+    drills_obj = sel[1] if len(sel) > 1 else None
+
+    try:
+        # 2. Create Board Base
+        bbox = outline_obj.Shape.BoundBox
+        full_length = bbox.XMax - bbox.XMin
+        width = bbox.YMax - bbox.YMin
+        thickness = 1.6
+        
+        # Apply Trim
+        final_length = full_length - ANTENNA_TRIM_MM
+        
+        # Create Solid
+        board_solid = Part.makeBox(final_length, width, thickness)
+        board_solid.translate(App.Vector(bbox.XMin, bbox.YMin, bbox.ZMin))
+        
+        final_shape = board_solid
+        
+        # 3. Process Drills
+        if drills_obj:
+            drill_compound = get_drills_compound(drills_obj)
+            if drill_compound:
+                drill_solids = []
+                loops = Part.sortEdges(drill_compound.Edges)
+                for loop in loops:
+                    try:
+                        wire = Part.Wire(loop)
+                        face = Part.Face(wire)
+                        cyl = face.extrude(App.Vector(0,0, thickness * 2))
+                        cyl.translate(App.Vector(0,0, -thickness/2))
+                        drill_solids.append(cyl)
+                    except:
+                        continue
+                if drill_solids:
+                    all_drills = Part.makeCompound(drill_solids)
+                    final_shape = board_solid.cut(all_drills)
+
+        # 4. Create Object
+        target_name = "Daughterboard_3D_Model"
+        old_obj = doc.getObject(target_name)
+        if old_obj: doc.removeObject(target_name)
+
+        new_obj = doc.addObject("Part::Feature", target_name)
+        new_obj.Shape = final_shape
+        new_obj.ViewObject.ShapeColor = (0.0, 0.4, 0.0) 
+        
+        outline_obj.ViewObject.Visibility = False
+        if drills_obj: drills_obj.ViewObject.Visibility = False
+        doc.recompute()
+
+        # 5. SMART SAVE DIALOG
+        # Determine the directory
+        current_dir = ""
+        if doc.FileName:
+            # If the FreeCAD file is saved, use that folder
+            current_dir = os.path.dirname(doc.FileName)
+        else:
+            # Fallback to User Documents or Home
+            current_dir = os.path.expanduser("~")
+
+        default_name = os.path.join(current_dir, get_root_label(outline_obj) + ".step")
+        
+        App.Console.PrintMessage(f"Opening save dialog at: {current_dir}\n")
+        
+        mw = Gui.getMainWindow()
+        file_path, filter_used = QtWidgets.QFileDialog.getSaveFileName(
+            mw, 
+            "Save 3D Model for KiCad", 
+            default_name, 
+            "STEP with colors (*.step *.stp)"
+        )
+        
+        if file_path:
+            if not file_path.lower().endswith(('.step', '.stp')):
+                file_path += ".step"
+            Import.export([new_obj], file_path)
+            App.Console.PrintMessage(f"Successfully exported: {file_path}\n")
+
+    except Exception as e:
+        App.Console.PrintError(f"Error: {str(e)}\n")
+
+create_trimmed_board()

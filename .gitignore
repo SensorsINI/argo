@@ -124,6 +124,8 @@ chats/
 
 # backup files  
 *.bak
+*.FCBak
+
 
 # Large PDF datasheets
 pcb/datasheets/adafruit-9-dof-orientation-imu-fusion-breakout-bno085.pdf
@@ -152,3 +154,4 @@ nodes/battery_slopes.json
 scripts/i2c_gpio_recovery.sh
 scripts/install_i2c_reset_sudoers.sh
 # Note: reset_i2c_bus.sh is tracked (not ignored) - it's a required script for the ai2creset alias
+pcb/argo-v9-stable/argo-v9-stable-rev3/argo-v9-stable-rev3-gerber.zip

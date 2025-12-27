@@ -1,4 +1,4 @@
-(footprint "Sparkfun_NEO-M9N-SMA-scaled"
+(footprint "Sparkfun_NEO-M9N-SMA"
 	(version 20241229)
 	(generator "pcbnew")
 	(generator_version "9.0")
@@ -364,9 +364,10 @@
 		(uuid "a41a31e9-e55a-4ac8-810d-814a31cacbfd")
 	)
 	(embedded_fonts no)
-	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/SparkFun_GPS_NEO_M9N_SMA_Board.step"
+	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/Sparkfun_NEO-M9N-SMA-scaled.step"
+		(opacity 0.8400)
 		(offset
-			(xyz 0 0 8)
+			(xyz 0 0 12)
 		)
 		(scale
 			(xyz 1 1 1)

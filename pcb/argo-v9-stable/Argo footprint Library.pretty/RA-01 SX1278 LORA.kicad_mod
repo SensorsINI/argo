@@ -381,4 +381,16 @@
 		(uuid "be1c0b21-354f-461d-be56-87ff86c7d704")
 	)
 	(embedded_fonts no)
+	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/RA-01 SX1278 LORA-fp001.step"
+		(opacity 0.8400)
+		(offset
+			(xyz 0 0 12)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz -0 -0 -0)
+		)
+	)
 )
