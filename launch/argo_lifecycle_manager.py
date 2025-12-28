@@ -84,6 +84,10 @@ try:
 except ImportError:
     REMOTE_CONFIG = None
 
+# MP2672 CHG timer warning threshold (hours)
+# Warn users when remaining charging time drops below this threshold
+CHARGING_TIME_WARNING_THRESHOLD_HOURS = 5.0
+
 
 class ArgoLifecycleManager:
     def __init__(self,
@@ -200,9 +204,15 @@ class ArgoLifecycleManager:
             threading.Thread(target=query_initial_pause_state, daemon=True).start()
         
         
-        # Setup signal handlers
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        # Setup signal handlers only from main thread (signal handlers can only be set from main thread)
+        # Use threading.main_thread() to check if we're in the main thread
+        if threading.current_thread() is threading.main_thread():
+            try:
+                signal.signal(signal.SIGINT, self._signal_handler)
+                signal.signal(signal.SIGTERM, self._signal_handler)
+            except ValueError:
+                # Signal handlers can only be set from main thread - ignore if called from background thread
+                pass
     
     def _load_nodes_from_yaml(self):
         """Load and parse node definitions from argo_nodes.yaml."""
@@ -2371,7 +2381,7 @@ class ArgoLifecycleManager:
 
             # Battery and alerts
             # Note: argo_battery_water.py runs as independent service
-            battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = None, None, None, None, None, None
+            battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours = None, None, None, None, None, None, None
             # Check if argo_battery_water service is running independently
             battery_service_running = False
             try:
@@ -2382,7 +2392,7 @@ class ArgoLifecycleManager:
                 pass
 
             if battery_service_running:
-                battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = self._get_battery_water_status_alerts()
+                battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours = self._get_battery_water_status_alerts()
             
             # Use unified formatting function for system info line
             system_info = self._format_status_summary(
@@ -2419,6 +2429,16 @@ class ArgoLifecycleManager:
                     print(f"⏱️  Est. battery lifetime: {minutes} min")
                 else:
                     print(f"⏱️  Est. battery lifetime: {time_to_empty_hours:.1f} hours")
+            
+            # Display MP2672 CHG timer remaining time if AC power is present
+            if charging_time_remaining_hours is not None and usb_power_status:
+                if charging_time_remaining_hours < 0.1:
+                    print(f"⚠️  MP2672 CHG timer: EXPIRED (charging disabled by safety timer)")
+                elif charging_time_remaining_hours < 1.0:
+                    minutes = int(charging_time_remaining_hours * 60)
+                    print(f"⏱️  MP2672 CHG timer: {minutes} min remaining")
+                else:
+                    print(f"⏱️  MP2672 CHG timer: {charging_time_remaining_hours:.1f} hours remaining")
             
             # Display critical alerts if any
             if critical_alerts:
@@ -2539,19 +2559,60 @@ class ArgoLifecycleManager:
     
     def quick_status(self) -> None:
         """Show condensed one-line status of Argo system (optimized for quick checks)"""
+        # Set up abort detection for Enter key (only if stdin is a TTY)
+        abort_requested = threading.Event()
+        abort_thread = None
+        
+        def monitor_abort():
+            """Background thread to monitor for Enter key press"""
+            try:
+                # Only monitor if stdin is a TTY (not piped)
+                if sys.stdin.isatty():
+                    stdin_fd = sys.stdin.fileno()
+                    # Continuously check for input until abort is requested or thread is stopped
+                    while not abort_requested.is_set():
+                        # Check if input is available (non-blocking check using file descriptor)
+                        ready, _, _ = select.select([stdin_fd], [], [], 0.1)
+                        if ready:
+                            # Input available, read it (this will get the Enter key press)
+                            line = sys.stdin.readline()
+                            if line:  # Any input triggers abort
+                                abort_requested.set()
+                                break
+            except Exception:
+                pass  # Ignore errors in abort monitoring
+        
+        # Start abort monitoring thread if stdin is a TTY
+        if sys.stdin.isatty():
+            abort_thread = threading.Thread(target=monitor_abort, daemon=True)
+            abort_thread.start()
+        
+        def check_abort():
+            """Check if abort was requested and exit if so"""
+            if abort_requested.is_set():
+                print("\r🚢 ARGO: Status check aborted", flush=True)
+                return True
+            return False
+        
         try:
             # Get node status
             node_status = self._get_node_status()
+            if check_abort():
+                return
             running_count = sum(1 for status in node_status.values() if "RUNNING" in status)
             total_count = len(node_status)
             
             # Get CPU usage (quick check with minimal interval)
             cpu_percent = psutil.cpu_percent(interval=0.2)
+            if check_abort():
+                return
             
             # Get memory and disk info (quick check)
             memory = psutil.virtual_memory()
             disk = psutil.disk_usage("/")
             free_disk_gb = disk.free / (1024**3)
+            if check_abort():
+                return
             
             # Get CPU temperature (quick check)
             cpu_temp = None
@@ -2564,6 +2625,8 @@ class ArgoLifecycleManager:
                 return
             except Exception:
                 pass
+            if check_abort():
+                return
             
             # Get battery info and power status if available (with retry for robustness)
             battery_summary = None
@@ -2571,6 +2634,7 @@ class ArgoLifecycleManager:
             usb_power_status = None
             time_to_full_hours = None
             time_to_empty_hours = None
+            charging_time_remaining_hours = None
             try:
                 result = subprocess.run(['systemctl', 'is-active', 'argo_battery_water.service'],
                                         capture_output=True, text=True, timeout=2)
@@ -2578,8 +2642,10 @@ class ArgoLifecycleManager:
                 if battery_service_running:
                     # Try to get battery info, with retry on failure
                     for attempt in range(2):
+                        if check_abort():
+                            return
                         try:
-                            battery_summary, _, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours = self._get_battery_water_status_alerts()
+                            battery_summary, _, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours = self._get_battery_water_status_alerts()
                             if battery_summary:
                                 break  # Success
                             time.sleep(0.1)  # Brief delay before retry
@@ -2592,6 +2658,8 @@ class ArgoLifecycleManager:
                 return
             except Exception:
                 pass
+            if check_abort():
+                return
             
             # Count healthy nodes
             healthy_count = 0
@@ -2602,6 +2670,8 @@ class ArgoLifecycleManager:
                     healthy_count += 1
                 elif health_status is False:
                     unhealthy_count += 1
+            if check_abort():
+                return
             
             # Get controller pause state
             controller_paused = None
@@ -2609,6 +2679,8 @@ class ArgoLifecycleManager:
                 # Query current pause state to ensure we have the latest
                 self._query_controller_pause_state()
                 controller_paused = self.controller_pause_state
+            if check_abort():
+                return
             
             # Use unified formatting function
             status_line = self._format_status_summary(
@@ -2630,6 +2702,17 @@ class ArgoLifecycleManager:
             )
             
             print(status_line, flush=True)
+            
+            # Warn if MP2672 CHG timer is getting low (when AC power is present)
+            if charging_time_remaining_hours is not None and usb_power_status:
+                if charging_time_remaining_hours < CHARGING_TIME_WARNING_THRESHOLD_HOURS:
+                    if charging_time_remaining_hours < 0.1:
+                        print(f"⚠️  WARNING: MP2672 CHG timer has EXPIRED - charging disabled by safety timer!", flush=True)
+                    elif charging_time_remaining_hours < 1.0:
+                        minutes = int(charging_time_remaining_hours * 60)
+                        print(f"⚠️  WARNING: MP2672 CHG timer low: {minutes} min remaining (charging will disable after timer expires)", flush=True)
+                    else:
+                        print(f"⚠️  WARNING: MP2672 CHG timer low: {charging_time_remaining_hours:.1f} hours remaining (charging will disable after {CHARGING_TIME_WARNING_THRESHOLD_HOURS:.0f}h)", flush=True)
             
             # Update timestamp file to prevent redundant quick timer checks
             try:
@@ -2944,8 +3027,8 @@ class ArgoLifecycleManager:
             print(f"❌ Toggle pause failed: {message}")
             return False
 
-    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool], Optional[float], Optional[float]]:
-        """Get battery info, alerts, charging status, USB power status, and lifetime estimates using the battery Trigger service client"""
+    def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool], Optional[float], Optional[float], Optional[float]]:
+        """Get battery info, alerts, charging status, USB power status, lifetime estimates, and charging time remaining using the battery Trigger service client"""
         try:
             # Ensure ROS2 node is initialized (required for service calls)
             self._ensure_ros2_node()
@@ -2966,13 +3049,14 @@ class ArgoLifecycleManager:
                 usb_power_status = raw_data.get('ac_power_present')
                 time_to_full_hours = raw_data.get('time_to_full_hours')
                 time_to_empty_hours = raw_data.get('time_to_empty_hours')
-                return battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours
+                charging_time_remaining_hours = raw_data.get('charging_time_remaining_hours')
+                return battery_summary, critical_alerts, charging_status, usb_power_status, time_to_full_hours, time_to_empty_hours, charging_time_remaining_hours
             else:
-                return None, None, None, None, None, None
+                return None, None, None, None, None, None, None
 
         except Exception as e:
             print(f"    Error getting battery and alerts: {e}")
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
 
     def _call_battery_service_client(self) -> Optional[Dict[str, Any]]:
         """Call battery service using centralized Trigger service call"""

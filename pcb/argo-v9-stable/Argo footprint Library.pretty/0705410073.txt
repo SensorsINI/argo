@@ -1,0 +1,10 @@
+﻿"Symbol";"Value";"Unit";
+"TraceParts.PartNumber";"90-08042024-063067";"";
+"REFERENCE";"705410073";"";
+"TraceParts.PartTitle";"SL";"";
+"TraceParts.InstanceId";"90-08042024-0630672N3XX9WWY2MK673V115V3T3RA";"";
+"SUPPLIER";"Molex";"";
+"DESIGN";"2.54mm Pitch SL Header, Single Row, Vertical, 3.05mm Pocket, Shrouded, with Beveled Plastic Peg, 4 Circuits, 0.76µm Gold (Au) Selective Plating, Tin (Sn) PC Tail Plating";"";
+"TRACEPARTS";"TRACEPARTS";"";
+"TraceParts.PartLanguage";"en";"";
+"TraceParts.PartVersion";"1.0.3";"";

@@ -28,7 +28,10 @@ import os
 from typing import Dict, Any, Optional, List
 
 # Import safe publishing utilities
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'support'))
+# Use absolute path to ensure reliable import regardless of working directory
+_support_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'support'))
+if _support_dir not in sys.path:
+    sys.path.insert(0, _support_dir)
 from safe_publish import safe_publish, safe_log, is_context_valid
 
 class ArgoBaseNode(Node):

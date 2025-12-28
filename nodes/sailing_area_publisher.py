@@ -131,35 +131,35 @@ class SailingAreaPublisher(Node):
     
     def log_startup_info(self):
         """Log comprehensive startup information about the sailing area publisher"""
-        self.get_logger().info("=" * 60)
-        self.get_logger().info("SAILING AREA PUBLISHER STARTUP INFORMATION")
-        self.get_logger().info("=" * 60)
+        self.get_logger().debug("=" * 60)
+        self.get_logger().debug("SAILING AREA PUBLISHER STARTUP INFORMATION")
+        self.get_logger().debug("=" * 60)
         
         # Published topics information
-        self.get_logger().info("Published Topics:")
-        self.get_logger().info(f"  • /sailing_waypoints (visualization_msgs/MarkerArray) - Waypoint markers")
-        self.get_logger().info(f"  • /sailing_boundaries (visualization_msgs/MarkerArray) - Boundary markers")
-        self.get_logger().info(f"  • /sailing_hazards (visualization_msgs/MarkerArray) - Hazard markers")
+        self.get_logger().debug("Published Topics:")
+        self.get_logger().debug(f"  • /sailing_waypoints (visualization_msgs/MarkerArray) - Waypoint markers")
+        self.get_logger().debug(f"  • /sailing_boundaries (visualization_msgs/MarkerArray) - Boundary markers")
+        self.get_logger().debug(f"  • /sailing_hazards (visualization_msgs/MarkerArray) - Hazard markers")
         
         # Publishing rate information
-        self.get_logger().info("Publishing Configuration:")
-        self.get_logger().info(f"  • Initial publish: Immediate on startup")
-        self.get_logger().info(f"  • Periodic republish: Every 60.0 seconds")
-        self.get_logger().info(f"  • QoS depth: 10 messages")
+        self.get_logger().debug("Publishing Configuration:")
+        self.get_logger().debug(f"  • Initial publish: Immediate on startup")
+        self.get_logger().debug(f"  • Periodic republish: Every 60.0 seconds")
+        self.get_logger().debug(f"  • QoS depth: 10 messages")
         
         # Maps directory information
-        self.get_logger().info("Maps Configuration:")
-        self.get_logger().info(f"  • Maps directory: {self.maps_dir}")
-        self.get_logger().info(f"  • Directory exists: {self.maps_dir.exists()}")
+        self.get_logger().debug("Maps Configuration:")
+        self.get_logger().debug(f"  • Maps directory: {self.maps_dir}")
+        self.get_logger().debug(f"  • Directory exists: {self.maps_dir.exists()}")
         
         # Loaded sailing areas information
-        self.get_logger().info("Loaded Sailing Areas:")
+        self.get_logger().debug("Loaded Sailing Areas:")
         if not self.sailing_areas:
             self.get_logger().warn("  • No sailing areas loaded")
         else:
             for area_name, geojson_data in self.sailing_areas.items():
                 features = geojson_data.get('features', [])
-                self.get_logger().info(f"  • {area_name}: {len(features)} features")
+                self.get_logger().debug(f"  • {area_name}: {len(features)} features")
                 
                 # Count feature types
                 feature_types = {}
@@ -170,25 +170,25 @@ class SailingAreaPublisher(Node):
                     feature_types[key] = feature_types.get(key, 0) + 1
                 
                 for feature_type, count in feature_types.items():
-                    self.get_logger().info(f"    - {feature_type}: {count}")
+                    self.get_logger().debug(f"    - {feature_type}: {count}")
         
         # Marker statistics
         waypoint_count, boundary_count, hazard_count = self.count_markers()
-        self.get_logger().info("Marker Statistics:")
-        self.get_logger().info(f"  • Total waypoints: {waypoint_count}")
-        self.get_logger().info(f"  • Total boundaries: {boundary_count}")
-        self.get_logger().info(f"  • Total hazards: {hazard_count}")
-        self.get_logger().info(f"  • Total markers: {waypoint_count + boundary_count + hazard_count}")
+        self.get_logger().debug("Marker Statistics:")
+        self.get_logger().debug(f"  • Total waypoints: {waypoint_count}")
+        self.get_logger().debug(f"  • Total boundaries: {boundary_count}")
+        self.get_logger().debug(f"  • Total hazards: {hazard_count}")
+        self.get_logger().debug(f"  • Total markers: {waypoint_count + boundary_count + hazard_count}")
         
         # Frame and coordinate information
-        self.get_logger().info("Coordinate System:")
-        self.get_logger().info(f"  • Frame ID: map")
-        self.get_logger().info(f"  • Coordinate format: Local x, y, z")
-        self.get_logger().info(f"  • Units: Meters")
+        self.get_logger().debug("Coordinate System:")
+        self.get_logger().debug(f"  • Frame ID: map")
+        self.get_logger().debug(f"  • Coordinate format: Local x, y, z")
+        self.get_logger().debug(f"  • Units: Meters")
         
-        self.get_logger().info("=" * 60)
-        self.get_logger().info("Sailing area publisher ready for Foxglove visualization")
-        self.get_logger().info("=" * 60)
+        self.get_logger().debug("=" * 60)
+        self.get_logger().debug("Sailing area publisher ready for Foxglove visualization")
+        self.get_logger().debug("=" * 60)
     
     def _find_origin_from_maps(self):
         """Find the 'home' waypoint from loaded maps to use as coordinate origin.

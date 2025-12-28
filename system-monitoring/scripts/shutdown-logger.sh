@@ -1,6 +1,9 @@
 #!/bin/bash
-# Shutdown logger - captures shutdown events and service stop times
-# Runs during system shutdown to log which services take time to stop
+# Shutdown timing logger - captures actual service stop times during shutdown
+# Runs during shutdown and logs real timing to persistent storage
+#
+# This script monitors systemd during shutdown and records when each service
+# actually stops, including whether it was force-killed.
 
 PERSIST_DIR="/var/log.hdd/persistent"
 SHUTDOWN_LOG="$PERSIST_DIR/shutdown-$(date +%Y%m%d-%H%M%S).log"
@@ -8,93 +11,134 @@ SHUTDOWN_LOG="$PERSIST_DIR/shutdown-$(date +%Y%m%d-%H%M%S).log"
 # Create persistent directory if it doesn't exist
 mkdir -p "$PERSIST_DIR"
 
-# Log function
+# Log function with forced flush
 log_msg() {
     local msg="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S.%3N')
-    echo "[$timestamp] $msg" >> "$SHUTDOWN_LOG" 2>/dev/null || true
-    # Also log to console/kmsg for visibility
-    echo "[$timestamp] SHUTDOWN-LOGGER: $msg" > /dev/console 2>/dev/null || true
-    echo "[$timestamp] SHUTDOWN-LOGGER: $msg" > /dev/kmsg 2>/dev/null || true
+    echo "[$timestamp] $msg" >> "$SHUTDOWN_LOG" 2>/dev/null
+    sync "$SHUTDOWN_LOG" 2>/dev/null || true
 }
 
-# Detect shutdown reason
-log_msg "=== SHUTDOWN LOGGER STARTED ==="
+# Start logging
+log_msg "=== SHUTDOWN TIMING LOGGER STARTED ==="
 log_msg "Shutdown initiated at $(date '+%Y-%m-%d %H:%M:%S')"
 
-# Check if systemd is still available to query
-if command -v systemctl >/dev/null 2>&1; then
-    # Get systemd target
-    if [ -f /etc/systemd/system/default.target ]; then
-        DEFAULT_TARGET=$(readlink -f /etc/systemd/system/default.target | xargs basename)
-        log_msg "Default target: $DEFAULT_TARGET"
+# Record initial state of Argo services
+log_msg ""
+log_msg "=== INITIAL ARGO SERVICE STATES ==="
+for service in argo_launch_standard argo_power_control argo_battery_water argo_bno085 \
+               argo_health_monitor argo_thermal_monitor argo_storage_monitor \
+               argo_radio_servo_module; do
+    if systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
+        STATE=$(systemctl is-active "$service.service" 2>/dev/null || echo "inactive")
+        # Get timeout - systemd returns it in various formats: "10s", "1min 30s", "infinity", or raw microseconds
+        TIMEOUT_RAW=$(systemctl show -p TimeoutStopUSec --value "$service.service" 2>/dev/null)
+        # Parse and normalize the timeout
+        if [[ "$TIMEOUT_RAW" == "infinity" ]]; then
+            TIMEOUT="∞"
+        elif [[ "$TIMEOUT_RAW" =~ ^[0-9]+s$ ]]; then
+            # Format like "10s" - already in seconds
+            TIMEOUT="$TIMEOUT_RAW"
+        elif [[ "$TIMEOUT_RAW" =~ ^[0-9]+min ]]; then
+            # Format like "1min 30s" - convert to seconds
+            TIMEOUT="$TIMEOUT_RAW"
+        elif [[ "$TIMEOUT_RAW" =~ ^[0-9]+$ ]]; then
+            # Raw microseconds - convert to seconds
+            TIMEOUT=$(echo "$TIMEOUT_RAW" | awk '{printf "%.1fs", $1/1000000}')
+        else
+            TIMEOUT="$TIMEOUT_RAW"
+        fi
+        KILLMODE=$(systemctl show -p KillMode --value "$service.service" 2>/dev/null)
+        log_msg "  $service: state=$STATE, timeout=$TIMEOUT, killmode=$KILLMODE"
     fi
+done
+
+# Monitor shutdown in real-time by tailing journalctl and watching for stop events
+log_msg ""
+log_msg "=== MONITORING SHUTDOWN PROGRESS ==="
+log_msg "Watching for service stop events..."
+
+# Create a background process to monitor journal
+(
+    # Use journalctl to follow shutdown events
+    journalctl -f --no-pager --since "now" 2>/dev/null | \
+    grep --line-buffered -E "Stopping|Stopped|Deactivated|Killing.*signal" | \
+    while IFS= read -r line; do
+        # Extract timestamp and message
+        ts=$(echo "$line" | awk '{print $1, $2, $3}')
+        msg=$(echo "$line" | sed 's/^[^ ]* [^ ]* [^ ]* //')
+        
+        # Check if it's an Argo service
+        if echo "$msg" | grep -qE "argo_(launch|power|battery|bno|health|thermal|storage|radio)"; then
+            log_msg "  $ts: $msg"
+        fi
+    done
+) &
+MONITOR_PID=$!
+
+# Wait a reasonable time for shutdown to progress
+# Services should stop within their TimeoutStopSec values
+# We'll wait up to 60 seconds total
+for i in {1..60}; do
+    sleep 1
     
-    # Check for active jobs (services being stopped)
-    log_msg "=== ACTIVE SYSTEMD JOBS ==="
-    systemctl list-jobs --no-pager >> "$SHUTDOWN_LOG" 2>/dev/null || true
-    
-    # List Argo services and their stop timeout configuration
-    log_msg "=== ARGO SERVICES STOP TIMEOUTS ==="
+    # Check if any Argo services are still running
+    RUNNING_COUNT=0
     for service in argo_launch_standard argo_power_control argo_battery_water argo_bno085 \
-                   argo_health_monitor argo_thermal_monitor argo_storage_monitor \
-                   argo_radio_servo_module argo_wifi_reconnect; do
-        if systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
-            TIMEOUT=$(systemctl show -p TimeoutStopSec --value "$service.service" 2>/dev/null || echo "default")
-            STATE=$(systemctl is-active "$service.service" 2>/dev/null || echo "inactive")
-            log_msg "  $service.service: timeout=${TIMEOUT}s, state=$STATE"
+                   argo_health_monitor; do
+        if systemctl is-active --quiet "$service.service" 2>/dev/null; then
+            ((RUNNING_COUNT++))
         fi
     done
     
-    # List all active services with stop timeouts > 10s
-    log_msg "=== SERVICES WITH LONG STOP TIMEOUTS (>10s) ==="
-    systemctl list-units --type=service --state=running --no-pager | \
-        grep -v "^  UNIT" | \
-        grep -v "^$" | \
-        awk '{print $1}' | \
-        while read -r unit; do
-            TIMEOUT=$(systemctl show -p TimeoutStopSec --value "$unit" 2>/dev/null || echo "default")
-            if [ "$TIMEOUT" != "default" ] && [ "$TIMEOUT" != "" ]; then
-                # Extract numeric value if timeout is formatted like "30s" or just "30"
-                TIMEOUT_NUM=$(echo "$TIMEOUT" | sed 's/[^0-9]//g')
-                if [ -n "$TIMEOUT_NUM" ] && [ "$TIMEOUT_NUM" -gt 10 ]; then
-                    log_msg "  $unit: timeout=${TIMEOUT}s"
-                fi
-            fi
-        done
-    
-    # Get systemd shutdown target info
-    log_msg "=== SYSTEMD SHUTDOWN TARGET INFO ==="
-    if systemctl list-jobs | grep -q "shutdown.target"; then
-        log_msg "shutdown.target job found"
-        systemctl list-jobs shutdown.target --no-pager >> "$SHUTDOWN_LOG" 2>/dev/null || true
+    # If all critical services have stopped, we're done monitoring
+    if [ $RUNNING_COUNT -eq 0 ]; then
+        log_msg "All monitored services have stopped after ${i} seconds"
+        break
     fi
-else
-    log_msg "WARNING: systemctl not available (already in late shutdown phase)"
-fi
+    
+    # Log progress every 5 seconds
+    if [ $((i % 5)) -eq 0 ]; then
+        log_msg "Still monitoring... ($i seconds elapsed, $RUNNING_COUNT services still running)"
+    fi
+done
 
-# Check if critical battery flag exists
+# Stop the monitoring process
+kill $MONITOR_PID 2>/dev/null || true
+wait $MONITOR_PID 2>/dev/null || true
+
+# Final service state check
+log_msg ""
+log_msg "=== FINAL ARGO SERVICE STATES ==="
+for service in argo_launch_standard argo_power_control argo_battery_water argo_bno085 \
+               argo_health_monitor argo_thermal_monitor argo_storage_monitor \
+               argo_radio_servo_module; do
+    if systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
+        STATE=$(systemctl is-active "$service.service" 2>/dev/null || echo "inactive")
+        log_msg "  $service: $STATE"
+    fi
+done
+
+# Check for critical battery flag
 if [ -f /tmp/argo_critical_battery ]; then
+    log_msg ""
     log_msg "=== CRITICAL BATTERY FLAG DETECTED ==="
-    log_msg "System shutting down due to critical battery - power relay will remain energized"
+    log_msg "Shutdown may have been triggered by critical battery condition"
 fi
 
-# Log filesystem sync status
-log_msg "=== FILESYSTEM SYNC ==="
-if command -v sync >/dev/null 2>&1; then
-    log_msg "Syncing filesystems..."
-    sync >> "$SHUTDOWN_LOG" 2>&1 || true
-    log_msg "Filesystem sync completed"
-else
-    log_msg "WARNING: sync command not available"
-fi
+# Sync filesystem one final time
+log_msg ""
+log_msg "=== FINAL FILESYSTEM SYNC ==="
+log_msg "Syncing filesystems..."
+sync 2>/dev/null || true
+log_msg "Sync completed"
 
 # Final timestamp
-log_msg "=== SHUTDOWN LOGGER ENDING ==="
-log_msg "Shutdown logger completed at $(date '+%Y-%m-%d %H:%M:%S')"
+log_msg ""
+log_msg "=== SHUTDOWN TIMING LOGGER COMPLETE ==="
+log_msg "Logger completed at $(date '+%Y-%m-%d %H:%M:%S')"
+
+# Force final sync of the log file
+sync "$SHUTDOWN_LOG" 2>/dev/null || true
 
 exit 0
-
-
-
-

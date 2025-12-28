@@ -1,0 +1,79 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+
+def get_drills_compound(obj):
+    edges = []
+    def collect(o):
+        children = []
+        if hasattr(o, "Group"): children = o.Group
+        elif hasattr(o, "OutList"): children = o.OutList
+        if hasattr(o, "Shape") and o.Shape.isValid():
+             try: edges.extend(o.Shape.Edges)
+             except: pass
+        for c in children: collect(c)
+    collect(obj)
+    if not edges: return None
+    return Part.makeCompound(edges)
+
+def create_solid_base():
+    doc = App.ActiveDocument
+    sel = Gui.Selection.getSelection()
+    
+    if len(sel) < 1:
+        App.Console.PrintError("Error: Select 'F.SilkS_outline_' and 'TH-Drills'.\n")
+        return
+
+    outline_obj = sel[0]
+    drills_obj = sel[1] if len(sel) > 1 else None
+
+    # 1. Get the FULL Bounding Box (No Trimming)
+    bbox = outline_obj.Shape.BoundBox
+    length = bbox.XMax - bbox.XMin
+    width = bbox.YMax - bbox.YMin
+    thickness = 1.6
+
+    # 2. Create the Base Box
+    # We create a Parametric Box so you can edit dimensions later
+    board_box = doc.addObject("Part::Box", "Board_Base_Object")
+    board_box.Length = length
+    board_box.Width = width
+    board_box.Height = thickness
+    board_box.Placement.Base = App.Vector(bbox.XMin, bbox.YMin, bbox.ZMin)
+
+    # 3. Cut the Holes (if drills exist)
+    if drills_obj:
+        drill_compound = get_drills_compound(drills_obj)
+        if drill_compound:
+            drill_solids = []
+            loops = Part.sortEdges(drill_compound.Edges)
+            for loop in loops:
+                try:
+                    face = Part.Face(Part.Wire(loop))
+                    cyl = face.extrude(App.Vector(0,0, thickness * 2))
+                    cyl.translate(App.Vector(0,0, -thickness/2))
+                    drill_solids.append(cyl)
+                except: continue
+            
+            if drill_solids:
+                # Create the CUT object
+                final_cut = doc.addObject("Part::Cut", "Daughterboard_Final")
+                final_cut.Base = board_box
+                final_cut.Tool = doc.addObject("Part::Feature", "Drills_Tool")
+                final_cut.Tool.Shape = Part.makeCompound(drill_solids)
+                
+                # Cleanup Visibility
+                board_box.ViewObject.Visibility = False
+                final_cut.Tool.ViewObject.Visibility = False
+                final_cut.ViewObject.ShapeColor = (0.0, 0.4, 0.0)
+            else:
+                board_box.ViewObject.ShapeColor = (0.0, 0.4, 0.0)
+    
+    # Hide original inputs
+    outline_obj.ViewObject.Visibility = False
+    if drills_obj: drills_obj.ViewObject.Visibility = False
+    
+    doc.recompute()
+    App.Console.PrintMessage("Board created. Expand 'Daughterboard_Final' to resize 'Board_Base_Object'.\n")
+
+create_solid_base()

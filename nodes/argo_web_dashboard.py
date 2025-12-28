@@ -779,15 +779,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Skip processing in low-power mode (no viewers)
         if self.low_power_mode:
             return
-        
+
         now = time.time()
-        
+
         with self.state_lock:
             if source == 'wifi':
                 self.last_wifi_update['wind'] = now
                 self.state['wind_speed'] = msg.x
                 self.state['wind_angle'] = msg.y
                 self.state['wind_temp'] = msg.z
+                # Also update air_temp for UI display (temperature from anemometer)
+                self.state['air_temp'] = msg.z
                 self.state['data_source'] = 'WiFi'
             elif source == 'lora':
                 self.last_lora_update['wind'] = now
@@ -796,6 +798,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.state['wind_speed'] = msg.x
                     self.state['wind_angle'] = msg.y
                     self.state['wind_temp'] = msg.z
+                    # Also update air_temp for UI display (temperature from anemometer)
+                    self.state['air_temp'] = msg.z
                     self.state['data_source'] = 'LoRa'
             
             self._update_data_age_indicators()
@@ -1521,10 +1525,14 @@ class ArgoWebDashboard(ArgoBaseNode):
                         saltwater_voltage = raw_data.get('saltwater_voltage')
                         time_to_full = raw_data.get('time_to_full_hours')
                         time_to_empty = raw_data.get('time_to_empty_hours')
+                        # NOTE: I2C failure status comes ONLY from topic subscription (/argo/critical/i2c_failure)
+                        # Service call timeout indicates battery service not running, which is a different error
                         
                         # Only update if we got valid data and topic data is still missing
                         # This prevents overriding topic data if it arrived between check and response
                         with self.state_lock:
+                            # I2C failure state is managed ONLY by topic subscription (i2c_failure_cb)
+                            # Do not update i2c_failure from service - service timeout is different error
                             self.get_logger().debug(f"Battery status response: {battery_data}")
                             # Always update charging status from service (service is authoritative)
                             if charging_status is not None:
@@ -1556,26 +1564,30 @@ class ArgoWebDashboard(ArgoBaseNode):
                             # Always update time estimates from service (topics don't provide this)
                             # CRITICAL: Always update (even if None) to clear stale values
                             # Respect charging status: if charging, clear TTE; if discharging, clear TTF
-                            if charging_status is True:
+                            # Use state['battery_charging'] as authoritative (may be from topics), fallback to service value
+                            authoritative_charging_status = self.state.get('battery_charging')
+                            if authoritative_charging_status is None:
+                                # If state doesn't have charging status, use service value
+                                authoritative_charging_status = charging_status
+                            
+                            if authoritative_charging_status is True:
                                 # Charging: use TTF, clear TTE
                                 self.state['battery_time_to_full'] = time_to_full
                                 self.state['battery_time_to_empty'] = None
                                 if time_to_full is not None:
                                     self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
-                            elif charging_status is False:
+                            elif authoritative_charging_status is False:
                                 # Discharging: use TTE, clear TTF
                                 self.state['battery_time_to_full'] = None
                                 self.state['battery_time_to_empty'] = time_to_empty
                                 if time_to_empty is not None:
                                     self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
                             else:
-                                # Unknown charging status: update both (let template decide)
-                                self.state['battery_time_to_full'] = time_to_full
-                                self.state['battery_time_to_empty'] = time_to_empty
-                                if time_to_full is not None:
-                                    self.get_logger().debug(f"Updated battery time to full: {time_to_full} hours")
-                                if time_to_empty is not None:
-                                    self.get_logger().debug(f"Updated battery time to empty: {time_to_empty} hours")
+                                # Unknown charging status: clear both to avoid showing wrong estimate
+                                # Don't update time estimates if we don't know charging status
+                                self.state['battery_time_to_full'] = None
+                                self.state['battery_time_to_empty'] = None
+                                self.get_logger().debug("Charging status unknown - cleared time estimates")
                     except (json.JSONDecodeError, KeyError) as e:
                         self.get_logger().debug(f"Error parsing battery status response: {e}")
         except Exception as e:
@@ -1842,6 +1854,18 @@ class ArgoWebDashboard(ArgoBaseNode):
                     'display_name': 'Patrol',
                     'icon': '🛥️',
                     'description': 'Autonomous patrol within geofence area'
+                },
+                {
+                    'type': 'crosser',
+                    'display_name': 'Crosser',
+                    'icon': '↔️',
+                    'description': 'Crosses pond from side to side, targeting middle waypoint'
+                },
+                {
+                    'type': 'human',
+                    'display_name': 'Human',
+                    'icon': '👤',
+                    'description': 'Manual control via keyboard/radio commands (pass-through mode)'
                 }
             ]
             return jsonify({'success': True, 'controllers': controllers})
@@ -1853,7 +1877,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             controller_type = data.get('type', '')
             
             # Valid controller types from controller.py _on_parameters_set callback
-            valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol']
+            valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol', 'crosser', 'human']
             if controller_type not in valid_types:
                 return jsonify({'success': False, 'message': f'Invalid controller type. Valid types: {", ".join(valid_types)}'}), 400
             

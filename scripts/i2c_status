@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""
+I2C Bus Status Checker
+Quick CLI tool to detect working and non-functional I2C buses.
+"""
+
+import subprocess
+import sys
+import argparse
+import time
+from datetime import datetime
+from typing import List, Tuple, Optional, Dict
+
+
+def scan_i2c_bus(bus: int, timeout: float = 2.0) -> Tuple[bool, List[int], Optional[str]]:
+    """
+    Scan an I2C bus and return status.
+    
+    Returns:
+        (is_working, detected_addresses, error_message)
+    """
+    try:
+        proc = subprocess.run(
+            ["i2cdetect", "-y", str(bus)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=True,
+        )
+        output = proc.stdout
+        
+        # Parse detected addresses
+        detected: List[int] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            
+            try:
+                _, cells_str = line.split(":", 1)
+            except ValueError:
+                continue
+            
+            cells = [c.strip() for c in cells_str.strip().split()]
+            for cell in cells:
+                # Skip empty slots and devices in use by drivers
+                if cell == "--" or cell == "UU":
+                    continue
+                # Parse hex addresses
+                if len(cell) == 2:
+                    try:
+                        addr = int(cell, 16)
+                        detected.append(addr)
+                    except ValueError:
+                        continue
+        
+        return True, sorted(set(detected)), None
+        
+    except FileNotFoundError:
+        return False, [], "i2cdetect not found (install i2c-tools)"
+    except subprocess.TimeoutExpired:
+        return False, [], "timeout"
+    except subprocess.CalledProcessError as e:
+        return False, [], f"i2cdetect failed (exit {e.returncode})"
+    except Exception as e:
+        return False, [], str(e)
+
+
+def check_bus_exists(bus: int) -> bool:
+    """Check if I2C bus device file exists."""
+    import os
+    return os.path.exists(f"/dev/i2c-{bus}")
+
+
+def format_status(is_working: bool, detected: List[int], error: Optional[str], bus: int, 
+                  show_change: bool = False, prev_detected: Optional[List[int]] = None) -> str:
+    """Format status output for a bus."""
+    change_indicator = ""
+    if show_change and prev_detected is not None:
+        if set(detected) != set(prev_detected):
+            lost = set(prev_detected) - set(detected)
+            gained = set(detected) - set(prev_detected)
+            changes = []
+            if lost:
+                changes.append(f"LOST: {', '.join([f'0x{a:02x}' for a in sorted(lost)])}")
+            if gained:
+                changes.append(f"NEW: {', '.join([f'0x{a:02x}' for a in sorted(gained)])}")
+            if changes:
+                change_indicator = f" [CHANGE: {'; '.join(changes)}]"
+    
+    if not check_bus_exists(bus):
+        return f"Bus {bus}: ❌ NOT FOUND (/dev/i2c-{bus} missing){change_indicator}"
+    
+    if not is_working:
+        status_icon = "❌ NON-FUNCTIONAL"
+        if error:
+            return f"Bus {bus}: {status_icon} - {error}{change_indicator}"
+        return f"Bus {bus}: {status_icon}{change_indicator}"
+    
+    if detected:
+        hex_addrs = ", ".join([f"0x{a:02x}" for a in detected])
+        return f"Bus {bus}: ✅ WORKING - {len(detected)} device(s): {hex_addrs}{change_indicator}"
+    else:
+        return f"Bus {bus}: ⚠️  WORKING but NO DEVICES detected{change_indicator}"
+
+
+def monitor_continuous(buses_to_check: List[int], interval: float, timeout: float, 
+                       brief: bool, show_timestamp: bool = True):
+    """Continuously monitor I2C buses for intermittent failures."""
+    print(f"Monitoring I2C buses {buses_to_check} (interval: {interval}s, Ctrl+C to stop)", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    
+    # Store previous state for change detection
+    prev_state: Dict[int, Tuple[bool, List[int], Optional[str]]] = {}
+    scan_count = 0
+    failure_count: Dict[int, int] = {bus: 0 for bus in buses_to_check}
+    success_count: Dict[int, int] = {bus: 0 for bus in buses_to_check}
+    
+    try:
+        while True:
+            scan_count += 1
+            timestamp = datetime.now().strftime("%H:%M:%S") if show_timestamp else None
+            
+            # Print timestamp once per scan cycle
+            if timestamp and not brief:
+                print(f"\n[{timestamp}] Scan #{scan_count}")
+            
+            # Scan all buses
+            current_results = []
+            for bus in sorted(set(buses_to_check)):
+                is_working, detected, error = scan_i2c_bus(bus, timeout=timeout)
+                current_results.append((bus, is_working, detected, error))
+                
+                # Update statistics
+                if is_working:
+                    success_count[bus] += 1
+                else:
+                    failure_count[bus] += 1
+                
+                # Check for changes
+                prev_working, prev_detected, prev_error = prev_state.get(bus, (None, None, None))
+                has_change = (
+                    prev_working is not None and 
+                    (prev_working != is_working or set(prev_detected or []) != set(detected))
+                )
+                
+                # Print status
+                if brief:
+                    if timestamp:
+                        print(f"[{timestamp}] ", end="", flush=True)
+                    if is_working and detected:
+                        status = f"Bus {bus}: OK ({len(detected)} devices)"
+                    elif is_working:
+                        status = f"Bus {bus}: OK (no devices)"
+                    else:
+                        status = f"Bus {bus}: FAIL"
+                    
+                    if has_change:
+                        status = f"⚠️  {status}"
+                    print(status)
+                else:
+                    prev_detected_list = prev_detected if prev_working else None
+                    status_line = format_status(
+                        is_working, detected, error, bus, 
+                        show_change=has_change, 
+                        prev_detected=prev_detected_list
+                    )
+                    if has_change:
+                        # Highlight changes
+                        print(f"⚠️  {status_line}")
+                    else:
+                        print(f"   {status_line}")
+                
+                # Update previous state
+                prev_state[bus] = (is_working, detected.copy() if detected else [], error)
+            
+            # Print separator between scans (only in verbose mode)
+            if not brief:
+                print("-" * 80)
+            
+            # Sleep until next scan
+            time.sleep(interval)
+            
+    except KeyboardInterrupt:
+        print("\n" + "=" * 80, file=sys.stderr)
+        print(f"Monitoring stopped after {scan_count} scan(s)", file=sys.stderr)
+        print("\nStatistics:", file=sys.stderr)
+        for bus in sorted(buses_to_check):
+            total = success_count[bus] + failure_count[bus]
+            if total > 0:
+                success_pct = (success_count[bus] / total) * 100
+                print(f"  Bus {bus}: {success_count[bus]}/{total} successful ({success_pct:.1f}%)", file=sys.stderr)
+                if failure_count[bus] > 0:
+                    print(f"           {failure_count[bus]} failure(s) detected", file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Quick I2C bus status checker",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                    # Check bus 0 (default)
+  %(prog)s 0                   # Check bus 0
+  %(prog)s 0 1                 # Check buses 0 and 1
+  %(prog)s --all                # Check all available buses
+  %(prog)s --scan 0-7          # Scan buses 0 through 7
+  %(prog)s --watch 1            # Monitor bus 0 every 1 second
+  %(prog)s 0 --watch 0.5       # Monitor bus 0 every 0.5 seconds
+  %(prog)s --all --watch 2     # Monitor all buses every 2 seconds
+        """
+    )
+    parser.add_argument(
+        "buses",
+        nargs="*",
+        type=int,
+        help="I2C bus numbers to check (default: 0)"
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Check all available I2C buses"
+    )
+    parser.add_argument(
+        "--scan",
+        metavar="RANGE",
+        help="Scan bus range (e.g., '0-7' or '1-3')"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=2.0,
+        help="Timeout in seconds per bus (default: 2.0)"
+    )
+    parser.add_argument(
+        "--brief",
+        action="store_true",
+        help="Brief output (only status, no details)"
+    )
+    parser.add_argument(
+        "--watch",
+        type=float,
+        metavar="INTERVAL",
+        help="Continuous monitoring mode (scan every INTERVAL seconds, Ctrl+C to stop)"
+    )
+    parser.add_argument(
+        "--no-timestamp",
+        action="store_true",
+        help="Don't show timestamps in watch mode"
+    )
+    
+    args = parser.parse_args()
+    
+    # Determine which buses to check
+    buses_to_check: List[int] = []
+    
+    if args.scan:
+        # Parse range like "0-7" or "1-3"
+        try:
+            start, end = map(int, args.scan.split("-"))
+            buses_to_check = list(range(start, end + 1))
+        except ValueError:
+            print(f"Error: Invalid range format '{args.scan}'. Use format like '0-7'", file=sys.stderr)
+            sys.exit(1)
+    elif args.all:
+        # Find all available I2C buses
+        import os
+        buses_to_check = []
+        for i in range(16):  # Check buses 0-15
+            if os.path.exists(f"/dev/i2c-{i}"):
+                buses_to_check.append(i)
+        if not buses_to_check:
+            print("No I2C buses found", file=sys.stderr)
+            sys.exit(1)
+    elif args.buses:
+        buses_to_check = args.buses
+    else:
+        buses_to_check = [0]  # Default to bus 0
+    
+    if not buses_to_check:
+        print("No buses specified", file=sys.stderr)
+        sys.exit(1)
+    
+    # Continuous monitoring mode
+    if args.watch is not None:
+        if args.watch <= 0:
+            print("Error: Watch interval must be positive", file=sys.stderr)
+            sys.exit(1)
+        monitor_continuous(
+            buses_to_check, 
+            interval=args.watch, 
+            timeout=args.timeout,
+            brief=args.brief,
+            show_timestamp=not args.no_timestamp
+        )
+        sys.exit(0)
+    
+    # Single scan mode
+    results = []
+    for bus in sorted(set(buses_to_check)):
+        is_working, detected, error = scan_i2c_bus(bus, timeout=args.timeout)
+        results.append((bus, is_working, detected, error))
+    
+    # Print results
+    if args.brief:
+        for bus, is_working, detected, error in results:
+            if is_working and detected:
+                print(f"Bus {bus}: OK ({len(detected)} devices)")
+            elif is_working:
+                print(f"Bus {bus}: OK (no devices)")
+            else:
+                print(f"Bus {bus}: FAIL")
+    else:
+        for bus, is_working, detected, error in results:
+            print(format_status(is_working, detected, error, bus))
+    
+    # Exit code: 0 if all buses working, 1 if any failed
+    all_working = all(is_working for _, is_working, _, _ in results)
+    sys.exit(0 if all_working else 1)
+
+
+if __name__ == "__main__":
+    main()

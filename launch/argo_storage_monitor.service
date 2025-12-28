@@ -11,6 +11,7 @@ WorkingDirectory=/home/orangepi/argo
 ExecStart=/usr/bin/python3 /home/orangepi/argo/launch/argo_storage_notifications.py check
 Restart=on-failure
 RestartSec=300
+TimeoutStopSec=30
 # Only run if we have a display (GUI environment)
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000

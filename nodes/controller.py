@@ -260,10 +260,16 @@ class DataCollector:
 
 class ControllerNode(ArgoBaseNode):
     """High-level autonomous controller node."""
+    
+    # Grace period after startup to ignore I2C failures (allows nodes to start up)
+    I2C_FAILURE_GRACE_PERIOD_SECONDS = 30.0
 
     def __init__(self, debug_mode=False):
         super().__init__('controller_node')
         self.get_logger().info('Controller node starting...')
+        
+        # Track startup time for grace period enforcement
+        self._startup_time = time.time()
         
         # Set initial health status - controller is healthy when running
         self.set_healthy("Controller node running")
@@ -551,6 +557,11 @@ class ControllerNode(ArgoBaseNode):
 
         self.get_logger().info(
             f"Initialized controller: {self.controller.name}")
+        
+        # Call reset() to ensure controller is properly initialized
+        # This is especially important for HumanController to publish release_servos=True
+        if self.controller:
+            self.controller.reset()
 
     def switch_controller(self, controller_type: str = None):
         """Switch to a different controller type.
@@ -845,27 +856,42 @@ class ControllerNode(ArgoBaseNode):
         # Always process critical failures, even when paused
         i2c_failed = msg.data
         old_state = self._i2c_failure_active
-        self._i2c_failure_active = i2c_failed
+        
+        # Check if we're still in the grace period after startup
+        time_since_startup = time.time() - self._startup_time
+        in_grace_period = time_since_startup < self.I2C_FAILURE_GRACE_PERIOD_SECONDS
         
         if i2c_failed and not old_state:
-            # I2C failure just detected - switch to RTH immediately
-            self.get_logger().error(
-                "🔴 CRITICAL I2C BUS FAILURE DETECTED - Battery/wind sensors unavailable. "
-                "Automatically switching to Return-to-Home mode for safety.")
-            
-            # Switch to RTH controller if not already in RTH mode
-            if not isinstance(self.controller, ReturnToHomeController):
-                old_controller_name = self.controller.name if self.controller else "None"
-                self.switch_controller('return_to_home')
-                self._rth_switched_due_to_i2c = True
-                self.get_logger().error(
-                    f"Controller automatically switched from {old_controller_name} to ReturnToHomeController "
-                    f"due to critical I2C bus failure")
+            # I2C failure just detected
+            if in_grace_period:
+                # Ignore I2C failures during startup grace period (nodes may still be starting)
+                remaining_grace = self.I2C_FAILURE_GRACE_PERIOD_SECONDS - time_since_startup
+                self.get_logger().debug(
+                    f"I2C failure detected during startup grace period (ignoring, {remaining_grace:.1f}s remaining). "
+                    f"This is normal during node startup.")
+                # Don't update _i2c_failure_active state during grace period
+                return
             else:
-                self.get_logger().info("Already in RTH mode - maintaining RTH due to I2C failure")
+                # I2C failure detected after grace period - switch to RTH immediately
+                self._i2c_failure_active = i2c_failed
+                self.get_logger().error(
+                    "🔴 CRITICAL I2C BUS FAILURE DETECTED - Battery/wind sensors unavailable. "
+                    "Automatically switching to Return-to-Home mode for safety.")
+                
+                # Switch to RTH controller if not already in RTH mode
+                if not isinstance(self.controller, ReturnToHomeController):
+                    old_controller_name = self.controller.name if self.controller else "None"
+                    self.switch_controller('return_to_home')
+                    self._rth_switched_due_to_i2c = True
+                    self.get_logger().error(
+                        f"Controller automatically switched from {old_controller_name} to ReturnToHomeController "
+                        f"due to critical I2C bus failure")
+                else:
+                    self.get_logger().info("Already in RTH mode - maintaining RTH due to I2C failure")
         
         elif not i2c_failed and old_state:
             # I2C recovery detected
+            self._i2c_failure_active = i2c_failed
             self.get_logger().info(
                 "✅ I2C BUS RECOVERY DETECTED - Critical sensors restored. "
                 "Controller will remain in current mode (RTH or manual switch required to exit RTH).")
@@ -981,7 +1007,11 @@ class ControllerNode(ArgoBaseNode):
                 safe_publish(self.pub_controller_state, state_msg, self)
             
             # Check if node is paused - when paused, skip all processing and logging
-            if self.is_paused():
+            # EXCEPTION: HumanController must still run to publish release_servos=True
+            # This ensures servos stay in high impedance mode for human control
+            is_human_controller = isinstance(self.controller, HumanController)
+            
+            if self.is_paused() and not is_human_controller:
                 # When paused, no autonomous commands are published, which causes
                 # rudder_sail_radio.py to default to human control due to stale auto commands.
                 # This effectively hands control back to the human operator immediately.
@@ -1015,13 +1045,16 @@ class ControllerNode(ArgoBaseNode):
                 self.last_logged_human_control = self.boat_state.human_controlled
 
             # Check for minimum required data
-            if self.boat_state.compass_heading is None:
+            # EXCEPTION: HumanController doesn't need compass_heading - it just passes through radio commands
+            if self.boat_state.compass_heading is None and not is_human_controller:
                 self.get_logger().debug("Waiting for initial compass heading...", throttle_duration_sec=5)
                 return
 
             if self.boat_state.human_controlled:
                 # Human control mode - update target heading for when robot takes over
-                self.boat_state.target_heading = self.boat_state.compass_heading
+                # Only update if compass_heading is available (not needed for HumanController)
+                if self.boat_state.compass_heading is not None:
+                    self.boat_state.target_heading = self.boat_state.compass_heading
 
                 # Collect training data if enabled
                 if (self.data_collector.enabled and
@@ -1036,7 +1069,22 @@ class ControllerNode(ArgoBaseNode):
                     self.data_collector.record_sample(
                         self.boat_state, human_action)
 
-                # No autonomous command published - rudder_sail_radio.py handles human input
+                # CRITICAL: HumanController must run even in human control mode to publish release_servos=True
+                # This ensures servos stay in high impedance mode for direct radio control
+                if isinstance(self.controller, HumanController):
+                    if self.controller is not None:
+                        control_command = self.controller.generate_control(self.boat_state)
+                        # Publish the command (HumanController passes through radio commands)
+                        if control_command:
+                            safe_publish(self.pub_rudder_sail_cmd, control_command.to_vector3(), self)
+                        else:
+                            self.get_logger().warn("HumanController.generate_control() returned None")
+                    else:
+                        self.get_logger().warn("HumanController instance is None")
+                else:
+                    # No autonomous command published - rudder_sail_radio.py handles human input
+                    self.get_logger().debug(f"Controller is not HumanController (type: {type(self.controller).__name__}) - no command published")
+                    pass
 
             else:
                 # Autonomous control mode
@@ -1103,6 +1151,8 @@ class ControllerNode(ArgoBaseNode):
 
                 # **THE CORE ARCHITECTURE: Single generate_control function**
                 # (Pause check already done at start of timer_callback - no need to check again)
+                # CRITICAL: HumanController must always run to publish release_servos=True
+                # This ensures servos stay in high impedance mode even after human control timeout
                 control_command = self.controller.generate_control(self.boat_state)
 
                 # Publish control command to rudder_sail_radio.py

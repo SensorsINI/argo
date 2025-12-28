@@ -357,6 +357,16 @@ def run_test_mode():
     except KeyboardInterrupt:
         print("\nCtrl+C pressed. Exiting test mode.")
     finally:
+        # CRITICAL: Release servo pins before exiting (set to high impedance mode)
+        try:
+            if SERVO_RUDDER_PATH.exists():
+                SERVO_RUDDER_PATH.write_text("0")
+            if SERVO_SAIL_PATH.exists():
+                SERVO_SAIL_PATH.write_text("0")
+            print("Servo outputs set to HIGH IMPEDANCE mode (radio control active)")
+        except Exception as e:
+            print(f"Warning: Could not set servos to high impedance mode: {e}", file=sys.stderr)
+        
         # Restore Terminal
         # This block ensures terminal settings are always restored
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
@@ -393,6 +403,8 @@ class RudderSailRadioNode(ArgoBaseNode):
         if not SYS_BASE_PATH.is_dir():
             self.get_logger().error(f"Sysfs path {SYS_BASE_PATH} not found.")
             self.get_logger().error("Is the 'argo_radio_servo_module' kernel module loaded?")
+            # CRITICAL: Release servo pins before exiting (in case they were left active)
+            self._emergency_release_servos()
             rclpy.shutdown()
             return
 
@@ -549,6 +561,15 @@ class RudderSailRadioNode(ArgoBaseNode):
         # between our own messages and external ones in the callback
         self.create_subscription(
             Vector3, '/rudder_sail_radio', self.external_control_callback, 10)
+        
+        # From controllers (human controller signals servo release)
+        # When True, servos should be released (high impedance mode) so radio directly controls them
+        # When False, normal PWM control via arbitration
+        self.release_servos = False  # Default to False (normal operation)
+        self.last_release_servos_time = time.time()  # Track last message time for timeout
+        self.RELEASE_SERVOS_TIMEOUT = 3.0  # If no message for 3 seconds, assume False (allows for jitter with 1Hz publish rate)
+        self.create_subscription(
+            Bool, '/release_servos', self.release_servos_callback, 10)
 
         # --- Timers ---
         self.control_loop_period = DEFAULT_CONTROL_LOOP_PERIOD  # 20 Hz for responsive control
@@ -668,6 +689,28 @@ class RudderSailRadioNode(ArgoBaseNode):
             # Removed debug logging to reduce CPU overhead (runs at 20Hz)
         except IOError as e:
             self.get_logger().error(f"Error writing to {path}: {e}")
+
+    def _emergency_release_servos(self):
+        """Emergency method to release servo pins - can be called even if node is not fully initialized.
+        
+        This method safely writes 0 to servo control files to set high impedance mode,
+        even if the node hasn't fully initialized (e.g., logger might not be available).
+        """
+        try:
+            # Try to release rudder servo
+            if SERVO_RUDDER_PATH.exists():
+                try:
+                    SERVO_RUDDER_PATH.write_text("0")
+                except Exception:
+                    pass  # Silently fail if we can't write
+            # Try to release sail servo
+            if SERVO_SAIL_PATH.exists():
+                try:
+                    SERVO_SAIL_PATH.write_text("0")
+                except Exception:
+                    pass  # Silently fail if we can't write
+        except Exception:
+            pass  # Silently fail - emergency cleanup should not raise exceptions
 
     def set_servo_high_impedance(self, rudder: bool = True, sail: bool = True):
         """Set servo outputs to high impedance mode for safety."""
@@ -870,6 +913,26 @@ class RudderSailRadioNode(ArgoBaseNode):
         self.last_auto_update = time.time()
         self._last_activity_time = time.time()  # Track activity for adaptive timers
 
+    def release_servos_callback(self, msg):
+        """Receive release_servos command from controllers.
+        
+        When True, servos should be released (high impedance mode) so radio
+        directly controls them without PWM interference.
+        When False, normal PWM control via arbitration.
+        """
+        self.release_servos = msg.data
+        self.last_release_servos_time = time.time()
+        
+        # Log state changes
+        if not hasattr(self, '_last_release_servos_state'):
+            self._last_release_servos_state = None
+        if self.release_servos != self._last_release_servos_state:
+            if self.release_servos:
+                self.get_logger().info("Servo release requested - setting servos to high impedance mode (radio direct control)")
+            else:
+                self.get_logger().info("Servo release cancelled - resuming normal PWM control")
+            self._last_release_servos_state = self.release_servos
+
     def determine_control_authority(self):
         """
         Determine who has control authority based on human activity.
@@ -1025,6 +1088,10 @@ class RudderSailRadioNode(ArgoBaseNode):
 
     def timer_callback(self):
         """Main control arbitration and hardware interface loop."""
+        # CRITICAL: Stop all control operations if shutdown requested
+        if hasattr(self, 'shutdown_requested') and self.shutdown_requested:
+            return  # Don't write to servos during shutdown
+        
         # Removed pause functionality - rudder_sail_radio runs continuously
         current_time = time.time()
         
@@ -1128,36 +1195,119 @@ class RudderSailRadioNode(ArgoBaseNode):
         # 6. Apply safety limits
         cmd_rudder, cmd_sail = self.apply_safety_limits(cmd_rudder, cmd_sail)
 
+        # 6.5. Check for servo release request (from human controller)
+        # If release_servos is True, set servos to high impedance mode and skip PWM writes
+        # This allows radio to directly control servos without PWM interference
+        current_time = time.time()
+        # Check for timeout: if no message received for timeout period, assume False (normal operation)
+        if (current_time - self.last_release_servos_time) > self.RELEASE_SERVOS_TIMEOUT:
+            if self.release_servos:  # Only log if we're transitioning from True to False
+                self.get_logger().warn(
+                    f"No release_servos message for {current_time - self.last_release_servos_time:.1f}s - "
+                    "assuming normal operation (resuming PWM control)")
+            self.release_servos = False
+        
         # 7. Convert commands to pulse widths and write to hardware (no in-node direction inversion)
-        servo_rudder_pw_us = cmd_to_pw_us(cmd_rudder)
-        servo_sail_pw_us = cmd_to_pw_us(cmd_sail)
+        # CRITICAL: Check shutdown flag again before writing to hardware
+        if hasattr(self, 'shutdown_requested') and self.shutdown_requested:
+            return  # Don't write to servos during shutdown
+        
+        if self.release_servos:
+            # Servo release mode: set servos to high impedance (write 0)
+            # This allows radio to directly control servos without PWM interference
+            self.write_sysfs_pw(SERVO_RUDDER_PATH, 0)
+            self.write_sysfs_pw(SERVO_SAIL_PATH, 0)
+            # Don't publish servo commands when in release mode (servos are not being controlled by PWM)
+            # But continue reading and publishing radio inputs for monitoring
+        else:
+            # Normal operation: write PWM commands to servos
+            servo_rudder_pw_us = cmd_to_pw_us(cmd_rudder)
+            servo_sail_pw_us = cmd_to_pw_us(cmd_sail)
 
-        self.write_sysfs_pw(SERVO_RUDDER_PATH, servo_rudder_pw_us)
-        self.write_sysfs_pw(SERVO_SAIL_PATH, servo_sail_pw_us)
+            self.write_sysfs_pw(SERVO_RUDDER_PATH, servo_rudder_pw_us)
+            self.write_sysfs_pw(SERVO_SAIL_PATH, servo_sail_pw_us)
 
         # 8. Publish actual servo commands (only on significant change or timeout)
-        servo_changed = (
-            self.prev_published_servo_rudder is None or
-            abs(cmd_rudder - self.prev_published_servo_rudder) > self.PUBLISH_CHANGE_THRESHOLD or
-            abs(cmd_sail - self.prev_published_servo_sail) > self.PUBLISH_CHANGE_THRESHOLD or
-            (current_time - self.last_servo_publish_time) > self.MAX_PUBLISH_INTERVAL
-        )
-        
-        if servo_changed:
-            self._servo_msg_cache.x = cmd_rudder
-            self._servo_msg_cache.y = cmd_sail
-            self._servo_msg_cache.z = 0.0
-            self.pub_rudder_sail_servo.publish(self._servo_msg_cache)
-            self.prev_published_servo_rudder = cmd_rudder
-            self.prev_published_servo_sail = cmd_sail
-            self.last_servo_publish_time = current_time
-            self._last_activity_time = current_time  # Track activity for adaptive timers
+        # Skip publishing when in release mode (servos are not being controlled by PWM)
+        if not self.release_servos:
+            servo_changed = (
+                self.prev_published_servo_rudder is None or
+                abs(cmd_rudder - self.prev_published_servo_rudder) > self.PUBLISH_CHANGE_THRESHOLD or
+                abs(cmd_sail - self.prev_published_servo_sail) > self.PUBLISH_CHANGE_THRESHOLD or
+                (current_time - self.last_servo_publish_time) > self.MAX_PUBLISH_INTERVAL
+            )
+            
+            if servo_changed:
+                self._servo_msg_cache.x = cmd_rudder
+                self._servo_msg_cache.y = cmd_sail
+                self._servo_msg_cache.z = 0.0
+                self.pub_rudder_sail_servo.publish(self._servo_msg_cache)
+                self.prev_published_servo_rudder = cmd_rudder
+                self.prev_published_servo_sail = cmd_sail
+                self.last_servo_publish_time = current_time
+                self._last_activity_time = current_time  # Track activity for adaptive timers
 
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals by ensuring safe exit."""
-        self.get_logger().info(
-            f"Received signal {signum}, initiating safe shutdown...")
-        self._ensure_safe_exit()
+        """Handle shutdown signals by ensuring safe exit.
+        
+        This method is called on SIGINT (Ctrl+C) and SIGTERM (systemd stop).
+        It ensures servo pins are released before the process exits.
+        """
+        try:
+            if hasattr(self, 'get_logger'):
+                self.get_logger().info(
+                    f"Received signal {signum}, initiating safe shutdown...")
+            
+            # CRITICAL: Set shutdown flag FIRST to stop timer from writing to servos
+            self.shutdown_requested = True
+            
+            # Cancel all timers to stop control loop immediately
+            try:
+                if hasattr(self, 'timer'):
+                    self.timer.cancel()
+                if hasattr(self, 'status_timer'):
+                    self.status_timer.cancel()
+                if hasattr(self, '_timers'):
+                    for timer in self._timers:
+                        try:
+                            timer.cancel()
+                        except Exception:
+                            pass
+            except Exception:
+                pass  # Ignore errors when canceling timers
+            
+            # Small delay to let any in-progress timer callback finish
+            time.sleep(0.1)
+            
+            # Now release servo pins (timer should be stopped)
+            if hasattr(self, '_emergency_release_servos'):
+                self._emergency_release_servos()
+            else:
+                # Fallback if method doesn't exist yet (very early in initialization)
+                try:
+                    if SERVO_RUDDER_PATH.exists():
+                        SERVO_RUDDER_PATH.write_text("0")
+                    if SERVO_SAIL_PATH.exists():
+                        SERVO_SAIL_PATH.write_text("0")
+                except Exception:
+                    pass  # Silently fail - emergency cleanup should not raise exceptions
+        except Exception:
+            # Try one more time with direct access
+            try:
+                if SERVO_RUDDER_PATH.exists():
+                    SERVO_RUDDER_PATH.write_text("0")
+                if SERVO_SAIL_PATH.exists():
+                    SERVO_SAIL_PATH.write_text("0")
+            except Exception:
+                pass  # Silently fail - emergency cleanup should not raise exceptions
+        
+        # Call full cleanup if available
+        try:
+            if hasattr(self, '_ensure_safe_exit'):
+                self._ensure_safe_exit()
+        except Exception:
+            pass  # Silently fail - emergency cleanup should not raise exceptions
+        
         # Allow normal signal handling to proceed
         if signum == signal.SIGINT:
             raise KeyboardInterrupt()
@@ -1165,7 +1315,11 @@ class RudderSailRadioNode(ArgoBaseNode):
             sys.exit(0)
 
     def _ensure_safe_exit(self):
-        """Ensure servos are in high impedance mode before exit."""
+        """Ensure servos are in high impedance mode before exit.
+        
+        This method is called on all exit paths (signals, exceptions, normal shutdown).
+        It uses the emergency release method which is safe to call multiple times.
+        """
         try:
             if hasattr(self, 'get_logger'):
                 self.get_logger().info("Setting servos to HIGH IMPEDANCE mode for safe exit...")
@@ -1173,11 +1327,8 @@ class RudderSailRadioNode(ArgoBaseNode):
                 print(
                     "Setting servos to HIGH IMPEDANCE mode for safe exit...", file=sys.stderr)
 
-            # Set servos to high impedance mode (radio control active)
-            if SERVO_RUDDER_PATH.exists():
-                SERVO_RUDDER_PATH.write_text("0")
-            if SERVO_SAIL_PATH.exists():
-                SERVO_SAIL_PATH.write_text("0")
+            # Use emergency release method (safe even if node is partially initialized)
+            self._emergency_release_servos()
 
             if hasattr(self, 'get_logger'):
                 self.get_logger().info(
@@ -1187,6 +1338,12 @@ class RudderSailRadioNode(ArgoBaseNode):
                     "Servos successfully set to HIGH IMPEDANCE mode. Radio control is now active.", file=sys.stderr)
 
         except Exception as e:
+            # Try emergency release one more time if regular method failed
+            try:
+                self._emergency_release_servos()
+            except Exception:
+                pass  # Silently fail - emergency cleanup should not raise exceptions
+            
             if hasattr(self, 'get_logger'):
                 self.get_logger().error(f"Error during safe exit: {e}")
             else:
@@ -1194,6 +1351,28 @@ class RudderSailRadioNode(ArgoBaseNode):
 
     def _cleanup_on_exit(self):
         """Rudder/sail radio specific cleanup on exit"""
+        # Set shutdown flag to stop timer callbacks
+        self.shutdown_requested = True
+        
+        # Cancel all timers to stop control loop
+        try:
+            if hasattr(self, 'timer'):
+                self.timer.cancel()
+            if hasattr(self, 'status_timer'):
+                self.status_timer.cancel()
+            if hasattr(self, '_timers'):
+                for timer in self._timers:
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+        except Exception:
+            pass  # Ignore errors when canceling timers
+        
+        # Small delay to let any in-progress timer callback finish
+        time.sleep(0.1)
+        
+        # Now release servo pins
         self._ensure_safe_exit()
 
     def publish_status(self):
@@ -1377,14 +1556,20 @@ TEST MODE:
         print(f"CRITICAL: Failed to initialize Rudder/Sail Radio node: {e}")
         print("CRITICAL: Check kernel module and sysfs interface.")
         # Final safety check - ensure servos are in high impedance mode
+        # Use the same emergency release pattern as other exit paths
         try:
-            if SERVO_RUDDER_PATH.exists():
-                SERVO_RUDDER_PATH.write_text("0")
-            if SERVO_SAIL_PATH.exists():
-                SERVO_SAIL_PATH.write_text("0")
-            print("Emergency: Servos set to HIGH IMPEDANCE mode. Radio control is active.")
+            # Try to create a minimal instance just for cleanup (if node creation failed)
+            # Otherwise try direct file access
+            try:
+                if SERVO_RUDDER_PATH.exists():
+                    SERVO_RUDDER_PATH.write_text("0")
+                if SERVO_SAIL_PATH.exists():
+                    SERVO_SAIL_PATH.write_text("0")
+                print("Emergency: Servos set to HIGH IMPEDANCE mode. Radio control is active.")
+            except Exception as file_e:
+                print(f"CRITICAL: Could not set high impedance mode during emergency: {file_e}")
         except Exception as emergency_e:
-            print(f"CRITICAL: Could not set high impedance mode during emergency: {emergency_e}")
+            print(f"CRITICAL: Emergency cleanup failed: {emergency_e}")
         sys.exit(1)
     finally:
         # Save profiling data if enabled

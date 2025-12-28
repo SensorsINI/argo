@@ -10,6 +10,7 @@ ExecStart=/bin/bash -c 'set -eo pipefail; { if ! lsmod | grep -q argo_radio_serv
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

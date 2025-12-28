@@ -88,7 +88,12 @@ rotate_service_logs() {
       dest+=".boot.log"
 
       if cp --preserve=mode,ownership,timestamps "$src" "$dest"; then
-        echo "Snapshot saved $log_name -> $(basename "$dest")"
+        # Compress boot log snapshots to save space (typically 90%+ reduction)
+        if gzip "$dest" 2>/dev/null; then
+          echo "Snapshot saved and compressed $log_name -> $(basename "$dest").gz"
+        else
+          echo "Snapshot saved $log_name -> $(basename "$dest") (compression failed)"
+        fi
       else
         echo "Warning: failed to copy $log_name to $(basename "$dest")" >&2
       fi

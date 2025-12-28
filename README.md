@@ -27,6 +27,16 @@ See the Argo autonomous sailboat in action at the 2024 CCNW (before current wate
 - **PWM I/O**: Custom kernel module for radio control and servo interfaces with high impedance safety mode
 - **LORA**: Long range radio based on RA-01 radio module from ai-thinker.com using SX1276 LORA chip
 
+### Hardware Replacement and MAC Address Cloning
+
+The Argo system is designed to handle frequent SBC hardware replacements (due to damage) while maintaining network identity. The WiFi MAC address is frozen to a consistent value (`c8:26:e2:6c:58:ba`) stored in `network/ARGO_MAC_ID.txt` and committed to git. This ensures:
+
+- **Network Stability**: Same MAC address across hardware changes maintains network access (uzh-iot, ZeroTier, tobi-wlan)
+- **SD Card Portability**: Same SD card works seamlessly with different SBC hardware
+- **Automatic Configuration**: Run `make freeze-mac-address` after hardware replacement to restore network identity
+
+See [Network Improvements Documentation](network/README.md#mac-address-cloning-hardware-replacement) for details.
+
 ### Servo Control Hardware
 
 The Argo system uses a shared control circuit design that allows both radio control and autonomous software control of servos through a fail-safe high impedance switching mechanism:
@@ -78,6 +88,8 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 
 ## Other READMEs
 - [**Systemd Services Architecture**](docs/README-services.md) - Service dependencies, boot sequence, and troubleshooting
+- [**Network Improvements**](network/README.md) - WiFi reconnection, MAC address cloning, and NetworkManager configuration
+- [**ZeroTier VPN Setup**](docs/README_zerotier.md) - ZeroTier VPN configuration, SSH access, and network management
 - [Simulation System Overview](simulator/README.md)  
 - [Power Control System](power_control/README.md)  
 - [Foxglove Visualization](foxglove/README.md)  

@@ -1,0 +1,260 @@
+(footprint "SOT-363_SC-70-6-handsolder"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "SOT-363, SC-70-6, SC-88")
+	(tags "SOT-363 SC-70-6 SC-88")
+	(property "Reference" "Q2"
+		(at 3.3 -0.1 0)
+		(layer "F.SilkS")
+		(hide yes)
+		(uuid "9a6b90ca-1500-4915-8dfa-71d50cde1efb")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "BSD840N"
+		(at 0 2 0)
+		(layer "F.SilkS")
+		(uuid "3478cd8d-44ed-4c2e-b28e-43f1d969a6b9")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://www.infineon.com/dgdl/BSD840N_Rev2%204.pdf?fileId=db3a30431b0626df011b12b4486c7c02"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "ffc344fc-316d-492f-b71a-d2b92e2321b3")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "0.88A Id, 20V Vds, Dual N-Channel MOSFET, 560mOhm Ron at 1.8V Vgs (ultra logic level), SOT-363"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "cc5a2d23-7971-42c6-baf3-65a257ad3cf2")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "digikey" "https://www.digikey.ch/en/products/detail/infineon-technologies/BSD840NH6327XTSA1/3196629"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "21207f6a-5412-46e5-9978-0d7943762647")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -0.71 -1.16)
+		(end 0.7 -1.16)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "97d03704-b9cc-4009-a7b6-4050c35bbaa3")
+	)
+	(fp_line
+		(start -0.7 1.16)
+		(end 0.7 1.16)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "f502c828-5c7d-414e-bf49-c169808648e6")
+	)
+	(fp_poly
+		(pts
+			(xy -1.08 -1.11) (xy -1.32 -1.44) (xy -0.84 -1.44) (xy -1.08 -1.11)
+		)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.SilkS")
+		(uuid "4372652b-0aae-4b5b-82ec-76eddc9f1f49")
+	)
+	(fp_line
+		(start -1.6 -1.4)
+		(end -1.6 1.4)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "4e4c8dde-a701-492b-b5a9-ce9f9ad9110c")
+	)
+	(fp_line
+		(start -1.6 -1.4)
+		(end 1.6 -1.4)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "d42cc4b1-1228-4787-9ade-8297c9680e2d")
+	)
+	(fp_line
+		(start -1.6 1.4)
+		(end 1.6 1.4)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "2ea3f3d3-ae6b-44ec-851a-bbbe6aae7521")
+	)
+	(fp_line
+		(start 1.6 1.4)
+		(end 1.6 -1.4)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "e544404f-8c00-4de7-ba45-fb368e4560b3")
+	)
+	(fp_line
+		(start -0.675 -0.6)
+		(end -0.675 1.1)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "5453a779-ea20-4018-b3a8-388daf7e20c9")
+	)
+	(fp_line
+		(start -0.175 -1.1)
+		(end -0.675 -0.6)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "b9fc4770-75be-49ef-843d-b44e035b7c12")
+	)
+	(fp_line
+		(start 0.675 -1.1)
+		(end -0.175 -1.1)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "0d7d46a6-719b-4df0-8f53-8324c7e3d4c4")
+	)
+	(fp_line
+		(start 0.675 -1.1)
+		(end 0.675 1.1)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "573ee55f-ad39-4fac-8317-e5cdb6c7ac3b")
+	)
+	(fp_line
+		(start 0.675 1.1)
+		(end -0.675 1.1)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "7bbc5efc-b08b-4341-86d3-18c8243042b4")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 90)
+		(layer "F.Fab")
+		(uuid "2816d849-a5e1-49f5-9df0-8e1bb612eb9a")
+		(effects
+			(font
+				(size 0.5 0.5)
+				(thickness 0.075)
+			)
+		)
+	)
+	(pad "1" smd roundrect
+		(at -1.265 -0.65)
+		(size 1.28 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0)
+		(chamfer_ratio 0.4)
+		(chamfer top_left)
+		(uuid "74eac68a-0ca0-43cd-b7ad-01e19c9b5ea0")
+	)
+	(pad "2" smd roundrect
+		(at -1.265 0)
+		(size 1.28 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+		(uuid "24d3f766-0cda-4e6e-a289-994cfe5bbea3")
+	)
+	(pad "3" smd roundrect
+		(at -1.265 0.65)
+		(size 1.28 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+		(uuid "0d77b02e-5107-4b32-82df-14c77ba301cd")
+	)
+	(pad "4" smd roundrect
+		(at 1.265 0.65)
+		(size 1.28 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+		(uuid "cc47701a-c9e5-4589-a3fe-22ae9fc73936")
+	)
+	(pad "5" smd roundrect
+		(at 1.265 0)
+		(size 1.28 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+		(uuid "f7319859-3220-4cd6-9c7f-97058e1717e2")
+	)
+	(pad "6" smd roundrect
+		(at 1.265 -0.65)
+		(size 1.28 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+		(uuid "e221866c-17df-408c-b209-01b95b8ba931")
+	)
+	(embedded_fonts no)
+	(model "${KICAD9_3DMODEL_DIR}/Package_TO_SOT_SMD.3dshapes/SOT-363_SC-70-6.step"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
+)

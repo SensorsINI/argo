@@ -8,6 +8,7 @@ ExecStart=/usr/local/bin/argo_thermal_monitor.sh
 Restart=always
 RestartSec=10
 User=root
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

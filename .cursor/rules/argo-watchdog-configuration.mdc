@@ -70,14 +70,34 @@ sudo journalctl -u wd_keepalive.service
 ```
 
 ## Alternative: Systemd Watchdog Integration
-Instead of the `watchdog` daemon, use systemd's built-in watchdog:
+**⚠️ CRITICAL WARNING: DO NOT USE WITHOUT CONSOLE ACCESS**
 
+The hardware watchdog timeout is **FIXED at 16 seconds** and cannot be changed.
+
+**FAILED CONFIGURATION (causes reboot loops):**
+```ini
+# /etc/systemd/system.conf - DO NOT USE
+[Manager]
+RuntimeWatchdogSec=60s      # ❌ TOO LONG - Hardware times out at 16s
+RebootWatchdogSec=10min
+WatchdogDevice=/dev/watchdog
+```
+
+**If you must use systemd watchdog, timeout MUST be less than 16s:**
 ```ini
 # /etc/systemd/system.conf
 [Manager]
-RuntimeWatchdogSec=10s
-ShutdownWatchdogSec=30s
+RuntimeWatchdogSec=10s      # ✅ Less than 16s hardware limit
+RebootWatchdogSec=2min      # Force reboot if shutdown hangs > 2 minutes
+WatchdogDevice=/dev/watchdog
 ```
+
+**Recommendation: DO NOT ENABLE WATCHDOG** on this hardware. The 16-second limit is too short for reliable operation and has caused multiple reboot loop incidents requiring SD card removal and recovery on another system.
+
+**Recent Failure (Dec 5, 2025):**
+- Configured with 60s timeout → Immediate reboot loops
+- Required HDMI console + USB adapter to recover
+- See `/home/orangepi/argo/docs/WATCHDOG_FAILURE_ANALYSIS.md` for details
 
 ## Troubleshooting Watchdog Reboots
 1. Check for network interface monitoring failures

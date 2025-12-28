@@ -11,13 +11,19 @@ Group=orangepi
 WorkingDirectory=/home/orangepi/argo/power_control
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
-ExecStart=/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash && /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py |& tee -a /var/log.hdd/persistent/argo-power-control.log'
+# CRITICAL: Clear Python bytecode cache to prevent running stale code with syntax errors
+ExecStartPre=/bin/bash -c 'find /home/orangepi/argo/power_control -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true; find /home/orangepi/argo/power_control -name "*.pyc" -delete 2>/dev/null || true'
+# CRITICAL: Validate Python syntax before starting - fail fast if syntax is invalid
+ExecStartPre=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 -m py_compile /home/orangepi/argo/power_control/argo_power_control.py'
+ExecStart=/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash && exec /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py |& tee -a /var/log.hdd/persistent/argo-power-control.log'
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 TimeoutStopSec=30
-KillMode=mixed
+KillMode=control-group
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
 
 [Install]
 WantedBy=multi-user.target

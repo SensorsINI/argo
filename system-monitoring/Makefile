@@ -125,6 +125,9 @@ install-persistent-log-manager:
 		 sudo mv /etc/logrotate.d/persistent-logs /etc/logrotate.d/persistent-logs.disabled; \
 		 echo "↪︎ Disabled legacy logrotate policy for persistent logs"; \
 	 fi
+	@echo "📋 Installing logrotate configuration for size-based rotation..."
+	@sudo cp $(MONITORING_DIR)/logrotate/persistent-logs /etc/logrotate.d/persistent-logs
+	@echo "✅ Logrotate configuration installed (rotates at 10MB, keeps 2 copies)"
 	@sudo systemctl daemon-reload
 	@sudo systemctl enable argo-persistent-logs.service
 	@sudo systemctl enable argo-persistent-logs-prune.timer
@@ -141,7 +144,8 @@ uninstall-persistent-log-manager:
 	@sudo rm -f $(SERVICE_DIR)/argo-persistent-logs-prune.service
 	@sudo rm -f $(SERVICE_DIR)/argo-persistent-logs-prune.timer
 	@sudo rm -f $(SCRIPT_DIR)/argo_persistent_log_manager.sh
-	@if [ -f /etc/logrotate.d/persistent-logs.disabled ] && [ ! -f /etc/logrotate.d/persistent-logs ]; then \
+	@sudo rm -f /etc/logrotate.d/persistent-logs
+	@if [ -f /etc/logrotate.d/persistent-logs.disabled ]; then \
 		 sudo mv /etc/logrotate.d/persistent-logs.disabled /etc/logrotate.d/persistent-logs; \
 		 echo "↩︎ Restored original logrotate policy for persistent logs"; \
 	 fi
@@ -189,7 +193,7 @@ uninstall-temp-logger:
 # Shutdown Logger Service
 install-shutdown-logger:
 	@echo "📋 Installing shutdown logger service..."
-	@sudo cp $(MONITORING_DIR)/shutdown-logger.service $(SERVICE_DIR)/
+	@sudo cp $(MONITORING_DIR)/services/shutdown-logger.service $(SERVICE_DIR)/
 	@sudo cp $(MONITORING_DIR)/scripts/shutdown-logger.sh $(SCRIPT_DIR)/
 	@sudo chmod +x $(SCRIPT_DIR)/shutdown-logger.sh
 	@sudo systemctl daemon-reload

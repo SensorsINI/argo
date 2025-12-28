@@ -83,12 +83,13 @@ argo_thermal_monitor.service
    - Launch service MUST wait for radio/servo hardware
    - Essential for control interface
 
-5. **battery_water → shutdown.target** (`Before`)
-   - Battery monitoring stays active late into shutdown
-   - Critical for safe power-off
+5. **battery_water → shutdown** (Normal shutdown timing)
+   - Stops early in shutdown sequence for clean ROS2 cleanup
+   - Previously used `Before=shutdown.target` but caused 60-90s hangs
 
-6. **bno085 → shutdown.target** (`Before`)
-   - IMU driver stays active late into shutdown
+6. **bno085 → shutdown** (Normal shutdown timing)
+   - Stops early in shutdown sequence for clean ROS2 cleanup
+   - Previously used `Before=shutdown.target` but caused 60-90s hangs
    - Proper hardware cleanup
 
 ## Boot Sequence
@@ -175,30 +176,22 @@ argo_thermal_monitor.service
     └─ argo_thermal_monitor.service stops
        - Temperature monitoring ends
     ↓
-[T+3s] Late shutdown services continue
+[T+3s] ROS2 services stop normally
     ↓
-    ├─ argo_bno085.service still running
-    │  - IMU driver active (Before=shutdown.target)
-    │  - Continues publishing data
+    ├─ argo_bno085.service stops (< 1 second)
+    │  - IMU driver graceful shutdown
+    │  - ROS2 cleanup completes
     │
-    └─ argo_battery_water.service still running
-       - Battery monitoring active (Before=shutdown.target)
-       - Critical battery status available
+    └─ argo_battery_water.service stops (< 1 second)
+       - Battery monitoring graceful shutdown
+       - Saves battery slopes data
+       - ROS2 cleanup completes
     ↓
-[T+5s] Power control prepares for shutdown
+[T+4s] Power control prepares for shutdown
     ↓
     └─ argo_power_control.service final actions
        - LED patterns indicate shutdown
        - Monitors shutdown progress
-       - Last service to stop
-    ↓
-[T+6s] Late shutdown services stop
-    ↓
-    ├─ argo_bno085.service stops
-    │  - IMU driver cleanup
-    │
-    └─ argo_battery_water.service stops
-       - Battery monitoring cleanup
     ↓
 [T+8s] shutdown.target completes
     ↓
@@ -207,10 +200,50 @@ argo_thermal_monitor.service
 
 ### Important Shutdown Notes
 
-- **Late Shutdown**: Battery and BNO085 services use `Before=shutdown.target` to stay active longer
-- **Power Control**: Handles shutdown LED patterns and hardware cleanup
-- **Graceful Stop**: All services have 30-second timeout for clean shutdown
+- **Normal Shutdown Timing**: Battery and BNO085 services stop early (< 1 second each)
+- **Power Relay**: Controlled by independent shutdown hook (`argo_poweroff.shutdown`), runs after all services
+- **Graceful Stop**: Services shut down cleanly in < 1 second with proper ROS2 cleanup
 - **Safe State**: Servos automatically go to high impedance (radio control) on shutdown
+- **Historical Note**: Previously used `Before=shutdown.target` for "late shutdown" but this caused 60-90s hangs
+
+### Graceful Shutdown Implementation (Dec 2025)
+
+**Problem Identified**: Services were being force-killed with SIGKILL during shutdown, preventing clean resource cleanup.
+
+**Root Cause**: `KillMode=mixed` in systemd service configuration sends SIGTERM only to the main process (bash shell) and **immediately** sends SIGKILL to all child processes (Python, tee), preventing Python signal handlers from executing.
+
+**Solution Implemented**:
+1. **Changed `KillMode` from `mixed` to `control-group`**
+   - All processes in control group now receive SIGTERM
+   - Systemd waits `TimeoutStopSec` before escalating to SIGKILL
+   - Python signal handlers have time to execute cleanup code
+
+2. **Added explicit signal configuration**:
+   ```ini
+   KillMode=control-group
+   KillSignal=SIGTERM
+   FinalKillSignal=SIGKILL
+   ```
+
+3. **Added `exec` to ExecStart** (limited benefit with pipes):
+   ```ini
+   ExecStart=/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash && exec /usr/bin/python3 ...'
+   ```
+   Note: `exec` has limited effect when piping to `tee` for persistent logging, but included for clarity.
+
+4. **Battery service: Replaced `rclpy.spin()` with `spin_once()` loop**:
+   - `rclpy.spin()` blocks in C code and doesn't check signals frequently
+   - Custom `spin_once()` loop with 100ms timeout returns to Python regularly
+   - Allows Python to check `shutdown_requested` flag and handle signals responsively
+   - Power control still uses `rclpy.spin()` but shuts down cleanly with `KillMode=control-group`
+
+**Results**:
+- Battery service: Clean shutdown in ~1-2 seconds (was 10s timeout → SIGKILL)
+- Power control: Clean shutdown in ~1-2 seconds (was immediate SIGKILL)
+- No force-kill messages in logs
+- Proper resource cleanup (battery slopes saved, timers cancelled, etc.)
+
+**Key Learning**: `KillMode=mixed` is inappropriate for services with child processes that need graceful shutdown. Use `KillMode=control-group` to allow all processes to handle SIGTERM.
 
 ## Service Details
 
@@ -264,8 +297,7 @@ WantedBy=multi-user.target
 [Unit]
 Description=Argo Battery and Water Monitoring Service
 After=network.target
-Before=shutdown.target
-DefaultDependencies=no
+# Normal shutdown timing (removed Before=shutdown.target to fix 60-90s hangs)
 
 [Service]
 Type=simple
@@ -287,7 +319,7 @@ WantedBy=multi-user.target
 
 **Dependencies**:
 - Requires: network.target
-- Before: shutdown.target (late shutdown)
+- Normal shutdown timing (stops early in shutdown sequence)
 - Started by: multi-user.target
 - Wanted by: argo_power_control.service
 
@@ -328,7 +360,7 @@ WantedBy=multi-user.target
 **Dependencies**:
 - Requires: network.target
 - Before: argo_launch_standard.service (blocks launch)
-- Before: shutdown.target (late shutdown)
+- Normal shutdown timing (stops early in shutdown sequence)
 - Started by: multi-user.target
 - Required by: argo_launch_standard.service (via Wants)
 
@@ -642,17 +674,98 @@ systemctl list-dependencies argo_launch_standard.service
 
 ---
 
-#### Late Shutdown Not Working
+#### Shutdown Takes > 60 Seconds
 
-**Symptom**: Battery/BNO085 services stop too early during shutdown
+**Symptom**: System shutdown hangs for 60-90 seconds
 
 **Diagnosis**:
 ```bash
-# Check service configuration
+# Check for Before=shutdown.target (causes ROS2 cleanup after ROS2 is dead)
 grep "Before=shutdown.target" /etc/systemd/system/argo_battery_water.service
+grep "Before=shutdown.target" /etc/systemd/system/argo_bno085.service
 ```
 
-**Solution**: Ensure service has `Before=shutdown.target` directive
+**Solution**: Remove `Before=shutdown.target` and `DefaultDependencies=no` to allow services to stop while ROS2 is still alive
+
+---
+
+#### Service Force-Killed with SIGKILL
+
+**Symptom**: Systemd logs show "Killing process ... with signal SIGKILL" immediately during service stop
+
+**Diagnosis**:
+```bash
+# Check service shutdown logs
+sudo journalctl -u argo_power_control.service --no-pager --since "5 minutes ago" | grep -i "killing\|sigkill"
+
+# Check KillMode setting
+grep "KillMode" /etc/systemd/system/argo_power_control.service
+
+# Test shutdown timing
+sudo systemctl start argo_power_control.service
+sleep 5
+sudo systemctl stop argo_power_control.service
+# Check if it stops cleanly in 1-2 seconds or requires force-kill
+```
+
+**Common Causes**:
+- `KillMode=mixed` sends SIGKILL immediately to child processes
+- Python using `rclpy.spin()` which blocks signals in C code
+- No signal handlers installed in Python code
+- Timeout too short for cleanup operations
+
+**Solutions**:
+
+1. **Change KillMode to control-group** (primary fix):
+   ```ini
+   [Service]
+   KillMode=control-group
+   KillSignal=SIGTERM
+   FinalKillSignal=SIGKILL
+   TimeoutStopSec=10
+   ```
+
+2. **Add exec to ExecStart** (helps signal forwarding):
+   ```ini
+   ExecStart=/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash && exec /usr/bin/python3 /path/to/script.py'
+   ```
+
+3. **For ROS2 nodes: Replace rclpy.spin() with spin_once() loop** (for responsive shutdown):
+   ```python
+   # Instead of:
+   rclpy.spin(node)
+   
+   # Use:
+   while rclpy.ok() and not node.shutdown_requested:
+       rclpy.spin_once(node, timeout_sec=0.1)
+   ```
+
+4. **Ensure Python signal handlers are installed**:
+   ```python
+   import signal
+   import rclpy.executors
+   
+   def _signal_handler(self, signum, frame):
+       self.get_logger().info(f"Received signal {signum}, shutting down...")
+       self.shutdown_requested = True
+       if rclpy.ok():
+           rclpy.shutdown()
+   
+   signal.signal(signal.SIGTERM, self._signal_handler)
+   signal.signal(signal.SIGINT, self._signal_handler)
+   ```
+
+**Verification**:
+```bash
+# Should show clean shutdown in 1-2 seconds
+sudo systemctl restart argo_power_control.service
+sudo systemctl stop argo_power_control.service
+
+# Check logs - should NOT see "Killing process" messages
+sudo journalctl -u argo_power_control.service --no-pager --since "1 minute ago" | tail -20
+```
+
+**Reference**: See "Graceful Shutdown Implementation" in the Shutdown Sequence section above.
 
 ---
 
@@ -763,6 +876,37 @@ ah     # Show help for Argo aliases
 - X MUST start successfully for this service to start
 - Strong dependency (not used in Argo services)
 
+## Known Issues and Work In Progress
+
+### WIP: Web Dashboard I2C Failure Display (Dec 2025)
+
+**Issue**: The web dashboard may not correctly reflect I2C failure status from the battery service in all scenarios.
+
+**Background**: 
+- Battery service publishes I2C failure status on `/argo/critical/i2c_failure` topic
+- Dashboard subscribes to this topic for real-time I2C failure detection
+- Service call to battery service for status queries does NOT include I2C failure state
+- Dashboard should rely ONLY on topic subscription for I2C failure status
+
+**Current Implementation**:
+- Dashboard correctly subscribes to `/argo/critical/i2c_failure` topic
+- Comments added to clarify that service call timeout is different from I2C failure
+- I2C failure state managed exclusively by topic subscription callback
+
+**Potential Issues**:
+- Dashboard may not show I2C failure if it starts before battery service publishes first status
+- Topic subscription timing may cause brief delay in displaying I2C failures
+- Battery service periodically republishes I2C status (every 5 seconds) to help late subscribers
+
+**Workaround**: 
+- Battery service now republishes I2C failure state periodically
+- Dashboard will catch up within 5 seconds of connecting
+
+**Future Work**:
+- Verify dashboard correctly displays I2C failures in all scenarios
+- Add explicit I2C failure status to battery service query response (if needed)
+- Consider using ROS2 QoS settings (TRANSIENT_LOCAL) for late-joining subscribers
+
 ## Summary
 
 The Argo systemd service architecture provides:
@@ -772,14 +916,6 @@ The Argo systemd service architecture provides:
 ✅ **Late shutdown** - Critical services stay active longer
 ✅ **Graceful degradation** - Soft dependencies where appropriate
 ✅ **Easy troubleshooting** - Clear logs and status information
+✅ **Graceful shutdown** - Services stop cleanly in 1-2 seconds with proper signal handling
 
 All services work together to provide a reliable, safe autonomous sailboat control system.
-
-
-
-
-
-
-
-
-
