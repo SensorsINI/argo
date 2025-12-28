@@ -285,7 +285,13 @@ class CrosserController(BaseController):
         return bearing_deg, distance_m
 
     def _calculate_absolute_wind_direction(self, state: BoatState):
-        """Calculate absolute wind direction from north."""
+        """
+        Calculate absolute wind direction from north.
+        
+        NOTE: This calculation is now centralized in controller.py._calculate_absolute_wind_direction().
+        This method is kept for backwards compatibility but should use the centralized version.
+        Future: Add absolute_wind_direction to BoatState and remove this method.
+        """
         if state.wind_angle is None or state.compass_heading is None:
             return None
         # wind_angle is relative to boat heading, convert to absolute
@@ -381,6 +387,8 @@ class CrosserController(BaseController):
             
             # Predict boundary crossing time in direction of travel (not just nearest distance)
             # This prevents false triggers when close to side boundaries while heading toward middle
+            # NOTE: GPS SOG updates at ~0.2 Hz (every 5 seconds), so may be stale.
+            # Controller uses position-based speed estimation as fallback (updates at 1 Hz).
             if (state.compass_heading is not None and state.gps_sog is not None and 
                 state.gps_sog > 0.1):  # Only predict if we have speed (gps_sog is in knots)
                 speed_ms = state.gps_sog * 0.514444  # Convert knots to m/s (1 knot = 0.514444 m/s)

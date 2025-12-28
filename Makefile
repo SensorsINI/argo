@@ -55,7 +55,7 @@ IS_ORANGEPI := $(shell if [ -f /proc/device-tree/compatible ] && grep -q "orange
 REQUIREMENTS_FILE := $(if $(filter 1,$(IS_ORANGEPI)),requirements.txt,requirements-host.txt)
 PLATFORM_NAME := $(if $(filter 1,$(IS_ORANGEPI)),Orange Pi Robot,Host Computer)
 
-.PHONY: help install-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks freeze-mac-address install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm install-watchdog status-watchdog disable-watchdog test-watchdog
+.PHONY: help install-argo-cli uninstall-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks freeze-mac-address install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm install-watchdog status-watchdog disable-watchdog test-watchdog
 
 VM_REQUIREMENTS_FILE := requirements-host.txt
 VM_INSTALL_SCOPE := $(shell if [ $$(id -u) -eq 0 ]; then printf 'system'; else printf 'user'; fi)
@@ -172,6 +172,7 @@ help:
 	@echo "  aliases-force - Force reinstall/update aliases (overwrites existing)"
 	@echo "  aliases-activate - Print command to activate aliases in current shell"
 	@echo "  install-argo-cli - Install Argo CLI (aliases, functions, dotfiles) to ~/.bashrc"
+	@echo "  uninstall-argo-cli - Remove Argo CLI from ~/.bashrc and clean up files"
 	@echo ""
 	@echo "Git Submodule Management:"
 	@echo "  submodule-init    - Initialize and checkout all submodules (sailboat-playground, bno08x_driver)"
@@ -465,9 +466,10 @@ install-argo-cli:
 		-e '/source.*dotfiles\/bashrc/d' \
 		~/.bashrc
 	@# Add the correct sourcing line for the new dotfiles.
+	@# Use actual repo directory instead of hardcoding ~/argo
 	@echo "" >> ~/.bashrc
 	@echo "# Source Argo dotfiles" >> ~/.bashrc
-	@echo "source ~/argo/dotfiles/bashrc" >> ~/.bashrc
+	@echo "source $(REPO_DIR)/dotfiles/bashrc" >> ~/.bashrc
 	@echo "✅ Updated dotfiles sourcing in ~/.bashrc"
 	@if [ -f dotfiles/.tmux.conf ]; then \
 		cp dotfiles/.tmux.conf ~/.tmux.conf; \
@@ -476,22 +478,98 @@ install-argo-cli:
 		echo "❌ dotfiles/.tmux.conf not found"; \
 	fi
 	@echo ""
+	@echo "Available commands:"
+	@echo ""
+	@echo "Service Control:"
+	@echo "  al   - Start Argo service (standard launch)"
+	@echo "  aq   - Stop Argo service"
+	@echo "  ars  - Restart Argo service (stop then start)"
+	@echo "  akill - Kill all Argo processes"
+	@echo ""
+	@echo "Status & Monitoring:"
+	@echo "  as   - Show detailed Argo status"
+	@echo "  asq  - Quick status check (quiet mode)"
+	@echo "  am   - Monitor mode (continuous status display)"
+	@echo "  alog - Show Argo system logs"
+	@echo "  ag   - Start Argo GUI (requires sudo)"
+	@echo "  argo_status - Detailed status function"
+	@echo "  argo_quick_status - Quick status function"
+	@echo ""
+	@echo "Recording:"
+	@echo "  ar   - Start recording data"
+	@echo "  ac   - Stop recording"
+	@echo "  apb  - Playback latest recording with visualization"
+	@echo "  arr  - Re-record latest bag with visualization markers"
+	@echo "  cleanbags - Clean old bag files (>3 days)"
+	@echo ""
+	@echo "Controller:"
+	@echo "  ap   - Pause/unpause autonomous controller (toggle)"
+	@echo ""
+	@echo "Battery & Health:"
+	@echo "  abat - Get battery status"
+	@echo "  ahealth - Get health monitor status"
+	@echo ""
+	@echo "Simulation:"
+	@echo "  asim - Start local simulation mode"
+	@echo "  asimreset - Reset simulation to origin location"
+	@echo "  asimkb - Keyboard control for simulation"
+	@echo "  asimlog - View latest simulation log"
+	@echo "  asimlatest - Get path to latest simulation log"
+	@echo ""
+	@echo "Utilities:"
+	@echo "  ah   - Show Argo help"
+	@echo "  ax11 - Setup X11 forwarding (VSCode Remote-SSH)"
+	@echo "  sd   - Shutdown system (with confirmation)"
+	@echo "  rb   - Reboot system (with confirmation)"
+	@echo "  vacuum - Clean logs and /tmp to free space"
+	@echo ""
+	@echo "💡 Note: On boat (Orange Pi), argo_quick_timer runs automatically"
+	@echo "   before each prompt to check status (throttled to 5 minutes)"
+	@echo ""
 	@echo "🔄 To activate CLI in this terminal, run:"
 	@echo "   source ~/.bashrc"
 	@echo ""
 	@echo "💡 In NEW terminals, CLI will be auto-loaded from ~/.bashrc"
 	@echo ""
-	@echo "Available commands:"
-	@echo "  al   - Launch argo service (with 30s monitoring)"
-	@echo "  aq   - Quit argo service"
-	@echo "  ar   - Record data"
-	@echo "  ac   - Close recording"
-	@echo "  as   - Show Argo status (via argo_status function)"
-	@echo "  ars  - Restart argo service"
-	@echo "  argo_status - Show detailed Argo status"
-	@echo "  argo_help - Show detailed help"
-	@echo ""
 	@echo "✅ Argo CLI installation complete!"
+
+uninstall-argo-cli:
+	@echo "Uninstalling Argo CLI (aliases, functions, and dotfiles)..."
+	@# Remove Argo dotfiles sourcing from ~/.bashrc
+	@if [ -f ~/.bashrc ]; then \
+		if grep -q "Source Argo dotfiles\|source.*dotfiles.*bashrc" ~/.bashrc 2>/dev/null; then \
+			sed -i.bak \
+				-e '/^# Source Argo dotfiles$$/d' \
+				-e '/source.*dotfiles\/\.bashrc/d' \
+				-e '/source.*dotfiles\/bashrc/d' \
+				~/.bashrc; \
+			echo "✅ Removed Argo dotfiles sourcing from ~/.bashrc"; \
+		else \
+			echo "ℹ️  Argo dotfiles sourcing not found in ~/.bashrc"; \
+		fi; \
+		if [ -f ~/.bashrc.bak ]; then \
+			rm -f ~/.bashrc.bak; \
+		fi; \
+	else \
+		echo "ℹ️  ~/.bashrc not found"; \
+	fi
+	@# Remove timer timestamp file if it exists
+	@if [ -f ~/.argo_last_check ]; then \
+		rm -f ~/.argo_last_check; \
+		echo "✅ Removed Argo timer timestamp file (~/.argo_last_check)"; \
+	else \
+		echo "ℹ️  Argo timer timestamp file not found"; \
+	fi
+	@echo ""
+	@echo "⚠️  Note: ~/.tmux.conf was not removed (contains general tmux config)"
+	@echo "   Remove it manually if desired: rm ~/.tmux.conf"
+	@echo ""
+	@echo "✅ Argo CLI uninstallation complete!"
+	@echo ""
+	@echo "🔄 To apply changes in this terminal, run:"
+	@echo "   source ~/.bashrc"
+	@echo ""
+	@echo "💡 In NEW terminals, changes will be automatically applied"
 
 # Power control installation is now in power_control/Makefile
 # Use 'make -C power_control install' to install power control

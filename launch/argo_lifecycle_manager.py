@@ -96,11 +96,18 @@ class ArgoLifecycleManager:
                  debug_node_port_base: int = 5678,
                  debug_node_wait: bool = False):
         # Become session leader to manage child processes effectively
+        # BUT: Skip this if we're running under timeout, as it breaks signal propagation
+        # Check if we're running under timeout by checking if our parent is timeout
         try:
-            os.setsid()
-        except OSError as e:
-            # This will fail if we are already a session leader, which is fine
-            pass
+            parent_cmd = open(f'/proc/{os.getppid()}/comm').read().strip()
+            if parent_cmd != 'timeout':
+                os.setsid()
+        except (OSError, IOError):
+            # If we can't check parent or setsid fails, continue anyway
+            try:
+                os.setsid()
+            except OSError:
+                pass
         
         self.argo_dir = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))
@@ -334,10 +341,13 @@ class ArgoLifecycleManager:
         
         self.shutdown_requested = True
         print(
-            f"\n🛑 argo_lifecycle_manager: Received signal {signum}, shutting down...")
+            f"\n🛑 argo_lifecycle_manager: Received signal {signum}, shutting down...", flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
         
         # Don't call stop() here - let the main loop handle it
         # Just set the flag and let continuous() exit cleanly
+    
     
     def _cleanup_ros2(self):
         """Clean up ROS2 resources - only call this once at final shutdown"""
@@ -1440,12 +1450,14 @@ class ArgoLifecycleManager:
                 pass
         
         # Also use process group kill as backup (may catch bash wrapper processes)
+        # Get current process group ID (may have changed if we're a session leader)
         try:
-            os.killpg(self.pgid, signal.SIGTERM)
-            print(f"  📤 Sent SIGTERM to process group {self.pgid}")
+            current_pgid = os.getpgid(os.getpid())
+            os.killpg(current_pgid, signal.SIGTERM)
+            print(f"  📤 Sent SIGTERM to process group {current_pgid}")
         except ProcessLookupError:
             # Process group already gone
-            print(f"  ℹ️  Process group {self.pgid} already terminated")
+            print(f"  ℹ️  Process group already terminated")
         except Exception as e:
             print(f"  ⚠️  Could not kill process group: {e}")
         
@@ -2062,6 +2074,13 @@ class ArgoLifecycleManager:
                             else:
                                 print(
                                     f"⚠️  Low node count: {len(running_nodes)}/{len(self.expected_nodes + self.special_nodes)} nodes running")
+                
+                # Loop exited due to shutdown_requested - clean up child processes
+                if self.shutdown_requested:
+                    print("\n🛑 Shutdown requested, stopping simulation and cleaning up all nodes...")
+                    self.stop()
+                    print("✅ All simulation nodes terminated")
+                    return True
 
             except KeyboardInterrupt:
                 print("\n🛑 Stopping simulation and cleaning up all nodes...")
@@ -2079,6 +2098,11 @@ class ArgoLifecycleManager:
                 self.shutdown_requested = True
                 self.stop()
                 return False
+            finally:
+                # Ensure cleanup happens even if loop exits for any reason
+                if self.shutdown_requested and hasattr(self, 'node_processes') and self.node_processes:
+                    print("\n🛑 Ensuring all child processes are terminated...")
+                    self.stop()
         else:
             print("❌ Argo simulation mode failed to start")
 

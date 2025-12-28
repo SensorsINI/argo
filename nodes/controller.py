@@ -116,6 +116,17 @@
 #   - Clamped to [-1, +1] range
 #   - Target heading set during human control, maintained during autonomous control
 #
+# SENSOR PROCESSING AND FUSION:
+#   Common sensor processing is centralized in controller.py to avoid duplication:
+#   - Speed estimation: GPS position-based fallback when GPS SOG is stale (0.2 Hz updates)
+#   - Future: Compass-GPS heading fusion (compass fast/low-noise, GPS absolute reference)
+#   - Future: Absolute wind direction calculation (centralized, added to BoatState)
+#   - Future: Sensor filtering and outlier rejection
+#   
+#   Controllers should use processed/fused values from BoatState rather than
+#   duplicating filtering or fusion logic. This ensures consistency and reduces
+#   code duplication across controllers.
+#
 # SAFE PUBLISHING:
 #   - Uses safe_publish utility to prevent "publisher's context is invalid" errors
 #   - Validates ROS2 context before all publishing operations
@@ -346,6 +357,21 @@ class ControllerNode(ArgoBaseNode):
         self.data_collector = DataCollector(training_data_dir)
 
         self.last_logged_human_control = None
+        
+        # GPS speed estimation tracking (for fallback when GPS SOG is stale)
+        self._last_gps_position_timestamp = None
+        self._last_gps_sog_timestamp = 0.0
+        
+        # Sensor fusion state (for future compass-GPS heading fusion)
+        # TODO: Implement compass-GPS heading fusion when boat is moving forward
+        # Compass heading is faster and less noisy than GPS COG, and is reliable
+        # when boat is moving forward (hull and rudder provide good heading reference)
+        self._last_compass_heading = None
+        self._last_compass_timestamp = None
+        self._last_gps_cog = None
+        self._last_gps_cog_timestamp = None
+        # Future: fused_heading will combine compass (fast, low noise) with GPS COG (absolute reference)
+        # For now, controllers use compass_heading directly
 
         # CPU monitoring
         self.cpu_monitor_enabled = False
@@ -736,17 +762,29 @@ class ControllerNode(ArgoBaseNode):
         # Convert from mathematical convention (0°=East, CCW) to compass convention (0°=North, CW)
         # Same conversion as visualization: compass = (450.0 - math) % 360.0
         heading_math = float(msg.z) % 360.0
-        self.boat_state.compass_heading = (450.0 - heading_math) % 360.0
+        compass_heading = (450.0 - heading_math) % 360.0
+        
+        # Track compass heading for sensor fusion
+        self._last_compass_heading = compass_heading
+        self._last_compass_timestamp = time.time()
+        
+        self.boat_state.compass_heading = compass_heading
 
     def gps_cog_callback(self, msg):
         if self.is_paused():
             return
         self.boat_state.gps_cog = msg.data
+        
+        # Track GPS COG for sensor fusion
+        self._last_gps_cog = msg.data
+        self._last_gps_cog_timestamp = time.time()
 
     def gps_sog_callback(self, msg):
         if self.is_paused():
             return
         self.boat_state.gps_sog = msg.data
+        # Track timestamp of GPS SOG update (updates at ~0.2 Hz, so may be stale)
+        self._last_gps_sog_timestamp = time.time()
 
     def gps_velocity_callback(self, msg):
         if self.is_paused():
@@ -902,9 +940,47 @@ class ControllerNode(ArgoBaseNode):
         if self.is_paused():
             return
         
+        # Track previous position for speed estimation (fallback when GPS SOG is stale)
+        prev_lat = self.boat_state.current_latitude
+        prev_lon = self.boat_state.current_longitude
+        prev_timestamp = getattr(self, '_last_gps_position_timestamp', None)
+        
         # Update current position
         self.boat_state.current_latitude = msg.latitude
         self.boat_state.current_longitude = msg.longitude
+        current_timestamp = time.time()
+        
+        # Estimate speed from position changes as fallback (GPS position updates at 1 Hz vs SOG at 0.2 Hz)
+        # This provides more timely speed data for safety-critical boundary prediction
+        if (prev_lat is not None and prev_lon is not None and prev_timestamp is not None and
+            current_timestamp > prev_timestamp):
+            dt = current_timestamp - prev_timestamp
+            if dt > 0.1:  # At least 0.1s between updates (avoid division by zero)
+                # Calculate distance using haversine formula
+                lat1 = math.radians(prev_lat)
+                lon1 = math.radians(prev_lon)
+                lat2 = math.radians(msg.latitude)
+                lon2 = math.radians(msg.longitude)
+                dlon = lon2 - lon1
+                a = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+                c = 2 * math.asin(math.sqrt(a))
+                distance_m = 6378137.0 * c  # Earth radius in meters
+                
+                speed_ms = distance_m / dt
+                speed_knots = speed_ms / 0.514444  # Convert m/s to knots
+                
+                # Store estimated speed (will be used as fallback if GPS SOG is stale)
+                # Only update if GPS SOG is None or very stale (>3 seconds old)
+                if self.boat_state.gps_sog is None:
+                    self.boat_state.gps_sog = speed_knots
+                else:
+                    # Check if GPS SOG is stale (last update > 3 seconds ago)
+                    last_sog_update = getattr(self, '_last_gps_sog_timestamp', 0.0)
+                    if current_timestamp - last_sog_update > 3.0:
+                        # GPS SOG is stale - use position-based estimate
+                        self.boat_state.gps_sog = speed_knots
+        
+        self._last_gps_position_timestamp = current_timestamp
         
         # Set home position on first valid GPS fix
         if (self.boat_state.home_latitude is None and 
@@ -940,6 +1016,10 @@ class ControllerNode(ArgoBaseNode):
                 return  # Skip all processing and logging when paused
 
             self.boat_state.timestamp = time.time()
+            
+            # Process sensor data (speed estimation, fusion, etc.) before controller uses state
+            # This centralizes sensor processing so controllers don't need to duplicate logic
+            self._process_sensor_data()
 
             # CPU monitoring (periodic check)
             if self.cpu_monitor_enabled and (time.time() - self.last_cpu_check) > self.cpu_check_interval:
@@ -1102,6 +1182,69 @@ class ControllerNode(ArgoBaseNode):
             # Re-raise the exception to let the node crash
             # The lifecycle manager will detect the node failure and terminate the simulation
             raise
+
+    def _process_sensor_data(self):
+        """
+        Centralized sensor processing and fusion for all controllers.
+        
+        This method processes raw sensor data and prepares fused/estimated values
+        that controllers can use. Common processing includes:
+        - Speed estimation from GPS position (fallback when GPS SOG is stale)
+        - Future: Compass-GPS heading fusion (compass is faster/less noisy, GPS provides absolute reference)
+        - Future: Wind direction calculations (absolute vs relative)
+        - Future: Sensor filtering and outlier rejection
+        
+        This centralizes sensor processing so controllers don't need to duplicate
+        filtering, fusion, or estimation logic.
+        """
+        # Speed estimation from GPS position is already handled in gps_position_callback
+        # (runs before this method is called)
+        
+        # TODO: Compass-GPS heading fusion
+        # When boat is moving forward (speed > threshold), compass heading is reliable
+        # and should be fused with GPS COG for better heading estimate:
+        # - Compass: Fast updates (~10 Hz), low noise, but can drift
+        # - GPS COG: Slow updates (~0.2 Hz), absolute reference, but noisy at low speeds
+        # - Fusion: Use compass for fast updates, GPS COG for calibration/drift correction
+        # 
+        # Implementation approach:
+        # 1. When speed > threshold (e.g., 0.5 m/s): compass is reliable
+        # 2. Use compass heading as primary (fast, low noise)
+        # 3. Periodically correct compass drift using GPS COG (when GPS COG is fresh)
+        # 4. When speed < threshold: rely more on GPS COG (compass less reliable when stationary)
+        #
+        # For now: Controllers use compass_heading directly (no fusion)
+        # Future: Add fused_heading field to BoatState and populate it here
+        
+        # TODO: Absolute wind direction calculation
+        # Some controllers calculate absolute wind from relative wind + heading
+        # This should be centralized here and added to BoatState
+        # Current: Controllers calculate this individually (crosser.py, patrol.py)
+        # Future: Calculate once here and add to BoatState.absolute_wind_direction
+        
+        pass
+    
+    def _calculate_absolute_wind_direction(self, state: BoatState) -> Optional[float]:
+        """
+        Calculate absolute wind direction from relative wind angle and boat heading.
+        
+        This is a common calculation used by multiple controllers, so it's centralized here.
+        Controllers can use this method instead of duplicating the calculation.
+        
+        Args:
+            state: BoatState with wind_angle (relative) and compass_heading
+            
+        Returns:
+            Absolute wind direction in degrees (0-360, compass convention, where wind comes from),
+            or None if calculation not possible
+        """
+        if state.wind_angle is None or state.compass_heading is None:
+            return None
+        
+        # wind_angle is relative to boat heading (0° = wind from front, 180° = wind from back)
+        # Convert to absolute: absolute_wind = (compass_heading + wind_angle) % 360.0
+        absolute_wind = (state.compass_heading + state.wind_angle) % 360.0
+        return absolute_wind
 
     def check_and_reload_params(self, is_initial=False):
         """Checks if the param file has changed and reloads it."""
