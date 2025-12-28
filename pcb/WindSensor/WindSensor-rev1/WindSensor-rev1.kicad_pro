@@ -448,11 +448,19 @@
     }
   },
   "libraries": {
-    "pinned_footprint_libs": [],
-    "pinned_symbol_libs": []
+    "pinned_footprint_libs": [
+      "WindSensor"
+    ],
+    "pinned_symbol_libs": [
+      "WindSensor-rescue",
+      "WindSensor-cache",
+      "WindSensor",
+      "myLib",
+      "NewLib"
+    ]
   },
   "meta": {
-    "filename": "WindSensor.kicad_pro",
+    "filename": "WindSensor-rev1.kicad_pro",
     "version": 3
   },
   "net_settings": {
