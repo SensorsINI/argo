@@ -1,0 +1,206 @@
+(footprint "SDP32"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(property "Reference" "U?"
+		(at 2.5 -4.7 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "e1e55afc-1478-4aae-8268-1b8090b8db03")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+		)
+	)
+	(property "Value" "SDP32"
+		(at 0 1 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "01ad69b0-de84-409d-b30e-08c0e1e7167a")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://sensirion.com/resource/datasheet/sdp3x-d"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "d69ed36b-97c4-4e07-98ea-a2d310009821")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Digital differential pressure sensor (±125 Pa)"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "60594cd9-43d8-4563-9eca-81e0fcc23d07")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "sensirion page" "https://sensirion.com/products/catalog/SDP32"
+		(at 0 0 0)
+		(layer "F.SilkS")
+		(hide yes)
+		(uuid "47d66c5f-e455-47ae-b5f4-1faf52886a85")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+		)
+	)
+	(attr smd)
+	(fp_text user "SDP32"
+		(at 2.4 -1.905 180)
+		(layer "F.Fab")
+		(uuid "54b9112c-4ba5-475b-806e-badd9af8171c")
+		(effects
+			(font
+				(size 0.5 0.5)
+				(thickness 0.1)
+			)
+		)
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 2.5 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "8fb9bcb8-0b50-430b-a775-1860048d0968")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(fp_text user "SDP32"
+		(at 2.4 -1.905 180)
+		(layer "F.Fab")
+		(uuid "a0d602b0-d30f-4b4c-b4ba-2704ba5358c7")
+		(effects
+			(font
+				(size 0.5 0.5)
+				(thickness 0.1)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at 3.4 -6 270)
+		(size 0.75 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "39d605bd-09d0-48e3-9e09-401c1ae7830a")
+	)
+	(pad "2" smd rect
+		(at 2.4 -6 270)
+		(size 0.75 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "66ef6a82-8738-4782-90f1-4bc6082c6415")
+	)
+	(pad "3" smd rect
+		(at 1.4 -6 270)
+		(size 0.75 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "bab2fcc5-4bc2-4259-9d1d-cf07f6e42f21")
+	)
+	(pad "4" smd rect
+		(at 0.325 -5.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "20740204-83ad-474f-b089-b82843d9f350")
+	)
+	(pad "5" smd rect
+		(at 0.325 -4.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "6ba2655d-5c6f-43e9-a6a4-bab2d80049da")
+	)
+	(pad "6" smd rect
+		(at 0.325 -3.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "f3d0a40d-f2c7-4df1-a394-509de6a6c9ec")
+	)
+	(pad "7" smd rect
+		(at 0.325 -2.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "8b4cae09-cc77-4626-b3f7-facd5c535ff8")
+	)
+	(pad "8" smd rect
+		(at 0.325 -1.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "eaa692a8-54dd-4bdf-8ec4-6847de53c0d1")
+	)
+	(pad "9" smd rect
+		(at 1.4 -0.35 270)
+		(size 0.75 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "4d2341d8-e72c-44d5-a48a-2c227a7f4b15")
+	)
+	(pad "10" smd rect
+		(at 2.4 -0.35 270)
+		(size 0.75 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "e1033de2-8be6-45bc-8fb9-99fc2252ed9c")
+	)
+	(pad "11" smd rect
+		(at 3.4 -0.35 270)
+		(size 0.75 0.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "ec3994d8-7200-48da-bfe3-826d0753cecd")
+	)
+	(pad "12" smd rect
+		(at 4.475 -1.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "bf25e4db-9f65-44be-851a-df0e4db89180")
+	)
+	(pad "13" smd rect
+		(at 4.475 -2.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "e3991845-1834-4ddf-81fb-240da2631f7d")
+	)
+	(pad "14" smd rect
+		(at 4.475 -3.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "57c24cd6-e3bd-4c26-b09a-4312d24baeca")
+	)
+	(pad "15" smd rect
+		(at 4.475 -4.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "3175b8e3-4ae0-4d2d-8887-9a10ff7b20f4")
+	)
+	(pad "16" smd rect
+		(at 4.475 -5.175 270)
+		(size 0.4 0.75)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "0cbe5713-8989-4c8a-af90-db5d45afc088")
+	)
+	(pad "20" smd rect
+		(at 2.4 -3.175 270)
+		(size 1.8 2.6)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "a5636383-e134-40e0-baf3-e64aac1566a8")
+	)
+	(embedded_fonts no)
+)
