@@ -1,6 +1,5 @@
 (sym_lib_table
   (version 7)
-  (lib (name "WindSensor")(type "KiCad")(uri "F:/tobi/argo/pcb/WindSensor/WindSensor.kicad_sym")(options "")(descr ""))
-  (lib (name "WindSensor1")(type "KiCad")(uri "F:/tobi/argo/pcb/WindSensor/WindSensor.kicad_sym")(options "")(descr ""))
-  (lib (name "cpdur5v0-hf")(type "KiCad")(uri "F:/tobi/argo/pcb/WindSensor/cpdur5v0-hf.kicad_sym")(options "")(descr ""))
+  (lib (name "WindSensor")(type "KiCad")(uri "${KIPRJMOD}/../WindSensor.kicad_sym")(options "")(descr ""))
+  (lib (name "WindSensor1")(type "KiCad")(uri "${KIPRJMOD}/../WindSensor.kicad_sym")(options "")(descr ""))
 )
