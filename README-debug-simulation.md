@@ -28,11 +28,12 @@ This configuration executes:
 ```bash
 python3 launch/argo_lifecycle_manager.py \
   simulate_local \
-  --force-mock \
   --debug-nodes \
   --debug-node-port-base 5680 \
   --debug-node-wait
 ```
+
+Note: Mock simulation is now the default. Use `--real` to use the real simulator instead.
 
 ### What the flags do
 

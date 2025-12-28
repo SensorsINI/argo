@@ -30,6 +30,7 @@ class HumanController(BaseController):
 
     def __init__(self, config, logger=None, parent_node=None):
         super().__init__(config, logger=logger, parent_node=parent_node)
+        self.name = 'HumanController'
         # Force publisher creation immediately so it shows up in ros2 node info
         self._get_release_servos_publisher()
         if logger:

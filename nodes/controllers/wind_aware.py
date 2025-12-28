@@ -19,6 +19,7 @@ class WindAwareController(BaseController):
 
     def __init__(self, config, logger=None, parent_node=None):
         super().__init__(config, logger=logger, parent_node=parent_node)
+        self.name = 'WindAwareController'
         self.rudder_gain = config.get('rudder_gain', 1.0)
         self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)
         self.sail_wind_gain = config.get('sail_wind_gain', 0.5)

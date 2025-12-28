@@ -125,7 +125,7 @@ class KeyboardControlNode(Node):
         
         # Log initialization messages BEFORE curses takes over terminal
         self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Toggle Manual | ENTER=Refresh | Q=Quit')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Toggle Manual | Q=Quit Sim | X=Quit Control | ENTER=Refresh')
         
         # Setup curses (after logging to avoid polluting display)
         self.stdscr = curses.initscr()
@@ -413,9 +413,12 @@ class KeyboardControlNode(Node):
                 self.toggle_rth_controller()
             elif key == ord('m') or key == ord('M'):
                 self.toggle_controller_pause()
+            elif key == ord('q') or key == ord('Q'):
+                self.quit_simulation()
             elif key == ord('\n') or key == ord('\r') or key == curses.KEY_ENTER:
                 self.clear_and_refresh_display()
-            elif key == ord('q') or key == ord('Q'):
+            elif key == ord('x') or key == ord('X'):
+                # Quit keyboard control (exit this node)
                 self.running = False
                 self.cleanup()
                 if rclpy.ok():
@@ -526,6 +529,26 @@ class KeyboardControlNode(Node):
         self.get_logger().info(f"Resumed {resumed_count}/{len(self.simulation_pids)} simulation processes")
         self.simulation_pids = []  # Clear list after resume
         return resumed_count > 0
+    
+    def _quit_simulation_processes(self):
+        """Quit simulation by sending SIGTERM to all simulation processes."""
+        sim_pids = self._find_simulation_processes()
+        
+        if not sim_pids:
+            self.get_logger().warn("No simulation processes found to quit")
+            return False
+        
+        terminated_count = 0
+        for pid in sim_pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                terminated_count += 1
+            except (ProcessLookupError, PermissionError) as e:
+                self.get_logger().warn(f"Could not terminate process {pid}: {e}")
+        
+        self.get_logger().info(f"Sent SIGTERM to {terminated_count}/{len(sim_pids)} simulation processes")
+        self._add_diagnostic_message(f"✅ Quit simulation: SIGTERM sent to {terminated_count} processes")
+        return terminated_count > 0
     
     def toggle_simulation_pause(self):
         """Toggle simulation pause state using process signals or topic."""
@@ -700,6 +723,14 @@ class KeyboardControlNode(Node):
                 self._add_diagnostic_message(message)
         else:
             message = "⚠️  Controller pause service call timed out"
+            self.get_logger().warn(message)
+            self._add_diagnostic_message(message)
+    
+    def quit_simulation(self):
+        """Quit simulation by sending SIGTERM to all simulation processes."""
+        success = self._quit_simulation_processes()
+        if not success:
+            message = "⚠️  No simulation processes found to quit"
             self.get_logger().warn(message)
             self._add_diagnostic_message(message)
     
@@ -932,7 +963,7 @@ class KeyboardControlNode(Node):
             controls_line1 = "  ←→ Rudder | ↑↓ Sail | C=Center"
             controls_line2 = "  SPACE=Sim Pause | W/E=Wind ±10°"
             controls_line3 = "  R=Reset | H=Toggle RTH | M=Toggle Manual"
-            controls_line4 = "  ENTER=Refresh | Q=Quit"
+            controls_line4 = "  Q=Quit Sim | X=Quit Control | ENTER=Refresh"
             self.stdscr.addstr(line_num, 2, controls_line1[:width-4])
             line_num += 1
             self.stdscr.addstr(line_num, 2, controls_line2[:width-4])

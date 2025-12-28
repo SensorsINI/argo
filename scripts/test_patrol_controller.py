@@ -397,15 +397,16 @@ def run_simulation_test(duration_sec=60.0):
     print(f"   Working directory: {argo_dir}")
     
     # Start simulation in background
-    print(f"\n2. Starting simulation with --force-mock...")
+    print(f"\n2. Starting simulation (mock simulator, default)...")
     print(f"   (This will run for {duration_sec:.0f} seconds)")
     
     # Use ros2 launch or direct node execution
     # We'll use ros2 run to start nodes directly
+    # Note: --force-mock is optional now (mock is default), but kept for explicit behavior
     simulator_cmd = [
         'python3', 'nodes/argo_unified_simulator_bridge.py',
         '--mode', 'local',
-        '--force-mock',
+        '--force-mock',  # Explicitly use mock (now default, but kept for clarity)
         '--map', 'Argo Irchel pond sailing area'
     ]
     

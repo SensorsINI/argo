@@ -104,6 +104,7 @@ class CrosserController(BaseController):
 
     def __init__(self, config, logger=None, parent_node=None):
         super().__init__(config, logger=logger, parent_node=parent_node)
+        self.name = 'CrosserController'
         # P controller parameters for heading control
         self.p_heading_gain = config.get('p_heading_gain', 0.3)  # Proportional gain for heading error
         self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)  # Heading error for full rudder deflection
@@ -918,6 +919,8 @@ class CrosserController(BaseController):
         
         if should_log:
             log_parts = []
+            # Always include controller name to avoid confusion
+            log_parts.append(f"Controller: {self.name}")
             # Show both state and maneuver: "state (maneuver)"
             state_name = self.crossing_state
             maneuver_name = self._current_maneuver

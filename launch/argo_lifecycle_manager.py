@@ -1699,14 +1699,18 @@ class ArgoLifecycleManager:
                 
         return True
 
-    def simulate_local(self, force_mock: bool = False, debug: bool = False) -> bool:
+    def simulate_local(self, force_mock: bool = True, force_real: bool = False, debug: bool = False) -> bool:
         """Launch Argo in local simulation mode.
         
         Args:
-            force_mock: If True, force use of mock simulator even if real simulator is available
+            force_mock: If True, force use of mock simulator even if real simulator is available (default: True)
+            force_real: If True, force use of real simulator even if mock simulator is available (default: False)
             debug: If True, enable debug tracing in the simulator bridge
         """
-        return self._simulate(mode='local', force_mock=force_mock, debug=debug)
+        # If force_real is explicitly set, override force_mock
+        if force_real:
+            force_mock = False
+        return self._simulate(mode='local', force_mock=force_mock, force_real=force_real, debug=debug)
 
     def simulate_remote(self) -> bool:
         """Launch Argo in remote simulation mode."""
@@ -1720,7 +1724,7 @@ class ArgoLifecycleManager:
             return False
         return self._simulate(mode='remote')
 
-    def _simulate(self, mode: str, force_mock: bool = False, debug: bool = False) -> bool:
+    def _simulate(self, mode: str, force_mock: bool = False, force_real: bool = False, debug: bool = False) -> bool:
         """
         Launch Argo in simulation mode.
 
@@ -3535,8 +3539,10 @@ EXAMPLES:
                         help='Suppress initialization messages (useful for quick_status)')
     parser.add_argument('--toggle_pause', action='store_true',
                         help='Toggle controller pause state (pauses autonomous navigation)')
-    parser.add_argument('--force-mock', action='store_true',
-                        help='Force use of mock simulator even if real simulator (sailboat-playground) is available (only for simulate_local)')
+    parser.add_argument('--mock', action='store_true',
+                        help='Force use of mock simulator (default behavior, can be omitted) (only for simulate_local)')
+    parser.add_argument('--real', action='store_true',
+                        help='Force use of real simulator instead of mock (only for simulate_local)')
     parser.add_argument('--debug-nodes', action='store_true',
                         help='Launch Python node subprocesses under debugpy so IDE breakpoints trigger')
     parser.add_argument('--debug-node-port-base', type=int, default=5678,
@@ -3576,7 +3582,19 @@ EXAMPLES:
             manager.quick_status()
             manager._cleanup_ros2()
         elif args.command == 'simulate_local':
-            success = manager.simulate_local(force_mock=args.force_mock, debug=args.debug)
+            # Default to mock simulation unless --real is explicitly specified
+            # If --real is specified, it overrides --mock
+            if args.real:
+                force_mock = False
+                force_real = True
+            elif args.mock:
+                force_mock = True
+                force_real = False
+            else:
+                # Default: use mock simulation
+                force_mock = True
+                force_real = False
+            success = manager.simulate_local(force_mock=force_mock, force_real=force_real, debug=args.debug)
             # simulate handles its own cleanup
             sys.exit(0 if success else 1)
         elif args.command == 'simulate_remote':

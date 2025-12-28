@@ -11,9 +11,9 @@
        controller_type: "patrol"  # Change from "proportional" to "patrol"
    ```
 
-2. **Start simulation**:
+2. **Start simulation** (mock is default, --force-mock is optional):
    ```bash
-   asim --force-mock
+   asim
    ```
 
 3. **In another terminal, start keyboard control**:
@@ -30,9 +30,9 @@
 
 If you want to switch controllers without editing the file:
 
-1. **Start simulation with default controller**:
+1. **Start simulation with default controller** (mock is default):
    ```bash
-   asim --force-mock
+   asim
    ```
 
 2. **Switch to patrol controller**:
@@ -58,7 +58,7 @@ The patrol controller uses these parameters (already configured in `argo.yaml`):
 
 ## Testing Workflow
 
-1. **Start simulation**: `asim --force-mock`
+1. **Start simulation**: `asim` (mock is default, or use `asim --real` for real simulator)
 2. **Start keyboard control**: `asimkb` (in another terminal)
 3. **Manually position boat**: Use arrow keys to move boat to center of sailing area
 4. **Switch to robot control**: Stop keyboard input (wait for timeout) or press `ap` to unpause

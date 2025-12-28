@@ -755,6 +755,9 @@ class ControllerNode(ArgoBaseNode):
     def true_wind_callback(self, msg):
         """Receive true wind direction from bridge (compass convention, where wind comes from)."""
         self.true_wind_direction_from_bridge = msg.data
+        # Pass true wind direction to patrol controller if it's active
+        if isinstance(self.controller, PatrolController):
+            self.controller.true_wind_direction_from_bridge = msg.data
     
     def pose_callback(self, msg):
         if self.is_paused():

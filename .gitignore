@@ -155,3 +155,6 @@ scripts/i2c_gpio_recovery.sh
 scripts/install_i2c_reset_sudoers.sh
 # Note: reset_i2c_bus.sh is tracked (not ignored) - it's a required script for the ai2creset alias
 pcb/argo-v9-stable/argo-v9-stable-rev3/argo-v9-stable-rev3-gerber.zip
+pcb/WindSensor/WindSensor-rev1.orig
+pcb/WindSensor/Directional Wind Meter Using SDP3x _ Sensirion.pdf
+pcb/WindSensor/Sensirion_Differential_Pressure_Sensors_SDP3x_Digital_Datasheet.pdf

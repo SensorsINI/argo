@@ -11,7 +11,7 @@
     # Controller parameters (used by controller.py and crosser controller)
     p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
     min_rudder_near_boundary: 0.5  # Minimum rudder command when close to boundary (0.0-1.0)
-    boundary_emergency_threshold: 4.0  # Meters from boundary for emergency turn
+    boundary_emergency_threshold: 3.0  # Meters from boundary for emergency turn
     turn_rudder_gain_multiplier: 2.0  # Multiplier for rudder gain during turns (more aggressive control)
     argo:
       mode: autonomous  # NOTE: Currently unused - launch mode controlled via launch argument (normal/simulation)
@@ -50,7 +50,7 @@
           cog_noise_stddev: 5.0       # Course over ground noise (degrees) - measured: 44.64° at low speeds, using conservative value
           sog_noise_stddev: 0.16       # Speed over ground noise (m/s) - measured: 0.156 m/s from pond recording
           update_rate: 0.2            # GPS update rate (Hz) - measured: ~0.2 Hz (1/5 Hz) from pond recording, critical for sim2real gap
-          noise_time_constant: 3.0    # Time constant for noise filtering (seconds) - measured: 3.01s from pond recording
+          noise_time_constant: 10.0    # Time constant for noise filtering (seconds) - measured: 3.01s from pond recording
           dropout_probability: 0.0    # Probability of GPS fix loss per update
           dropout_duration: 2.0       # Duration of GPS dropout (seconds)
         # IMU accelerometer/gyro noise (for roll/pitch)
@@ -109,7 +109,7 @@ controller_node:
     rudder_full_scale_deg: 60.0  # Heading error (degrees) that produces full rudder deflection (-1.0 to +1.0)
     param_file_path: argo.yaml
     patrol_lookahead_time: 15.0  # Seconds to predict ahead for boundary crossing (used by patrol/crosser controllers)
-    boundary_turn_threshold: 7.0  # Distance to boundary (meters) to trigger turn maneuver
+    boundary_turn_threshold: 4.0  # Distance to boundary (meters) to trigger turn maneuver
     tack_angle: 120.0  # Degrees to turn during tack maneuver (increased from 90° for better tack success - more momentum through wind, less likely to stall)
     arrival_distance_m: 3.0  # Distance to middle waypoint (meters) to consider "arrived" (used by crosser controller)
     tack_min_angle_from_wind: 50.0  # Minimum angle from wind during tack to avoid stays (degrees, used by crosser controller)
