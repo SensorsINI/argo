@@ -1,7 +1,8 @@
 (sym_lib_table
   (version 7)
-  (lib (name "argo-v9")(type "KiCad")(uri "${ARGO}/argo-v9-stable/argo-v9.kicad_sym")(options "")(descr ""))
-  (lib (name "SamacSys_Parts")(type "KiCad")(uri "${ARGO}/library_loader/SamacSys_Parts.kicad_sym")(options "")(descr ""))
-  (lib (name "orange_pi_zero_2w")(type "KiCad")(uri "${ARGO}/orange-pi/orange_pi_zero_2w.kicad_sym")(options "")(descr ""))
-  (lib (name "PRL3-5V-DC-1A")(type "KiCad")(uri "${ARGO}/snapeda/PRL3-5V-DC-1A/PRL3-5V-DC-1A.kicad_sym")(options "")(descr "Relay SPST dual coil"))
+  (lib (name "argo-v9")(type "KiCad")(uri "${KIPRJMOD}/../argo-v9.kicad_sym")(options "")(descr ""))
+  (lib (name "SamacSys_Parts")(type "KiCad")(uri "${KIPRJMOD}/../../library_loader/SamacSys_Parts.kicad_sym")(options "")(descr ""))
+  (lib (name "orange_pi_zero_2w")(type "KiCad")(uri "${KIPRJMOD}/../../orange-pi/orange_pi_zero_2w.kicad_sym")(options "")(descr ""))
+  (lib (name "PRL3-5V-DC-1A")(type "KiCad")(uri "${KIPRJMOD}/../../snapeda/PRL3-5V-DC-1A/PRL3-5V-DC-1A.kicad_sym")(options "")(descr "Relay SPST dual coil"))
+  (lib (name "WindSensor")(type "KiCad")(uri "${KIPRJMOD}/../../WindSensor/WindSensor.kicad_sym")(options "")(descr ""))
 )

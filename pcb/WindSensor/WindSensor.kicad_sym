@@ -2,6 +2,974 @@
 	(version 20241209)
 	(generator "kicad_symbol_editor")
 	(generator_version "9.0")
+	(symbol "599-2310-427F"
+		(pin_names
+			(offset 0.254)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "LED"
+			(at 15.875 10.795 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+			)
+		)
+		(property "Value" "599-2310-427F"
+			(at 20.32 5.08 0)
+			(effects
+				(font
+					(size 1.524 1.524)
+				)
+			)
+		)
+		(property "Footprint" "WindSensor:599-2310_DIA"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+					(italic yes)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://s3-us-west-2.amazonaws.com/catsy.557/C18645.pdf"
+			(at 11.176 -22.606 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+					(italic yes)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "RGBW LED 60mA max ~4lm max"
+			(at 2.286 -27.432 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "digikey" "https://www.digikey.ch/en/products/detail/dialight/599-2310-427F/21710489"
+			(at 11.43 -31.242 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "599-2310-427F"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "599-2310_DIA"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "599-2310-427F_0_1"
+			(polyline
+				(pts
+					(xy 7.62 5.08) (xy 7.62 -17.78)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 7.62 0) (xy 13.97 0)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 7.62 -5.08) (xy 13.97 -5.08)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 7.62 -10.16) (xy 13.97 -10.16)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 7.62 -15.24) (xy 13.97 -15.24)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 7.62 -17.78) (xy 22.86 -17.78)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.335 2.54) (xy 13.335 1.905)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.335 2.54) (xy 13.97 2.54)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.335 -2.54) (xy 13.335 -3.175)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.335 -2.54) (xy 13.97 -2.54)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.335 -7.62) (xy 13.335 -8.255)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.335 -7.62) (xy 13.97 -7.62)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.335 -12.7) (xy 13.335 -13.335)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.335 -12.7) (xy 13.97 -12.7)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.97 1.27) (xy 13.97 -1.27)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.97 0) (xy 16.51 -1.27)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.97 -3.81) (xy 13.97 -6.35)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.97 -5.08) (xy 16.51 -6.35)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.97 -8.89) (xy 13.97 -11.43)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.97 -10.16) (xy 16.51 -11.43)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.97 -13.97) (xy 13.97 -16.51)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 13.97 -15.24) (xy 16.51 -16.51)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 14.605 2.54) (xy 14.605 3.175)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 14.605 1.27) (xy 13.335 2.54)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 14.605 -2.54) (xy 14.605 -1.905)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 14.605 -3.81) (xy 13.335 -2.54)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 14.605 -7.62) (xy 14.605 -6.985)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 14.605 -8.89) (xy 13.335 -7.62)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 14.605 -12.7) (xy 14.605 -12.065)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 14.605 -13.97) (xy 13.335 -12.7)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 15.24 3.175) (xy 14.605 3.175)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 15.24 -1.905) (xy 14.605 -1.905)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 15.24 -6.985) (xy 14.605 -6.985)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 15.24 -12.065) (xy 14.605 -12.065)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 15.875 1.905) (xy 14.605 3.175)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 15.875 -3.175) (xy 14.605 -1.905)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 15.875 -8.255) (xy 14.605 -6.985)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 15.875 -13.335) (xy 14.605 -12.065)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 1.27) (xy 13.97 0)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 1.27) (xy 16.51 -1.27)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 255 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 0) (xy 22.86 0)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -3.81) (xy 13.97 -5.08)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -3.81) (xy 16.51 -6.35)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 255 0 0 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -5.08) (xy 22.86 -5.08)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -8.89) (xy 13.97 -10.16)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -8.89) (xy 16.51 -11.43)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+					(color 0 0 255 1)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -10.16) (xy 22.86 -10.16)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -13.97) (xy 13.97 -15.24)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -13.97) (xy 16.51 -16.51)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 16.51 -15.24) (xy 22.86 -15.24)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 20.32 -5.08) (xy 20.32 -7.62)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(circle
+				(center 20.32 -5.08)
+				(radius 0.127)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 22.86 5.08) (xy 7.62 5.08)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 22.86 -7.62) (xy 20.32 -7.62)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 22.86 -17.78) (xy 22.86 5.08)
+				)
+				(stroke
+					(width 0.127)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(pin unspecified line
+				(at 0 0 0)
+				(length 7.62)
+				(name "9"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "9"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin unspecified line
+				(at 0 -5.08 0)
+				(length 7.62)
+				(name "7"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "7"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin unspecified line
+				(at 0 -10.16 0)
+				(length 7.62)
+				(name "4"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "4"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin unspecified line
+				(at 0 -15.24 0)
+				(length 7.62)
+				(name "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin unspecified line
+				(at 30.48 0 180)
+				(length 7.62)
+				(name "8"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "8"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin unspecified line
+				(at 30.48 -5.08 180)
+				(length 7.62)
+				(name "6"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "6"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin unspecified line
+				(at 30.48 -7.62 180)
+				(length 7.62)
+				(name "5"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "5"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin unspecified line
+				(at 30.48 -10.16 180)
+				(length 7.62)
+				(name "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin unspecified line
+				(at 30.48 -15.24 180)
+				(length 7.62)
+				(name "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(symbol "599-2310-427F_1_1"
+			(text "R"
+				(at 17.526 -4.318 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(text "G"
+				(at 17.78 1.27 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(text "B"
+				(at 17.78 -9.144 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(text "W"
+				(at 18.034 -14.224 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
 	(symbol "CPDUR5V0-HF"
 		(pin_numbers
 			(hide yes)
@@ -168,6 +1136,273 @@
 					)
 				)
 				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	(symbol "Conn_I2C_Molex_740990604"
+		(pin_names
+			(offset 1.016)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "J"
+			(at 0 5.08 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "Conn_I2C_Molex_740990604"
+			(at 0 -7.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "WindSensor:CONN_SD-74099-1000_04_MOL"
+			(at -0.762 -20.066 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.molex.com/en-us/products/part-detail/740990604?display=pdf"
+			(at 2.794 -10.922 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Molex SL 1x4 vertical SMD"
+			(at 4.064 -13.208 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Product page" "https://www.molex.com/en-us/products/part-detail/740990604"
+			(at 1.778 -17.272 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Drawing" "https://www.molex.com/content/dam/molex/molex-dot-com/products/automated/en-us/salesdrawingpdf/705/70545/705450003_sd.pdf?inline"
+			(at 2.286 -15.24 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "series" "https://www.molex.com/en-us/part-list/74099"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "connector"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "Connector*:*_1x??_* Conn*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "Conn_I2C_Molex_740990604_1_1"
+			(rectangle
+				(start -1.27 3.81)
+				(end 10.16 -6.35)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type background)
+				)
+			)
+			(rectangle
+				(start -1.27 2.667)
+				(end 0 2.413)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 0.127)
+				(end 0 -0.127)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 -2.413)
+				(end 0 -2.667)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 -4.953)
+				(end 0 -5.207)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(text "SCK"
+				(at 0 2.54 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+						(color 0 194 0 1)
+					)
+					(justify left)
+				)
+			)
+			(text "SDA"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+						(color 194 194 194 1)
+					)
+					(justify left)
+				)
+			)
+			(text "5V"
+				(at 0 -2.54 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+						(color 255 0 0 1)
+					)
+					(justify left)
+				)
+			)
+			(text "GND"
+				(at 0 -5.08 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+						(color 0 0 0 1)
+					)
+					(justify left)
+				)
+			)
+			(pin input line
+				(at -5.08 2.54 0)
+				(length 3.81)
+				(name "SCLK"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin bidirectional line
+				(at -5.08 0 0)
+				(length 3.81)
+				(name "SDA"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin power_out line
+				(at -5.08 -2.54 0)
+				(length 3.81)
+				(name "5V"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin power_out line
+				(at -5.08 -5.08 0)
+				(length 3.81)
+				(name "GND"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "4"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -790,8 +2025,8 @@
 				)
 			)
 		)
-		(property "Footprint" "LP5814DRLR:IC_LP5814DRLR"
-			(at 0 0 0)
+		(property "Footprint" "WindSensor:IC_LP5814DRLR"
+			(at -32.004 -13.462 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -800,8 +2035,8 @@
 				(hide yes)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/lp5815.pdf?ts=1759771294028&ref_url=https%253A%252F%252Fwww.ti.com%252Fproduct%252FLP5815"
-			(at 0 0 0)
+		(property "Datasheet" "https://www.ti.com/lit/gpn/lp5814"
+			(at 17.78 -26.924 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -810,7 +2045,7 @@
 			)
 		)
 		(property "Description" "LED 4-ch driver i2c controller"
-			(at 0 0 0)
+			(at -29.718 -5.08 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -819,7 +2054,7 @@
 			)
 		)
 		(property "DigiKey_Part_Number" "296-LP5814DRLRCT-ND"
-			(at 0 0 0)
+			(at -31.242 -9.144 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -829,7 +2064,7 @@
 			)
 		)
 		(property "SnapEDA_Link" "https://www.snapeda.com/parts/LP5814DRLR/Texas+Instruments/view-part/?ref=snap"
-			(at 0 0 0)
+			(at 5.334 -30.48 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -839,7 +2074,7 @@
 			)
 		)
 		(property "MAXIMUM_PACKAGE_HEIGHT" "0.60mm"
-			(at 0 0 0)
+			(at -34.29 0.762 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -849,7 +2084,7 @@
 			)
 		)
 		(property "CREATOR" "AAMIR"
-			(at 0 0 0)
+			(at -31.242 -17.526 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -859,7 +2094,7 @@
 			)
 		)
 		(property "Package" "None"
-			(at 0 0 0)
+			(at -34.29 14.986 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -869,7 +2104,7 @@
 			)
 		)
 		(property "Check_prices" "https://www.snapeda.com/parts/LP5814DRLR/Texas+Instruments/view-part/?ref=eda"
-			(at 0 0 0)
+			(at 2.032 -24.384 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -879,7 +2114,7 @@
 			)
 		)
 		(property "STANDARD" "Manufacturer Recommendations"
-			(at 0 0 0)
+			(at -30.988 4.064 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -889,7 +2124,7 @@
 			)
 		)
 		(property "PARTREV" "MARCH 2025"
-			(at 0 0 0)
+			(at -34.036 -3.048 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -899,7 +2134,7 @@
 			)
 		)
 		(property "VERIFIER" "NEZY"
-			(at 0 0 0)
+			(at -33.02 11.684 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -909,7 +2144,7 @@
 			)
 		)
 		(property "MF" "Texas Instruments"
-			(at 0 0 0)
+			(at -32.766 19.558 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -919,7 +2154,7 @@
 			)
 		)
 		(property "MP" "LP5814DRLR"
-			(at 0 0 0)
+			(at -33.02 7.874 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -929,7 +2164,7 @@
 			)
 		)
 		(property "Description_1" "LED Driver IC 4 Output Linear Constant Current Analog, PWM Dimming 51mA SOT-583"
-			(at 0 0 0)
+			(at 1.27 -21.844 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -939,7 +2174,7 @@
 			)
 		)
 		(property "MANUFACTURER" "Texas Instruments"
-			(at 0 0 0)
+			(at -28.956 22.86 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -948,10 +2183,19 @@
 				(hide yes)
 			)
 		)
+		(property "Product page" "https://www.ti.com/product/LP5814"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(symbol "LP5814DRLR_0_0"
 			(rectangle
-				(start -10.16 -12.7)
-				(end 10.16 10.16)
+				(start -10.16 10.16)
+				(end 10.16 -12.7)
 				(stroke
 					(width 0.254)
 					(type default)
@@ -1068,24 +2312,6 @@
 					)
 				)
 			)
-			(pin output line
-				(at 15.24 -5.08 180)
-				(length 5.08)
-				(name "OUT3"
-					(effects
-						(font
-							(size 1.016 1.016)
-						)
-					)
-				)
-				(number "5"
-					(effects
-						(font
-							(size 1.016 1.016)
-						)
-					)
-				)
-			)
 			(pin power_in line
 				(at 15.24 -10.16 180)
 				(length 5.08)
@@ -1097,6 +2323,26 @@
 					)
 				)
 				(number "3"
+					(effects
+						(font
+							(size 1.016 1.016)
+						)
+					)
+				)
+			)
+		)
+		(symbol "LP5814DRLR_1_0"
+			(pin output line
+				(at 15.24 -5.08 180)
+				(length 5.08)
+				(name "OUT3"
+					(effects
+						(font
+							(size 1.016 1.016)
+						)
+					)
+				)
+				(number "5"
 					(effects
 						(font
 							(size 1.016 1.016)
@@ -1473,6 +2719,44 @@
 					(effects
 						(font
 							(size 0.5 0.5)
+						)
+					)
+				)
+			)
+			(pin power_in line
+				(at 12.7 13.97 0)
+				(length 2.54)
+				(hide yes)
+				(name "GND"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "17"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin power_in line
+				(at 12.7 11.43 0)
+				(length 2.54)
+				(hide yes)
+				(name "GND"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "18"
+					(effects
+						(font
+							(size 1.27 1.27)
 						)
 					)
 				)

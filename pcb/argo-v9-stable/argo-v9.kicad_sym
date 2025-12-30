@@ -1223,7 +1223,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Argo footprint Library:I2C_header"
+		(property "Footprint" "argo:I2C_header"
 			(at -0.762 -20.066 0)
 			(effects
 				(font
@@ -1261,6 +1261,15 @@
 		)
 		(property "Drawing" "https://www.molex.com/content/dam/molex/molex-dot-com/products/automated/en-us/salesdrawingpdf/705/70545/705450003_sd.pdf?inline"
 			(at 2.286 -15.24 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "series" "https://www.molex.com/en-us/products/series-chart/70545"
+			(at 0 0 0)
 			(effects
 				(font
 					(size 1.27 1.27)

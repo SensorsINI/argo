@@ -1,0 +1,10 @@
+﻿"Symbol";"Value";"Unit";
+"TraceParts.PartNumber";"90-15042024-010552";"";
+"REFERENCE";"740990604";"";
+"TraceParts.PartTitle";"SL";"";
+"TraceParts.InstanceId";"90-15042024-0105522N3XX9WWY2MK673V115V3T3RA";"";
+"SUPPLIER";"Molex";"";
+"DESIGN";"SL Wire-to-Board Header, Surface Mount, Single Row, Vertical, 4 Circuits, Tin (Sn) Plating, Packaging Tape and Reel with Pick-and-Place Cap";"";
+"TRACEPARTS";"TRACEPARTS";"";
+"TraceParts.PartLanguage";"en";"";
+"TraceParts.PartVersion";"1.0.2";"";
