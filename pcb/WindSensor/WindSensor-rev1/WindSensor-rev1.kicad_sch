@@ -3485,6 +3485,16 @@
 			(embedded_fonts no)
 		)
 	)
+	(text "VDD=5V"
+		(exclude_from_sim no)
+		(at 75.946 32.004 0)
+		(effects
+			(font
+				(size 3 3)
+			)
+		)
+		(uuid "63b758e6-4e5b-4799-9c78-65597a5cb23d")
+	)
 	(junction
 		(at 59.69 73.66)
 		(diameter 0)

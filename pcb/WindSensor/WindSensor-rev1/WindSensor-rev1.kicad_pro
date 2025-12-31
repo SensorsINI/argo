@@ -48,7 +48,7 @@
         "silk_text_thickness": 0.15,
         "silk_text_upright": false,
         "zones": {
-          "min_clearance": 0.508
+          "min_clearance": 0.0
         }
       },
       "diff_pair_dimensions": [
@@ -58,7 +58,52 @@
           "width": 0.0
         }
       ],
-      "drc_exclusions": [],
+      "drc_exclusions": [
+        [
+          "courtyards_overlap|103095000|83439989|241323b7-788f-443c-a625-e98e7564ef04|2f815dbe-13f6-4012-b8f0-c51ea1338e14",
+          ""
+        ],
+        [
+          "hole_clearance|88500000|79400000|794e6e23-6c43-4441-9f5c-8c98391514f3|ce5be8b3-ee66-4f38-995d-9c7ac7b9f9af",
+          ""
+        ],
+        [
+          "hole_clearance|92905000|89672500|4e0b77cd-172e-476b-84f6-6b3d3afb4269|469e4745-0fb8-4a18-bd14-258168905ce4",
+          ""
+        ],
+        [
+          "hole_clearance|98075000|89672500|2d5a4586-8946-4126-bc2c-9553a7569ec6|e666f068-811a-46dc-9040-7bdb7d0a8587",
+          ""
+        ],
+        [
+          "starved_thermal|86792144|95592144|3b98dd2a-3134-4ebd-8b04-6996171ba778|29126e9b-e895-4f8b-83a9-8ee432e09b32|F.Cu",
+          ""
+        ],
+        [
+          "via_dangling|90500000|84700000|16284125-0473-4557-9ed5-2306c4f0bcef|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "via_dangling|91000000|82800000|b6432d07-5c08-4680-b498-c95a6ac2c37c|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "via_dangling|95800000|84400000|3e5249f6-8b30-4a94-91c7-6a02c77a8ddd|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "via_dangling|96400000|82700000|f7926453-09cb-46af-8c80-fae1a36c3e2e|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "via_dangling|98500000|89000000|9fb8d6b1-eb54-43c1-90ec-a1e3a44a8f53|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "via_dangling|99000000|87700000|d8c17083-c4d7-431d-83a4-be99be4efcbe|00000000-0000-0000-0000-000000000000",
+          ""
+        ]
+      ],
       "meta": {
         "filename": "board_design_settings.json",
         "version": 2
@@ -138,7 +183,7 @@
         "min_text_thickness": 0.08,
         "min_through_hole_diameter": 0.15,
         "min_track_width": 0.16,
-        "min_via_annular_width": 0.15,
+        "min_via_annular_width": 0.0,
         "min_via_diameter": 0.3,
         "solder_mask_to_copper_clearance": 0.0,
         "use_height_for_length_calcs": true
@@ -190,7 +235,7 @@
       "track_widths": [
         0.0,
         0.1,
-        0.15,
+        0.16,
         0.2,
         0.3,
         0.5,
@@ -232,7 +277,7 @@
           "drill": 0.15
         },
         {
-          "diameter": 0.6,
+          "diameter": 0.45,
           "drill": 0.3
         },
         {
@@ -250,7 +295,40 @@
       "mpn": ""
     },
     "layer_pairs": [],
-    "layer_presets": [],
+    "layer_presets": [
+      {
+        "activeLayer": -2,
+        "flipBoard": false,
+        "layers": [
+          17,
+          25,
+          29,
+          31
+        ],
+        "name": "align",
+        "renderLayers": [
+          "vias",
+          "footprint_text",
+          "footprint_anchors",
+          "ratsnest",
+          "grid",
+          "footprints_front",
+          "footprints_back",
+          "footprint_values",
+          "footprint_references",
+          "tracks",
+          "drc_errors",
+          "drawing_sheet",
+          "bitmaps",
+          "pads",
+          "zones",
+          "drc_warnings",
+          "locked_item_shadows",
+          "conflict_shadows",
+          "shapes"
+        ]
+      }
+    ],
     "viewports": []
   },
   "boards": [],
@@ -499,7 +577,7 @@
     "classes": [
       {
         "bus_width": 12,
-        "clearance": 0.2,
+        "clearance": 0.16,
         "diff_pair_gap": 0.25,
         "diff_pair_via_gap": 0.25,
         "diff_pair_width": 0.2,
@@ -510,8 +588,8 @@
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "priority": 2147483647,
         "schematic_color": "rgba(0, 0, 0, 0.000)",
-        "track_width": 0.25,
-        "via_diameter": 0.6,
+        "track_width": 0.16,
+        "via_diameter": 0.45,
         "via_drill": 0.3,
         "wire_width": 6
       }
