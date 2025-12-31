@@ -263,7 +263,7 @@
 		(uuid "eff6c7f1-9626-4d76-a4fa-c425918a0e3f")
 	)
 	(embedded_fonts no)
-	(model "F:/tobi/argo/pcb/WindSensor/WindSensor.pretty/3d_models/0740990604.stp"
+	(model "$(WINDSENSOR_3D)/0740990604.stp"
 		(offset
 			(xyz 0 -0.5 7)
 		)

@@ -308,7 +308,7 @@
 		(uuid "0a52e083-2323-4a96-a19b-85fc35ddabb4")
 	)
 	(embedded_fonts no)
-	(model "${ARGO}/3d_models/599-2310_DIA.step"
+	(model "$(WINDSENSOR_3D)/599-2310_DIA.step"
 		(offset
 			(xyz 0 0 0)
 		)

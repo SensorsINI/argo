@@ -485,7 +485,7 @@
 		(uuid "474f8dd2-c847-49e8-b810-41c194fc82ec")
 	)
 	(embedded_fonts no)
-	(model "F:/tobi/argo/pcb/WindSensor/WindSensor.pretty/3d_models/LP5814DRLR--3DModel-STEP-269445.STEP"
+	(model "$(WINDSENSOR_3D)/LP5814DRLR--3DModel-STEP-269445.STEP"
 		(offset
 			(xyz 0 0 0)
 		)
