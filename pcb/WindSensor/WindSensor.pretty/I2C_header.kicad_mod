@@ -361,7 +361,7 @@
 		(uuid "9170b317-28f9-45dd-a730-f8999f6c82ae")
 	)
 	(embedded_fonts no)
-	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/0705410073.stp"
+	(model "3d_models/0705410073.stp"
 		(offset
 			(xyz -4 0 6)
 		)

@@ -524,7 +524,7 @@
 		(uuid "6c9f480f-94c5-4a40-9c26-bb74ee9d64ac")
 	)
 	(embedded_fonts no)
-	(model "$(WINDSENSOR_3D)/Sensirion_Differential_Pressure_Sensors_SDP3x_STEP_file.step"
+	(model "3d_models/Sensirion_Differential_Pressure_Sensors_SDP3x_STEP_file.step"
 		(opacity 0.7800)
 		(offset
 			(xyz 2.68 4.27 0)
