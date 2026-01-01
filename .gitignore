@@ -162,3 +162,6 @@ pcb/WindSensor/Sensirion_Differential_Pressure_Sensors_SDP3x_Digital_Datasheet.p
 /pcb/KiCad-DesignRules-main/JLCPCB
 /pcb/KiCad-DesignRules-main/PCBWAY/PCBWay.kicad_dru
 /pcb/KiCad-DesignRules-main/README.md
+pcb/WindSensor/WindSensor-rev1/WindSensor-rev1.FCStd.ff1af290-8525-4361-bb0e-402e02177297
+pcb/WindSensor/WindSensor-rev1/WindSensor-rev1a.FCStd.c72a58fe-b546-4caf-b672-82f1a6334219
+pcb/WindSensor/WindSensor-rev1/WindSensor-rev1b.FCStd.1f44a24d-55e9-45df-9ad2-dbe2fe54b3f0
