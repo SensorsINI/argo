@@ -4779,8 +4779,32 @@
 		(layer "Edge.Cuts")
 		(uuid "af7ffb50-a131-4c41-84ab-cba58e2ae8d1")
 	)
+	(gr_text "Argo WindSensor\n1/26 tobi"
+		(at 95.36 93.29 0)
+		(layer "F.SilkS")
+		(uuid "25725ec1-7a81-4379-a4d6-c2a3d2412c0a")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+			(justify bottom)
+		)
+	)
+	(gr_text "Argo WindSensor\n1/26 tobi"
+		(at 88.333 86.7515 90)
+		(layer "B.SilkS")
+		(uuid "f4efdc06-6d0e-4b04-be4d-c8b1a27f30a2")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+			(justify bottom mirror)
+		)
+	)
 	(gr_text "Supply \nmax ~170mA"
-		(at 105.4 86.1 0)
+		(at 70.41 87.2 0)
 		(layer "Dwgs.User")
 		(uuid "9241fdf2-f629-4bed-b0d6-eba6b767df6e")
 		(effects
@@ -4910,7 +4934,7 @@
 		(layer "F.Fab")
 		(uuid "35667ef1-2a0c-4e3c-a153-ec122d93ec24")
 		(pts
-			(xy 101.594 89.4225) (xy 101.594 96.2)
+			(xy 101.55 90.43) (xy 101.594 96.2)
 		)
 		(height 14.306)
 		(orientation 1)
@@ -4931,8 +4955,8 @@
 			(extension_offset 0.5)
 			(keep_text_aligned yes)
 		)
-		(gr_text "6.7775"
-			(at 114.75 92.81125 90)
+		(gr_text "5.77"
+			(at 114.706 93.315 90)
 			(layer "F.Fab")
 			(uuid "35667ef1-2a0c-4e3c-a153-ec122d93ec24")
 			(effects
@@ -5215,7 +5239,7 @@
 		(layer "F.Fab")
 		(uuid "a0c26fed-cb22-4552-a359-0a772b1423ee")
 		(pts
-			(xy 101.6 81.226) (xy 101.6 76.2)
+			(xy 101.414 81.92) (xy 101.6 76.2)
 		)
 		(height 10.8)
 		(orientation 1)
@@ -5230,14 +5254,14 @@
 		(style
 			(thickness 0.1)
 			(arrow_length 1.27)
-			(text_position_mode 0)
+			(text_position_mode 2)
 			(arrow_direction outward)
 			(extension_height 0.58642)
 			(extension_offset 0.5)
 			(keep_text_aligned yes)
 		)
-		(gr_text "5.026"
-			(at 111.25 78.713 90)
+		(gr_text "5.72"
+			(at 111.03 79.11 90)
 			(layer "F.Fab")
 			(uuid "a0c26fed-cb22-4552-a359-0a772b1423ee")
 			(effects
