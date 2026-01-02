@@ -125,7 +125,7 @@ chats/
 # backup files  
 *.bak
 *.FCBak
-
+*.kicad_sch-bak
 
 # Large PDF datasheets
 pcb/datasheets/adafruit-9-dof-orientation-imu-fusion-breakout-bno085.pdf
