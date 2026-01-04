@@ -109,8 +109,28 @@
 		(layer "F.CrtYd")
 		(uuid "2a73e343-b881-46ff-95c8-14bf53159feb")
 	)
+	(fp_line
+		(start 0 -8.49)
+		(end 5.5 0)
+		(stroke
+			(width 0.001)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "cb43b07d-0059-46cb-99f6-a8874307f0ed")
+	)
+	(fp_line
+		(start 5.5 -8.5)
+		(end 0 0)
+		(stroke
+			(width 0.001)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "2ed9b384-7ce7-4990-8d2f-57d6aa2e75e8")
+	)
 	(image
-		(at 2.15732 -4.275)
+		(at -4.11768 -7.4)
 		(layer "F.SilkS")
 		(scale 0.0810928)
 		(data "iVBORw0KGgoAAAANSUhEUgAAAnIAAAOBCAYAAAB1X02WAAAABHNCSVQICAgIfAhkiAAAAAlwSFlz"
