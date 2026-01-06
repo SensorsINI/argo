@@ -144,146 +144,6 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Device:C_Small"
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 0.254)
-				(hide yes)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(property "Reference" "C"
-				(at 0.254 1.778 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left)
-				)
-			)
-			(property "Value" "C_Small"
-				(at 0.254 -2.032 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left)
-				)
-			)
-			(property "Footprint" ""
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Datasheet" "~"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Description" "Unpolarized capacitor, small symbol"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_keywords" "capacitor cap"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_fp_filters" "C_*"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(symbol "C_Small_0_1"
-				(polyline
-					(pts
-						(xy -1.524 0.508) (xy 1.524 0.508)
-					)
-					(stroke
-						(width 0.3048)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy -1.524 -0.508) (xy 1.524 -0.508)
-					)
-					(stroke
-						(width 0.3302)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "C_Small_1_1"
-				(pin passive line
-					(at 0 2.54 270)
-					(length 2.032)
-					(name "~"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -2.54 90)
-					(length 2.032)
-					(name "~"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 		(symbol "Device:R_US"
 			(pin_numbers
 				(hide yes)
@@ -3633,6 +3493,26 @@
 			)
 		)
 		(uuid "63b758e6-4e5b-4799-9c78-65597a5cb23d")
+	)
+	(text "same 22u cap as argo pcb"
+		(exclude_from_sim no)
+		(at 108.966 55.88 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "98247860-6c3f-407f-81c2-252c9597f0f4")
+	)
+	(text "SMD version of header"
+		(exclude_from_sim no)
+		(at 130.81 30.988 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "c6a2e858-6a6e-4cf7-bdfd-f6e08686706d")
 	)
 	(junction
 		(at 59.69 73.66)
@@ -7002,7 +6882,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 102.87 57.15 180)
+		(at 91.44 55.88 180)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -7010,15 +6890,15 @@
 		(dnp no)
 		(uuid "755f0667-a86a-4e05-bae2-0373c9465b79")
 		(property "Reference" "C1"
-			(at 100.584 59.436 0)
+			(at 89.154 58.166 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
 			)
 		)
-		(property "Value" "22u 16V"
-			(at 107.442 54.61 0)
+		(property "Value" "22u"
+			(at 96.012 53.34 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7026,7 +6906,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:C_1210_3225Metric_Pad1.33x2.70mm_HandSolder"
-			(at 101.9048 53.34 0)
+			(at 90.4748 52.07 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7035,7 +6915,7 @@
 			)
 		)
 		(property "Datasheet" "https://content.kemet.com/datasheets/KEM_C1006_X5R_SMD.pdf"
-			(at 102.87 57.15 0)
+			(at 91.44 55.88 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7044,7 +6924,7 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
-			(at 102.87 57.15 0)
+			(at 91.44 55.88 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7053,7 +6933,7 @@
 			)
 		)
 		(property "Order" "https://ch.farnell.com/en-CH/kemet/c1210c226k4pactu/cap-22-f-16v-10-x5r-1210/dp/1288266"
-			(at 102.87 57.15 0)
+			(at 91.44 55.88 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7062,7 +6942,7 @@
 			)
 		)
 		(property "digikey" "https://www.digikey.ch/en/products/detail/kemet/c1210c226k4pactu/1465597"
-			(at 102.87 57.15 0)
+			(at 91.44 55.88 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7075,74 +6955,6 @@
 		)
 		(pin "2"
 			(uuid "2efac4e2-c7aa-4ef3-8320-7df94830a53e")
-		)
-		(instances
-			(project "WindSensor-rev1"
-				(path "/094e312f-2c62-41df-b67d-51e0bb0b4171"
-					(reference "C1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C_Small")
-		(at 91.44 57.15 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "82207043-44a3-4786-bb47-fe4ddfdc2a28")
-		(property "Reference" "C1"
-			(at 93.7768 55.9816 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "10u"
-			(at 93.7768 58.293 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric_Pad1.08x0.95mm_HandSolder"
-			(at 91.44 57.15 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 91.44 57.15 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Should be at least 6.3V"
-			(at 91.44 47.244 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "77c97270-9873-46b2-9e4f-a0e09aa44a61")
-		)
-		(pin "2"
-			(uuid "d6a46570-2aa3-45b1-bce7-0e5f8f08f241")
 		)
 		(instances
 			(project "WindSensor-rev1"
@@ -7322,7 +7134,7 @@
 	)
 	(symbol
 		(lib_id "power:VDD")
-		(at 91.44 54.61 0)
+		(at 91.44 52.07 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -7330,7 +7142,7 @@
 		(dnp no)
 		(uuid "d3da3fe4-cac0-4999-97f3-b284db105403")
 		(property "Reference" "#PWR06"
-			(at 91.44 58.42 0)
+			(at 91.44 55.88 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7339,7 +7151,7 @@
 			)
 		)
 		(property "Value" "VDD"
-			(at 91.8718 50.2158 0)
+			(at 91.8718 47.6758 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7347,7 +7159,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 91.44 54.61 0)
+			(at 91.44 52.07 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7356,7 +7168,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 91.44 54.61 0)
+			(at 91.44 52.07 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -7365,7 +7177,7 @@
 			)
 		)
 		(property "Description" ""
-			(at 91.44 54.61 0)
+			(at 91.44 52.07 0)
 			(effects
 				(font
 					(size 1.27 1.27)
