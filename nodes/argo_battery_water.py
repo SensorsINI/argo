@@ -54,7 +54,9 @@
 # - I2C Pins: SDA=PI6 (twi0-sda), SCL=PI5 (twi0-sck) - configured via pi-i2c0 overlay
 # - MAX11612 ADC at I2C address 0x34, SHT45 sensor at I2C address 0x44
 # - MP2672 charger at I2C address 0x4B (only accessible when USB power present and MP2672_HOST_CONTROL = True)
-# - GPIO Pins: PC12 (pin 36, line 76) !CHARGING, PH9 (pin 26, line 233) !ACOK from MP2672GD
+# - GPIO Pins: PC12 (pin 36, line 76) !CHARGING, PH9 (pin 26, line 233) !ACOK from MP2672GD; PI4 (pin 38, line 260) !PG from CH221K USB-C voltage controller Pin 3 (open-drain, active low, requires pull-up)
+#   - !PG indicates successful USB Power Delivery (PD) negotiation - LOW = PD successful, HIGH = no PD (standard USB) or failed
+#   - Note: With standard USB cables (non-PD), this will be HIGH, not an indication of power failure
 # - HOST_CTL: GPIO 229 (pin 24) tied high via hardware pullup resistor for host control mode
 
 import rclpy
@@ -97,6 +99,9 @@ MP2672_REG_04 = 0x04  # Register 04H - Fault register (default: 0x00, read-only,
 # GPIO configuration for MP2672GD charger status
 CHARGING_GPIO_LINE = 76   # PC12 (pin 36) - !CHARGING from MP2672GD
 ACOK_GPIO_LINE = 233      # PH9 (pin 26) - !ACOK from MP2672GD
+PG_GPIO_LINE = 260        # PI4 (pin 38) - !PG from CH221K USB-C voltage controller Pin 3 (open-drain output, active low, REQUIRES external pull-up)
+                         # Indicates successful USB Power Delivery (PD) negotiation: LOW = PD successful, HIGH = no PD (standard USB) or failed
+                         # Note: With standard USB cables (non-PD), this will be HIGH - not an indication of power failure
 HOST_CTL_GPIO_LINE = 229  # PH5/SPI1_CS0 (pin 24) - HOST_CTL to MP2672GD (not used, MPC2672GD reads CV pin on power-on only)
 
 # Sample rate configuration - dual timers for different sensor requirements
@@ -215,6 +220,19 @@ class BatteryWaterNode(ArgoBaseNode):
         self._charging_conflict_log_interval = 60.0
         self._last_charging_conflict_log_time = 0.0
         
+        # GPIO fault detection (for standalone mode - no I2C access)
+        # MP2672 datasheet: 1Hz blinking on STAT pin indicates fault conditions:
+        # - Battery missing (BATTFLOAT_STAT)
+        # - Battery OVP, Timer fault, NTC hot/cold faults, Battery float
+        # Track GPIO transitions to detect characteristic blinking pattern
+        self._charging_gpio_transitions = deque(maxlen=20)  # Track last 20 transitions for frequency analysis
+        self._last_charging_gpio_value = None
+        self._last_charging_gpio_change_time = None
+        self._charging_fault_detected = False  # True if 1-2 Hz blinking pattern detected
+        self._charging_fault_frequency = None  # Calculated frequency if fault detected
+        self._charging_fault_log_interval = 30.0  # Log fault status every 30 seconds
+        self._last_charging_fault_log_time = 0.0
+        
         # AC power plug-in/plug-out tracking for MP2672 CHG timer monitoring
         # Track when AC power is plugged in to monitor 20-hour safety timer
         self._ac_power_plug_in_time = None  # Monotonic time when AC was plugged in (for calculations)
@@ -246,6 +264,9 @@ class BatteryWaterNode(ArgoBaseNode):
         self._latest_humidity_alert = False
         self._latest_charging_status = None
         self._latest_ac_power_present = None
+        self._latest_usb_pd_negotiated = False  # CH221K !PG pin: True = USB PD negotiation successful, False = no PD (standard USB) or failed
+        self._latest_charging_fault_detected = False  # GPIO-based fault detection (standalone mode)
+        self._latest_charging_fault_frequency = None  # Frequency of blinking if fault detected
         self._latest_timestamp = None
         # Track data staleness (when using last known values due to I2C failure)
         self._data_stale = False
@@ -273,6 +294,9 @@ class BatteryWaterNode(ArgoBaseNode):
             'humidity_alert': False,
             'charging_status': None,
             'ac_power_present': None,
+            'usb_pd_negotiated': False,  # CH221K !PG GPIO (PI4, pin 38): True = USB PD negotiation successful, False = no PD (standard USB) or failed
+            'charging_fault_detected': False,  # GPIO-based fault detection: True if 1-2 Hz blinking pattern detected
+            'charging_fault_frequency': None,  # Frequency (Hz) of blinking if fault detected
             'time_to_full_hours': None,
             'time_to_empty_hours': None,
             'voltage_slope_vph': None,
@@ -432,6 +456,7 @@ class BatteryWaterNode(ArgoBaseNode):
         self.gpio_available = False
         self.charging_gpio_line = None
         self.acok_gpio_line = None
+        self.pg_gpio_line = None
         # Note: HOST_CTL_GPIO_LINE (229) is tied high via hardware pullup resistor to VCC
         # MP2672 checks CV pin on power-on only, so hardware pullup ensures host control mode
         # GPIO can be used later to drive CV low to test standalone mode (future feature)
@@ -454,6 +479,18 @@ class BatteryWaterNode(ArgoBaseNode):
                     consumer="battery_water_node", 
                     type=gpiod.LINE_REQ_DIR_IN,
                     flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP
+                )
+                # Request USB PD negotiation status GPIO line (PI4, line 260, pin 38)
+                # CH221K PG pin (Pin 3) is open-drain output, active low - REQUIRES external pull-up (3.3V) to work correctly
+                # Indicates successful USB Power Delivery (PD) negotiation of requested voltage (e.g., 5V, 9V, 12V, 15V, 20V)
+                # Active low: CH221K pulls LOW when PD negotiation successful, leaves floating (HIGH via pull-up) when no PD or failed
+                # Note: With standard USB cables (non-PD), this will be HIGH - not an indication of power failure
+                # May not work consistently on subsequent USB cable plug-ins
+                self.pg_gpio_line = self.gpio_chip.get_line(PG_GPIO_LINE)
+                self.pg_gpio_line.request(
+                    consumer="battery_water_node", 
+                    type=gpiod.LINE_REQ_DIR_IN,
+                    flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP  # REQUIRED for open-drain !PG pin
                 )
                 self.gpio_available = True
                 self.get_logger().info('GPIO setup complete for MP2672GD charger monitoring')
@@ -505,8 +542,11 @@ class BatteryWaterNode(ArgoBaseNode):
                 1.0 / SAIL_CURRENT_RATE_HZ, self.read_sail_current)
             
             # High-frequency timer for GPIO status (1 Hz to catch MP2672GD cycling)
+            # GPIO status polling timer (10Hz) - high frequency needed to reliably detect 1-2 Hz blinking fault pattern
+            # MP2672 fault indication: 1Hz blinking, but observed at ~2Hz in practice
+            # Sampling at 10Hz ensures we catch transitions reliably (Nyquist: need >4Hz for 2Hz signal)
             self.gpio_status_timer = self.create_timer(
-                1.0, self.read_gpio_status_only)
+                0.1, self.read_gpio_status_only)
             
             # Low-frequency timer for battery safety sensors
             self.battery_safety_timer = self.create_timer(
@@ -514,7 +554,7 @@ class BatteryWaterNode(ArgoBaseNode):
             
             self.get_logger().info(
                 f'Battery/Water node initialized - Sail current: {SAIL_CURRENT_RATE_HZ}Hz, '
-                f'GPIO status: 1Hz, Battery safety: {BATTERY_SAFETY_INTERVAL_S}s intervals')
+                f'GPIO status: 10Hz, Battery safety: {BATTERY_SAFETY_INTERVAL_S}s intervals')
 
             # Initial health status will be set after first sensor readings
             
@@ -614,6 +654,9 @@ class BatteryWaterNode(ArgoBaseNode):
                 'humidity_alert': self._latest_humidity_alert,
                 'charging_status': self._latest_charging_status,
                 'ac_power_present': self._latest_ac_power_present,
+                'usb_pd_negotiated': self._latest_usb_pd_negotiated,
+                'charging_fault_detected': self._charging_fault_detected,
+                'charging_fault_frequency': self._charging_fault_frequency,
                 'time_to_full_hours': self._latest_time_to_full_hours,
                 'time_to_empty_hours': self._latest_time_to_empty_hours,
                 'voltage_slope_vph': self._latest_voltage_slope_vph,
@@ -798,6 +841,9 @@ class BatteryWaterNode(ArgoBaseNode):
                 'humidity_alert': buffer_copy['humidity_alert'],
                 'charging_status': buffer_copy['charging_status'] if buffer_copy['charging_status'] is not None else False,
                 'ac_power_present': buffer_copy['ac_power_present'] if buffer_copy['ac_power_present'] is not None else False,
+                'usb_pd_negotiated': buffer_copy.get('usb_pd_negotiated') if buffer_copy.get('usb_pd_negotiated') is not None else False,  # False if not available or standard USB (non-PD)
+                'charging_fault_detected': buffer_copy.get('charging_fault_detected', False),
+                'charging_fault_frequency': buffer_copy.get('charging_fault_frequency'),  # None if no fault or not detected
                 'battery_water_health': buffer_copy.get('battery_water_health', 'UNKNOWN'),
                 'timestamp_sec': now.seconds_nanoseconds()[0],
                 'timestamp_nanosec': now.seconds_nanoseconds()[1],
@@ -820,10 +866,22 @@ class BatteryWaterNode(ArgoBaseNode):
             }
             
             # Determine MP2672 fault condition summary for alerts
+            # In standalone mode (no I2C), use GPIO-based fault detection
+            # In host control mode (I2C available), use I2C fault register
             mp2672_fault_summary = None
+            active_faults = []
+            
+            # GPIO-based fault detection (standalone mode - no I2C access)
+            if battery_data.get('charging_fault_detected') is True:
+                freq = battery_data.get('charging_fault_frequency')
+                if freq is not None:
+                    active_faults.append(f'{freq:.2f}Hz blinking (battery missing/OVP/timer/NTC fault)')
+                else:
+                    active_faults.append('Blinking pattern detected (battery missing/OVP/timer/NTC fault)')
+            
+            # I2C-based fault detection (host control mode - I2C available)
             if battery_data.get('mp2672_available') and battery_data.get('mp2672_faults'):
                 faults_dict = battery_data['mp2672_faults']
-                active_faults = []
                 
                 if faults_dict.get('wd_fault'):
                     active_faults.append('Watchdog timer expiration')
@@ -839,9 +897,9 @@ class BatteryWaterNode(ArgoBaseNode):
                     active_faults.append(f"NTC {faults_dict['ntc_fault_str']}")
                 if battery_data.get('mp2672_battery_missing_fault'):
                     active_faults.append('Battery missing or balance cable fault')
-                
-                if active_faults:
-                    mp2672_fault_summary = ' | '.join(active_faults)
+            
+            if active_faults:
+                mp2672_fault_summary = ' | '.join(active_faults)
             
             # Add MP2672 fault summary to battery data
             battery_data['mp2672_fault_summary'] = mp2672_fault_summary
@@ -874,11 +932,20 @@ class BatteryWaterNode(ArgoBaseNode):
             if battery_data.get('charging_anomaly') is True:
                 active_alerts.append('⚠️ CHARGER POWER FAULT')
             
-            # MP2672 fault alerts (from fault register - only when USB power present)
+            # GPIO-based charging fault detection (standalone mode - no I2C access)
+            # MP2672 datasheet: 1Hz blinking on STAT pin indicates fault conditions
+            if battery_data.get('charging_fault_detected') is True:
+                freq = battery_data.get('charging_fault_frequency')
+                if freq is not None:
+                    active_alerts.append(f'🔴 CHARGING FAULT: {freq:.2f}Hz blinking detected (battery missing/OVP/timer/NTC fault)')
+                else:
+                    active_alerts.append('🔴 CHARGING FAULT: Blinking pattern detected (battery missing/OVP/timer/NTC fault)')
+            
+            # MP2672 fault alerts (from fault register - only when USB power present and I2C available)
             if battery_data.get('mp2672_fault_summary'):
                 active_alerts.append(f'⚠️ MP2672: {battery_data["mp2672_fault_summary"]}')
             
-            # MP2672 battery missing/balance cable fault (from status register)
+            # MP2672 battery missing/balance cable fault (from status register - only when I2C available)
             if battery_data.get('mp2672_battery_missing_fault'):
                 active_alerts.append('⚠️ BATTERY MISSING OR BALANCE CABLE FAULT')
             
@@ -1956,7 +2023,7 @@ class BatteryWaterNode(ArgoBaseNode):
         "AC power present" if seen within the last time window to provide stable
         status reporting despite the rapid cycling.
         
-        The actual GPIO polling happens at 1Hz in read_gpio_status_only().
+        The actual GPIO polling happens at 10Hz in read_gpio_status_only() (needed to reliably detect 1-2 Hz blinking fault pattern).
         This method just returns the time-filtered status.
         """
         if not self.gpio_available:
@@ -2522,9 +2589,14 @@ class BatteryWaterNode(ArgoBaseNode):
                          previous_value) * 100.0
         return change_pct >= threshold_pct
 
-    # ---------- High-frequency GPIO status reading (1Hz) ----------
+    # ---------- High-frequency GPIO status reading (10Hz) ----------
     def read_gpio_status_only(self):
-        """High-frequency reading of GPIO status only (1Hz) to track MP2672GD cycling"""
+        """High-frequency reading of GPIO status only (10Hz) to track MP2672GD cycling and detect fault patterns
+        
+        Polling at 10Hz is necessary to reliably detect the 1-2 Hz blinking fault pattern.
+        MP2672 datasheet specifies 1Hz blinking for faults, but we observe ~2Hz in practice.
+        Nyquist sampling theorem requires >4Hz sampling rate for 2Hz signal.
+        """
         if self._shutdown_requested or not self.gpio_available:
             return
             
@@ -2536,6 +2608,41 @@ class BatteryWaterNode(ArgoBaseNode):
             if self.charging_gpio_line is not None:
                 charging_gpio_value = self.charging_gpio_line.get_value()
                 charging_raw = not charging_gpio_value  # Invert: !CHARGING=0 means charging=True
+                
+                # Track GPIO transitions for fault detection (1-2 Hz blinking pattern)
+                # MP2672 datasheet: 1Hz blinking on STAT pin indicates fault conditions
+                if self._last_charging_gpio_value is not None and charging_gpio_value != self._last_charging_gpio_value:
+                    # GPIO state changed - record transition time
+                    if self._last_charging_gpio_change_time is not None:
+                        period = current_time - self._last_charging_gpio_change_time
+                        self._charging_gpio_transitions.append(period)
+                    
+                    self._last_charging_gpio_change_time = current_time
+                
+                self._last_charging_gpio_value = charging_gpio_value
+                
+                # Analyze transitions to detect fault pattern (1-2 Hz blinking)
+                # Need at least 4 transitions to calculate frequency reliably
+                if len(self._charging_gpio_transitions) >= 4:
+                    # Calculate average period over recent transitions
+                    recent_periods = list(self._charging_gpio_transitions)[-8:]  # Use last 8 transitions
+                    avg_period = sum(recent_periods) / len(recent_periods)
+                    frequency = 1.0 / avg_period if avg_period > 0 else 0.0
+                    
+                    # MP2672 fault pattern: 1Hz blinking (datasheet), but we see ~2 Hz in practice
+                    # Accept 0.8-2.5 Hz range to account for measurement variations
+                    if 0.8 <= frequency <= 2.5:
+                        self._charging_fault_detected = True
+                        self._charging_fault_frequency = frequency
+                    else:
+                        # Normal operation - not fault pattern
+                        self._charging_fault_detected = False
+                        self._charging_fault_frequency = None
+                else:
+                    # Not enough data yet - reset fault state if we don't have enough transitions
+                    if len(self._charging_gpio_transitions) < 2:
+                        self._charging_fault_detected = False
+                        self._charging_fault_frequency = None
                 
                 # Update last-seen time when charging is active
                 if charging_raw:
@@ -2549,6 +2656,23 @@ class BatteryWaterNode(ArgoBaseNode):
                 # Update last-seen time when AC power is present
                 if ac_power_raw:
                     self._last_ac_power_true_time = current_time
+            
+            # Read !PG GPIO (PI4, line 260, pin 38) from CH221K USB-C voltage controller
+            # CH221K PG pin (Pin 3) indicates successful USB Power Delivery (PD) negotiation
+            # Active low: Hardware LOW = PD negotiation successful, Hardware HIGH (via pull-up) = no PD (standard USB) or failed
+            # Note: With standard USB cables (non-PD), this will be HIGH - not an indication of power failure
+            # May not work consistently on subsequent USB cable plug-ins
+            # GPIO reading behavior: Hardware LOW reads as GPIO HIGH (1), hardware HIGH reads as GPIO LOW (0)
+            # This inversion is likely due to GPIO driver or hardware configuration
+            if self.pg_gpio_line is not None:
+                pg_gpio_value = self.pg_gpio_line.get_value()
+                # Note: GPIO reading appears inverted from hardware pin state
+                # When hardware pin is LOW (PD negotiation successful), GPIO reads HIGH (1)
+                # When hardware pin is HIGH (no PD or negotiation failed), GPIO reads LOW (0)
+                usb_pd_negotiated = (pg_gpio_value == 1)  # GPIO HIGH = hardware LOW = USB PD negotiation successful
+                
+                # Store USB PD negotiation status (used in battery status service)
+                self._latest_usb_pd_negotiated = usb_pd_negotiated
                     
         except Exception as e:
             # Silently handle errors in high-frequency polling
@@ -2749,6 +2873,8 @@ class BatteryWaterNode(ArgoBaseNode):
         
         self._latest_charging_status = charging_status
         self._latest_ac_power_present = ac_power_present
+        self._latest_charging_fault_detected = self._charging_fault_detected
+        self._latest_charging_fault_frequency = self._charging_fault_frequency
         
         # Read MP2672 register information for service response (when USB power present and host control enabled)
         mp2672_status_info = None
@@ -2823,6 +2949,16 @@ class BatteryWaterNode(ArgoBaseNode):
             except Exception:
                 pass
 
+        # Log charging fault if detected (throttled logging)
+        current_time = time.monotonic()
+        if self._charging_fault_detected:
+            if current_time - self._last_charging_fault_log_time >= self._charging_fault_log_interval:
+                freq_str = f" ({self._charging_fault_frequency:.2f} Hz)" if self._charging_fault_frequency is not None else ""
+                self.get_logger().warning(
+                    f"🔴 CHARGING FAULT DETECTED{freq_str}: MP2672 STAT pin blinking pattern indicates fault "
+                    f"(battery missing/OVP/timer/NTC fault). Check charger hardware and battery connections.")
+                self._last_charging_fault_log_time = current_time
+        
         # Publish GPIO status (always publish for web dashboard, but only log on actual changes)
         if rclpy.ok():
             try:

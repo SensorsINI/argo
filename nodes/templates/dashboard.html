@@ -26,6 +26,11 @@
                 🔴 CRITICAL I2C BUS FAILURE<br>
                 <span style="font-size: 0.9em; font-weight: normal;">Battery/wind sensors unavailable - Controller switched to RTH mode</span>
             </div>
+            <!-- Charging Fault Alert (shown when MP2672 charging fault detected) -->
+            <div id="charging-fault-alert" class="critical-alert" style="display: none; background-color: #ff8800; color: white; padding: 12px; border-radius: 8px; margin-bottom: 12px; font-weight: bold; text-align: center;">
+                🔴 CHARGING FAULT DETECTED<br>
+                <span id="charging-fault-details" style="font-size: 0.9em; font-weight: normal;"></span>
+            </div>
             <div class="status-grid">
                 <!-- Row 1: System, Nodes, Health -->
                 <div class="status-item">
@@ -482,13 +487,43 @@
             }
             document.getElementById('battery-status').textContent = batteryText;
             
-            document.getElementById('charging-status').textContent = 
-                data.battery_charging === true ? '🔌 YES' :
-                data.battery_charging === false ? '❌ NO' : '???';
+            // Charging status: show fault if detected, otherwise show YES/NO
+            let chargingStatusText = '???';
+            if (data.battery_charging_fault_detected === true) {
+                // Fault detected - show fault status instead of charging status
+                const freq = data.battery_charging_fault_frequency;
+                if (freq !== null && freq !== undefined) {
+                    chargingStatusText = `🔴 FAULT (${freq.toFixed(2)}Hz)`;
+                } else {
+                    chargingStatusText = '🔴 FAULT';
+                }
+            } else if (data.battery_charging === true) {
+                chargingStatusText = '🔌 YES';
+            } else if (data.battery_charging === false) {
+                chargingStatusText = '❌ NO';
+            }
+            document.getElementById('charging-status').textContent = chargingStatusText;
             
             document.getElementById('usb-power').textContent = 
                 data.battery_usb_power === true ? '⚡ YES' :
                 data.battery_usb_power === false ? '❌ NO' : '???';
+            
+            // Update charging fault alert
+            const chargingFaultAlert = document.getElementById('charging-fault-alert');
+            const chargingFaultDetails = document.getElementById('charging-fault-details');
+            if (data.battery_charging_fault_detected === true) {
+                chargingFaultAlert.style.display = 'block';
+                // Show fault summary if available, otherwise show frequency
+                if (data.battery_mp2672_fault_summary) {
+                    chargingFaultDetails.textContent = data.battery_mp2672_fault_summary;
+                } else if (data.battery_charging_fault_frequency !== null && data.battery_charging_fault_frequency !== undefined) {
+                    chargingFaultDetails.textContent = `${data.battery_charging_fault_frequency.toFixed(2)}Hz blinking detected - Check charger hardware and battery connections`;
+                } else {
+                    chargingFaultDetails.textContent = 'Blinking pattern detected - Check charger hardware and battery connections';
+                }
+            } else {
+                chargingFaultAlert.style.display = 'none';
+            }
             
             // Node summary - show non-running or non-healthy nodes
             let nodeSummaryText = '';

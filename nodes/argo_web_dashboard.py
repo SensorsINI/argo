@@ -115,6 +115,9 @@ class ArgoWebDashboard(ArgoBaseNode):
             'battery_usb_power': None,
             'battery_time_to_full': None,
             'battery_time_to_empty': None,
+            'battery_charging_fault_detected': False,  # GPIO-based charging fault detection
+            'battery_charging_fault_frequency': None,  # Frequency of blinking if fault detected
+            'battery_mp2672_fault_summary': None,  # MP2672 fault summary (GPIO or I2C based)
             
             # Temperature
             'cpu_temp': None,
@@ -1525,6 +1528,9 @@ class ArgoWebDashboard(ArgoBaseNode):
                         saltwater_voltage = raw_data.get('saltwater_voltage')
                         time_to_full = raw_data.get('time_to_full_hours')
                         time_to_empty = raw_data.get('time_to_empty_hours')
+                        charging_fault_detected = raw_data.get('charging_fault_detected', False)
+                        charging_fault_frequency = raw_data.get('charging_fault_frequency')
+                        mp2672_fault_summary = raw_data.get('mp2672_fault_summary')
                         # NOTE: I2C failure status comes ONLY from topic subscription (/argo/critical/i2c_failure)
                         # Service call timeout indicates battery service not running, which is a different error
                         
@@ -1561,6 +1567,10 @@ class ArgoWebDashboard(ArgoBaseNode):
                             # Update saltwater voltage if missing from topic
                             if self.state.get('saltwater_voltage') is None and saltwater_voltage is not None:
                                 self.state['saltwater_voltage'] = saltwater_voltage
+                            # Always update fault information from service (topics don't provide this)
+                            self.state['battery_charging_fault_detected'] = charging_fault_detected
+                            self.state['battery_charging_fault_frequency'] = charging_fault_frequency
+                            self.state['battery_mp2672_fault_summary'] = mp2672_fault_summary
                             # Always update time estimates from service (topics don't provide this)
                             # CRITICAL: Always update (even if None) to clear stale values
                             # Respect charging status: if charging, clear TTE; if discharging, clear TTF
