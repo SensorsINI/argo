@@ -6680,7 +6680,7 @@
 				)
 			)
 		)
-		(property "Footprint" "WindSensor:IC_LP5814DRLR"
+		(property "Footprint" "WindSensor:IC_LP5814DRLR_hand_solder"
 			(at 125.73 71.12 0)
 			(effects
 				(font
@@ -6991,7 +6991,7 @@
 				)
 			)
 		)
-		(property "Footprint" "WindSensor:599-2310_DIA"
+		(property "Footprint" "WindSensor:599-2310_DIA_hand_solder"
 			(at 161.29 67.31 0)
 			(effects
 				(font
