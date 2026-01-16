@@ -256,7 +256,7 @@
 		(path "/b4a06ae2-087e-43e9-80ec-0925a31d822d")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -3561,7 +3561,7 @@
 		(path "/77f91b32-8969-4bce-b071-614e839a434b")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -4522,7 +4522,7 @@
 		(path "/4474e799-1466-4864-873d-a7b0bacbbb6e")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr smd)
+		(attr smd dnp)
 		(fp_line
 			(start -0.254724 -0.5225)
 			(end 0.254724 -0.5225)
@@ -5144,7 +5144,7 @@
 		(path "/37d74902-47cb-4da6-a652-d980570ece12")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -5415,7 +5415,6 @@
 		(property "Reference" "R34"
 			(at 0 -1.43 90)
 			(layer "F.SilkS")
-			(hide yes)
 			(uuid "85dc03da-0938-4726-9ac5-199ca16f9794")
 			(effects
 				(font
@@ -5426,7 +5425,7 @@
 		)
 		(property "Value" "10k"
 			(at 0 1.43 90)
-			(layer "F.Fab")
+			(layer "F.SilkS")
 			(uuid "e053e652-04b1-495d-91bf-094e3e640dc5")
 			(effects
 				(font
@@ -6890,7 +6889,7 @@
 		(path "/add7977f-b178-4ab8-ad86-c35a2a18f055")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -6999,7 +6998,7 @@
 		(path "/efc78b01-1f4e-4c9c-8d5b-984e62c62cdc")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -11268,7 +11267,7 @@
 		(path "/f9e83952-f922-4148-a67e-ed84ed14a804")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr smd)
+		(attr smd dnp)
 		(fp_line
 			(start -0.254724 -0.5225)
 			(end 0.254724 -0.5225)
@@ -12072,7 +12071,7 @@
 		(path "/bee9a795-6887-4d89-90a8-adfb3ebb6c9e")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -15180,7 +15179,7 @@
 		(path "/7f9276a9-4099-4db3-b125-286b4feb5e5a")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr through_hole)
+		(attr through_hole dnp)
 		(fp_line
 			(start 0.92 0)
 			(end 1.54 0)
@@ -16712,7 +16711,7 @@
 		(path "/e861ba28-59ad-4f56-8af4-2801acf26472")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr smd)
+		(attr smd dnp)
 		(fp_line
 			(start -0.254724 -0.5225)
 			(end 0.254724 -0.5225)
@@ -17489,7 +17488,7 @@
 		(path "/e67cf84b-f545-45ba-ab8e-71e6be87ba85")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -17556,7 +17555,7 @@
 				)
 			)
 		)
-		(property "Value" "5V"
+		(property "Value" "TestPoint_Probe_autonamed"
 			(at -0.1 1.6 0)
 			(layer "F.SilkS")
 			(uuid "c7056497-4f32-4974-b9e7-d165b4c7fe28")
@@ -17597,7 +17596,7 @@
 		(path "/9747622c-7939-4971-955d-6f5dda0b23da")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -17690,7 +17689,7 @@
 		(path "/b06dc802-7bd2-4e42-a205-4adf3e4a5667")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr smd)
+		(attr smd dnp)
 		(fp_line
 			(start -0.254724 -0.5225)
 			(end 0.254724 -0.5225)
@@ -19626,7 +19625,7 @@
 		(path "/4e54a6db-7699-4a2d-a23e-d4cbaea1d89d")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -22056,7 +22055,7 @@
 		(path "/6e60364a-f290-4a85-b4dc-9c7ba8ffff21")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -22362,7 +22361,7 @@
 		(path "/14ec169c-d522-4e4a-8134-4466d9de696f")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr smd)
+		(attr smd dnp)
 		(fp_line
 			(start -0.254724 -0.5225)
 			(end 0.254724 -0.5225)
@@ -23974,7 +23973,7 @@
 		(path "/6981c2d8-da36-4213-a498-ea73030fe07a")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr smd)
+		(attr smd dnp)
 		(fp_line
 			(start -0.254724 -0.5225)
 			(end 0.254724 -0.5225)
@@ -24177,7 +24176,7 @@
 		(path "/c0ca8c87-5723-4f79-80e4-6bb00c552446")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr exclude_from_pos_files)
+		(attr exclude_from_pos_files exclude_from_bom)
 		(fp_circle
 			(center 0 0)
 			(end 0 0.7)
@@ -24883,7 +24882,7 @@
 		(path "/8365bb7a-0c0e-4915-a99a-0180554fbb82")
 		(sheetname "/")
 		(sheetfile "argo-v9-stable-rev3.kicad_sch")
-		(attr smd)
+		(attr smd dnp)
 		(fp_line
 			(start -0.254724 -0.5225)
 			(end 0.254724 -0.5225)
