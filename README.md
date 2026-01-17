@@ -17,11 +17,13 @@ See the Argo autonomous sailboat in action at the 2024 CCNW (before current wate
 ![Argo Autonomous Sailboat](https://img.youtube.com/vi/tjC1262BsCY/maxresdefault.jpg)
 
 ## Hardware Platform
+The main PCB design for Argo is available in the [pcb/](pcb/) folder. The latest board version is [rev3](pcb/argo-v9-stable/argo-v9-stable-rev3/), which contains the current sailboat control and sensor interface design.
 
 - **Orange Pi Zero 2W** (Allwinner H618 SoC)
 - **GPS**: u-blox NEO-M9N via UART5 (/dev/ttyS5)
 - **IMU**: [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU via I2C0 (0x4a)
-- **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23)
+- **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23). This PCB includes an RGBW LED and its I2C controller chip LP5814DLR at I2C address 0x2C.  
+  - **Design files:** See [`Windsensor-rev1/`](Windsensor-rev1/) directory for full hardware schematics, layout, and BOM.
 - **ADC**: MAX11612 for battery/water sensing via I2C0 (0x34)
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
 - **PWM I/O**: Custom kernel module for radio control and servo interfaces with high impedance safety mode
@@ -87,18 +89,53 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 - **`simulator/`** - Sailboat simulation submodule (sailboat-playground)
 
 ## Other READMEs
+
+### Core System Documentation
 - [**Systemd Services Architecture**](docs/README-services.md) - Service dependencies, boot sequence, and troubleshooting
 - [**Network Improvements**](network/README.md) - WiFi reconnection, MAC address cloning, and NetworkManager configuration
 - [**ZeroTier VPN Setup**](docs/README_zerotier.md) - ZeroTier VPN configuration, SSH access, and network management
-- [Simulation System Overview](simulator/README.md)  
-- [Power Control System](power_control/README.md)  
-- [Foxglove Visualization](foxglove/README.md)  
-- [Development Workflow](simulator/development-workflow.md)  
-- [Systemd Integration](launch/README.md)  
-- [Simulation Documentation](SIMULATION.md)
-- [ROS2 Conversion Summary](ROS2_CONVERSION_SUMMARY.md)
-- [Threading Architecture](THREADING_ARCHITECTURE.md)
-- [CPU Frequency Tuning](README-cpufreq-tuning-service.md)
+- [**Power Control System**](power_control/README.md) - Power button, LED control, and graceful shutdown
+- [**Systemd Integration**](launch/README.md) - Launch system and lifecycle management
+- [**Shutdown Fixes**](docs/SHUTDOWN_FIXES.md) - Shutdown procedure fixes and improvements
+- [**LED Status Guide**](docs/ARGO_LED_STATUS_GUIDE.md) - LED status display and hatch cover indicators
+
+### Development & Simulation
+- [**Simulation System Overview**](simulator/README.md) - Sailboat simulation framework
+- [**Simulation Documentation**](docs/SIMULATION.md) - Simulation setup and usage
+- [**Debug Simulation**](docs/README-debug-simulation.md) - Debugging simulation issues
+
+### Hardware & Configuration
+- [**I2C Configuration**](docs/README-i2c.md) - I2C bus setup and troubleshooting
+- [**Watchdog Configuration**](docs/README-watchdog.md) - Watchdog setup for Orange Pi Zero 2W
+- [**CPU Frequency Tuning**](docs/README-cpufreq-tuning-service.md) - CPU governor configuration
+- [**Battery & Power Monitoring**](docs/README-battery-power.md) - Battery monitoring system
+- [**Battery Panel Setup**](docs/BATTERY_PANEL_SETUP.md) - Battery panel configuration
+- [**SD Card Backup**](docs/README-sd-card-backup.md) - SD card backup procedures
+- [**DVFS Userspace Access**](docs/dvfs_userspace_access.md) - Dynamic voltage and frequency scaling
+
+### Visualization & Analysis
+- [**Foxglove Visualization**](foxglove/README.md) - Real-time visualization setup
+- [**Foxglove Debugging**](docs/FOXGLOVE_DEBUGGING.md) - Debugging Foxglove issues
+- [**Foxglove Joystick Setup**](docs/FOXGLOVE_JOYSTICK_SETUP.md) - Joystick control configuration
+- [**3D Visualization**](docs/README-3d-visualization.md) - 3D visualization configuration
+- [**Visualization Marker Persistence**](docs/VISUALIZATION_MARKER_PERSISTENCE.md) - Marker persistence in visualization
+- [**Adding Sailing Maps**](docs/README-adding-sailing-maps.md) - Map integration guide
+- [**Maps Documentation**](maps/README-maps.md) - Sailing area maps
+
+### Remote Access & Interface
+- [**Remote Desktop VNC**](docs/README_REMOTE_DESKTOP_VNC.md) - VNC remote desktop setup
+- [**Web Dashboard**](docs/WEB_DASHBOARD_README.md) - Mobile-friendly web interface
+
+### CLI & User Interface
+- [**CLI Completion**](docs/CLI_COMPLETION.md) - Command-line completion setup
+- [**Completion Quickstart**](docs/COMPLETION_QUICKSTART.md) - Quick start guide for CLI completion
+- [**MOTD Customization**](docs/MOTD_CUSTOMIZATION.md) - Message of the day customization
+
+### Additional Resources
+- [**ROS2 Nodes**](nodes/README.md) - Node documentation and configuration
+- [**Scripts**](scripts/README.md) - Utility scripts documentation
+- [**Dotfiles Setup**](dotfiles/README.md) - CLI aliases and shell configuration
+- [**Persistent Logging**](docs/README-persistent-logging.md) - Logging configuration
 
 
 ### Simulation Support
