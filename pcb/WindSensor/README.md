@@ -23,12 +23,43 @@ See the argo ROS2 nodes anem.py and mastled.py for sensing and control of the wi
 ### Housing Design
 ![Argo Wind Sensor Housing](WindSensor-rev1/argo-wind-sensor-housing.png)
 
+### Hull entry cable gland
+See Wiedmuller part below. The 3D design of the cable gland hull entry through DF65 battery charger opening is part of the 3D FreeCAD design of the WindSensor.
+
+### Mast step up
+The mast is raised by 1cm to allow clearance of the main sail boom over the cable gland housing. The 3D design of this replacement for the standard DF65 mast base plate is part of the WindSensor 3D design in FreeCAD.
+
+
 ## Specifications
 
 ### Electrical
 - **Supply Voltage**: 5V
 - **Operating Current**: ~160mA max (3 LEDS, each max 50mA)~
 - **Communication Interface**: I2C
+- **Cabling**: I2C cable, Digikey Part: [T1384-1-ND](https://www.digikey.ch/product-detail/en/tensility-international-corp/30-00099/T1384-1-ND/8346518)
+  - **Description**: CBL 4CON 28AWG SHLD WHT 1M  
+    - 4-conductor (1 pair twisted), Multi-Conductor Cable, White, 28 AWG  
+    - Shielded (Foil, Braid)  
+    - Length: 1.00m (3.28')  
+    - Outer Diameter: 3.6mm  
+  - **Datasheet**: [30-00099 (PDF)](http://www.tensility.com/pdffiles/30-00099.pdf)
+  - **Supplier**: digikey.ch  
+  - **Approx. Price**: 2.07 CHF/m
+- **Cable Gland**: Waterproofing cable guard for I2C cable entry  
+  - **Part Number:** 281-3860-ND  
+  - **Manufacturer:** Weidmüller (2583400000)  
+  - **Supplier:** [Digi-Key](https://www.digikey.ch/products/de?keywords=281-3860)  
+  - **Description:** Water-resistant cable entry for wind sensor I2C connection  
+  - **Type:** Square Frame Grommet, Split  
+    - Frame Size: 0.815" (20.70mm)  
+    - Cable Range: 0.118" ~ 0.157" (3.00mm ~ 4.00mm)  
+    - Color: Gray  
+  - **Price:** ~3.70 CHF (digikey.ch)
+
+
+
+
+
 
 ### Physical
 - **Board Dimensions**: 20x20mm
