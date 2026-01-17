@@ -18,7 +18,11 @@ See the argo ROS2 nodes anem.py and mastled.py for sensing and control of the wi
 ## Images
 
 ### 3D Model
-![Wind Sensor 3D Model](WindSensor-rev1/wind-sensor-3d.jpg)
+[![Wind Sensor 3D Turntable](WindSensor-rev1/wind-sensor-3d.jpg)](WindSensor-rev1/windsensor-3d-turntable.mp4)
+<!--
+Clicking the image opens the "windsensor-3d-turntable.mp4" in a new tab (works on GitHub as a direct file link).
+For best results, right-click and select "Open Link in New Tab" if your browser does not automatically do so.
+-->
 
 ### Housing Design
 ![Argo Wind Sensor Housing](WindSensor-rev1/argo-wind-sensor-housing.png)
