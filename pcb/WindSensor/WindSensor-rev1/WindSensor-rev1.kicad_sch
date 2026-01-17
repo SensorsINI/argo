@@ -3504,6 +3504,16 @@
 		)
 		(uuid "98247860-6c3f-407f-81c2-252c9597f0f4")
 	)
+	(text "LP5814DLR appears at\nI2C address 0x2C\n(datasheet Sec. 4)"
+		(exclude_from_sim no)
+		(at 125.984 88.646 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "a3359fee-b605-46fe-907e-379a90be6874")
+	)
 	(text "SMD version of header"
 		(exclude_from_sim no)
 		(at 130.81 30.988 0)

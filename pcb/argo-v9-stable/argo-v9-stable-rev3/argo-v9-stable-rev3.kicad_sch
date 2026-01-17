@@ -14405,7 +14405,7 @@
 		)
 		(uuid "a657ad04-7881-4300-89f1-9b14231bccf1")
 	)
-	(text "I2C addressses\n0x21,0x22,0x23 wind\n0x34 ADC\n0x44 humidity\n0x48 MP2672 charger (if configured)\n0x69 IMU"
+	(text "I2C addressses\n0x21,0x22,0x23 wind sensor SDP32s\n0x2C wind sensor RGBW LED LP5814DLR\n0x34 ADC\n0x44 humidity\n0x48 MP2672 charger (if configured)\n0x69 IMU"
 		(exclude_from_sim no)
 		(at 244.602 60.452 0)
 		(effects
@@ -14586,7 +14586,7 @@
 		)
 		(uuid "def188e1-f8d4-408a-a282-39f9cc9411b1")
 	)
-	(text "SDP32 I2C 0x21,22,23"
+	(text "SDP32 I2C 0x21,22,23\nLP5814DLR 0x2C"
 		(exclude_from_sim no)
 		(at 217.932 102.616 0)
 		(effects
