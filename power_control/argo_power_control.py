@@ -43,6 +43,8 @@
 #   - Red LED: SOS patterns for low battery warning (slow SOS for low battery, fast SOS for critical battery)
 #   - Red/Green LEDs: Alternating pattern when WiFi connectivity is lost (0.5Hz alternating)
 #   - All LEDs: Active LOW control (GPIO LOW = LED ON, GPIO HIGH = LED OFF)
+#   - RGB State Publishing: LED RGB state is published to /argo/power_button/rgb for mast head LED mirroring
+#                           (geometry_msgs/Vector3: x=red, y=green, z=blue as normalized 0.0-1.0)
 #
 # SHUTDOWN SEQUENCE:
 #   1. Broadcast wall message to all users
@@ -457,6 +459,7 @@ class PowerController(ArgoBaseNode):
         # LED state tracking
         self.green_led_state = False
         self.blue_led_state = False
+        self.red_led_state = False  # Track red LED state for RGB publishing
         self.green_led_line = None  # Initialize to None, will be set if GPIO control is needed
 
         # Sysfs LED control paths (for kernel overlay)
@@ -1563,6 +1566,8 @@ class PowerController(ArgoBaseNode):
         # GPIO 228 (PH4) is controlled via sysfs when available (preferred method)
         # Falls back to direct GPIO if sysfs is not available
         self.green_led_state = state
+        # Publish RGB state for mast head LED mirroring
+        self._publish_rgb_state()
         
         # Use sysfs control if available (preferred method)
         if self.green_led_available and self.green_led_using_sysfs:
@@ -1603,7 +1608,10 @@ class PowerController(ArgoBaseNode):
         """Control blue LED (charging indicator)"""
         # HACK: This function is temporarily disabled. The blue LED pin is being
         # used for the green heartbeat signal due to hardware issues with PH4/PH0.
-        pass
+        # Still track state and publish RGB for future use when blue LED is enabled
+        self.blue_led_state = state
+        # Publish RGB state for mast head LED mirroring
+        self._publish_rgb_state()
 
     def set_red_led(self, state):
         """Control red LED (battery warning/SOS indicator)"""
@@ -1613,6 +1621,9 @@ class PowerController(ArgoBaseNode):
             # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
             value = LED_ON_STATE if state else LED_OFF_STATE
             self.red_led_line.set_value(value)
+            self.red_led_state = state  # Track red LED state for RGB publishing
+            # Publish RGB state for mast head LED mirroring
+            self._publish_rgb_state()
         except Exception as e:
             self.get_logger().error(f"Error controlling red LED: {e}")
 
@@ -2908,6 +2919,9 @@ class PowerController(ArgoBaseNode):
                 String, '/argo/power/status', 10)
             self.button_event_publisher = self.create_publisher(
                 String, '/argo/power/button_events', 10)
+            # RGB LED state publisher for mast head LED mirroring
+            self.power_button_rgb_publisher = self.create_publisher(
+                Vector3, '/argo/power_button/rgb', 10)
 
             # Create subscription to controller pause state
             from std_msgs.msg import Bool
@@ -2951,6 +2965,7 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("  - /argo/power/toggle_argo")
             self.get_logger().info("  - /argo/power/status (topic)")
             self.get_logger().info("  - /argo/power/button_events (topic)")
+            self.get_logger().info("  - /argo/power_button/rgb (topic - for mast head LED mirroring)")
             self.get_logger().info("  - /controller_pause_state (subscription)")
             self.get_logger().info("  - /ac_power_present (subscription - for fast charge state updates)")
             self.get_logger().info("  - /argo/critical/i2c_failure (subscription - for critical I2C failure detection)")
@@ -3034,6 +3049,22 @@ class PowerController(ArgoBaseNode):
                 self.get_logger().info(f"Published button event: {event}")
             except Exception as e:
                 self.get_logger().debug(f"Failed to publish button event: {e}")
+
+    def _publish_rgb_state(self):
+        """Publish current RGB LED state for mast head LED mirroring"""
+        if not hasattr(self, 'power_button_rgb_publisher') or not self.power_button_rgb_publisher:
+            return  # Publisher not yet created (during initialization)
+        
+        try:
+            from geometry_msgs.msg import Vector3
+            msg = Vector3()
+            # Convert boolean states to normalized brightness (0.0 = OFF, 1.0 = ON)
+            msg.x = 1.0 if self.red_led_state else 0.0
+            msg.y = 1.0 if self.green_led_state else 0.0
+            msg.z = 1.0 if self.blue_led_state else 0.0
+            self.power_button_rgb_publisher.publish(msg)
+        except Exception as e:
+            self.get_logger().debug(f"Failed to publish RGB state: {e}")
 
     def _controller_pause_state_callback(self, msg):
         """Receive controller pause state updates from topic"""
@@ -4935,6 +4966,8 @@ LED INDICATORS (Active LOW):
   - Blue LED: Show charging status via battery !CHARGING signal
   - Red LED: SOS patterns for low battery warning (slow SOS for low battery, fast SOS for critical battery)
   - Red/Green LEDs: Alternating pattern when WiFi connectivity is lost (0.5Hz alternating)
+  - RGB State Publishing: LED RGB state is published to /argo/power_button/rgb for mast head LED mirroring
+                           (geometry_msgs/Vector3: x=red, y=green, z=blue as normalized 0.0-1.0)
 
 USAGE:
   ./argo_power_control.py [OPTIONS]

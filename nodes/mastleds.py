@@ -16,6 +16,7 @@
 # Features:
 # - Four individual subscriptions (one per color channel: R, G, B, W)
 # - One combined 4-component subscription for synchronized RGBW control
+# - Power button RGB mirroring: mirrors RGB channels from power button LEDs
 # - Internal synchronization ensures all color updates take effect together
 # - Normalized brightness control (0.0-1.0) converted to 8-bit (0-255) for hardware
 # - Automatic I2C error recovery with health monitoring
@@ -32,6 +33,10 @@
 #   White channel brightness (0.0-1.0)
 # /mastled_rgbw (std_msgs/Float32MultiArray):
 #   Combined RGBW control (data array with 4 elements: [R, G, B, W] as Float32 0.0-1.0)
+# /argo/power_button/rgb (geometry_msgs/Vector3):
+#   Power button RGB mirroring (x=red, y=green, z=blue as 0.0-1.0)
+#   Mirrors RGB channels from power button LEDs controlled by argo_power_control.py
+#   White channel is not affected by power button mirroring
 #
 # Command line options:
 # --debug: Enable debug logging of LED values and I2C operations
@@ -51,6 +56,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.logging import LoggingSeverity
 from std_msgs.msg import Float32, Float32MultiArray
+from geometry_msgs.msg import Vector3
 
 # I2C communication
 import smbus
@@ -91,10 +97,14 @@ TOPIC_GREEN = '/mastled_g'
 TOPIC_BLUE = '/mastled_b'
 TOPIC_WHITE = '/mastled_w'
 TOPIC_RGBW = '/mastled_rgbw'
+# Power button LED mirroring topic
+TOPIC_POWER_BUTTON_RGB = '/argo/power_button/rgb'
 
 # I2C Error Recovery
-I2C_RETRY_DELAY_S = 1.0  # Delay between I2C retry attempts in seconds
+I2C_RETRY_DELAY_S = 1.0  # Delay between I2C retry attempts in seconds (initial retries)
 I2C_ERROR_LOG_THROTTLE_S = 5.0  # Maximum I2C error logging frequency in seconds
+I2C_MAX_INITIAL_RETRIES = 3  # Maximum retries during initial startup before entering low-CPU mode
+I2C_LOW_CPU_CHECK_INTERVAL_S = 60.0  # Interval for checking device availability in low-CPU mode (60 seconds)
 
 
 class MastLEDsNode(ArgoBaseNode):
@@ -117,8 +127,10 @@ class MastLEDsNode(ArgoBaseNode):
         # I2C bus and device state
         self.bus = None
         self.device_ready = False
+        self.device_unavailable = False  # True when device is permanently unavailable (low-CPU mode)
         self._last_i2c_error_log_time = 0.0
         self._consecutive_i2c_errors = 0
+        self._initial_retry_count = 0  # Count of initial retry attempts
 
         # Initialize I2C bus and device
         if self._initialize_i2c():
@@ -127,9 +139,11 @@ class MastLEDsNode(ArgoBaseNode):
                 self.set_healthy("LED controller initialized and ready")
             else:
                 self.set_unhealthy("Failed to initialize LP5814DLR device")
+                self._initial_retry_count = 1
                 self._start_retry_timer()
         else:
             self.set_unhealthy("Failed to open I2C bus")
+            self._initial_retry_count = 1
             self._start_retry_timer()
 
         # Create subscriptions
@@ -214,25 +228,69 @@ class MastLEDsNode(ArgoBaseNode):
         if self.device_ready:
             if self.retry_timer:
                 self.retry_timer.cancel()
+            self.device_unavailable = False  # Clear unavailable flag if device is ready
             return
+
+        # If device is marked as unavailable, use low-CPU check interval
+        if self.device_unavailable:
+            # Check device only periodically in low-CPU mode
+            if not hasattr(self, '_last_low_cpu_check'):
+                self._last_low_cpu_check = 0.0
+            
+            current_time = time.time()
+            if current_time - self._last_low_cpu_check < I2C_LOW_CPU_CHECK_INTERVAL_S:
+                return  # Not time to check yet
+            
+            self._last_low_cpu_check = current_time
+
+        # During initial retries, count attempts
+        if not self.device_unavailable:
+            self._initial_retry_count += 1
 
         if not self.bus:
             if self._initialize_i2c():
                 # I2C bus initialized, try device init
                 if self._initialize_device():
                     self.device_ready = True
+                    self.device_unavailable = False
                     self.set_healthy("LED controller reinitialized successfully")
                     if self.retry_timer:
                         self.retry_timer.cancel()
                     self._consecutive_i2c_errors = 0
+                    self._initial_retry_count = 0
         else:
             # Bus exists, just retry device init
             if self._initialize_device():
                 self.device_ready = True
+                self.device_unavailable = False
                 self.set_healthy("LED controller reinitialized successfully")
                 if self.retry_timer:
                     self.retry_timer.cancel()
                 self._consecutive_i2c_errors = 0
+                self._initial_retry_count = 0
+            else:
+                # Device init failed - check if we should enter low-CPU mode
+                # Only enter unavailable mode if I2C bus is available but device not found
+                # (I2C bus unavailable is a system config issue, not missing hardware)
+                if not self.device_unavailable and self._initial_retry_count >= I2C_MAX_INITIAL_RETRIES:
+                    self._enter_device_unavailable_mode()
+
+    def _enter_device_unavailable_mode(self):
+        """Enter low-CPU mode when device is permanently unavailable (missing hardware)."""
+        self.device_unavailable = True
+        self.device_ready = False
+        self.set_unhealthy("LP5814DLR LED controller not found at I2C address 0x21 - using original wind sensor without LED controller")
+        self.get_logger().error(
+            "LP5814DLR LED controller not found at I2C address 0x21. "
+            "This indicates the original wind sensor (without LED controller) is in use. "
+            "Node will continue running in low-CPU mode, ignoring LED control subscriptions. "
+            "Hardware will be checked periodically for device appearance.")
+        
+        # Switch retry timer to low-CPU interval if it exists
+        if hasattr(self, 'retry_timer') and self.retry_timer:
+            self.retry_timer.cancel()
+            # Start low-CPU periodic check timer (60s interval)
+            self.retry_timer = self.create_timer(I2C_LOW_CPU_CHECK_INTERVAL_S, self._retry_initialization)
 
     def _normalize_brightness(self, value: float) -> float:
         """Clamp brightness value to valid range (0.0-1.0)."""
@@ -246,8 +304,13 @@ class MastLEDsNode(ArgoBaseNode):
         return int(round(normalized * BRIGHTNESS_HW_MAX))
 
     def _update_hardware(self):
-        """Update all LED channels on hardware in synchronized manner."""
-        if not self.device_ready or not self.bus:
+        """Update all LED channels on hardware in synchronized manner.
+        
+        Silently ignores updates if device is not ready or unavailable (low-CPU mode).
+        """
+        if not self.device_ready or not self.bus or self.device_unavailable:
+            # Silently ignore hardware updates when device unavailable
+            # This allows subscriptions to work without errors, but hardware is not updated
             return
 
         try:
@@ -286,40 +349,73 @@ class MastLEDsNode(ArgoBaseNode):
         self.sub_rgbw = self.create_subscription(
             Float32MultiArray, TOPIC_RGBW, self._rgbw_callback, 10)
 
-        self.get_logger().info(f'Subscribed to {TOPIC_RED}, {TOPIC_GREEN}, {TOPIC_BLUE}, {TOPIC_WHITE}, {TOPIC_RGBW}')
+        # Power button RGB mirroring subscription (mirrors RGB from power control node)
+        self.sub_power_button_rgb = self.create_subscription(
+            Vector3, TOPIC_POWER_BUTTON_RGB, self._power_button_rgb_callback, 10)
+
+        self.get_logger().info(f'Subscribed to {TOPIC_RED}, {TOPIC_GREEN}, {TOPIC_BLUE}, {TOPIC_WHITE}, {TOPIC_RGBW}, {TOPIC_POWER_BUTTON_RGB}')
 
     def _red_callback(self, msg: Float32):
         """Callback for red channel subscription."""
+        # Update internal state even if device unavailable (allows recovery)
         self._red_brightness = self._normalize_brightness(msg.data)
+        # Hardware update will be ignored if device unavailable
         self._update_hardware()
 
     def _green_callback(self, msg: Float32):
         """Callback for green channel subscription."""
+        # Update internal state even if device unavailable (allows recovery)
         self._green_brightness = self._normalize_brightness(msg.data)
+        # Hardware update will be ignored if device unavailable
         self._update_hardware()
 
     def _blue_callback(self, msg: Float32):
         """Callback for blue channel subscription."""
+        # Update internal state even if device unavailable (allows recovery)
         self._blue_brightness = self._normalize_brightness(msg.data)
+        # Hardware update will be ignored if device unavailable
         self._update_hardware()
 
     def _white_callback(self, msg: Float32):
         """Callback for white channel subscription."""
+        # Update internal state even if device unavailable (allows recovery)
         self._white_brightness = self._normalize_brightness(msg.data)
+        # Hardware update will be ignored if device unavailable
         self._update_hardware()
 
     def _rgbw_callback(self, msg: Float32MultiArray):
         """Callback for combined RGBW subscription."""
         if len(msg.data) >= 4:
             # Update all channels from array [R, G, B, W]
+            # Update internal state even if device unavailable (allows recovery)
             self._red_brightness = self._normalize_brightness(msg.data[0])
             self._green_brightness = self._normalize_brightness(msg.data[1])
             self._blue_brightness = self._normalize_brightness(msg.data[2])
             self._white_brightness = self._normalize_brightness(msg.data[3])
+            # Hardware update will be ignored if device unavailable
             self._update_hardware()
         else:
             self.get_logger().warn(
                 f"RGBW message has {len(msg.data)} elements, expected 4. Ignoring.")
+
+    def _power_button_rgb_callback(self, msg: Vector3):
+        """Callback for power button RGB mirroring subscription.
+        
+        Mirrors RGB channels from power button LEDs to mast head LEDs.
+        x = red, y = green, z = blue (normalized 0.0-1.0).
+        White channel is not affected by power button mirroring.
+        
+        Silently ignores updates if device unavailable (low-CPU mode).
+        """
+        # Update RGB channels from power button (Vector3: x=R, y=G, z=B)
+        # Update internal state even if device unavailable (allows recovery)
+        self._red_brightness = self._normalize_brightness(msg.x)
+        self._green_brightness = self._normalize_brightness(msg.y)
+        self._blue_brightness = self._normalize_brightness(msg.z)
+        # White channel is NOT affected by power button mirroring
+        # (power button only has RGB, not RGBW)
+        # Hardware update will be ignored if device unavailable
+        self._update_hardware()
 
     def destroy_node(self):
         """Cleanup on node shutdown."""
@@ -361,6 +457,7 @@ Hardware Setup:
 Features:
   - Four individual subscriptions (one per color channel: R, G, B, W)
   - One combined 4-component subscription for synchronized RGBW control
+  - Power button RGB mirroring: automatically mirrors RGB channels from power button LEDs
   - Internal synchronization ensures all color updates take effect together
   - Normalized brightness control (0.0-1.0) converted to 8-bit (0-255) for hardware
   - Automatic I2C error recovery with health monitoring
@@ -377,6 +474,10 @@ Topics Subscribed:
     White channel brightness (0.0-1.0)
   /mastled_rgbw (std_msgs/Float32MultiArray):
     Combined RGBW control (data array with 4 elements: [R, G, B, W] as Float32 0.0-1.0)
+  /argo/power_button/rgb (geometry_msgs/Vector3):
+    Power button RGB mirroring (x=red, y=green, z=blue as 0.0-1.0)
+    Automatically mirrors RGB channels from power button LEDs controlled by argo_power_control.py
+    White channel is not affected by power button mirroring
 
 Configuration Constants (modify at top of file):
   - I2C_BUS: I2C bus number (default: 0)
