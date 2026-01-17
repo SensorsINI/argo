@@ -21,9 +21,12 @@ See the argo ROS2 nodes anem.py and mastled.py for sensing and control of the wi
 ![Wind Sensor 3D Turntable](WindSensor-rev1/wind-sensor-3d.jpg)
 
 ### Housing Design
-<a href="WindSensor-rev1/windsensor-3d-turntable.mp4"><img src="WindSensor-rev1/argo-wind-sensor-housing.png" alt="Argo Wind Sensor Housing"></a>
+![Argo Wind Sensor Housing](WindSensor-rev1/argo-wind-sensor-housing.png)
 
-*Click the image above to view the 3D turntable video.*
+**📹 3D Turntable Video**: [windsensor-3d-turntable.mp4](WindSensor-rev1/windsensor-3d-turntable.mp4)  
+*Note: Due to GitHub file size limits, the video may not display inline. For best results:*
+- *Convert to an animated GIF for inline preview (recommended for short videos)*
+- *Host on YouTube/Vimeo and link a thumbnail (most reliable for larger files)*
 
 ### Hull entry cable gland
 See Wiedmuller part below. The 3D design of the cable gland hull entry through DF65 battery charger opening is part of the 3D FreeCAD design of the WindSensor.
