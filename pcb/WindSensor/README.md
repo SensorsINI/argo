@@ -18,14 +18,12 @@ See the argo ROS2 nodes anem.py and mastled.py for sensing and control of the wi
 ## Images
 
 ### 3D Model
-[![Wind Sensor 3D Turntable](WindSensor-rev1/wind-sensor-3d.jpg)](WindSensor-rev1/windsensor-3d-turntable.mp4)
-<!--
-Clicking the image opens the "windsensor-3d-turntable.mp4" in a new tab (works on GitHub as a direct file link).
-For best results, right-click and select "Open Link in New Tab" if your browser does not automatically do so.
--->
+![Wind Sensor 3D Turntable](WindSensor-rev1/wind-sensor-3d.jpg)
 
 ### Housing Design
 ![Argo Wind Sensor Housing](WindSensor-rev1/argo-wind-sensor-housing.png)
+
+[Wind Sensor 3D Turntable Video](WindSensor-rev1/windsensor-3d-turntable.mp4)
 
 ### Hull entry cable gland
 See Wiedmuller part below. The 3D design of the cable gland hull entry through DF65 battery charger opening is part of the 3D FreeCAD design of the WindSensor.
@@ -38,7 +36,7 @@ The mast is raised by 1cm to allow clearance of the main sail boom over the cabl
 
 ### Electrical
 - **Supply Voltage**: 5V
-- **Operating Current**: ~160mA max (3 LEDS, each max 50mA)~
+- **Operating Current**: About 160mA max (3 LEDS, each max 50mA)
 - **Communication Interface**: I2C
 - **Cabling**: I2C cable, Digikey Part: [839-30-00099-DS-ND](https://www.digikey.ch/en/products/detail/tensility-international-corp/30-00099/24671435)
   - **Description**: CBL 4CON 28AWG SHLD WHT 1M  
