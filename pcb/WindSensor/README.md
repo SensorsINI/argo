@@ -36,15 +36,16 @@ The mast is raised by 1cm to allow clearance of the main sail boom over the cabl
 - **Supply Voltage**: 5V
 - **Operating Current**: ~160mA max (3 LEDS, each max 50mA)~
 - **Communication Interface**: I2C
-- **Cabling**: I2C cable, Digikey Part: [T1384-1-ND](https://www.digikey.ch/product-detail/en/tensility-international-corp/30-00099/T1384-1-ND/8346518)
+- **Cabling**: I2C cable, Digikey Part: [839-30-00099-DS-ND](https://www.digikey.ch/en/products/detail/tensility-international-corp/30-00099/24671435)
   - **Description**: CBL 4CON 28AWG SHLD WHT 1M  
     - 4-conductor (1 pair twisted), Multi-Conductor Cable, White, 28 AWG  
     - Shielded (Foil, Braid)  
     - Length: 1.00m (3.28')  
     - Outer Diameter: 3.6mm  
-  - **Datasheet**: [30-00099 (PDF)](http://www.tensility.com/pdffiles/30-00099.pdf)
+    - 4 (1 Pair Twisted) Conductor Multi-Conductor Cable White 28 AWG Foil
+  - **Datasheet**: [30-00099 (PDF)](https://tensility.s3.us-west-2.amazonaws.com/imports/product_spec_sheets/30-00099.pdf)
   - **Supplier**: digikey.ch  
-  - **Approx. Price**: 2.07 CHF/m
+  - **Approx. Price**: 2.62 CHF/m
 - **Cable Gland**: Waterproofing cable guard for I2C cable entry  
   - **Part Number:** 281-3860-ND  
   - **Manufacturer:** Weidmüller (2583400000)  
