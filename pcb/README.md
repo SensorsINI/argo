@@ -6,6 +6,9 @@ The design was done with KiCad version 9 stable.
 **It is important to use the stable version, not the development release, since KiCad will not open files from later versions!**  
 - [Download KiCad stable here](https://www.kicad.org/download/)
 
+## See also
+Updated wind sensor design in [WindSensor](WindSensor).
+
 ## Directory Structure
 
 ### `argo-v9-stable/`
@@ -16,6 +19,8 @@ The main PCB design files for the Argo v9 stable revision:
 - **argo-v9-stable-backups/**: Archive of previous design iterations
 - **argo-v9-stable-rev0/**: First revision manufacturing files (Gerber, drill files)
 - **argo-v9-stable-rev1/**: Second revision manufacturing files
+- **argo-v9-stable-rev2/**: Third revision (rev2) manufacturing files
+- **argo-v9-stable-rev3/**: Current production (rev3) manufacturing files (fully functional, no modifications required)
 - **bom/**: Bill of Materials (BOM) files including interactive HTML BOM
 
 ### `datasheets/`

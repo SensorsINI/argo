@@ -2,6 +2,12 @@
 
 An autonomous sailboat system based on Dragonforce 65 hull, running on Orange Pi Zero 2W with ROS2. The system includes comprehensive sensor integration, autonomous navigation, and safety monitoring.
 
+## News
+- **Feb 2026:** Updated [wind sensor design PCB and housing](Windsensor-rev1/) complete. 3D parts for wind sensor I2C cable and mast step up completed and printed.
+- **Jan 2026:** [Argo main PCB version 3](pcb/argo-v9-stable/argo-v9-stable-rev3/) completed and seems fully functional with no surgery needed.
+- **Aug-Dec 2025:** Intense development of new [Argo PCB](pcb/) and [ROS2 software framework](nodes/). System services developed (see [`power_control/argo_power_control.py`](power_control/argo_power_control.py) and [`launch/argo_lifecycle_manager.py`](launch/argo_lifecycle_manager.py)) along with robust [lifecycle management](launch/argo_lifecycle_manager.py) and [battery/power control](power_control/argo_power_control.py).
+- **Oct-Nov 2025:** Developed first version of [Argo simulator](simulator/).
+
 ## System Overview
 
 The Argo system consists of multiple ROS2 nodes that work together to provide autonomous sailing capabilities:
