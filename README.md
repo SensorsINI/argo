@@ -3,12 +3,12 @@
 An autonomous sailboat system based on Dragonforce 65 hull, running on Orange Pi Zero 2W with ROS2. The system includes comprehensive sensor integration, autonomous navigation, and safety monitoring.
 
 ## News
-- **Feb 2026:** Updated [wind sensor design PCB and housing](Windsensor-rev1/) complete. 3D parts for wind sensor I2C cable and mast step up completed and printed.
+- **Feb 2026:** Updated [wind sensor design PCB and housing](pcb/WindSensor/WindSensor-rev1/) complete. 3D parts for wind sensor I2C cable and mast step up completed and printed.
 - **Jan 2026:** [Argo main PCB version 3](pcb/argo-v9-stable/argo-v9-stable-rev3/) completed and seems fully functional with no surgery needed.
 - **Aug-Dec 2025:** Intense development of new [Argo PCB](pcb/) and [ROS2 software framework](nodes/). System services developed (see [`power_control/argo_power_control.py`](power_control/argo_power_control.py) and [`launch/argo_lifecycle_manager.py`](launch/argo_lifecycle_manager.py)) along with robust [lifecycle management](launch/argo_lifecycle_manager.py) and [battery/power control](power_control/argo_power_control.py).
 - **Oct-Nov 2025:** Developed first version of [Argo simulator](simulator/).  
-  - See [simulator/README.md](simulator/README.md) for usage and architecture.  
-  - Additional docs: [Simulator Node Integration Guide](docs/simulator_node_integration.md), [Simulator Design Notes](docs/simulator_design_notes.md)  
+  - See [simulator/sailboat-playground/README.md](simulator/sailboat-playground/README.md) for usage and architecture.  
+  - Additional docs: [Simulation Guide](docs/SIMULATION.md), [Debug Simulation Guide](docs/README-debug-simulation.md)  
 
 ## System Overview
 
@@ -31,7 +31,7 @@ The main PCB design for Argo is available in the [pcb/](pcb/) folder. The latest
 - **GPS**: u-blox NEO-M9N via UART5 (/dev/ttyS5)
 - **IMU**: [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU via I2C0 (0x4a)
 - **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23). This PCB includes an RGBW LED and its I2C controller chip LP5814DLR at I2C address 0x2C.  
-  - **Design files:** See [`Windsensor-rev1/`](Windsensor-rev1/) directory for full hardware schematics, layout, and BOM.
+  - **Design files:** See [`pcb/WindSensor/WindSensor-rev1/`](pcb/WindSensor/WindSensor-rev1/) directory for full hardware schematics, layout, and BOM.
 - **ADC**: MAX11612 for battery/water sensing via I2C0 (0x34)
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
 - **PWM I/O**: Custom kernel module for radio control and servo interfaces with high impedance safety mode
