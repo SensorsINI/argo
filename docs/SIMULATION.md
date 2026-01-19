@@ -1,6 +1,6 @@
 # Argo Simulation Guide
 
-This guide explains how to run the Argo in local simulation mode using the robust ROS2 launch system.
+This guide explains how to run the Argo in local simulation mode.
 
 ## Overview
 
@@ -13,157 +13,103 @@ When running simulation, several hardware nodes conflict with the simulator topi
 - `rudder_sail_radio.py` → subscribes to `/rudder_sail_servo`
 
 **Nodes launched in simulation:**
-- `argo_unified_simulator_bridge.py` → provides simulated sensor data
+- `argo_unified_simulator_bridge.py` → provides simulated sensor data (uses mock simulator by default)
 - `controller.py` → handles autonomous navigation
 - `sailing_area_publisher.py` → provides map boundaries for visualization
 - `foxglove_bridge` → provides the websocket for Foxglove Studio
 
-## Local Simulation
+## Quick Start
 
-The local simulation runs all necessary components directly on the local machine. It uses the `sailboat-playground` simulator for realistic physics or falls back to a simpler mock simulator if needed.
+### Step 1: Start Simulation
 
-### Usage
-
-The entire simulation environment is managed by a ROS2 launch file. To start it, simply use the `asim` alias in your terminal:
+In your first terminal, launch the simulation with the mock simulator (the physical simulator is not yet stable):
 
 ```bash
-# Start the complete local simulation environment
+asim --mock
+```
+
+Or simply:
+
+```bash
 asim
 ```
 
+(The `--mock` flag is the default, so it can be omitted. Use `--real` if you want to try the physical simulator, but it's not recommended yet.)
+
 This command will:
-1.  Launch the simulator bridge, controller, and sailing area publisher.
-2.  Start the `foxglove_bridge` automatically.
-3.  Ensure all processes are managed correctly and shut down cleanly with `Ctrl+C`.
+1. Launch the simulator bridge, controller, and sailing area publisher
+2. Start the `foxglove_bridge` automatically
+3. Ensure all processes are managed correctly and shut down cleanly with `Ctrl+C`
 
-This is now the only supported method for starting the local simulation. The previous methods using `argo_lifecycle_manager.py` or running nodes manually are deprecated due to stability issues.
+### Step 2: Start Keyboard Control (Optional)
 
-### Visualization
-
-Once the simulation is running, you can connect to it using Foxglove Studio.
-- **Connection URL:** `ws://localhost:8765`
-
-### External Control
-
-The simulator can be controlled via external tools:
-
-#### Foxglove Joystick Panel (Recommended)
-
-1. **Install Joystick Panel**: In Foxglove Studio, add the "Joystick" community panel extension from the Extension Marketplace
-
-2. **Critical Configuration Steps**:
-   - **Publish Section**:
-     - **Publish Mode**: Set to **"On"** (this is critical - must be enabled!)
-     - **Pub Joy Topic**: Set to `/joy`
-   - **Data Source Section**:
-     - **Data Source**: Select one of:
-       - **"Interactive Display Mode"** - Use mouse/touchscreen to control (recommended)
-       - **"Keyboard Mode"** - Use keyboard keys
-       - **"Gamepad Mode"** - Use a physical gamepad connected to your computer
-     - **DO NOT** select "Subscribed Joy To..." - that's for monitoring, not controlling
-   - **Display Section**:
-     - **Display Mode**: "Auto-Generated" is fine
-     - Other display settings can be left as default
-
-3. **Control Mapping**:
-   - **Axis 0** (default): Rudder control (-1=full left, +1=full right)
-   - **Axis 1** (default): Sail control (-1=pulled in, +1=let out)
-   - Sail axis is inverted by default (pull up = sail out)
-
-4. **Operation**: 
-   - Once configured, the panel should show joystick controls that you can interact with
-   - Moving the joystick indicators will publish Joy messages to `/joy`
-   - The simulator bridge automatically converts these to control commands
-
-5. **Troubleshooting**:
-   - If panel shows "waiting for first data": **Enable Publish Mode to "On"**
-   - If nothing happens when you interact: Check that Data Source is set to Interactive/Keyboard/Gamepad mode (not Subscribe mode)
-   - Verify topic is correct: `/joy`
-
-6. **Customization**: You can change axis mapping via ROS2 parameters:
-   ```bash
-   --ros-args -p joy_rudder_axis:=0 -p joy_sail_axis:=1 -p joy_sail_invert:=true
-   ```
-
-#### Foxglove Teleop Panel (Alternative)
-
-1. **Install Teleop Panel**: In Foxglove Studio, add the "Teleop" community panel extension
-2. **Configure Topic**: Set the Teleop panel to publish to `/rudder_sail_radio` topic
-3. **Control Mapping**: 
-   - **Left/Right arrows**: Control rudder (x-axis, -1=full left, +1=full right)
-   - **Up/Down arrows**: Control sail (y-axis, -1=pulled in, +1=let out)
-4. **Operation**: Unlike real RC radio control, Teleop panel controls are position-based rather than rate-based. The position is held until you change it (no automatic return to neutral).
-5. **Note**: Teleop only supports binary values. For smooth scalar control, use the Joystick panel instead.
-
-#### Terminal Control
-
-You can also control the simulator from the terminal:
+In a second terminal, launch the keyboard control interface:
 
 ```bash
-# Set rudder to 50% right, sail to 30% out
-ros2 topic pub --once /rudder_sail_radio geometry_msgs/msg/Vector3 "{x: 0.5, y: 0.3, z: 0.0}"
-
-# Center controls
-ros2 topic pub --once /rudder_sail_radio geometry_msgs/msg/Vector3 "{x: 0.0, y: 0.0, z: 0.0}"
-
-# Continuous control (press Ctrl+C to stop)
-ros2 topic pub -r 10 /rudder_sail_radio geometry_msgs/msg/Vector3 "{x: 0.0, y: 0.0, z: 0.0}"
+asimkb
 ```
 
-#### Keyboard Control (Curses Mode)
-
-When running the simulator bridge directly (not via launch file), keyboard control is available:
-- **Arrow Keys**: ←→ for rudder, ↑↓ for sail
-- **'c'**: Center controls
-- **'q'**: Quit
-
-Note: Keyboard control publishes to `/rudder_sail_radio` topic, so it works with the same control system as Teleop.
-
-## Remote Simulation
-
-Connects to a remote simulator running on another machine.
-
-**Features:**
-- Offloads CPU-intensive simulation to remote machine
-- Forwards sensor data from remote simulator
-- Sends control commands to remote simulator
-- Monitors connection status
-
-**Prerequisites:**
-1. Remote machine with Argo project cloned
-2. SSH access to remote machine
-3. ROS2 Humble installed on remote machine
-
-**Setup:**
+Or directly:
 
 ```bash
-# 1. Setup remote machine (one-time)
-./scripts/setup_remote_simulator.sh
-
-# 2. Start SSH tunnel (terminal 1)
-./scripts/remote_simulator_tunnel.sh
-
-# 3. Start remote simulator (terminal 2)
-python3 scripts/remote_simulator_launch.py
-
-# 4. Start local simulation (terminal 3)
-python3 launch/argo_lifecycle_manager.py simulate_remote
+python3 nodes/argo_keyboard_control.py
 ```
 
-## Unified Simulator Bridge
+**Keyboard Controls:**
+- **← →** : Rudder control (left/right)
+- **↑ ↓** : Sail control (out/in)
+- **c** : Center both controls
+- **w** : Rotate wind +10°
+- **e** : Rotate wind -10°
+- **SPACE** : Toggle simulation pause (freezes simulation, keeps markers visible)
+- **r** : Reset simulation
+- **h** : Toggle Return-to-Home controller
+- **m** : Toggle controller pause (manual/autonomous)
+- **q** : Quit simulation
+- **x** : Quit keyboard control (keep simulation running)
+- **ENTER** : Refresh display
 
-The `argo_unified_simulator_bridge.py` replaces both `argo_simulator_bridge.py` and `argo_remote_simulator_bridge.py`:
+The keyboard control node publishes to `/rudder_sail_radio` topic, which takes priority over autonomous control when active.
 
-**Local Mode:**
-- Runs sailboat-playground or mock simulator
-- Publishes simulated sensor data
-- Handles control commands locally
+### Step 3: Visualize in Foxglove Studio
 
-**Remote Mode:**
-- Connects to remote simulator via ROS2 topics
-- Forwards sensor data from remote
-- Sends control commands to remote
-- Monitors connection health
+1. Open Foxglove Studio
+2. Connect to: `ws://localhost:8765`
+3. The visualization should show:
+   - Boat position and heading
+   - Sailing area boundaries
+   - Wind direction
+   - Control commands
+   - Sensor data
+
+## Configuration
+
+All simulation parameters are centralized in `nodes/argo.yaml`. This file contains:
+
+- **Simulation parameters**: Rates, grounding behavior, sensor noise models
+- **Mock simulator physics**: Turn rates, speeds, tack parameters
+- **Wind characteristics**: Speed, direction, variability
+- **Controller parameters**: Heading gains, boundary thresholds
+- **Map configuration**: Geofence and sailing area settings
+
+### Key Parameters
+
+The most commonly adjusted parameters are in the `simulation` section:
+
+```yaml
+simulation:
+  publish_rate: 2.0         # Sensor publishing rate (Hz)
+  simulation_rate: 10.0     # Physics simulation rate (Hz)
+  grounding_behavior: reset # Behavior on grounding: reset|terminate|continue
+  wind:
+    wind_direction: 300.0   # Wind direction in degrees (compass, 0°=North)
+    wind_min_speed: 5.0     # Minimum wind speed (m/s)
+    wind_max_speed: 10.0    # Maximum wind speed (m/s)
+```
+
+To modify parameters:
+1. Edit `nodes/argo.yaml`
+2. Restart the simulation (the nodes will reload parameters automatically)
 
 ## Topic Mapping
 
@@ -179,133 +125,93 @@ The simulator bridge provides these topics to the Argo system:
 - `/rudder_sail_radio` - Radio control input status (Vector3, x=rudder, y=sail, z=0)
 
 **Subscribed Topics (Argo → Simulator):**
-- `/rudder_sail_radio` - **External control input** (Vector3, x=rudder -1 to +1, y=sail -1 to +1, z=0)
-  - Can be controlled via Foxglove Teleop panel, terminal commands, or keyboard (when curses enabled)
+- `/rudder_sail_radio` - External control input (Vector3, x=rudder -1 to +1, y=sail -1 to +1, z=0)
+  - Published by keyboard control node (`asimkb`)
   - Takes priority over autonomous control when active
   - Automatically enables human control mode
 - `/rudder_sail_servo` - Final servo commands from Argo (Vector3, x=rudder, y=sail)
 - `/human_controlled` - Control mode status (Bool, true=human, false=robot)
 
-## Configuration
-
-### Centralized Configuration
-
-All remote simulation settings are centralized in `scripts/remote_simulator_config.json`:
-
-```json
-{
-  "remote": {
-    "host": "sensors-tobidh87.lan.ini.uzh.ch",
-    "user": "tobi",
-    "argo_dir": "/home/tobi/Dropbox/GitHub/SensorsINI/argo"
-  },
-  "ros2": {
-    "domain_id": 42
-  },
-  "network": {
-    "local_port": 11311,
-    "remote_port": 11311
-  },
-  "ssh": {
-    "timeout": 10,
-    "key_path": "~/.ssh/id_rsa"
-  }
-}
-```
-
-### Loading Configuration
-
-Both Python and shell scripts load configuration using `scripts/load_config.py`:
-
-```bash
-# Shell scripts
-eval "$(python3 scripts/load_config.py --export-shell)"
-
-# Python scripts
-from load_config import load_config
-config = load_config()
-```
-
 ## Troubleshooting
 
-### Local Simulation Issues
+### Simulation won't start
 
-1. **`package 'argo_launch' not found` error:**
-   - This error occurred with the old launch system. The new `simulation_launch.py` uses `ExecuteProcess` and should not produce this error. Ensure you have the latest code.
+1. **Check ROS2 environment:**
+   ```bash
+   source /opt/ros/humble/setup.bash
+   ```
 
-2. **`FileNotFoundError` for `naca0015.csv`:**
-   - This was an issue with relative paths. The bridge now calculates and passes an absolute path to the simulator's data files, which has resolved this.
+2. **Verify the alias is set:**
+   ```bash
+   alias asim
+   ```
+   If not set, install Argo CLI: `make install-argo-cli`
 
-3. **`foxglove_bridge` doesn't start or `Bind Error`:**
-   - The `foxglove_bridge` is now included in the main launch file and starts automatically. If you see a `Bind Error`, it means a previous simulation did not shut down cleanly. Use `pkill -f foxglove_bridge` to terminate the old process. The new launch system should prevent this from happening in the future.
+3. **Check for running processes:**
+   ```bash
+   ros2 node list
+   ```
+   If old nodes are running, stop them first
 
-4. **sailboat-playground not available:**
-   - Check if simulator submodule is initialized: `make submodule-status`
-   - Initialize if needed: `make submodule-init`
-   - Verify sailboat-playground is in `simulator/sailboat-playground/` directory
+### Foxglove connection issues
 
-### Remote Simulation Issues
+1. **`foxglove_bridge` doesn't start or `Bind Error`:**
+   - A previous simulation may not have shut down cleanly
+   - Kill the old process: `pkill -f foxglove_bridge`
+   - Restart the simulation
 
-1. **Connection timeout:**
-   - Check SSH tunnel: `./scripts/remote_simulator_tunnel.sh`
-   - Verify remote simulator is running
-   - Check network connectivity
+2. **Can't connect to `ws://localhost:8765`:**
+   - Verify `foxglove_bridge` is running: `ros2 node list | grep foxglove`
+   - Check if port is in use: `lsof -i :8765`
+   - Restart the simulation
 
-2. **ROS2 communication issues:**
-   - Ensure both machines use same ROS_DOMAIN_ID
-   - Check firewall settings
-   - Verify SSH tunnel is active
+### Keyboard control not working
 
-3. **Remote setup issues:**
-   - Run setup script: `./scripts/setup_remote_simulator.sh`
-   - Check ROS2 installation on remote machine
-   - Verify Python dependencies
+1. **Node not found:**
+   ```bash
+   ros2 node list | grep keyboard
+   ```
+   If not present, check that `asimkb` alias is set or run directly:
+   ```bash
+   python3 nodes/argo_keyboard_control.py
+   ```
+
+2. **No response to key presses:**
+   - Check that keyboard control is publishing: `ros2 topic echo /rudder_sail_radio`
+   - Verify the simulation is running and subscribed to the topic
+   - Try refreshing the display with ENTER key
+
+### Mock simulator issues
+
+1. **Simulation seems unrealistic:**
+   - The mock simulator is simplified compared to the physical simulator
+   - Adjust parameters in `nodes/argo.yaml` under `simulation.mock_simulator`
+   - Consider using `--real` flag (experimental, may be unstable)
+
+2. **Boat doesn't respond to controls:**
+   - Check control mode: `ros2 topic echo /human_controlled`
+   - Verify keyboard control is publishing: `ros2 topic echo /rudder_sail_radio`
+   - Check controller status: `ros2 topic echo /controller_pause_state`
 
 ### Debug Commands
 
 ```bash
-# Check the status of running ROS2 nodes
+# Check running ROS2 nodes
 ros2 node list
 
-# Echo a topic to see if data is being published
+# Monitor a specific topic
 ros2 topic echo /pose
+ros2 topic echo /rudder_sail_radio
+ros2 topic echo /human_controlled
 
-# Check the definition of the asim alias
-alias asim
+# Check topic rates
+ros2 topic hz /pose
+ros2 topic hz /gps_velocity
+
+# View simulation parameters
+ros2 param list /argo_unified_simulator_bridge
+ros2 param get /argo_unified_simulator_bridge simulation.simulation_rate
 ```
-
-## Benefits
-
-### Local Simulation
-- No network dependencies
-- Fast startup
-- Good for development and testing
-- Uses local CPU resources
-
-### Remote Simulation
-- Offloads CPU-intensive simulation
-- Better performance on resource-constrained Orange Pi
-- Scalable (multiple simulators on different machines)
-- Isolation (simulator crashes don't affect local system)
-
-## Migration from Old Bridges
-
-The unified simulator bridge replaces the old separate bridges:
-
-**Old approach:**
-- `argo_simulator_bridge.py` (local only)
-- `argo_remote_simulator_bridge.py` (remote only)
-
-**New approach:**
-- `argo_unified_simulator_bridge.py` (both local and remote)
-
-**Migration:**
-1. Use `--mode local` instead of `argo_simulator_bridge.py`
-2. Use `--mode remote` instead of `argo_remote_simulator_bridge.py`
-3. Update launch scripts to use unified bridge
-4. Remove old bridge files (optional)
-
-This unified approach reduces code duplication and provides a consistent interface for both simulation modes.
 
 ## Bag File Playback with Visualization
 
