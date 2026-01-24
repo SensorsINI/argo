@@ -833,41 +833,38 @@ class BatteryWaterNode(ArgoBaseNode):
             with self._buffer_lock:
                 buffer_copy = self._service_buffer.copy()
 
-            # Build battery data dictionary from consistent buffer
+            # Build battery data dictionary from consistent buffer (alphabetically ordered for readability)
             battery_data = {
-                'battery_voltage': buffer_copy['battery_voltage'],
-                'saltwater_voltage': buffer_copy['saltwater_voltage'],
-                'sail_current': buffer_copy['sail_current'],
-                'pcb_temperature': buffer_copy['temperature'] if buffer_copy['temperature'] is not None else 0.0,
-                'relative_humidity': buffer_copy['humidity'] if buffer_copy['humidity'] is not None else 0.0,
-                'battery_remaining_pct': buffer_copy['battery_remaining_pct'] if buffer_copy['battery_remaining_pct'] is not None else 0.0,
-                'battery_low_alert': buffer_copy['battery_low_alert'],
-                'saltwater_alert': buffer_copy['saltwater_alert'],
-                'humidity_alert': buffer_copy['humidity_alert'],
-                'charging_status': buffer_copy['charging_status'] if buffer_copy['charging_status'] is not None else False,
                 'ac_power_present': buffer_copy['ac_power_present'] if buffer_copy['ac_power_present'] is not None else False,
-                'usb_pd_negotiated': buffer_copy.get('usb_pd_negotiated') if buffer_copy.get('usb_pd_negotiated') is not None else False,  # False if not available or standard USB (non-PD)
-                'charging_fault_detected': buffer_copy.get('charging_fault_detected', False),
-                'charging_fault_frequency': buffer_copy.get('charging_fault_frequency'),  # None if no fault or not detected
-                'battery_water_health': buffer_copy.get('battery_water_health', 'UNKNOWN'),
-                'timestamp_sec': now.seconds_nanoseconds()[0],
-                'timestamp_nanosec': now.seconds_nanoseconds()[1],
-                'time_to_full_hours': buffer_copy['time_to_full_hours'],
-                'time_to_empty_hours': buffer_copy['time_to_empty_hours'],
-                'voltage_slope_vph': buffer_copy.get('voltage_slope_vph'),
-                'charging_anomaly': buffer_copy.get('charging_anomaly', False),
                 'anomaly_code': buffer_copy.get('anomaly_code'),
                 'anomaly_reason': buffer_copy.get('anomaly_reason'),
-                # MP2672 charger information (NEW)
-                'mp2672_available': buffer_copy.get('mp2672_available', False),
-                'mp2672_status': buffer_copy.get('mp2672_status'),
-                'mp2672_faults': buffer_copy.get('mp2672_faults'),
-                'mp2672_battery_missing_fault': buffer_copy.get('mp2672_battery_missing_fault', False),
-                # I2C failure and data staleness
+                'battery_low_alert': buffer_copy['battery_low_alert'],
+                'battery_remaining_pct': buffer_copy['battery_remaining_pct'] if buffer_copy['battery_remaining_pct'] is not None else 0.0,
+                'battery_voltage': buffer_copy['battery_voltage'],
+                'battery_water_health': buffer_copy.get('battery_water_health', 'UNKNOWN'),
+                'charging_anomaly': buffer_copy.get('charging_anomaly', False),
+                'charging_fault_detected': buffer_copy.get('charging_fault_detected', False),
+                'charging_fault_frequency': buffer_copy.get('charging_fault_frequency'),  # None if no fault or not detected
+                'charging_status': buffer_copy['charging_status'] if buffer_copy['charging_status'] is not None else False,
+                'charging_time_remaining_hours': buffer_copy.get('charging_time_remaining_hours'),
+                'humidity_alert': buffer_copy['humidity_alert'],
                 'i2c_failure': buffer_copy.get('i2c_failure', False),
+                'mp2672_available': buffer_copy.get('mp2672_available', False),
+                'mp2672_battery_missing_fault': buffer_copy.get('mp2672_battery_missing_fault', False),
+                'mp2672_faults': buffer_copy.get('mp2672_faults'),
+                'mp2672_status': buffer_copy.get('mp2672_status'),
+                'pcb_temperature': buffer_copy['temperature'] if buffer_copy['temperature'] is not None else 0.0,
+                'relative_humidity': buffer_copy['humidity'] if buffer_copy['humidity'] is not None else 0.0,
+                'sail_current': buffer_copy['sail_current'],
+                'saltwater_alert': buffer_copy['saltwater_alert'],
+                'saltwater_voltage': buffer_copy['saltwater_voltage'],
                 'stale_data': buffer_copy.get('stale_data', False),
-                # AC power plug-in tracking for MP2672 CHG timer
-                'charging_time_remaining_hours': buffer_copy.get('charging_time_remaining_hours')
+                'timestamp_nanosec': now.seconds_nanoseconds()[1],
+                'timestamp_sec': now.seconds_nanoseconds()[0],
+                'time_to_empty_hours': buffer_copy['time_to_empty_hours'],
+                'time_to_full_hours': buffer_copy['time_to_full_hours'],
+                'usb_pd_negotiated': buffer_copy.get('usb_pd_negotiated') if buffer_copy.get('usb_pd_negotiated') is not None else False,  # False if not available or standard USB (non-PD)
+                'voltage_slope_vph': buffer_copy.get('voltage_slope_vph')
             }
             
             # Determine MP2672 fault condition summary for alerts
@@ -905,9 +902,15 @@ class BatteryWaterNode(ArgoBaseNode):
             
             if active_faults:
                 mp2672_fault_summary = ' | '.join(active_faults)
+            else:
+                mp2672_fault_summary = None
             
-            # Add MP2672 fault summary to battery data
-            battery_data['mp2672_fault_summary'] = mp2672_fault_summary
+            # Insert mp2672_fault_summary in alphabetical position (after mp2672_faults, before mp2672_status)
+            # Create new dict with all items in alphabetical order
+            temp_dict = dict(battery_data)
+            temp_dict['mp2672_fault_summary'] = mp2672_fault_summary
+            # Rebuild dict in alphabetical order
+            battery_data = dict(sorted(temp_dict.items()))
 
             # Format battery summary
             battery_summary = None

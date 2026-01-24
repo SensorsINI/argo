@@ -48,3 +48,4 @@ alias vacuum='sudo journalctl --vacuum-size=10M ;sudo find /tmp -type f -atime +
 
 # I2C bus reset (requires sudo)
 alias ai2creset='sudo $ARGO_DIR/scripts/reset_i2c_bus.sh'  # Reset I2C bus (stops services, resets bus, restarts services)
+alias ai2c='$ARGO_DIR/scripts/ai2c.sh'  # Scan I2C bus 0 and report sensor status
