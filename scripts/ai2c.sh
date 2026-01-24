@@ -9,6 +9,7 @@ I2C_BUS=0
 TIMEOUT=1
 
 # Expected I2C addresses for Argo devices
+# Note: MP2672 (0x4B) excluded - using standalone mode (GPIO only), not I2C
 declare -A EXPECTED_DEVICES=(
     ["0x21"]="Wind sensor 1 (SDP3x)"
     ["0x22"]="Wind sensor 2 (SDP3x)"
@@ -17,7 +18,6 @@ declare -A EXPECTED_DEVICES=(
     ["0x34"]="ADC (MAX11612) - Battery/Water"
     ["0x44"]="Temperature/Humidity (SHT45)"
     ["0x4a"]="IMU (BNO085)"
-    ["0x4B"]="Charger (MP2672) - USB power only"
 )
 
 echo "Scanning I2C bus ${I2C_BUS}..."
@@ -115,13 +115,8 @@ for addr in "${!EXPECTED_DEVICES[@]}"; do
         echo "🟢 ${addr}: ${device_name}"
         FOUND_COUNT=$((FOUND_COUNT + 1))
     else
-        # Special handling for MP2672 (0x4B) - only visible when USB power present
-        if [[ "$addr" == "0x4B" ]]; then
-            echo "🟡 ${addr}: ${device_name} (not visible - normal if no USB power)"
-        else
-            echo "🔴 ${addr}: ${device_name} - MISSING"
-            MISSING_COUNT=$((MISSING_COUNT + 1))
-        fi
+        echo "🔴 ${addr}: ${device_name} - MISSING"
+        MISSING_COUNT=$((MISSING_COUNT + 1))
     fi
 done
 
