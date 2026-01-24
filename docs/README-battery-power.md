@@ -290,13 +290,27 @@ The power control service implements two-tier battery protection:
 
 **Functionality**:
 - Calls `/battery_status` service
-- Validates voltage readings (3.0V - 30.0V range)
+- Extracts `i2c_failure` and `stale_data` flags to distinguish I2C failures from actual low voltage
+- Validates voltage readings (only 0.0V indicates invalid reading)
 - Logs voltage changes >50mV (`BATTERY_LOG_THRESHOLD_V`)
 - Handles service failures gracefully
 - Initiates safe shutdown after 5 minutes of service failures
 
+**I2C Failure Detection**:
+- **Primary check**: If `i2c_failure=True` or `stale_data=True` from battery service, treat as I2C failure
+- **I2C failures**: Tracked for 1-hour timeout before shutdown (prevents false shutdowns from temporary sensor issues)
+- **Never triggers immediate shutdown** on I2C failures - only after sustained 1-hour failure
+- **Skips critical battery check** when I2C is failing (prevents treating 0.0V as critical low voltage)
+
+**Invalid Reading Detection**:
+- **Only 0.0V** is treated as invalid reading (indicates I2C failure, not actual battery voltage)
+- **Sustained invalid readings** (>1 hour) trigger safety shutdown
+- **Duration validation**: Prevents false shutdowns from timestamp corruption or system clock adjustments
+- **Reading count validation**: Ensures duration matches expected number of readings before shutdown
+
 **Safety Features**:
-- **Never halts on invalid readings** (0V, <3V, >30V)
+- **I2C failure protection**: Checks `i2c_failure` and `stale_data` flags before processing voltage
+- **Never halts on invalid readings immediately** - only after 1 hour of sustained failure
 - **Startup grace period** (60s) for battery service availability
 - **Consecutive failure tracking** (3 failures = warning, 10 failures = shutdown)
 
@@ -513,132 +527,51 @@ pip3 install pandas matplotlib
 
 ### Critical Battery Monitoring
 
-```3331:3455:power_control/argo_power_control.py
-    def monitor_critical_battery(self):
-        """Monitor battery voltage every 30 seconds for critical low voltage"""
-        self.get_logger().info("Starting critical battery monitoring thread")
-        self.battery_monitoring_active = True
+**Key Logic Flow**:
 
-        # Track consecutive failures for safety
-        consecutive_service_failures = 0
-        consecutive_invalid_readings = 0
-        MAX_CONSECUTIVE_FAILURES = 3  # 90 seconds of failures = log warning
-        BATTERY_SERVICE_FAILURE_TIMEOUT = 10  # 5 minutes (10 * 30s) of failures = initiate safe shutdown
-        battery_service_failure_start_time = None  # Track when service failures started
+1. **I2C Failure Check** (first priority):
+   - Extract `i2c_failure` and `stale_data` flags from battery service response
+   - If either flag is `True` → Treat as I2C failure (not critical battery)
+   - Track for 1-hour timeout before shutdown
+   - Skip critical battery check entirely (prevents false shutdowns)
 
-        # Startup grace period - don't count failures until battery service has been seen at least once
-        # This prevents false critical alerts if argo_battery_water.service starts after power_control.service
-        battery_service_ever_available = False
-        startup_time = time.time()
-        STARTUP_GRACE_PERIOD_S = 60.0  # 60 seconds to wait for argo_battery_water.service startup
+2. **Invalid Reading Check** (if I2C flags are False):
+   - Only 0.0V is treated as invalid reading
+   - Track for 1-hour timeout with duration and reading count validation
+   - Prevents false shutdowns from timestamp corruption or system clock adjustments
 
-        while self.running and self.battery_monitoring_active:
-            try:
-                # Always attempt to check battery, even if argo-launch is stopped
-                # This is CRITICAL for safety - battery monitoring must never stop
+3. **Critical Battery Check** (only for valid readings):
+   - If voltage < 7.2V and I2C is working → Immediate shutdown (actual low battery)
+   - If AC power present and charging → Don't shutdown (battery will recover)
 
-                # Call battery service to get voltage
-                battery_data = self._call_battery_service()
-                if battery_data:
-                    # Service call succeeded - reset failure tracking
-                    consecutive_service_failures = 0
-                    battery_service_failure_start_time = None  # Reset failure start time
+**Code Reference**:
 
-                    # Mark that we've seen the battery service available at least once
-                    if not battery_service_ever_available:
-                        battery_service_ever_available = True
-                        self.get_logger().info("Battery service is now available - critical battery monitoring active")
-
+```3407:3540:power_control/argo_power_control.py
                     battery_voltage = battery_data.get('battery_voltage', 0)
                     charging_status = battery_data.get('charging_status', None)
                     ac_power_present = battery_data.get('ac_power_present', None)
-                    # Prefer topic value if available (faster updates), otherwise use service value
-                    ac_power = self.ac_power_from_topic if self.ac_power_from_topic is not None else ac_power_present
-                    self.last_battery_voltage = battery_voltage
-                    self.get_logger().debug(
-                        f"Battery data received: {battery_voltage:.3f}V (charging={charging_status}, ac_power={ac_power_present})")
+                    # CRITICAL: Extract I2C failure and stale data flags to distinguish I2C failures from actual low voltage
+                    i2c_failure = battery_data.get('i2c_failure', False)
+                    stale_data = battery_data.get('stale_data', False)
+                    
+                    # CRITICAL SAFETY CHECK: If I2C is failing or data is stale, treat as I2C failure (not critical battery)
+                    # I2C failures should only trigger shutdown after 1 hour of sustained failure, not immediately
+                    if i2c_failure or stale_data:
+                        # I2C is failing - treat any voltage reading (including 0.0V) as invalid due to I2C failure
+                        # Do NOT treat as critical low voltage - only track for 1-hour invalid reading timeout
+                        # ... (tracks for 1-hour timeout, skips critical battery check)
+                        continue  # Skip critical battery check - this is I2C failure, not low voltage
 
-                    # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
-                    # Invalid readings (0V, very low, or impossibly high) indicate sensor/communication errors
-                    # NEVER halt on invalid readings - only on valid low voltage readings
-                    if battery_voltage <= 0 or battery_voltage < 3.0 or battery_voltage > 30.0:
-                        consecutive_invalid_readings += 1
-                        self.get_logger().error(
-                            f"Invalid battery voltage reading: {battery_voltage:.3f}V "
-                            f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely sensor/I2C error")
-                        self.get_logger().error(
-                            f"⚠️  System will NOT halt on invalid readings - only on valid low voltage!")
-
-                        # Do NOT halt on invalid readings - they indicate hardware/communication problems, not battery issues
-                        # Just log the error and continue monitoring
-                        if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
-                            self.get_logger().error(
-                                f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings!")
-                            self.get_logger().error(
-                                f"This indicates a sensor/communication problem, NOT a battery problem!")
-                            self.get_logger().error(
-                                f"System will continue running - check argo_battery_water.service status")
+                    # CRITICAL SAFETY CHECK: Only 0.0V indicates invalid reading (I2C failure)
+                    # 0.0V reading indicates sensor/communication error, not actual battery voltage
+                    if battery_voltage <= 0.0:
+                        # ... (tracks for 1-hour timeout with validation)
                         continue
 
-                    # Valid reading - reset invalid counter
-                    consecutive_invalid_readings = 0
-
-                    # Check if voltage has changed significantly since last log
-                    should_log_voltage = True
-                    if self.last_logged_battery_voltage is not None:
-                        voltage_change = abs(battery_voltage - self.last_logged_battery_voltage)
-                        should_log_voltage = voltage_change >= BATTERY_LOG_THRESHOLD_V
-
-                    # Log battery status with charging information (only if voltage changed significantly)
-                    if should_log_voltage:
-                        charging_str = ""
-                        if charging_status is not None or ac_power_present is not None:
-                            charging_parts = []
-                            if ac_power_present is not None:
-                                charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
-                            if charging_status is not None:
-                                charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
-                            charging_str = f", {', '.join(charging_parts)}"
-
-                        self.get_logger().info(
-                            f"Battery voltage check: {battery_voltage:.3f}V "
-                            f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
-
-                        # Update the last logged voltage
-                        self.last_logged_battery_voltage = battery_voltage
-
-                    # Check for critical battery first (highest priority)
+                    # Valid reading - check for critical battery
                     if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
-                        if not self.critical_battery_detected:
-                            # Always log critical battery events regardless of voltage change threshold
-                            charging_str = ""
-                            if charging_status is not None or ac_power_present is not None:
-                                charging_parts = []
-                                if ac_power_present is not None:
-                                    charging_parts.append(f"AC Power: {'YES' if ac_power_present else 'NO'}")
-                                if charging_status is not None:
-                                    charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
-                                charging_str = f", {', '.join(charging_parts)}"
-
-                            self.get_logger().error(
-                                f"CRITICAL BATTERY DETECTED: {battery_voltage:.3f}V < {CRITICAL_BATTERY_THRESHOLD_V}V{charging_str}")
-                            self.critical_battery_detected = True
-                            # Pause heartbeat for critical battery
-                            self.pause_heartbeat(reason="critical_battery")
-                            # Stop SOS pattern if running (critical takes priority)
-                            if self.sos_led_active:
-                                self.sos_led_active = False
-                            # Stop I2C failure SOS pattern if running (critical takes priority)
-                            if self.i2c_failure_sos_active:
-                                self.i2c_failure_sos_active = False
-                            # Stop charge state pattern if running (critical takes priority)
-                            if self.charge_state_led_active:
-                                self.charge_state_led_active = False
-                                self.charging_state_active = False
-                                # Immediately turn off charge state LED
-                                led_setter = self._get_charge_state_led_setter()
-                                led_setter(False)
-                            self.initiate_critical_battery_halt(battery_voltage)
+                        # Immediate shutdown for actual low battery (only if I2C is working)
+                        # ...
 ```
 
 ## Troubleshooting
@@ -656,17 +589,33 @@ journalctl -u argo_battery_water.service -f
 ros2 node list | grep battery_water
 ```
 
-### Invalid Battery Readings
+### Invalid Battery Readings and I2C Failures
 
-**Symptoms**: Voltage readings are 0V, <3V, or >30V
+**Symptoms**: Voltage readings are 0.0V (invalid reading) or I2C failure flags are set
+
+**Detection Logic**:
+1. **I2C Failure Check** (first priority):
+   - If `i2c_failure=True` or `stale_data=True` from battery service → Treat as I2C failure
+   - Track for 1-hour timeout before shutdown
+   - Skip critical battery check (prevents false shutdowns)
+
+2. **Invalid Reading Check** (if I2C flags are False):
+   - Only 0.0V is treated as invalid reading
+   - Track for 1-hour timeout before shutdown
+   - Duration and reading count validation prevents false shutdowns
 
 **Possible Causes**:
-- I2C bus failure
+- I2C bus failure (sensor short, bus conflict)
 - ADC sensor disconnected
 - Voltage divider circuit issue
 - Service crash
+- System clock adjustment (causes duration validation to reset timer)
 
-**Solution**: System will NOT halt on invalid readings - check hardware connections and I2C bus status.
+**Solution**: 
+- System will NOT halt immediately on invalid readings or I2C failures
+- Only triggers shutdown after **1 hour of sustained failure**
+- Check hardware connections and I2C bus status
+- Review logs for "time since last valid reading" to diagnose actual failure duration
 
 ### Charging Status Not Updating
 

@@ -219,6 +219,7 @@ import select
 import tty
 import termios
 import json
+import math
 from typing import Optional, Dict, Any
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -2903,6 +2904,8 @@ class PowerController(ArgoBaseNode):
         try:
             # Create power control services
             from std_srvs.srv import Trigger
+            from std_msgs.msg import Bool, UInt8, Int32
+            from geometry_msgs.msg import Vector3
             self.start_recording_service = self.create_service(
                 Trigger, '/argo/power/start_recording', self._handle_start_recording_service)
             self.stop_recording_service = self.create_service(
@@ -2924,13 +2927,10 @@ class PowerController(ArgoBaseNode):
                 Vector3, '/argo/power_button/rgb', 10)
 
             # Create subscription to controller pause state
-            from std_msgs.msg import Bool
             self.controller_pause_sub = self.create_subscription(
                 Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
 
             # Create subscriptions for system status monitoring
-            from std_msgs.msg import UInt8, Int32
-            from geometry_msgs.msg import Vector3
             
             # Anemometer health monitoring
             self.anem_health_sub = self.create_subscription(
@@ -3380,6 +3380,11 @@ class PowerController(ArgoBaseNode):
         INVALID_READING_TIMEOUT_S = 3600.0  # 1 hour = 3600 seconds
         INVALID_READING_TIMEOUT_CHECKS = int(INVALID_READING_TIMEOUT_S / BATTERY_MONITORING_INTERVAL_S)  # ~120 checks at 30s intervals
         invalid_reading_start_time = None  # Track when invalid readings started
+        last_valid_reading_time = None  # Track when last valid reading occurred
+        
+        # Throttling for invalid reading log messages (prevent spam)
+        last_critical_invalid_log_time = 0.0
+        CRITICAL_INVALID_LOG_INTERVAL = 300.0  # Log every 5 minutes (300s) once threshold exceeded
 
         # Startup grace period - don't count failures until battery service has been seen at least once
         # This prevents false critical alerts if argo_battery_water.service starts after power_control.service
@@ -3407,48 +3412,236 @@ class PowerController(ArgoBaseNode):
                     battery_voltage = battery_data.get('battery_voltage', 0)
                     charging_status = battery_data.get('charging_status', None)
                     ac_power_present = battery_data.get('ac_power_present', None)
+                    # CRITICAL: Extract I2C failure and stale data flags to distinguish I2C failures from actual low voltage
+                    i2c_failure = battery_data.get('i2c_failure', False)
+                    stale_data = battery_data.get('stale_data', False)
                     # Prefer topic value if available (faster updates), otherwise use service value
                     ac_power = self.ac_power_from_topic if self.ac_power_from_topic is not None else ac_power_present
                     self.last_battery_voltage = battery_voltage
                     self.get_logger().debug(
-                        f"Battery data received: {battery_voltage:.3f}V (charging={charging_status}, ac_power={ac_power_present})")
+                        f"Battery data received: {battery_voltage:.3f}V (charging={charging_status}, ac_power={ac_power_present}, "
+                        f"i2c_failure={i2c_failure}, stale_data={stale_data})")
 
-                    # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
-                    # Invalid readings (0V, very low, or impossibly high) indicate sensor/communication errors
-                    # Short-term failures are OK (external sensor shorts during sailing)
-                    # But sustained failures (>1 hour) indicate serious problem and should trigger shutdown
-                    if battery_voltage <= 0 or battery_voltage < 3.0 or battery_voltage > 30.0:
+                    # CRITICAL SAFETY CHECK: If I2C is failing or data is stale, treat as I2C failure (not critical battery)
+                    # I2C failures should only trigger shutdown after 1 hour of sustained failure, not immediately
+                    # This prevents false shutdowns when I2C bus is temporarily unavailable (e.g., sensor short)
+                    if i2c_failure or stale_data:
+                        # I2C is failing - treat any voltage reading (including 0.0V) as invalid due to I2C failure
+                        # Do NOT treat as critical low voltage - only track for 1-hour invalid reading timeout
                         consecutive_invalid_readings += 1
+                        current_time = time.time()
                         
-                        # Track when invalid readings started
+                        # Calculate time since last valid reading
+                        time_since_valid_str = ""
+                        if last_valid_reading_time is not None:
+                            time_since_valid = current_time - last_valid_reading_time
+                            if time_since_valid < 60:
+                                time_since_valid_str = f" ({time_since_valid:.1f}s since last valid reading)"
+                            elif time_since_valid < 3600:
+                                time_since_valid_str = f" ({time_since_valid/60:.1f}min since last valid reading)"
+                            else:
+                                time_since_valid_str = f" ({time_since_valid/3600:.2f}h since last valid reading)"
+                        else:
+                            time_since_valid_str = " (no valid reading recorded yet)"
+                        
                         if invalid_reading_start_time is None:
-                            invalid_reading_start_time = time.time()
-                            self.get_logger().error(
-                                f"Invalid battery voltage reading: {battery_voltage:.3f}V "
-                                f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely sensor/I2C error")
-                            self.get_logger().error(
-                                f"⚠️  Short-term invalid readings are OK (external sensor failures), but sustained failures >1 hour will trigger shutdown")
+                            invalid_reading_start_time = current_time
+                            failure_type = "I2C failure" if i2c_failure else "stale data"
+                            # Handle NaN in logging
+                            voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                            # Concise single-line message
+                            self.get_logger().warn(
+                                f"{failure_type} detected: {voltage_str}{time_since_valid_str} - treating as invalid reading (not critical battery). "
+                                f"Shutdown after 1h sustained failure.")
                         else:
                             # Calculate duration of invalid readings
-                            invalid_duration = time.time() - invalid_reading_start_time
+                            invalid_duration = current_time - invalid_reading_start_time
                             invalid_duration_hours = invalid_duration / 3600.0
                             
-                            # Log periodically (every 10 minutes) to show sustained failure
-                            if consecutive_invalid_readings % 20 == 0:  # Every 20 checks = ~10 minutes
+                            # BUG FIX: Validate that duration is reasonable (not negative or impossibly large)
+                            if invalid_duration < 0 or invalid_duration > INVALID_READING_TIMEOUT_S * 2:
                                 self.get_logger().error(
-                                    f"Invalid battery voltage reading: {battery_voltage:.3f}V "
-                                    f"(count: {consecutive_invalid_readings}, duration: {invalid_duration_hours:.2f}h) - likely sensor/I2C error")
-                                self.get_logger().error(
-                                    f"⚠️  Sustained invalid readings for {invalid_duration_hours:.2f}h - shutdown will trigger if >1 hour")
+                                    f"⚠️  Invalid duration calculation detected: {invalid_duration:.1f}s - resetting invalid reading timer")
+                                invalid_reading_start_time = current_time
+                                consecutive_invalid_readings = 1
+                                invalid_duration = 0.0
+                                invalid_duration_hours = 0.0
+                            
+                            # Log periodically (every 20 minutes) to show sustained failure - concise single line, heavily throttled
+                            # Only log every 40 checks (~20 minutes at 30s intervals) AND throttle to prevent spam
+                            if consecutive_invalid_readings % 40 == 0:  # Every 40 checks = ~20 minutes at 30s intervals
+                                # Additional throttling: only log if enough time has passed (handles faster check rates)
+                                time_since_last_periodic_log = current_time - (last_critical_invalid_log_time if last_critical_invalid_log_time > 0 else 0)
+                                if time_since_last_periodic_log >= 1200.0:  # At least 20 minutes since last periodic log
+                                    failure_type = "I2C failure" if i2c_failure else "stale data"
+                                    # Handle NaN in logging
+                                    voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                                    self.get_logger().warn(
+                                        f"{failure_type} continuing: {voltage_str} ({consecutive_invalid_readings} readings, "
+                                        f"{invalid_duration_hours:.2f}h duration){time_since_valid_str} - shutdown after 1h sustained failure")
+                                    last_critical_invalid_log_time = current_time
 
                         # Check if invalid readings have persisted for >1 hour
                         if invalid_reading_start_time is not None:
-                            invalid_duration = time.time() - invalid_reading_start_time
+                            invalid_duration = current_time - invalid_reading_start_time
+                            
+                            # BUG FIX: Additional validation - ensure duration is reasonable before checking timeout
+                            if invalid_duration < 0:
+                                self.get_logger().error(
+                                    f"⚠️  Negative duration detected: {invalid_duration:.1f}s - resetting invalid reading timer")
+                                invalid_reading_start_time = current_time
+                                consecutive_invalid_readings = 1
+                                invalid_duration = 0.0
+                            
+                            # BUG FIX: Validate that duration matches expected number of readings
+                            expected_min_readings = int(INVALID_READING_TIMEOUT_S / BATTERY_MONITORING_INTERVAL_S)
                             if invalid_duration >= INVALID_READING_TIMEOUT_S:
+                                # Sanity check: duration should roughly match number of readings
+                                min_expected_readings = int(expected_min_readings * 0.8)
                                 invalid_duration_hours = invalid_duration / 3600.0
+                                if consecutive_invalid_readings < min_expected_readings:
+                                    self.get_logger().error(
+                                        f"⚠️  Duration mismatch detected: {invalid_duration_hours:.2f}h duration but only "
+                                        f"{consecutive_invalid_readings} readings (expected ~{expected_min_readings}){time_since_valid_str}")
+                                    self.get_logger().error(
+                                        f"This indicates a timestamp corruption or system clock issue - resetting timer")
+                                    invalid_reading_start_time = current_time
+                                    consecutive_invalid_readings = 1
+                                    continue  # Skip shutdown, continue monitoring
+                                
+                                failure_type = "I2C failure" if i2c_failure else "stale data"
+                                self.get_logger().error(
+                                    f"🔴 CRITICAL: {failure_type} has persisted for {invalid_duration_hours:.2f}h "
+                                    f"({consecutive_invalid_readings} consecutive readings){time_since_valid_str}")
+                                self.get_logger().error(
+                                    f"This indicates a serious sensor/I2C communication problem!")
+                                self.get_logger().error(
+                                    f"⚠️  SAFETY SHUTDOWN: Initiating safe shutdown to prevent battery damage")
+                                self.get_logger().error(
+                                    f"Battery monitoring unavailable - cannot verify battery voltage!")
+                                self.get_logger().error(
+                                    f"Check I2C bus and argo_battery_water.service status")
+                                
+                                # Initiate safe shutdown due to sustained I2C failure
+                                # Use voltage=0.0 to indicate unknown voltage (monitoring unavailable)
+                                self.initiate_critical_battery_halt(
+                                    battery_voltage=0.0, 
+                                    reason=f"sustained_i2c_failure_{invalid_duration_hours:.1f}h")
+                                # Note: initiate_critical_battery_halt will handle the shutdown sequence
+                                break  # Exit monitoring loop after initiating shutdown
+
+                        # Log warning for short-term failures (but don't shutdown yet) - throttled to prevent spam
+                        if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
+                            # Throttle logging: only log every 5 minutes or on first occurrence
+                            should_log = (current_time - last_critical_invalid_log_time) >= CRITICAL_INVALID_LOG_INTERVAL
+                            if should_log or consecutive_invalid_readings == MAX_CONSECUTIVE_FAILURES:
+                                invalid_duration_str = ""
+                                if invalid_reading_start_time is not None:
+                                    invalid_duration = current_time - invalid_reading_start_time
+                                    invalid_duration_hours = invalid_duration / 3600.0
+                                    invalid_duration_str = f" (duration: {invalid_duration_hours:.2f}h)"
+                                
+                                failure_type = "I2C failure" if i2c_failure else "stale data"
+                                # Concise single-line message
+                                self.get_logger().error(
+                                    f"⚠️  {failure_type}: {consecutive_invalid_readings} consecutive invalid readings{invalid_duration_str}{time_since_valid_str} - "
+                                    f"System continues (shutdown after 1h sustained failure). Check I2C bus and argo_battery_water.service")
+                                last_critical_invalid_log_time = current_time
+                        continue  # Skip critical battery check - this is I2C failure, not low voltage
+
+                    # CRITICAL SAFETY CHECK: NaN or 0.0V indicates invalid reading (I2C failure)
+                    # NaN or 0.0V reading indicates sensor/communication error, not actual battery voltage
+                    # Short-term failures are OK (external sensor shorts during sailing)
+                    # But sustained failures (>1 hour) indicate serious problem and should trigger shutdown
+                    if math.isnan(battery_voltage) or battery_voltage <= 0.0:
+                        consecutive_invalid_readings += 1
+                        
+                        # Track when invalid readings started (only on first invalid reading in sequence)
+                        current_time = time.time()
+                        
+                        # Calculate time since last valid reading
+                        time_since_valid_str = ""
+                        if last_valid_reading_time is not None:
+                            time_since_valid = current_time - last_valid_reading_time
+                            if time_since_valid < 60:
+                                time_since_valid_str = f" ({time_since_valid:.1f}s since last valid reading)"
+                            elif time_since_valid < 3600:
+                                time_since_valid_str = f" ({time_since_valid/60:.1f}min since last valid reading)"
+                            else:
+                                time_since_valid_str = f" ({time_since_valid/3600:.2f}h since last valid reading)"
+                        else:
+                            time_since_valid_str = " (no valid reading recorded yet)"
+                        
+                        if invalid_reading_start_time is None:
+                            invalid_reading_start_time = current_time
+                            # Handle NaN in logging
+                            voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                            self.get_logger().warn(
+                                f"Invalid battery reading: {voltage_str} (count: {consecutive_invalid_readings}){time_since_valid_str} - "
+                                f"likely sensor/I2C error. Short-term failures OK; shutdown after 1h sustained failure.")
+                        else:
+                            # Calculate duration of invalid readings
+                            invalid_duration = current_time - invalid_reading_start_time
+                            invalid_duration_hours = invalid_duration / 3600.0
+                            
+                            # BUG FIX: Validate that duration is reasonable (not negative or impossibly large)
+                            # This prevents false shutdowns if system clock was adjusted or if timestamp was corrupted
+                            if invalid_duration < 0 or invalid_duration > INVALID_READING_TIMEOUT_S * 2:
+                                self.get_logger().error(
+                                    f"⚠️  Invalid duration calculation detected: {invalid_duration:.1f}s - resetting invalid reading timer")
+                                self.get_logger().error(
+                                    f"This may indicate a system clock adjustment or timestamp corruption")
+                                invalid_reading_start_time = current_time  # Reset to current time
+                                consecutive_invalid_readings = 1  # Reset count to 1 (current reading)
+                                invalid_duration = 0.0
+                                invalid_duration_hours = 0.0
+                            
+                            # Log periodically (every 20 minutes) to show sustained failure - heavily throttled and concise
+                            if consecutive_invalid_readings % 40 == 0:  # Every 40 checks = ~20 minutes
+                                # Additional throttling: only log if enough time has passed
+                                time_since_last_periodic_log = current_time - (last_critical_invalid_log_time if last_critical_invalid_log_time > 0 else 0)
+                                if time_since_last_periodic_log >= 1200.0:  # At least 20 minutes since last periodic log
+                                    # Handle NaN in logging
+                                    voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                                    self.get_logger().warn(
+                                        f"Invalid battery reading continuing: {voltage_str} ({consecutive_invalid_readings} readings, "
+                                        f"{invalid_duration_hours:.2f}h duration){time_since_valid_str} - shutdown after 1h sustained failure")
+                                    last_critical_invalid_log_time = current_time
+
+                        # Check if invalid readings have persisted for >1 hour
+                        # Only check if we have a valid start time and duration is reasonable
+                        if invalid_reading_start_time is not None:
+                            invalid_duration = current_time - invalid_reading_start_time
+                            
+                            # BUG FIX: Additional validation - ensure duration is reasonable before checking timeout
+                            if invalid_duration < 0:
+                                self.get_logger().error(
+                                    f"⚠️  Negative duration detected: {invalid_duration:.1f}s - resetting invalid reading timer")
+                                invalid_reading_start_time = current_time
+                                consecutive_invalid_readings = 1
+                                invalid_duration = 0.0
+                            
+                            # BUG FIX: Validate that duration matches expected number of readings
+                            # If we have very few readings but duration shows 1 hour, something is wrong
+                            # Each reading happens every BATTERY_MONITORING_INTERVAL_S seconds
+                            expected_min_readings = int(INVALID_READING_TIMEOUT_S / BATTERY_MONITORING_INTERVAL_S)
+                            if invalid_duration >= INVALID_READING_TIMEOUT_S:
+                                # Sanity check: duration should roughly match number of readings
+                                # Allow some tolerance (80% of expected) to account for timing variations
+                                min_expected_readings = int(expected_min_readings * 0.8)
+                                invalid_duration_hours = invalid_duration / 3600.0
+                                if consecutive_invalid_readings < min_expected_readings:
+                                    self.get_logger().error(
+                                        f"⚠️  Duration mismatch detected: {invalid_duration_hours:.2f}h duration but only "
+                                        f"{consecutive_invalid_readings} readings (expected ~{expected_min_readings}){time_since_valid_str}")
+                                    self.get_logger().error(
+                                        f"This indicates a timestamp corruption or system clock issue - resetting timer")
+                                    invalid_reading_start_time = current_time
+                                    consecutive_invalid_readings = 1
+                                    continue  # Skip shutdown, continue monitoring
                                 self.get_logger().error(
                                     f"🔴 CRITICAL: Invalid battery readings have persisted for {invalid_duration_hours:.2f}h "
-                                    f"({consecutive_invalid_readings} consecutive readings)")
+                                    f"({consecutive_invalid_readings} consecutive readings){time_since_valid_str}")
                                 self.get_logger().error(
                                     f"This indicates a serious sensor/I2C communication problem!")
                                 self.get_logger().error(
@@ -3466,27 +3659,28 @@ class PowerController(ArgoBaseNode):
                                 # Note: initiate_critical_battery_halt will handle the shutdown sequence
                                 break  # Exit monitoring loop after initiating shutdown
 
-                        # Log warning for short-term failures (but don't shutdown yet)
+                        # Log warning for short-term failures (but don't shutdown yet) - throttled to prevent spam
                         if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
-                            invalid_duration_str = ""
-                            if invalid_reading_start_time is not None:
-                                invalid_duration = time.time() - invalid_reading_start_time
-                                invalid_duration_hours = invalid_duration / 3600.0
-                                invalid_duration_str = f" (duration: {invalid_duration_hours:.2f}h)"
-                            
-                            self.get_logger().error(
-                                f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings{invalid_duration_str}!")
-                            self.get_logger().error(
-                                f"This indicates a sensor/communication problem, NOT a battery problem!")
-                            self.get_logger().error(
-                                f"System will continue running - but will shutdown if failures persist >1 hour")
-                            self.get_logger().error(
-                                f"Check argo_battery_water.service status and I2C bus connections")
+                            # Throttle logging: only log every 5 minutes or on first occurrence
+                            should_log = (current_time - last_critical_invalid_log_time) >= CRITICAL_INVALID_LOG_INTERVAL
+                            if should_log or consecutive_invalid_readings == MAX_CONSECUTIVE_FAILURES:
+                                invalid_duration_str = ""
+                                if invalid_reading_start_time is not None:
+                                    invalid_duration = current_time - invalid_reading_start_time
+                                    invalid_duration_hours = invalid_duration / 3600.0
+                                    invalid_duration_str = f" (duration: {invalid_duration_hours:.2f}h)"
+                                
+                                # Concise single-line message
+                                self.get_logger().error(
+                                    f"⚠️  Invalid battery readings: {consecutive_invalid_readings} consecutive{invalid_duration_str}{time_since_valid_str} - "
+                                    f"System continues (shutdown after 1h sustained failure). Check I2C bus and argo_battery_water.service")
+                                last_critical_invalid_log_time = current_time
                         continue
 
-                    # Valid reading - reset invalid counter and start time
+                    # Valid reading - reset invalid counter and start time, update last valid reading time
                     consecutive_invalid_readings = 0
                     invalid_reading_start_time = None  # Reset invalid reading start time
+                    last_valid_reading_time = time.time()  # Update last valid reading time
 
                     # Check if voltage has changed significantly since last log
                     should_log_voltage = True
@@ -3505,15 +3699,18 @@ class PowerController(ArgoBaseNode):
                                 charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
                             charging_str = f", {', '.join(charging_parts)}"
 
+                        # Handle NaN in logging
+                        voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
                         self.get_logger().info(
-                            f"Battery voltage check: {battery_voltage:.3f}V "
+                            f"Battery voltage check: {voltage_str} "
                             f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
 
                         # Update the last logged voltage
                         self.last_logged_battery_voltage = battery_voltage
 
                     # Check for critical battery first (highest priority)
-                    if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
+                    # Safety check: Skip if NaN (shouldn't happen here, but defensive programming)
+                    if not math.isnan(battery_voltage) and battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
                         # CRITICAL FIX: If AC power is present and charging is active, don't trigger shutdown
                         # The battery is being charged and will recover - shutdown is not needed
                         # Use topic value (ac_power) for faster updates, fallback to service value
