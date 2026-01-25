@@ -14131,7 +14131,7 @@
 				(size 1.27 1.27)
 				(thickness 0.254)
 				(bold yes)
-				(color 255 0 255 1)
+				(color 0 132 0 1)
 			)
 			(justify top)
 		)
@@ -14171,6 +14171,17 @@
 		)
 		(uuid "33ca4453-97fa-4c69-a042-d94cdc66be9a")
 	)
+	(text "Consider moving external I2C (wind sensor) to separate I2C TWI1 for safety"
+		(exclude_from_sim no)
+		(at 203.454 37.592 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+		)
+		(uuid "37203486-96b3-4fce-8d67-806a30803fbd")
+	)
 	(text "Fully charged battery makes 8.4V.\nRtop=27k Rbot=18k, then vout=0.4vin, \nso 8.4V will give 3.36V"
 		(exclude_from_sim no)
 		(at 117.348 213.36 0)
@@ -14189,7 +14200,7 @@
 		(effects
 			(font
 				(size 0.889 0.889)
-				(color 255 0 255 1)
+				(color 0 132 0 1)
 			)
 		)
 		(uuid "43462be9-3264-45ed-88a7-ad1a393f2b49")
@@ -14345,7 +14356,7 @@
 		(effects
 			(font
 				(size 0.9 0.9)
-				(color 255 0 255 1)
+				(color 0 132 0 1)
 			)
 			(justify left)
 		)
@@ -14361,13 +14372,24 @@
 		)
 		(uuid "9445d234-f82f-4bab-9cf6-f9f26e52cb49")
 	)
+	(text "Add optional pullups on SDA/SCK to allow reducing resisstance for long wind sensor I2C"
+		(exclude_from_sim no)
+		(at 209.042 30.734 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+		)
+		(uuid "945c4f0c-3baf-4c10-86d9-9231ddd56eec")
+	)
 	(text "Solder R24 to let\nOPi drive BLUE\npower button LED"
 		(exclude_from_sim no)
 		(at 176.53 112.014 0)
 		(effects
 			(font
 				(size 0.889 0.889)
-				(color 255 0 255 1)
+				(color 0 132 0 1)
 			)
 			(justify left)
 		)
@@ -14422,7 +14444,7 @@
 		(effects
 			(font
 				(size 1.1176 1.1176)
-				(color 255 0 255 1)
+				(color 0 132 0 1)
 			)
 			(justify left)
 		)
@@ -14613,7 +14635,7 @@
 		(effects
 			(font
 				(size 0.889 0.889)
-				(color 255 0 255 1)
+				(color 0 132 0 1)
 			)
 			(justify left)
 		)
