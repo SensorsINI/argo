@@ -10,6 +10,16 @@
  			${XTRA_RSYNC_TO[@]+"${XTRA_RSYNC_TO[@]}"} \
  			$RAM_LOG $HDD_LOG 2>&1 | $LOG_OUTPUT
 
+@@ -64,7 +64,7 @@ syncFromDisk () {
+ 	if [ "$USE_RSYNC" = true ]; then
+-		${NoCache} rsync -aXWv --delete \
++		${NoCache} rsync -aXWv --delete --exclude "persistent" \
+ 			--exclude "lost+found" --exclude orangepi-ramlog.log \
+ 			--exclude *.gz --exclude *.xz --exclude='*.[0-9]' \
+ 			--links \
+ 			${XTRA_RSYNC_FROM[@]+"${XTRA_RSYNC_FROM[@]}"} \
+ 			$HDD_LOG $RAM_LOG 2>&1 | $LOG_OUTPUT
+
 
 
 

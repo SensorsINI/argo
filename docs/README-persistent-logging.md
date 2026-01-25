@@ -1,10 +1,98 @@
 # Persistent Logging Documentation
 
-This document provides a comprehensive overview of the Argo autonomous sailboat logging system, including persistent log storage, log viewing tools, and all services that generate log files in `/var/log.hdd/persistent/`.
+This document explains how Argo’s persistent logging works on the robot (Armbian / Orange Pi), how log rotation + pruning are installed, and why **Argo writes persistent logs to `/var/log.hdd/persistent/`** (not `/var/log/persistent/`).
+
+## How persistent logging is set up (Armbian/Orange Pi + Argo)
+
+Argo runs on an Armbian-derived Orange Pi image that uses **ramlog / log2ram-style logging** to reduce SD/eMMC wear:
+
+### What is `systemd-journald`?
+
+`systemd-journald` (often shortened to “journald”) is systemd’s built-in logging daemon. It collects log messages from:
+
+- the kernel (via `kmsg`)
+- systemd services (stdout/stderr)
+- syslog clients (optionally)
+
+It stores logs in a **binary journal format** and you query it with `journalctl`.
+
+Common storage locations:
+- **Volatile (RAM)**: `/run/log/journal/` (lost on reboot)
+- **Persistent (disk)**: `/var/log/journal/` (survives reboot)
+
+Key point for Armbian/ramlog systems: even if journald is configured with `Storage=persistent`, its “persistent” path is still **under `/var/log/journal/`** — and if `/var/log` is RAM-backed (zram/tmpfs), journald can still consume zram unless journald is redirected/symlinked to an on-disk location.
+
+### What is “ramlog” / “log2ram”?
+
+“ramlog” (Armbian/Orange Pi naming) is a mechanism that makes `/var/log` **live in RAM** to reduce flash wear:
+
+- `/var/log/` is mounted on **zram** (compressed RAM) or `tmpfs`
+- `/var/log.hdd/` points at the **on-disk** backing store
+- a sync step (often `rsync`) copies logs between RAM and disk at boot/shutdown/intervals
+
+The upside is fewer writes to SD/eMMC. The downside is that `/var/log` is **small**, so copying “persistent” logs into `/var/log` (or letting logs grow unbounded in RAM) can fill zram and cause `ENOSPC` issues.
+
+- **`/var/log/`**: a **RAM-backed filesystem** (often zram, e.g. `/dev/zram1`) where “normal” system logs are written during runtime.
+  - Fast, reduces flash writes, but **small** and can fill (causing `No space left on device`).
+- **`/var/log.hdd/`**: a **bind-mount view** of the *on-disk* `/var/log` directory used as the persistence backing store.
+  - The ramlog service syncs logs between `/var/log` (RAM) and `/var/log.hdd` (disk) on boot/shutdown/intervals (implementation varies).
+
+Argo adds an explicit, durable layer on top:
+
+- **`/var/log.hdd/persistent/`**: **Argo’s canonical persistent log directory** (survives reboots, not constrained by zram size).
+- **`/var/log/persistent/`**: may exist as a **RAM mirror** (created/filled by ramlog syncing `/var/log.hdd/persistent` → `/var/log/persistent` at boot).
+  - This directory is **not** the authoritative store and should not be relied on for long-term retention.
+
+### Why there are both `/var/log` and `/var/log.hdd` (ramlog/log2ram background)
+
+On Armbian, the “ramlog” mechanism commonly:
+
+1. Ensures an on-disk log directory exists.
+2. Creates a bind-mount so the on-disk logs are accessible at **`/var/log.hdd/`**.
+3. Mounts a RAM-backed filesystem (zram/tmpfs) on **`/var/log/`**.
+4. Uses `rsync`/copy on boot and shutdown to keep the disk copy updated.
+
+In practical terms:
+- **`/var/log.hdd/persistent`** is a *directory on disk*.
+- When ramlog “restores logs” at boot, it may copy that directory into the RAM-backed `/var/log` as **`/var/log/persistent`**.
+  - That is why you can end up with **both** paths existing at the same time.
+
+This is a widely used pattern in Armbian/Orange Pi ecosystems; see Armbian discussions like:
+- `https://forum.armbian.com/topic/3728-varlog-varloghdd/`
+- `https://forum.armbian.com/topic/13483-help-me-to-understand-armbian-ramlog-where-he-log/`
+
+### Why Argo logs to `/var/log.hdd/persistent` (not `/var/log/persistent`)
+
+**`/var/log` is RAM and intentionally small.** If large “persistent” logs are copied into `/var/log/persistent`, zram can fill and break:
+- `rsyslog` file outputs (`/var/log/syslog`, `/var/log/kern.log`, etc.)
+- systemd-journald storage in `/var/log/journal`
+- any service writing into `/var/log/*`
+
+Therefore Argo uses **`/var/log.hdd/persistent/`** as the **single source of truth** for persistent logs and configures Argo services to write there directly (typically via `tee -a /var/log.hdd/persistent/<service>.log`).
+
+**Note on systemd-journald**: `Storage=persistent` normally stores journals under `/var/log/journal/`. On ramlog systems, `/var/log` is RAM-backed, so journald “persistent” journals can still consume zram unless journald is explicitly redirected/symlinked to an on-disk location (varies by distro/image). Argo’s persistent log files are intentionally separate from journald for predictable retention.
+
+If your `/var/log` zram fills, it’s usually because something is writing large files into `/var/log` or because ramlog is copying too much data from `/var/log.hdd` back into RAM. Argo includes a fix for the Orange Pi ramlog script to **exclude `persistent/` in BOTH directions** (disk→RAM and RAM→disk) so persistent logs stay on disk and don’t consume zram.
+
+### Installation: top-level Makefile targets
+
+Argo’s persistent logging and pruning is installed via these Makefile targets:
+
+- **Install everything in `system-monitoring/` (includes persistent log manager)**:
+  - `make install-system-monitoring`
+- **Install only the Argo persistent log manager (boot rotation + hourly prune timer + logrotate policy)**:
+  - `make -C system-monitoring install-persistent-log-manager`
+- **Patch Orange Pi ramlog to avoid zram filling / accidental deletion**:
+  - `make fix-orangepi-ramlog`
+
+The persistent log manager installs and enables:
+- `argo-persistent-logs.service` (oneshot at boot: rotate + prune)
+- `argo-persistent-logs-prune.timer` (hourly prune checks)
+- `/etc/logrotate.d/persistent-logs` (size-based rotation for live `argo-*.log` files)
 
 ## Overview
 
-The Argo system uses a sophisticated logging architecture that combines Argo-specific monitoring services with system-level monitoring services. All logs are stored in `/var/log.hdd/persistent/` to ensure they survive system reboots and provide persistent diagnostic information.
+The Argo system uses a logging architecture that combines Argo-specific monitoring services with system-level logs. Argo service logs that must survive reboots are written to `/var/log.hdd/persistent/`, while system logs are managed separately by rsyslog/systemd-journald (often with ramlog/log2ram underneath).
 
 ## Log Directory Structure
 
@@ -15,6 +103,8 @@ The Argo system uses a dual logging architecture:
 - **Daily logs**: `service-name-YYYYMMDD.log`
 - **Timestamped logs**: `service-name-YYYYMMDD-HHMMSS.log`
 - **CSV data**: `service-name-YYYYMMDD.csv`
+
+**Important**: `/var/log/persistent/` may appear on some Armbian/Orange Pi installs as a **RAM mirror** populated by ramlog. For Argo, treat `/var/log.hdd/persistent/` as authoritative.
 
 ### System Logging (`/var/log.hdd/` and `/var/log/`)
 **Purpose**: Standard system logs managed by rsyslog and systemd journal
