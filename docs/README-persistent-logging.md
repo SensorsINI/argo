@@ -356,14 +356,40 @@ tail -f /var/log.hdd/persistent/thermal-$(date +%Y%m%d).log
 - `argo-*-YYYYMMDD-HHMMSS-<BOOT_ID>.boot.log` (per-boot snapshots)
 - `journalctl-<BOOT_ID>.log` (per-boot journal export)
 
-**Purpose**: Guarantees that Argo service logs survive reboots and are only rotated when either a reboot occurs or the persistent log partition exceeds a configurable usage threshold (85% by default).
+**Purpose**: Guarantees that Argo service logs survive reboots, while actively pruning “per-boot” and “daily” artifacts to keep `/var/log.hdd/persistent/` readable and bounded.
 
 **Features**:
 - Rotates each Argo service log at boot before dependent services start
 - Maintains boot-specific log snapshots for retrospective analysis (automatically compressed to save ~90% space)
-- Prunes oldest log artifacts only when persistent storage usage crosses the threshold
+- Enforces retention for common “clutter” files (see below)
+- Has an emergency usage backstop (default threshold: 85%) that will delete oldest artifacts until usage drops below the threshold
 - Installs size-based logrotate configuration (rotates at 10MB, keeps 2 copies) to prevent unbounded growth between reboots
-- Hourly pruning timer that does nothing unless the threshold is exceeded
+- Hourly pruning timer (runs even when below threshold)
+
+**Retention & pruning policy (defaults)**:
+
+The prune script uses **two retention rules** and keeps the **intersection** (“whichever results in less clutter”):
+
+- **Keep last 2 days** (by file mtime)
+- **Keep last 4 boots** (for artifacts that contain a `<BOOT_ID>` in the filename)
+
+In practice:
+- Per-boot artifacts are kept only if they are **both** recent enough **and** belong to the last 4 boots:
+  - `argo-*-<BOOT_ID>.boot.log(.gz)`
+  - `journalctl-…-<BOOT_ID>.log`
+  - `boot-history-…-<BOOT_ID>.log`
+- Daily / periodic artifacts are kept only if they are within the last 2 days:
+  - `dmesg-*`, `shutdown-*`, `thermal-YYYYMMDD.log`, `wifi-reconnect-YYYYMMDD.log`, `battery-monitor-YYYYMMDD.csv`, `orangepi-monitor-YYYYMMDD.log`, etc.
+
+Files that are **not** removed by pruning:
+- Live service logs (`argo-*.log`) and their logrotate-managed copies (`argo-*.log.1`, `argo-*.log.2.gz`, …)
+- Index/summary files like `boot-history.log` and `journalctl-boot-index.log`
+
+You can override the defaults manually:
+
+```bash
+sudo /usr/local/bin/argo_persistent_log_manager.sh --prune --retention-days 2 --retention-boots 4
+```
 
 ## System-Level Monitoring Services (Optional)
 
