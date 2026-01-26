@@ -60,6 +60,7 @@
 # - HOST_CTL: GPIO 229 (pin 24) tied high via hardware pullup resistor for host control mode
 
 import rclpy
+import math
 from std_msgs.msg import Float32, Bool
 from std_srvs.srv import Trigger
 import time
@@ -253,8 +254,9 @@ class BatteryWaterNode(ArgoBaseNode):
         self._humid_alert_prev = False
 
         # Latest sensor values for service response (double buffer for consistency)
-        self._latest_battery_voltage = 0.0
-        self._latest_saltwater_voltage = 0.0
+        # Use NaN to indicate no valid reading yet (more informative than 0.0)
+        self._latest_battery_voltage = float('nan')
+        self._latest_saltwater_voltage = float('nan')
         self._latest_sail_current = 0.0
         self._latest_temperature = None
         self._latest_humidity = None
@@ -283,8 +285,8 @@ class BatteryWaterNode(ArgoBaseNode):
         
         # Thread-safe double buffer for service responses
         self._service_buffer = {
-            'battery_voltage': 0.0,
-            'saltwater_voltage': 0.0,
+            'battery_voltage': float('nan'),  # Use NaN to indicate no valid reading yet
+            'saltwater_voltage': float('nan'),  # Use NaN to indicate no valid reading yet
             'sail_current': 0.0,
             'temperature': None,
             'humidity': None,
@@ -357,6 +359,7 @@ class BatteryWaterNode(ArgoBaseNode):
         
         # I2C failure logging throttling
         self._last_i2c_error_log_time = 0.0
+        self._last_reinit_error = None  # Store last re-initialization error for logging
         self._i2c_error_log_interval = 30.0  # Log I2C errors max once every 30 seconds
         self._max_failures = 3
         self._shutdown_requested = False
@@ -406,6 +409,10 @@ class BatteryWaterNode(ArgoBaseNode):
             self.get_logger().info('smbus2 not available; this node requires smbus2')
 
         # ADC (MAX11612)
+        # WARNING: Address 0x34 conflicts with LP5814 broadcast address (0x34)
+        # LP5814 broadcast address cannot be disabled and causes ADC to return zeros
+        # Solution: Replace MAX11612 with MAX11614 (0x33) or MAX11616 (0x35)
+        # See docs/I2C_ADDRESS_CONFLICT_LP5814_MAX11612.md for details
         self.adc_addr = 0x34
         self.vref = 4.096
         self.lsb_value = self.vref / 4096.0
@@ -590,10 +597,12 @@ class BatteryWaterNode(ArgoBaseNode):
             self._publish_i2c_failure(self._critical_i2c_failure, force=True)
             self.get_logger().info(f"Published initial I2C failure state: {self._critical_i2c_failure}")
         
-        # Log initial status summary
+        # Log initial status summary (handle NaN values)
+        battery_str = f"{self._latest_battery_voltage:.3f}V" if not math.isnan(self._latest_battery_voltage) else "NaN (I2C failure)"
+        saltwater_str = f"{self._latest_saltwater_voltage:.3f}V" if not math.isnan(self._latest_saltwater_voltage) else "NaN"
         self.get_logger().info(
-            f"Initial readings complete - Battery={self._latest_battery_voltage:.3f}V, "
-            f"Saltwater={self._latest_saltwater_voltage:.3f}V, Sail_current={self._latest_sail_current:.3f}A"
+            f"Initial readings complete - Battery={battery_str}, "
+            f"Saltwater={saltwater_str}, Sail_current={self._latest_sail_current:.3f}A"
         )
         
         # Initialize service buffer with initial readings
@@ -683,8 +692,8 @@ class BatteryWaterNode(ArgoBaseNode):
         - No saltwater intrusion detected
         - Humidity below 70%
         """
-        if battery_voltage is None:
-            self.set_unhealthy("No battery voltage reading")
+        if battery_voltage is None or math.isnan(battery_voltage):
+            self.set_unhealthy("No battery voltage reading (I2C failure)")
             return
         
         if saltwater_detected is None:
@@ -783,21 +792,21 @@ class BatteryWaterNode(ArgoBaseNode):
             charging_csv = 1 if charging_status else 0
             ac_power_csv = 1 if ac_power_present else 0
 
-            # Handle None values - mark as "FAILED" if ADC is stale and value is 0 or None
-            if adc_stale and battery_voltage == 0.0:
+            # Handle NaN and None values - mark as "FAILED" if ADC is stale and value is NaN/None/0
+            if adc_stale and (math.isnan(battery_voltage) or battery_voltage == 0.0):
                 battery_voltage_str = "FAILED"
             else:
-                battery_voltage_str = battery_voltage
+                battery_voltage_str = battery_voltage if not math.isnan(battery_voltage) else "NaN"
                 
             battery_remaining_pct = battery_remaining_pct if battery_remaining_pct is not None else ("FAILED" if adc_stale else "")
             temperature = temperature if temperature is not None else ""
             humidity = humidity if humidity is not None else ""
             
-            # Mark saltwater as FAILED if ADC is stale and value is 0
-            if adc_stale and saltwater_voltage == 0.0:
+            # Mark saltwater as FAILED if ADC is stale and value is NaN/None/0
+            if adc_stale and (math.isnan(saltwater_voltage) or saltwater_voltage == 0.0):
                 saltwater_voltage_str = "FAILED"
             else:
-                saltwater_voltage_str = saltwater_voltage
+                saltwater_voltage_str = saltwater_voltage if not math.isnan(saltwater_voltage) else "NaN"
 
             # Write CSV row
             with open(self.csv_file_path, 'a', newline='') as csvfile:
@@ -828,41 +837,38 @@ class BatteryWaterNode(ArgoBaseNode):
             with self._buffer_lock:
                 buffer_copy = self._service_buffer.copy()
 
-            # Build battery data dictionary from consistent buffer
+            # Build battery data dictionary from consistent buffer (alphabetically ordered for readability)
             battery_data = {
-                'battery_voltage': buffer_copy['battery_voltage'],
-                'saltwater_voltage': buffer_copy['saltwater_voltage'],
-                'sail_current': buffer_copy['sail_current'],
-                'pcb_temperature': buffer_copy['temperature'] if buffer_copy['temperature'] is not None else 0.0,
-                'relative_humidity': buffer_copy['humidity'] if buffer_copy['humidity'] is not None else 0.0,
-                'battery_remaining_pct': buffer_copy['battery_remaining_pct'] if buffer_copy['battery_remaining_pct'] is not None else 0.0,
-                'battery_low_alert': buffer_copy['battery_low_alert'],
-                'saltwater_alert': buffer_copy['saltwater_alert'],
-                'humidity_alert': buffer_copy['humidity_alert'],
-                'charging_status': buffer_copy['charging_status'] if buffer_copy['charging_status'] is not None else False,
                 'ac_power_present': buffer_copy['ac_power_present'] if buffer_copy['ac_power_present'] is not None else False,
-                'usb_pd_negotiated': buffer_copy.get('usb_pd_negotiated') if buffer_copy.get('usb_pd_negotiated') is not None else False,  # False if not available or standard USB (non-PD)
-                'charging_fault_detected': buffer_copy.get('charging_fault_detected', False),
-                'charging_fault_frequency': buffer_copy.get('charging_fault_frequency'),  # None if no fault or not detected
-                'battery_water_health': buffer_copy.get('battery_water_health', 'UNKNOWN'),
-                'timestamp_sec': now.seconds_nanoseconds()[0],
-                'timestamp_nanosec': now.seconds_nanoseconds()[1],
-                'time_to_full_hours': buffer_copy['time_to_full_hours'],
-                'time_to_empty_hours': buffer_copy['time_to_empty_hours'],
-                'voltage_slope_vph': buffer_copy.get('voltage_slope_vph'),
-                'charging_anomaly': buffer_copy.get('charging_anomaly', False),
                 'anomaly_code': buffer_copy.get('anomaly_code'),
                 'anomaly_reason': buffer_copy.get('anomaly_reason'),
-                # MP2672 charger information (NEW)
-                'mp2672_available': buffer_copy.get('mp2672_available', False),
-                'mp2672_status': buffer_copy.get('mp2672_status'),
-                'mp2672_faults': buffer_copy.get('mp2672_faults'),
-                'mp2672_battery_missing_fault': buffer_copy.get('mp2672_battery_missing_fault', False),
-                # I2C failure and data staleness
+                'battery_low_alert': buffer_copy['battery_low_alert'],
+                'battery_remaining_pct': buffer_copy['battery_remaining_pct'] if buffer_copy['battery_remaining_pct'] is not None else 0.0,
+                'battery_voltage': buffer_copy['battery_voltage'],
+                'battery_water_health': buffer_copy.get('battery_water_health', 'UNKNOWN'),
+                'charging_anomaly': buffer_copy.get('charging_anomaly', False),
+                'charging_fault_detected': buffer_copy.get('charging_fault_detected', False),
+                'charging_fault_frequency': buffer_copy.get('charging_fault_frequency'),  # None if no fault or not detected
+                'charging_status': buffer_copy['charging_status'] if buffer_copy['charging_status'] is not None else False,
+                'charging_time_remaining_hours': buffer_copy.get('charging_time_remaining_hours'),
+                'humidity_alert': buffer_copy['humidity_alert'],
                 'i2c_failure': buffer_copy.get('i2c_failure', False),
+                'mp2672_available': buffer_copy.get('mp2672_available', False),
+                'mp2672_battery_missing_fault': buffer_copy.get('mp2672_battery_missing_fault', False),
+                'mp2672_faults': buffer_copy.get('mp2672_faults'),
+                'mp2672_status': buffer_copy.get('mp2672_status'),
+                'pcb_temperature': buffer_copy['temperature'] if buffer_copy['temperature'] is not None else 0.0,
+                'relative_humidity': buffer_copy['humidity'] if buffer_copy['humidity'] is not None else 0.0,
+                'sail_current': buffer_copy['sail_current'],
+                'saltwater_alert': buffer_copy['saltwater_alert'],
+                'saltwater_voltage': buffer_copy['saltwater_voltage'],
                 'stale_data': buffer_copy.get('stale_data', False),
-                # AC power plug-in tracking for MP2672 CHG timer
-                'charging_time_remaining_hours': buffer_copy.get('charging_time_remaining_hours')
+                'timestamp_nanosec': now.seconds_nanoseconds()[1],
+                'timestamp_sec': now.seconds_nanoseconds()[0],
+                'time_to_empty_hours': buffer_copy['time_to_empty_hours'],
+                'time_to_full_hours': buffer_copy['time_to_full_hours'],
+                'usb_pd_negotiated': buffer_copy.get('usb_pd_negotiated') if buffer_copy.get('usb_pd_negotiated') is not None else False,  # False if not available or standard USB (non-PD)
+                'voltage_slope_vph': buffer_copy.get('voltage_slope_vph')
             }
             
             # Determine MP2672 fault condition summary for alerts
@@ -900,21 +906,30 @@ class BatteryWaterNode(ArgoBaseNode):
             
             if active_faults:
                 mp2672_fault_summary = ' | '.join(active_faults)
+            else:
+                mp2672_fault_summary = None
             
-            # Add MP2672 fault summary to battery data
-            battery_data['mp2672_fault_summary'] = mp2672_fault_summary
+            # Insert mp2672_fault_summary in alphabetical position (after mp2672_faults, before mp2672_status)
+            # Create new dict with all items in alphabetical order
+            temp_dict = dict(battery_data)
+            temp_dict['mp2672_fault_summary'] = mp2672_fault_summary
+            # Rebuild dict in alphabetical order
+            battery_data = dict(sorted(temp_dict.items()))
 
             # Format battery summary
             battery_summary = None
             voltage = battery_data['battery_voltage']
             percent = battery_data['battery_remaining_pct']
 
-            if voltage is not None and percent is not None:
+            # Handle NaN values in voltage (I2C failure)
+            if voltage is not None and not math.isnan(voltage) and percent is not None:
                 battery_summary = f"{voltage:.1f}V ({percent:.0f}%)"
-            elif voltage is not None:
+            elif voltage is not None and not math.isnan(voltage):
                 battery_summary = f"{voltage:.1f}V"
             elif percent is not None:
                 battery_summary = f"{percent:.0f}%"
+            elif voltage is not None and math.isnan(voltage):
+                battery_summary = "NaN (I2C failure)"
 
             # Format critical alerts
             active_alerts = []
@@ -1228,11 +1243,16 @@ class BatteryWaterNode(ArgoBaseNode):
             return None
         
         try:
-            # Extract timestamps and voltages
-            n = len(samples)
-            t0 = samples[0][0]  # Reference time for numerical stability
-            times = [t - t0 for t, v in samples]
-            voltages = [v for t, v in samples]
+            # Filter out NaN values from samples (I2C failures)
+            valid_samples = [(t, v) for t, v in samples if not math.isnan(v)]
+            if len(valid_samples) < self.battery_lifetime_min_samples:
+                return None  # Not enough valid samples
+            
+            # Extract timestamps and voltages from valid samples
+            n = len(valid_samples)
+            t0 = valid_samples[0][0]  # Reference time for numerical stability
+            times = [t - t0 for t, v in valid_samples]
+            voltages = [v for t, v in valid_samples]
             
             # Compute sums for least squares
             sum_t = sum(times)
@@ -1266,6 +1286,10 @@ class BatteryWaterNode(ArgoBaseNode):
         Returns:
             Time in hours, or None if estimation not possible
         """
+        # Handle NaN values (I2C failure)
+        if math.isnan(voltage):
+            return None
+        
         try:
             # Priority 1: Use persistent slopes immediately if available (no need to wait for 5 samples)
             # This allows estimates to be provided right after startup if we have saved slopes
@@ -1288,6 +1312,7 @@ class BatteryWaterNode(ArgoBaseNode):
                 MIN_DISCHARGING_SLOPE_V_PER_S = -8.33e-5  # -0.3 V/h (magnitude)
                 
                 # Also check that battery is not already fully charged to avoid capturing voltage float near full
+                # Note: voltage is already validated as not NaN above
                 is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)  # Within 0.1V of full
                 is_near_empty = voltage <= 6.5  # Within 0.5V of empty
                 
@@ -1401,13 +1426,21 @@ class BatteryWaterNode(ArgoBaseNode):
     def _build_config(self, reg, scan, cs, sgl_dif):
         return ((reg & 1) << 7) | ((scan & 0b11) << 5) | ((cs & 0b1111) << 1) | (sgl_dif & 1)
 
-    def _read_adc_channel_avg(self, ch: int, repeats: int = 8, settle_delay_s: float = 0.001) -> int:
+    def _read_adc_channel_avg(self, ch: int, repeats: int = 8, settle_delay_s: float = 0.010) -> int:
         # SCAN=01: convert selected input eight times
+        # CRITICAL: Use separate write-then-read transactions (like SHT45) with explicit delay
+        # This matches the SHT45 pattern which works reliably with LP5814 on the bus
+        # Increased default delay from 1ms to 10ms to handle bus capacitance/timing issues
+        # when LP5814 is on the bus - gives ADC more time to complete conversion
         cfg = self._build_config(reg=0, scan=0b01, cs=ch, sgl_dif=1)
         acc = 0
-        self._i2c_write(self.adc_addr, cfg)
-        time.sleep(settle_delay_s)
         for _ in range(repeats):
+            # Write config byte (triggers conversion) - separate transaction
+            self._i2c_write(self.adc_addr, cfg)
+            # Explicit delay to allow conversion to complete (increased for LP5814 compatibility)
+            # SHT45 uses 15ms delay - using 10ms as compromise between speed and reliability
+            time.sleep(settle_delay_s)
+            # Read result - separate transaction
             d = self._i2c_read(self.adc_addr, 2)
             code = ((d[0] & 0x0F) << 8) | d[1]
             acc += code
@@ -2143,8 +2176,12 @@ class BatteryWaterNode(ArgoBaseNode):
         current_time = time.monotonic()
         self._consecutive_io_errors += 1
 
-        # Log error with throttling (max once per 5 seconds)
-        if current_time - self._last_i2c_error_log_time >= 5.0:
+        # Suppress "Transient" messages during retry mode - re-initialization attempts will log instead
+        # Only log transient errors in normal mode (when retry_timer doesn't exist or is None)
+        in_retry_mode = hasattr(self, 'retry_timer') and self.retry_timer is not None
+        
+        # Log error with throttling (max once per 5 seconds) - but not in retry mode
+        if not in_retry_mode and current_time - self._last_i2c_error_log_time >= 5.0:
             self.get_logger().warn(
                 f"Transient {sensor_name} error (attempt {self._consecutive_io_errors}): {error}")
             self._last_i2c_error_log_time = current_time
@@ -2215,8 +2252,6 @@ class BatteryWaterNode(ArgoBaseNode):
 
     def _reinitialize_sensors(self):
         """Re-initialize ADC and SHT45 sensors after I2C recovery"""
-        self.get_logger().info("Re-initializing ADC and SHT45 sensors...")
-        
         try:
             # Re-initialize ADC
             setup_byte = self._build_setup(
@@ -2227,11 +2262,11 @@ class BatteryWaterNode(ArgoBaseNode):
             # SHT45 doesn't need re-init, but we can verify communication
             # by attempting a read (the actual read will be done in normal operation)
             
-            self.get_logger().info("Sensor re-initialization successful")
             return True
             
         except Exception as e:
-            self.get_logger().error(f"Sensor re-initialization failed: {e}")
+            # Store error for caller to log - don't log here to avoid duplicate messages
+            self._last_reinit_error = str(e)
             return False
 
     def _check_io_recovery(self):
@@ -2247,19 +2282,20 @@ class BatteryWaterNode(ArgoBaseNode):
             self._recovery_attempt_count += 1
             self._last_recovery_attempt_time = current_time
 
-            self.get_logger().info(
-                f"Attempting sensor re-initialization (attempt {self._recovery_attempt_count})...")
-            
+            # Try re-initialization (no debug message - only log on failure)
             if self._reinitialize_sensors():
                 self.node_healthy = True
                 self.set_healthy("Sensors recovered")
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0  # Reset counter on success
                 self.get_logger().info(
-                    f"Sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
+                    f"✅ Sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
             else:
-                self.get_logger().error(
-                    f"Sensor re-initialization failed (attempt {self._recovery_attempt_count}), staying in retry mode")
+                # Re-initialization failed - log single informative error with attempt count and error details
+                error_msg = getattr(self, '_last_reinit_error', 'I2C device not available')
+                self.get_logger().warn(
+                    f"⚠️  Sensor re-initialization failed (attempt {self._recovery_attempt_count}): {error_msg} - "
+                    f"staying in retry mode. Check I2C bus connections and argo_battery_water.service status")
 
     def _retry_callback(self):
         """Retry callback for low-frequency I2C recovery attempts"""
@@ -2272,7 +2308,8 @@ class BatteryWaterNode(ArgoBaseNode):
         # Try to read sensors (will mark as healthy if successful)
         try:
             # Try a simple ADC read to test I2C
-            raw0 = self._read_adc_channel_avg(0, repeats=4, settle_delay_s=0.001)
+            # Use longer delay for reliability with LP5814 on bus
+            raw0 = self._read_adc_channel_avg(0, repeats=4, settle_delay_s=0.010)
             if raw0 > 0:  # Successful read
                 self._last_successful_read_time = time.monotonic()
                 self._consecutive_io_errors = 0
@@ -2356,7 +2393,7 @@ class BatteryWaterNode(ArgoBaseNode):
             # One-shot sample on CH3
             try:
                 raw = self._read_adc_channel_avg(
-                    3, repeats=1, settle_delay_s=0.0005)
+                    3, repeats=1, settle_delay_s=0.005)  # Increased for LP5814 compatibility
             except Exception:
                 raw = 0
             v = raw * self.lsb_value
@@ -2390,6 +2427,9 @@ class BatteryWaterNode(ArgoBaseNode):
             return None
 
     def _scale_pct(self, value, vmin, vmax):
+        # Handle NaN values (I2C failure)
+        if math.isnan(value):
+            return 0  # Return 0% for NaN (invalid reading)
         if vmax == vmin:
             return 0
         pct = int(100.0 * (max(min(value, vmax), vmin) - vmin) / (vmax - vmin))
@@ -2411,9 +2451,12 @@ class BatteryWaterNode(ArgoBaseNode):
         h_min, h_max = 0.0, 100.0
         try:
             sys.stdout.write('\x1b[H')  # home
+            # Handle NaN values in formatting
+            bat_v_str = f"{bat_v:7.3f}" if not math.isnan(bat_v) else "   NaN"
+            sw_v_str = f"{sw_v:7.3f}" if not math.isnan(sw_v) else "   NaN"
             lines = [
-                f"Battery {bat_v:7.3f} V  " + self._bar(bat_v, bat_max),
-                f"Salt   {sw_v:7.3f} V  " + self._bar(sw_v, sw_max),
+                f"Battery {bat_v_str} V  " + self._bar(bat_v, bat_max),
+                f"Salt   {sw_v_str} V  " + self._bar(sw_v, sw_max),
                 f"Sail I {cur_a:7.3f} A  " + self._bar(cur_a, cur_max),
             ]
             if temp_c is not None:
@@ -2493,6 +2536,9 @@ class BatteryWaterNode(ArgoBaseNode):
 
     def _bar(self, value: float, limit: float, width: int = 50) -> str:
         width = max(10, width)
+        # Handle NaN values (I2C failure) - show empty bar
+        if math.isnan(value):
+            return '[' + ('-' * width) + ']'  # Empty bar for NaN
         v = max(0.0, min(limit, float(value)))
         fill = int(round((v / limit) * width)) if limit > 0 else 0
         if fill > width:
@@ -2686,7 +2732,8 @@ class BatteryWaterNode(ArgoBaseNode):
             
         try:
             # Read only sail current channel (AIN2) - minimal I2C overhead
-            raw2 = self._read_adc_channel_avg(2, repeats=4, settle_delay_s=0.0005)  # Faster for 10Hz
+            # Increased delay for LP5814 compatibility (was 0.5ms, now 5ms - still fast enough for 10Hz)
+            raw2 = self._read_adc_channel_avg(2, repeats=4, settle_delay_s=0.005)
             sail_current = raw2 * self.lsb_value
             
             # Update successful read time
@@ -2767,6 +2814,19 @@ class BatteryWaterNode(ArgoBaseNode):
         # CRITICAL: Continue with last known values on failure to allow power control to detect stale data
         adc_read_successful = False
         try:
+            # CRITICAL: Re-write setup register before reading if we're getting zeros
+            # This may be needed when LP5814 is on the bus (ADC might reset or lose setup)
+            # Check if last reading was zero, and if so, re-initialize setup register
+            if (self._latest_battery_voltage == 0.0 or 
+                (not math.isnan(self._latest_battery_voltage) and self._latest_battery_voltage < 1.0)):
+                try:
+                    setup_byte = self._build_setup(reg=1, sel=0b101, clk=0, bip_uni=0, rst=1, x=0)
+                    self._i2c_write(self.adc_addr, setup_byte)
+                    time.sleep(0.01)  # Allow ADC to stabilize after setup
+                    self.get_logger().debug("Re-initialized ADC setup register (previous reading was zero/low)")
+                except Exception as e:
+                    self.get_logger().warn(f"Failed to re-initialize ADC setup register: {e}")
+            
             # ADC averages for battery and saltwater
             raw0 = self._read_adc_channel_avg(0)
             raw1 = self._read_adc_channel_avg(1)
@@ -2774,48 +2834,76 @@ class BatteryWaterNode(ArgoBaseNode):
             battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
             saltwater_voltage = raw1 * self.lsb_value
             
-            # Update successful read time for critical sensors
-            self._last_successful_read_time = time.monotonic()
-            
-            # Publish initial I2C failure state if never published before (for late-joining subscribers)
-            if self._last_published_i2c_failure_state is None:
-                self._publish_i2c_failure(self._critical_i2c_failure, force=True)
-                self.get_logger().info(f"Published initial I2C failure state (from sensor read): {self._critical_i2c_failure}")
-            
-            # Reset ADC failure timer on successful read
-            if self._adc_failure_start_time is not None:
-                self._adc_failure_start_time = None
-                if self._critical_i2c_failure:
-                    self._critical_i2c_failure = False
-                    self._publish_i2c_failure(False)
-                    self._last_i2c_failure_republish_time = 0.0  # Reset republish timer
-                    self.get_logger().info("✅ I2C recovery: ADC sensor communication restored - critical failure cleared")
-            
-            # If we were unhealthy but now have successful reads, recover to normal mode
-            if not self.node_healthy:
-                self.node_healthy = True
-                self.set_healthy("Automatic recovery successful")
-                self._switch_to_normal_mode()
-                self._recovery_attempt_count = 0
-                self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
+            # CRITICAL: Detect when ADC returns zeros or suspiciously low values
+            # This can happen with power supply issues or ADC reference problems
+            # (not I2C failures - those would throw exceptions)
+            if raw0 == 0 or (raw0 < 100 and battery_voltage < 1.0):
+                # Log raw ADC code for diagnostics
+                self.get_logger().warn(
+                    f"⚠️ ADC returned suspiciously low value: raw_code={raw0} (0x{raw0:04x}), "
+                    f"calculated_voltage={battery_voltage:.3f}V. "
+                    f"This may indicate power supply droop, ADC reference issue, or input problem. "
+                    f"Raw ADC bytes may be corrupted by bus capacitance.")
+                # Mark as stale/invalid to trigger NaN handling downstream
+                battery_voltage = float('nan')
+                saltwater_voltage = float('nan') if raw1 == 0 else saltwater_voltage
+                adc_read_successful = False  # Don't mark as successful
+                self._data_stale = True
+            else:
+                # Valid ADC reading
+                # Update successful read time for critical sensors
+                self._last_successful_read_time = time.monotonic()
+                
+                # Publish initial I2C failure state if never published before (for late-joining subscribers)
+                if self._last_published_i2c_failure_state is None:
+                    self._publish_i2c_failure(self._critical_i2c_failure, force=True)
+                    self.get_logger().info(f"Published initial I2C failure state (from sensor read): {self._critical_i2c_failure}")
+                
+                # Reset ADC failure timer on successful read
+                if self._adc_failure_start_time is not None:
+                    self._adc_failure_start_time = None
+                    if self._critical_i2c_failure:
+                        self._critical_i2c_failure = False
+                        self._publish_i2c_failure(False)
+                        self._last_i2c_failure_republish_time = 0.0  # Reset republish timer
+                        self.get_logger().info("✅ I2C recovery: ADC sensor communication restored - critical failure cleared")
+                
+                # If we were unhealthy but now have successful reads, recover to normal mode
+                if not self.node_healthy:
+                    self.node_healthy = True
+                    self.set_healthy("Automatic recovery successful")
+                    self._switch_to_normal_mode()
+                    self._recovery_attempt_count = 0
+                    self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
 
-            # Update latest critical sensor values
-            self._latest_battery_voltage = battery_voltage
-            self._latest_saltwater_voltage = saltwater_voltage
-            adc_read_successful = True
-            self._data_stale = False  # Data is fresh
+                # Update latest critical sensor values
+                self._latest_battery_voltage = battery_voltage
+                self._latest_saltwater_voltage = saltwater_voltage
+                adc_read_successful = True
+                self._data_stale = False  # Data is fresh
             
         except Exception as e:
             self._handle_io_error(e, "ADC sensors")
             # CRITICAL FIX: Continue with last known values instead of returning early
             # This allows power control to detect stale data and make safety decisions
-            # Use last known good values (or 0.0 if never read)
-            battery_voltage = self._latest_battery_voltage if self._latest_battery_voltage > 0 else 0.0
-            saltwater_voltage = self._latest_saltwater_voltage if self._latest_saltwater_voltage >= 0 else 0.0
+            # Use NaN to indicate I2C failure (more informative than 0.0)
+            # Only use last known value if it's valid (not NaN), otherwise use NaN
+            if not math.isnan(self._latest_battery_voltage) and self._latest_battery_voltage > 0:
+                battery_voltage = self._latest_battery_voltage
+            else:
+                battery_voltage = float('nan')
+            if not math.isnan(self._latest_saltwater_voltage) and self._latest_saltwater_voltage >= 0:
+                saltwater_voltage = self._latest_saltwater_voltage
+            else:
+                saltwater_voltage = float('nan')
             self._data_stale = True  # Mark data as stale
-            self.get_logger().warn(
-                f"ADC read failed, using last known values: battery={battery_voltage:.3f}V, "
-                f"saltwater={saltwater_voltage:.3f}V (data may be stale)")
+            if not math.isnan(battery_voltage):
+                self.get_logger().warn(
+                    f"ADC read failed, using last known values: battery={battery_voltage:.3f}V, "
+                    f"saltwater={saltwater_voltage:.3f}V (data may be stale)")
+            else:
+                self.get_logger().warn(
+                    f"ADC read failed, no valid previous reading: battery=NaN, saltwater=NaN (I2C failure)")
         
         # Read SHT45 sensor separately - this is non-critical and can fail gracefully
         temperature, humidity = self._read_sht45_robust()
@@ -2828,7 +2916,7 @@ class BatteryWaterNode(ArgoBaseNode):
 
         # Calculate battery remaining percentage (only if we have valid voltage reading)
         battery_remaining_pct = None
-        if adc_read_successful and battery_voltage > 0:
+        if adc_read_successful and not math.isnan(battery_voltage) and battery_voltage > 0:
             try:
                 cells = max(1, int(self.batt_series_cells))
                 v_cell = battery_voltage / float(cells) if cells > 0 else battery_voltage
@@ -3118,12 +3206,16 @@ class BatteryWaterNode(ArgoBaseNode):
     def _process_alerts(self, battery_voltage, saltwater_voltage, humidity):
         """Process and publish alert states"""
         try:
-            lower = self.batt_low_threshold_v
-            upper = lower + self.batt_low_hysteresis_v
-            if self._batt_low_prev:
-                batt_low = not (battery_voltage >= upper)
+            # Handle NaN values (I2C failure) - no alerts when voltage is invalid
+            if math.isnan(battery_voltage):
+                batt_low = False  # Don't trigger alerts on NaN
             else:
-                batt_low = (battery_voltage <= lower)
+                lower = self.batt_low_threshold_v
+                upper = lower + self.batt_low_hysteresis_v
+                if self._batt_low_prev:
+                    batt_low = not (battery_voltage >= upper)
+                else:
+                    batt_low = (battery_voltage <= lower)
             
             salt_alert = saltwater_voltage >= self.saltwater_alert_threshold_v
             humid_alert = (humidity is not None) and (humidity >= self.humidity_alert_threshold_pct)
@@ -3137,9 +3229,14 @@ class BatteryWaterNode(ArgoBaseNode):
                     pass
 
             if batt_low and not self._batt_low_prev:
-                self.get_logger().warning(f"Battery low alert: {battery_voltage:.2f} V <= threshold {lower:.2f} V")
-            if (not batt_low) and self._batt_low_prev and (battery_voltage >= upper):
-                self.get_logger().info(f"Battery voltage OK: {battery_voltage:.2f} V >= release {upper:.2f} V")
+                if not math.isnan(battery_voltage):
+                    lower = self.batt_low_threshold_v
+                    self.get_logger().warning(f"Battery low alert: {battery_voltage:.2f} V <= threshold {lower:.2f} V")
+            if (not batt_low) and self._batt_low_prev and not math.isnan(battery_voltage):
+                lower = self.batt_low_threshold_v
+                upper = lower + self.batt_low_hysteresis_v
+                if battery_voltage >= upper:
+                    self.get_logger().info(f"Battery voltage OK: {battery_voltage:.2f} V >= release {upper:.2f} V")
             if salt_alert and not self._salt_alert_prev:
                 self.get_logger().warning(f"Saltwater alert: {saltwater_voltage:.3f} V >= threshold {self.saltwater_alert_threshold_v:.3f} V")
             if humid_alert and not self._humid_alert_prev:
@@ -3204,9 +3301,12 @@ class BatteryWaterNode(ArgoBaseNode):
                 health_icon = "🟢" if self.health_status else "🔴"
                 health_status_str = f" | Health: {health_icon} {self.health_details}"
             
+            # Handle NaN values in logging
+            battery_voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+            saltwater_voltage_str = f"{saltwater_voltage:.3f}V" if not math.isnan(saltwater_voltage) else "NaN"
             self.get_logger().info(
-                f"Status: Battery={battery_voltage:.3f}V ({battery_pct_str}), "
-                f"Saltwater={saltwater_voltage:.3f}V, Sail_current={sail_current:.3f}A, "
+                f"Status: Battery={battery_voltage_str} ({battery_pct_str}), "
+                f"Saltwater={saltwater_voltage_str}, Sail_current={sail_current:.3f}A, "
                 f"{temp_humid_str}{charging_str}{slope_str}{lifetime_str}{health_status_str}"
             )
             self._last_log_time = current_time

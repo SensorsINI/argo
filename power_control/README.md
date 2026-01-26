@@ -51,7 +51,7 @@ The boot indicator service provides early feedback during this long boot sequenc
 ### GPIO Pin Assignments
 - **PI3 (pin 40, GPIO 259)**: `POW_OFF` - Output pulse to relay RESET coil (active HIGH)
 - **PI9 (pin 28, GPIO 265)**: `POW_BUT` - Power button input (active HIGH when pressed)
-- **PH4 (pin 18, GPIO 228)**: Green LED in power button (active LOW - cathode control)
+- **PH4 (pin 18, GPIO 228)**: Green LED in power button (ACTIVE_HIGH - NFET control: HIGH = ON, LOW = OFF)
 - **PI1 (pin 12, GPIO 257)**: Blue LED in power button (active LOW - cathode control)
 - **PI16 (pin 37, GPIO 272)**: Red LED for SOS warnings (active LOW - cathode control)
 - **PC12 (pin 36, GPIO 76)**: `!CHARGING` from MP2672GD (LOW = charging active)

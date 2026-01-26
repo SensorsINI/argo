@@ -64,5 +64,5 @@ The entire process is managed by the included `Makefile`.
 
 -   **GPIO Pin**: `PH4`
 -   **Physical Pin**: Pin 18 (on the 40-pin header)
--   **Device**: Green LED in the main power button.
--   **Activation**: The overlay configures the pin as `ACTIVE_LOW`, matching the hardware design.
+-   **Device**: Green LED in the main power button (controlled via NFET).
+-   **Activation**: The overlay configures the pin as `ACTIVE_HIGH` (NFET control: GPIO HIGH = LED ON, GPIO LOW = LED OFF).

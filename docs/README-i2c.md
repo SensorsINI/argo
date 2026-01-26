@@ -53,6 +53,7 @@ The `pi-i2c0` overlay enables I2C bus 0 on pins PI5/PI6.
 | 0x21 | Sensirion SDP3x | Wind sensor (CCW) | `anem.py` | 5V supply |
 | 0x22 | Sensirion SDP3x | Wind sensor (Center) | `anem.py` | 5V supply |
 | 0x23 | Sensirion SDP3x | Wind sensor (CW) | `anem.py` | 5V supply |
+| 0x2c | TI LP5814DLR | Mast RGBW LED controller | `argo_mast_leds.py` | 5V supply |
 | 0x34 | MAX11612 ADC | Battery/water monitoring | `argo_battery_water.py` | 5V supply |
 | 0x44 | SHT45 | Temperature/humidity | `argo_battery_water.py` | 3.3V supply |
 | 0x4a | Adafruit BNO085 | 9-DOF IMU | `bno085.py` (via C++ driver) | 5V supply |

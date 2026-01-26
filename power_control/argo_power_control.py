@@ -15,7 +15,10 @@
 # HARDWARE CONFIGURATION (Rev3 PCB):
 #   - PI3 (Pin 40, wPi 27, GPIO 259): POW_OFF - Output for power relay control (active HIGH pulse to reset relay)
 #   - PI9 (Pin 28, wPi 18, GPIO 265): POW_BUT - Input from power button (active HIGH when pressed)
-#   - PH4 (Pin 18, wPi 10, GPIO 228): Green LED in power button (active LOW - cathode control)
+#   - PH4 (Pin 18, wPi 10, GPIO 228): Green LED in power button
+#     Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
+#     Device tree: GPIO_ACTIVE_LOW (kernel driver inverts polarity)
+#     Software: Inverts brightness values (state=True → brightness=0, state=False → brightness=1)
 #   - PI1 (Pin 12, wPi 6, GPIO 257): Blue LED in power button (active LOW - cathode control)
 #   - PI16 (Pin 37, wPi 25, GPIO 272): Red LED: GPIO controlled (active LOW - cathode control)
 #   - LEDs: Common anode RGB LED, GPIO controls cathode (LOW = ON, HIGH = OFF)
@@ -219,6 +222,7 @@ import select
 import tty
 import termios
 import json
+import math
 from typing import Optional, Dict, Any
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -230,6 +234,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../node
 # ROS2 imports for service client
 try:
     import rclpy
+    from rclpy.logging import LoggingSeverity
     from std_srvs.srv import Trigger, SetBool
     from argo_base_node import ArgoBaseNode # Import the base node
     ROS2_AVAILABLE = True
@@ -351,7 +356,7 @@ SOS_PATTERN_DURATION_S = 2.0       # Total duration of one SOS pattern cycle (se
 
 # Charging State LED Pattern Configuration
 # LED to use for charging state indication (easy to change later)
-CHARGE_STATE_LED = 'green'  # Options: 'red', 'green', 'blue' (currently using green LED)
+CHARGE_STATE_LED = 'blue'  # Options: 'red', 'green', 'blue' (currently using blue LED)
 CHARGE_STATE_PERIOD_S = 3.0        # Total period for charge state flash pattern (seconds)
 CHARGE_STATE_DUTY_CYCLE = 0.2      # Duty cycle for charge state flashes (20% on, 80% off) - increased from 0.1 for better visibility
 CHARGE_STATE_LOG_INTERVAL_S = 30.0 # Log charge state pattern every 30 seconds when active
@@ -1562,21 +1567,61 @@ class PowerController(ArgoBaseNode):
     pass
 
     def set_green_led(self, state):
-        """Control green LED (system running indicator) via sysfs or direct GPIO."""
+        """Control green LED (system running indicator) via sysfs or direct GPIO.
+        
+        CRITICAL POLARITY NOTE:
+        - Hardware: PH4 controls green LED via NFET (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
+        - Device tree: Configured as GPIO_ACTIVE_LOW, causing kernel driver to invert polarity
+        - Kernel behavior: brightness=1 drives GPIO LOW, brightness=0 drives GPIO HIGH
+        - Software workaround: Invert brightness values to match hardware requirements
+          * state=True (LED ON) → brightness=0 (kernel drives GPIO HIGH → LED ON) ✓
+          * state=False (LED OFF) → brightness=1 (kernel drives GPIO LOW → LED OFF) ✓
+        """
         # GPIO 228 (PH4) is controlled via sysfs when available (preferred method)
         # Falls back to direct GPIO if sysfs is not available
         self.green_led_state = state
-        # Publish RGB state for mast head LED mirroring
-        self._publish_rgb_state()
+        # Note: RGB state publishing removed - now publishes pattern once per cycle
         
         # Use sysfs control if available (preferred method)
         if self.green_led_available and self.green_led_using_sysfs:
             try:
-                # For ACTIVE_LOW LED with invert=0: brightness 1 = ON, brightness 0 = OFF
-                # The kernel LED driver handles the ACTIVE_LOW inversion automatically
-                brightness_value = 1 if state else 0
+                # POLARITY WORKAROUND: Invert brightness values due to kernel driver polarity inversion
+                # Hardware needs: GPIO HIGH = ON, GPIO LOW = OFF
+                # Kernel driver with GPIO_ACTIVE_LOW: brightness=1 → GPIO LOW, brightness=0 → GPIO HIGH
+                # Solution: Write inverted brightness (state=True → brightness=0, state=False → brightness=1)
+                brightness_value = 0 if state else 1
+                
+                # Write with explicit flush to ensure it takes effect immediately
                 with open(self.green_led_brightness_path, 'w') as f:
                     f.write(str(brightness_value))
+                    f.flush()
+                    import os
+                    os.fsync(f.fileno())  # Force write to disk
+                
+                # Verify the write took effect and check for trigger changes
+                try:
+                    with open(self.green_led_brightness_path, 'r') as f:
+                        actual_brightness = int(f.read().strip())
+                    
+                    # Only log brightness mismatches (warnings)
+                    if actual_brightness != brightness_value:
+                        self.get_logger().warning(
+                            f"PH4 brightness mismatch! Wrote {brightness_value}, read back {actual_brightness}")
+                    
+                    # Check if trigger changed (kernel might have taken control back)
+                    with open(self.green_led_trigger_path, 'r') as f:
+                        trigger_content = f.read()
+                        if '[none]' not in trigger_content:
+                            self.get_logger().warning(
+                                f"PH4 trigger changed! Expected [none], got: {trigger_content[:100]}")
+                            # Try to restore control
+                            with open(self.green_led_trigger_path, 'w') as f2:
+                                f2.write('none')
+                                f2.flush()
+                                os.fsync(f2.fileno())
+                except Exception as verify_e:
+                    self.get_logger().debug(f"Could not verify PH4 state: {verify_e}")
+                
                 return
             except Exception as e:
                 self.get_logger().error(f"Error controlling green LED via sysfs: {e}")
@@ -1610,8 +1655,7 @@ class PowerController(ArgoBaseNode):
         # used for the green heartbeat signal due to hardware issues with PH4/PH0.
         # Still track state and publish RGB for future use when blue LED is enabled
         self.blue_led_state = state
-        # Publish RGB state for mast head LED mirroring
-        self._publish_rgb_state()
+        # Note: RGB state publishing removed - now publishes pattern once per cycle
 
     def set_red_led(self, state):
         """Control red LED (battery warning/SOS indicator)"""
@@ -1621,9 +1665,8 @@ class PowerController(ArgoBaseNode):
             # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
             value = LED_ON_STATE if state else LED_OFF_STATE
             self.red_led_line.set_value(value)
-            self.red_led_state = state  # Track red LED state for RGB publishing
-            # Publish RGB state for mast head LED mirroring
-            self._publish_rgb_state()
+            self.red_led_state = state  # Track red LED state
+            # Note: RGB state publishing removed - now publishes pattern once per cycle
         except Exception as e:
             self.get_logger().error(f"Error controlling red LED: {e}")
 
@@ -1677,6 +1720,88 @@ class PowerController(ArgoBaseNode):
             time.sleep(blink_interval)
 
     # TODO for rev3 PCB, LEDs are turned on by low signal on pin because LEDs in button are connected with positive side connected to 5V and negative to the pin, so we need to invert the driving logic signal
+    def _check_ph4_hardware_state(self):
+        """Check actual PH4 hardware state and compare with expected state"""
+        try:
+            expected_state = self.green_led_state
+            actual_state = None
+            method = None
+            
+            sysfs_state = None
+            gpio_state = None
+            
+            # Check sysfs state if available
+            if self.green_led_available and self.green_led_using_sysfs:
+                try:
+                    # Check trigger first - should be "none" for manual control
+                    try:
+                        with open(self.green_led_trigger_path, 'r') as f:
+                            trigger_content = f.read().strip()
+                            # Trigger file shows available triggers with [none] indicating current
+                            # Format is usually: "[none] heartbeat ..." where [none] means it's active
+                            trigger_is_none = '[none]' in trigger_content
+                            if not trigger_is_none:
+                                # Check if it's set to heartbeat (kernel control)
+                                if 'heartbeat' in trigger_content.lower() and '[heartbeat]' in trigger_content:
+                                    self.get_logger().warning(
+                                        f"PH4 trigger changed to heartbeat! Kernel may be controlling LED. "
+                                        f"Trigger content: {trigger_content[:200]}"
+                                    )
+                                else:
+                                    self.get_logger().warning(
+                                        f"PH4 trigger may have changed! Current trigger content: {trigger_content[:200]}"
+                                    )
+                    except Exception as e:
+                        self.get_logger().debug(f"Could not read PH4 trigger: {e}")
+                    
+                    # Check brightness
+                    with open(self.green_led_brightness_path, 'r') as f:
+                        brightness_str = f.read().strip()
+                        actual_brightness = int(brightness_str) if brightness_str.isdigit() else None
+                        if actual_brightness is not None:
+                            sysfs_state = (actual_brightness == 1)
+                except Exception as e:
+                    self.get_logger().debug(f"Could not read PH4 sysfs state: {e}")
+            
+            # ALWAYS check actual GPIO pin state when available (even if using sysfs)
+            # This detects if kernel driver is not properly controlling the GPIO
+            if self.gpio_available and self.green_led_line is not None:
+                try:
+                    gpio_value = self.green_led_line.get_value()
+                    # Active-low: GPIO 0 (LOW) = LED ON, GPIO 1 (HIGH) = LED OFF
+                    gpio_state = (gpio_value == LED_ON_STATE)
+                except Exception as e:
+                    self.get_logger().debug(f"Could not read PH4 GPIO state: {e}")
+            
+            # Use GPIO state as primary (actual hardware), sysfs as secondary (what kernel thinks)
+            if gpio_state is not None:
+                actual_state = gpio_state
+                method = "gpio"
+                # Compare with sysfs if both available
+                if sysfs_state is not None and sysfs_state != gpio_state:
+                    self.get_logger().warning(
+                        f"PH4 sysfs/GPIO mismatch! Sysfs brightness={sysfs_state}, "
+                        f"GPIO pin={gpio_state} (GPIO value={gpio_value}). "
+                        f"Kernel LED driver may not be controlling GPIO correctly."
+                    )
+            elif sysfs_state is not None:
+                actual_state = sysfs_state
+                method = "sysfs"
+            
+            # Log mismatch if detected
+            if actual_state is not None and actual_state != expected_state:
+                self.get_logger().warning(
+                    f"PH4 state mismatch detected! Expected={expected_state}, "
+                    f"Actual={actual_state} (via {method}), "
+                    f"GPIO228 may be controlled by another process"
+                )
+            elif actual_state is not None:
+                self.get_logger().debug(
+                    f"PH4 state check OK: expected={expected_state}, actual={actual_state} (via {method})"
+                )
+        except Exception as e:
+            self.get_logger().debug(f"Error checking PH4 hardware state: {e}")
+
     def green_led_heartbeat(self):
         """LED slot-based heartbeat - 3-second cycle with 10 slots of 0.3s each"""
         while self.running:
@@ -1813,6 +1938,11 @@ class PowerController(ArgoBaseNode):
 
     def _execute_led_pattern(self, pattern: str):
         """Execute LED pattern over 10 slots of 0.3s each"""
+        # Track LED states for both ON and OFF periods within each slot
+        # Each slot has: ON period (0.03s) + OFF period (0.27s) = 0.3s total
+        # Total: 10 slots × 2 periods = 20 states tracked
+        slot_states = {'R': [], 'G': [], 'B': []}  # Track red, green, blue for each period
+        
         for slot in range(10):
             if not self.running:
                 break
@@ -1826,6 +1956,11 @@ class PowerController(ArgoBaseNode):
                 self.set_red_led(False)
                 self.set_blue_led(False)
             
+            # Record LED states during ON period (0.03s)
+            slot_states['R'].append('r' if self.red_led_state else '-')
+            slot_states['G'].append('g' if self.green_led_state else '-')
+            slot_states['B'].append('b' if self.blue_led_state else '-')
+            
             # Each slot: 0.03s on + 0.27s off = 0.3s total (10% duty cycle)
             self._heartbeat_sleep(0.03)  # LED on for 0.03s (10% of 0.3s)
             
@@ -1836,7 +1971,31 @@ class PowerController(ArgoBaseNode):
             self.set_green_led(False)
             self.set_red_led(False)
             self.set_blue_led(False)
+            
+            # Record LED states during OFF period (0.27s) - should all be OFF
+            slot_states['R'].append('r' if self.red_led_state else '-')
+            slot_states['G'].append('g' if self.green_led_state else '-')
+            slot_states['B'].append('b' if self.blue_led_state else '-')
+            
             self._heartbeat_sleep(0.27)  # LED off for 0.27s (90% of 0.3s)
+        
+        # Publish pattern message once per cycle for mast LED mirroring
+        self._publish_led_pattern(pattern)
+        
+        # Print summary of LED states across all periods (20 total: 10 slots × 2 periods each)
+        # Only format and log if debug level is enabled to avoid CPU overhead
+        if len(slot_states['R']) == 20:
+            logger = self.get_logger()
+            # Check if debug logging is enabled before formatting (avoids string formatting overhead)
+            # Only format strings if DEBUG level is actually enabled
+            if logger.get_effective_level() <= logging.DEBUG:
+                r_line = f"R:{''.join(slot_states['R'])}"
+                g_line = f"G:{''.join(slot_states['G'])}"
+                b_line = f"B:{''.join(slot_states['B'])}"
+                logger.debug(f"LED pattern execution summary (20 periods: 10 slots × [ON,OFF]):")
+                logger.debug(r_line)
+                logger.debug(g_line)
+                logger.debug(b_line)
 
     def _set_leds_for_slot(self, led_state: str):
         """Set LED states for a single slot based on character"""
@@ -2903,6 +3062,8 @@ class PowerController(ArgoBaseNode):
         try:
             # Create power control services
             from std_srvs.srv import Trigger
+            from std_msgs.msg import Bool, UInt8, Int32
+            from geometry_msgs.msg import Vector3
             self.start_recording_service = self.create_service(
                 Trigger, '/argo/power/start_recording', self._handle_start_recording_service)
             self.stop_recording_service = self.create_service(
@@ -2919,18 +3080,16 @@ class PowerController(ArgoBaseNode):
                 String, '/argo/power/status', 10)
             self.button_event_publisher = self.create_publisher(
                 String, '/argo/power/button_events', 10)
-            # RGB LED state publisher for mast head LED mirroring
-            self.power_button_rgb_publisher = self.create_publisher(
-                Vector3, '/argo/power_button/rgb', 10)
+            # LED pattern publisher for mast head LED mirroring (publishes once per cycle)
+            # Format: JSON string with category, pattern, cycle_duration, slot_duration
+            self.power_button_pattern_publisher = self.create_publisher(
+                String, '/argo/power_button/pattern', 10)
 
             # Create subscription to controller pause state
-            from std_msgs.msg import Bool
             self.controller_pause_sub = self.create_subscription(
                 Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
 
             # Create subscriptions for system status monitoring
-            from std_msgs.msg import UInt8, Int32
-            from geometry_msgs.msg import Vector3
             
             # Anemometer health monitoring
             self.anem_health_sub = self.create_subscription(
@@ -3050,21 +3209,53 @@ class PowerController(ArgoBaseNode):
             except Exception as e:
                 self.get_logger().debug(f"Failed to publish button event: {e}")
 
-    def _publish_rgb_state(self):
-        """Publish current RGB LED state for mast head LED mirroring"""
-        if not hasattr(self, 'power_button_rgb_publisher') or not self.power_button_rgb_publisher:
+    def _publish_led_pattern(self, pattern: str):
+        """Publish LED pattern for mast head LED mirroring (once per cycle).
+        
+        Publishes a JSON message with:
+        - category: Pattern category (heartbeat, sos, charging, shutdown, wifi_loss)
+        - pattern: Pattern string (e.g., "ggrrrr....")
+        - cycle_duration: Total cycle duration in seconds (3.0 for heartbeat)
+        - slot_duration: Duration of each slot in seconds (0.3 for heartbeat)
+        - on_period: ON period duration in seconds (0.03 for heartbeat)
+        - off_period: OFF period duration in seconds (0.27 for heartbeat)
+        """
+        if not hasattr(self, 'power_button_pattern_publisher') or not self.power_button_pattern_publisher:
             return  # Publisher not yet created (during initialization)
         
         try:
-            from geometry_msgs.msg import Vector3
-            msg = Vector3()
-            # Convert boolean states to normalized brightness (0.0 = OFF, 1.0 = ON)
-            msg.x = 1.0 if self.red_led_state else 0.0
-            msg.y = 1.0 if self.green_led_state else 0.0
-            msg.z = 1.0 if self.blue_led_state else 0.0
-            self.power_button_rgb_publisher.publish(msg)
+            import json
+            from std_msgs.msg import String
+            
+            # Determine pattern category
+            category = "heartbeat"
+            if self.heartbeat_paused:
+                if self.sos_led_active:
+                    category = "sos"
+                elif self.charge_state_led_active:
+                    category = "charging"
+                elif self.shutdown_initiated:
+                    category = "shutdown"
+                elif self.wifi_monitoring_active and not self.wifi_connected:
+                    category = "wifi_loss"
+                else:
+                    category = self.heartbeat_pause_reason or "unknown"
+            
+            # Create pattern message
+            pattern_data = {
+                "category": category,
+                "pattern": pattern,
+                "cycle_duration": 3.0,  # 10 slots × 0.3s = 3.0s
+                "slot_duration": 0.3,   # Each slot is 0.3s
+                "on_period": 0.03,      # ON period within each slot
+                "off_period": 0.27      # OFF period within each slot
+            }
+            
+            msg = String()
+            msg.data = json.dumps(pattern_data)
+            self.power_button_pattern_publisher.publish(msg)
         except Exception as e:
-            self.get_logger().debug(f"Failed to publish RGB state: {e}")
+            self.get_logger().debug(f"Failed to publish LED pattern: {e}")
 
     def _controller_pause_state_callback(self, msg):
         """Receive controller pause state updates from topic"""
@@ -3380,6 +3571,11 @@ class PowerController(ArgoBaseNode):
         INVALID_READING_TIMEOUT_S = 3600.0  # 1 hour = 3600 seconds
         INVALID_READING_TIMEOUT_CHECKS = int(INVALID_READING_TIMEOUT_S / BATTERY_MONITORING_INTERVAL_S)  # ~120 checks at 30s intervals
         invalid_reading_start_time = None  # Track when invalid readings started
+        last_valid_reading_time = None  # Track when last valid reading occurred
+        
+        # Throttling for invalid reading log messages (prevent spam)
+        last_critical_invalid_log_time = 0.0
+        CRITICAL_INVALID_LOG_INTERVAL = 300.0  # Log every 5 minutes (300s) once threshold exceeded
 
         # Startup grace period - don't count failures until battery service has been seen at least once
         # This prevents false critical alerts if argo_battery_water.service starts after power_control.service
@@ -3407,48 +3603,236 @@ class PowerController(ArgoBaseNode):
                     battery_voltage = battery_data.get('battery_voltage', 0)
                     charging_status = battery_data.get('charging_status', None)
                     ac_power_present = battery_data.get('ac_power_present', None)
+                    # CRITICAL: Extract I2C failure and stale data flags to distinguish I2C failures from actual low voltage
+                    i2c_failure = battery_data.get('i2c_failure', False)
+                    stale_data = battery_data.get('stale_data', False)
                     # Prefer topic value if available (faster updates), otherwise use service value
                     ac_power = self.ac_power_from_topic if self.ac_power_from_topic is not None else ac_power_present
                     self.last_battery_voltage = battery_voltage
                     self.get_logger().debug(
-                        f"Battery data received: {battery_voltage:.3f}V (charging={charging_status}, ac_power={ac_power_present})")
+                        f"Battery data received: {battery_voltage:.3f}V (charging={charging_status}, ac_power={ac_power_present}, "
+                        f"i2c_failure={i2c_failure}, stale_data={stale_data})")
 
-                    # CRITICAL SAFETY CHECK: Validate battery voltage is reasonable
-                    # Invalid readings (0V, very low, or impossibly high) indicate sensor/communication errors
-                    # Short-term failures are OK (external sensor shorts during sailing)
-                    # But sustained failures (>1 hour) indicate serious problem and should trigger shutdown
-                    if battery_voltage <= 0 or battery_voltage < 3.0 or battery_voltage > 30.0:
+                    # CRITICAL SAFETY CHECK: If I2C is failing or data is stale, treat as I2C failure (not critical battery)
+                    # I2C failures should only trigger shutdown after 1 hour of sustained failure, not immediately
+                    # This prevents false shutdowns when I2C bus is temporarily unavailable (e.g., sensor short)
+                    if i2c_failure or stale_data:
+                        # I2C is failing - treat any voltage reading (including 0.0V) as invalid due to I2C failure
+                        # Do NOT treat as critical low voltage - only track for 1-hour invalid reading timeout
                         consecutive_invalid_readings += 1
+                        current_time = time.time()
                         
-                        # Track when invalid readings started
+                        # Calculate time since last valid reading
+                        time_since_valid_str = ""
+                        if last_valid_reading_time is not None:
+                            time_since_valid = current_time - last_valid_reading_time
+                            if time_since_valid < 60:
+                                time_since_valid_str = f" ({time_since_valid:.1f}s since last valid reading)"
+                            elif time_since_valid < 3600:
+                                time_since_valid_str = f" ({time_since_valid/60:.1f}min since last valid reading)"
+                            else:
+                                time_since_valid_str = f" ({time_since_valid/3600:.2f}h since last valid reading)"
+                        else:
+                            time_since_valid_str = " (no valid reading recorded yet)"
+                        
                         if invalid_reading_start_time is None:
-                            invalid_reading_start_time = time.time()
-                            self.get_logger().error(
-                                f"Invalid battery voltage reading: {battery_voltage:.3f}V "
-                                f"(count: {consecutive_invalid_readings}/{MAX_CONSECUTIVE_FAILURES}) - likely sensor/I2C error")
-                            self.get_logger().error(
-                                f"⚠️  Short-term invalid readings are OK (external sensor failures), but sustained failures >1 hour will trigger shutdown")
+                            invalid_reading_start_time = current_time
+                            failure_type = "I2C failure" if i2c_failure else "stale data"
+                            # Handle NaN in logging
+                            voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                            # Concise single-line message
+                            self.get_logger().warn(
+                                f"{failure_type} detected: {voltage_str}{time_since_valid_str} - treating as invalid reading (not critical battery). "
+                                f"Shutdown after 1h sustained failure.")
                         else:
                             # Calculate duration of invalid readings
-                            invalid_duration = time.time() - invalid_reading_start_time
+                            invalid_duration = current_time - invalid_reading_start_time
                             invalid_duration_hours = invalid_duration / 3600.0
                             
-                            # Log periodically (every 10 minutes) to show sustained failure
-                            if consecutive_invalid_readings % 20 == 0:  # Every 20 checks = ~10 minutes
+                            # BUG FIX: Validate that duration is reasonable (not negative or impossibly large)
+                            if invalid_duration < 0 or invalid_duration > INVALID_READING_TIMEOUT_S * 2:
                                 self.get_logger().error(
-                                    f"Invalid battery voltage reading: {battery_voltage:.3f}V "
-                                    f"(count: {consecutive_invalid_readings}, duration: {invalid_duration_hours:.2f}h) - likely sensor/I2C error")
-                                self.get_logger().error(
-                                    f"⚠️  Sustained invalid readings for {invalid_duration_hours:.2f}h - shutdown will trigger if >1 hour")
+                                    f"⚠️  Invalid duration calculation detected: {invalid_duration:.1f}s - resetting invalid reading timer")
+                                invalid_reading_start_time = current_time
+                                consecutive_invalid_readings = 1
+                                invalid_duration = 0.0
+                                invalid_duration_hours = 0.0
+                            
+                            # Log periodically (every 20 minutes) to show sustained failure - concise single line, heavily throttled
+                            # Only log every 40 checks (~20 minutes at 30s intervals) AND throttle to prevent spam
+                            if consecutive_invalid_readings % 40 == 0:  # Every 40 checks = ~20 minutes at 30s intervals
+                                # Additional throttling: only log if enough time has passed (handles faster check rates)
+                                time_since_last_periodic_log = current_time - (last_critical_invalid_log_time if last_critical_invalid_log_time > 0 else 0)
+                                if time_since_last_periodic_log >= 1200.0:  # At least 20 minutes since last periodic log
+                                    failure_type = "I2C failure" if i2c_failure else "stale data"
+                                    # Handle NaN in logging
+                                    voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                                    self.get_logger().warn(
+                                        f"{failure_type} continuing: {voltage_str} ({consecutive_invalid_readings} readings, "
+                                        f"{invalid_duration_hours:.2f}h duration){time_since_valid_str} - shutdown after 1h sustained failure")
+                                    last_critical_invalid_log_time = current_time
 
                         # Check if invalid readings have persisted for >1 hour
                         if invalid_reading_start_time is not None:
-                            invalid_duration = time.time() - invalid_reading_start_time
+                            invalid_duration = current_time - invalid_reading_start_time
+                            
+                            # BUG FIX: Additional validation - ensure duration is reasonable before checking timeout
+                            if invalid_duration < 0:
+                                self.get_logger().error(
+                                    f"⚠️  Negative duration detected: {invalid_duration:.1f}s - resetting invalid reading timer")
+                                invalid_reading_start_time = current_time
+                                consecutive_invalid_readings = 1
+                                invalid_duration = 0.0
+                            
+                            # BUG FIX: Validate that duration matches expected number of readings
+                            expected_min_readings = int(INVALID_READING_TIMEOUT_S / BATTERY_MONITORING_INTERVAL_S)
                             if invalid_duration >= INVALID_READING_TIMEOUT_S:
+                                # Sanity check: duration should roughly match number of readings
+                                min_expected_readings = int(expected_min_readings * 0.8)
                                 invalid_duration_hours = invalid_duration / 3600.0
+                                if consecutive_invalid_readings < min_expected_readings:
+                                    self.get_logger().error(
+                                        f"⚠️  Duration mismatch detected: {invalid_duration_hours:.2f}h duration but only "
+                                        f"{consecutive_invalid_readings} readings (expected ~{expected_min_readings}){time_since_valid_str}")
+                                    self.get_logger().error(
+                                        f"This indicates a timestamp corruption or system clock issue - resetting timer")
+                                    invalid_reading_start_time = current_time
+                                    consecutive_invalid_readings = 1
+                                    continue  # Skip shutdown, continue monitoring
+                                
+                                failure_type = "I2C failure" if i2c_failure else "stale data"
+                                self.get_logger().error(
+                                    f"🔴 CRITICAL: {failure_type} has persisted for {invalid_duration_hours:.2f}h "
+                                    f"({consecutive_invalid_readings} consecutive readings){time_since_valid_str}")
+                                self.get_logger().error(
+                                    f"This indicates a serious sensor/I2C communication problem!")
+                                self.get_logger().error(
+                                    f"⚠️  SAFETY SHUTDOWN: Initiating safe shutdown to prevent battery damage")
+                                self.get_logger().error(
+                                    f"Battery monitoring unavailable - cannot verify battery voltage!")
+                                self.get_logger().error(
+                                    f"Check I2C bus and argo_battery_water.service status")
+                                
+                                # Initiate safe shutdown due to sustained I2C failure
+                                # Use voltage=0.0 to indicate unknown voltage (monitoring unavailable)
+                                self.initiate_critical_battery_halt(
+                                    battery_voltage=0.0, 
+                                    reason=f"sustained_i2c_failure_{invalid_duration_hours:.1f}h")
+                                # Note: initiate_critical_battery_halt will handle the shutdown sequence
+                                break  # Exit monitoring loop after initiating shutdown
+
+                        # Log warning for short-term failures (but don't shutdown yet) - throttled to prevent spam
+                        if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
+                            # Throttle logging: only log every 5 minutes or on first occurrence
+                            should_log = (current_time - last_critical_invalid_log_time) >= CRITICAL_INVALID_LOG_INTERVAL
+                            if should_log or consecutive_invalid_readings == MAX_CONSECUTIVE_FAILURES:
+                                invalid_duration_str = ""
+                                if invalid_reading_start_time is not None:
+                                    invalid_duration = current_time - invalid_reading_start_time
+                                    invalid_duration_hours = invalid_duration / 3600.0
+                                    invalid_duration_str = f" (duration: {invalid_duration_hours:.2f}h)"
+                                
+                                failure_type = "I2C failure" if i2c_failure else "stale data"
+                                # Concise single-line message
+                                self.get_logger().error(
+                                    f"⚠️  {failure_type}: {consecutive_invalid_readings} consecutive invalid readings{invalid_duration_str}{time_since_valid_str} - "
+                                    f"System continues (shutdown after 1h sustained failure). Check I2C bus and argo_battery_water.service")
+                                last_critical_invalid_log_time = current_time
+                        continue  # Skip critical battery check - this is I2C failure, not low voltage
+
+                    # CRITICAL SAFETY CHECK: NaN or 0.0V indicates invalid reading (I2C failure)
+                    # NaN or 0.0V reading indicates sensor/communication error, not actual battery voltage
+                    # Short-term failures are OK (external sensor shorts during sailing)
+                    # But sustained failures (>1 hour) indicate serious problem and should trigger shutdown
+                    if math.isnan(battery_voltage) or battery_voltage <= 0.0:
+                        consecutive_invalid_readings += 1
+                        
+                        # Track when invalid readings started (only on first invalid reading in sequence)
+                        current_time = time.time()
+                        
+                        # Calculate time since last valid reading
+                        time_since_valid_str = ""
+                        if last_valid_reading_time is not None:
+                            time_since_valid = current_time - last_valid_reading_time
+                            if time_since_valid < 60:
+                                time_since_valid_str = f" ({time_since_valid:.1f}s since last valid reading)"
+                            elif time_since_valid < 3600:
+                                time_since_valid_str = f" ({time_since_valid/60:.1f}min since last valid reading)"
+                            else:
+                                time_since_valid_str = f" ({time_since_valid/3600:.2f}h since last valid reading)"
+                        else:
+                            time_since_valid_str = " (no valid reading recorded yet)"
+                        
+                        if invalid_reading_start_time is None:
+                            invalid_reading_start_time = current_time
+                            # Handle NaN in logging
+                            voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                            self.get_logger().warn(
+                                f"Invalid battery reading: {voltage_str} (count: {consecutive_invalid_readings}){time_since_valid_str} - "
+                                f"likely sensor/I2C error. Short-term failures OK; shutdown after 1h sustained failure.")
+                        else:
+                            # Calculate duration of invalid readings
+                            invalid_duration = current_time - invalid_reading_start_time
+                            invalid_duration_hours = invalid_duration / 3600.0
+                            
+                            # BUG FIX: Validate that duration is reasonable (not negative or impossibly large)
+                            # This prevents false shutdowns if system clock was adjusted or if timestamp was corrupted
+                            if invalid_duration < 0 or invalid_duration > INVALID_READING_TIMEOUT_S * 2:
+                                self.get_logger().error(
+                                    f"⚠️  Invalid duration calculation detected: {invalid_duration:.1f}s - resetting invalid reading timer")
+                                self.get_logger().error(
+                                    f"This may indicate a system clock adjustment or timestamp corruption")
+                                invalid_reading_start_time = current_time  # Reset to current time
+                                consecutive_invalid_readings = 1  # Reset count to 1 (current reading)
+                                invalid_duration = 0.0
+                                invalid_duration_hours = 0.0
+                            
+                            # Log periodically (every 20 minutes) to show sustained failure - heavily throttled and concise
+                            if consecutive_invalid_readings % 40 == 0:  # Every 40 checks = ~20 minutes
+                                # Additional throttling: only log if enough time has passed
+                                time_since_last_periodic_log = current_time - (last_critical_invalid_log_time if last_critical_invalid_log_time > 0 else 0)
+                                if time_since_last_periodic_log >= 1200.0:  # At least 20 minutes since last periodic log
+                                    # Handle NaN in logging
+                                    voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                                    self.get_logger().warn(
+                                        f"Invalid battery reading continuing: {voltage_str} ({consecutive_invalid_readings} readings, "
+                                        f"{invalid_duration_hours:.2f}h duration){time_since_valid_str} - shutdown after 1h sustained failure")
+                                    last_critical_invalid_log_time = current_time
+
+                        # Check if invalid readings have persisted for >1 hour
+                        # Only check if we have a valid start time and duration is reasonable
+                        if invalid_reading_start_time is not None:
+                            invalid_duration = current_time - invalid_reading_start_time
+                            
+                            # BUG FIX: Additional validation - ensure duration is reasonable before checking timeout
+                            if invalid_duration < 0:
+                                self.get_logger().error(
+                                    f"⚠️  Negative duration detected: {invalid_duration:.1f}s - resetting invalid reading timer")
+                                invalid_reading_start_time = current_time
+                                consecutive_invalid_readings = 1
+                                invalid_duration = 0.0
+                            
+                            # BUG FIX: Validate that duration matches expected number of readings
+                            # If we have very few readings but duration shows 1 hour, something is wrong
+                            # Each reading happens every BATTERY_MONITORING_INTERVAL_S seconds
+                            expected_min_readings = int(INVALID_READING_TIMEOUT_S / BATTERY_MONITORING_INTERVAL_S)
+                            if invalid_duration >= INVALID_READING_TIMEOUT_S:
+                                # Sanity check: duration should roughly match number of readings
+                                # Allow some tolerance (80% of expected) to account for timing variations
+                                min_expected_readings = int(expected_min_readings * 0.8)
+                                invalid_duration_hours = invalid_duration / 3600.0
+                                if consecutive_invalid_readings < min_expected_readings:
+                                    self.get_logger().error(
+                                        f"⚠️  Duration mismatch detected: {invalid_duration_hours:.2f}h duration but only "
+                                        f"{consecutive_invalid_readings} readings (expected ~{expected_min_readings}){time_since_valid_str}")
+                                    self.get_logger().error(
+                                        f"This indicates a timestamp corruption or system clock issue - resetting timer")
+                                    invalid_reading_start_time = current_time
+                                    consecutive_invalid_readings = 1
+                                    continue  # Skip shutdown, continue monitoring
                                 self.get_logger().error(
                                     f"🔴 CRITICAL: Invalid battery readings have persisted for {invalid_duration_hours:.2f}h "
-                                    f"({consecutive_invalid_readings} consecutive readings)")
+                                    f"({consecutive_invalid_readings} consecutive readings){time_since_valid_str}")
                                 self.get_logger().error(
                                     f"This indicates a serious sensor/I2C communication problem!")
                                 self.get_logger().error(
@@ -3466,27 +3850,28 @@ class PowerController(ArgoBaseNode):
                                 # Note: initiate_critical_battery_halt will handle the shutdown sequence
                                 break  # Exit monitoring loop after initiating shutdown
 
-                        # Log warning for short-term failures (but don't shutdown yet)
+                        # Log warning for short-term failures (but don't shutdown yet) - throttled to prevent spam
                         if consecutive_invalid_readings >= MAX_CONSECUTIVE_FAILURES:
-                            invalid_duration_str = ""
-                            if invalid_reading_start_time is not None:
-                                invalid_duration = time.time() - invalid_reading_start_time
-                                invalid_duration_hours = invalid_duration / 3600.0
-                                invalid_duration_str = f" (duration: {invalid_duration_hours:.2f}h)"
-                            
-                            self.get_logger().error(
-                                f"CRITICAL: {consecutive_invalid_readings} consecutive invalid battery readings{invalid_duration_str}!")
-                            self.get_logger().error(
-                                f"This indicates a sensor/communication problem, NOT a battery problem!")
-                            self.get_logger().error(
-                                f"System will continue running - but will shutdown if failures persist >1 hour")
-                            self.get_logger().error(
-                                f"Check argo_battery_water.service status and I2C bus connections")
+                            # Throttle logging: only log every 5 minutes or on first occurrence
+                            should_log = (current_time - last_critical_invalid_log_time) >= CRITICAL_INVALID_LOG_INTERVAL
+                            if should_log or consecutive_invalid_readings == MAX_CONSECUTIVE_FAILURES:
+                                invalid_duration_str = ""
+                                if invalid_reading_start_time is not None:
+                                    invalid_duration = current_time - invalid_reading_start_time
+                                    invalid_duration_hours = invalid_duration / 3600.0
+                                    invalid_duration_str = f" (duration: {invalid_duration_hours:.2f}h)"
+                                
+                                # Concise single-line message
+                                self.get_logger().error(
+                                    f"⚠️  Invalid battery readings: {consecutive_invalid_readings} consecutive{invalid_duration_str}{time_since_valid_str} - "
+                                    f"System continues (shutdown after 1h sustained failure). Check I2C bus and argo_battery_water.service")
+                                last_critical_invalid_log_time = current_time
                         continue
 
-                    # Valid reading - reset invalid counter and start time
+                    # Valid reading - reset invalid counter and start time, update last valid reading time
                     consecutive_invalid_readings = 0
                     invalid_reading_start_time = None  # Reset invalid reading start time
+                    last_valid_reading_time = time.time()  # Update last valid reading time
 
                     # Check if voltage has changed significantly since last log
                     should_log_voltage = True
@@ -3505,15 +3890,18 @@ class PowerController(ArgoBaseNode):
                                 charging_parts.append(f"Charging: {'ACTIVE' if charging_status else 'INACTIVE'}")
                             charging_str = f", {', '.join(charging_parts)}"
 
+                        # Handle NaN in logging
+                        voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
                         self.get_logger().info(
-                            f"Battery voltage check: {battery_voltage:.3f}V "
+                            f"Battery voltage check: {voltage_str} "
                             f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
 
                         # Update the last logged voltage
                         self.last_logged_battery_voltage = battery_voltage
 
                     # Check for critical battery first (highest priority)
-                    if battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
+                    # Safety check: Skip if NaN (shouldn't happen here, but defensive programming)
+                    if not math.isnan(battery_voltage) and battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
                         # CRITICAL FIX: If AC power is present and charging is active, don't trigger shutdown
                         # The battery is being charged and will recover - shutdown is not needed
                         # Use topic value (ac_power) for faster updates, fallback to service value
@@ -4945,9 +5333,11 @@ DESCRIPTION:
 HARDWARE CONFIGURATION (Rev3 PCB):
   - PI3 (Pin 40): POW_OFF - Output for power relay RESET coil (active HIGH pulse)
   - PI9 (Pin 28): POW_BUT - Input from power button (active HIGH when pressed)
-  - PH4 (Pin 18): Green LED in power button (active LOW - cathode control)
-      Temporary hack for rev2 board with blown PH4 pin: PH0 (40-pin header pin 8, line 224, by default  claimed byh UART0) is soldere to the GREEN led,
-      and thus low on PH0 should turn on green LED.
+  - PH4 (Pin 18): Green LED in power button
+      Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
+      Device tree: GPIO_ACTIVE_LOW (kernel driver inverts polarity)
+      Software: Inverts brightness values in set_green_led() to compensate
+      Note: Rev3 PCB uses NFET control, different from rev2 direct cathode control.
   - PI1 (Pin 12): Blue LED in power button (active LOW - cathode control)
   - Red LED: Not GPIO controlled (common anode RGB LED)
   - LEDs: Active LOW control (GPIO LOW = ON, GPIO HIGH = OFF)
@@ -5152,6 +5542,11 @@ def main():
     try:
         node = PowerController(
             test_mode=args.test_mode, threshold=args.threshold)
+        
+        # Set ROS2 logger level to DEBUG if debug flag is enabled
+        if args.debug and ROS2_AVAILABLE:
+            node.get_logger().set_level(LoggingSeverity.DEBUG)
+            node.get_logger().info('Debug logging enabled for ROS2 logger')
         
         # Start background threads
         node.run_threads()
