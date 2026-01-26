@@ -1236,6 +1236,11 @@ def cmd_status():
         print("\n❌ Cannot check ROS2 nodes")
     
     # Check topics
+    # TODO: Fix topic detection - currently shows topics as unavailable even when they're publishing
+    #       Verified that topics are actually publishing data (e.g., /imu, /compass) but status
+    #       script incorrectly reports them as missing. May be timing issue or ros2 topic info
+    #       command not working correctly. Consider using ros2 topic list + grep or direct
+    #       topic echo with timeout instead of topic info.
     print("\nTopics:")
     for topic in ['/imu', '/magnetic_field', '/compass', '/pose', '/accel', '/gyro', '/imu_health']:
         try:

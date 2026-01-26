@@ -409,6 +409,10 @@ class BatteryWaterNode(ArgoBaseNode):
             self.get_logger().info('smbus2 not available; this node requires smbus2')
 
         # ADC (MAX11612)
+        # WARNING: Address 0x34 conflicts with LP5814 broadcast address (0x34)
+        # LP5814 broadcast address cannot be disabled and causes ADC to return zeros
+        # Solution: Replace MAX11612 with MAX11614 (0x33) or MAX11616 (0x35)
+        # See docs/I2C_ADDRESS_CONFLICT_LP5814_MAX11612.md for details
         self.adc_addr = 0x34
         self.vref = 4.096
         self.lsb_value = self.vref / 4096.0
@@ -1422,13 +1426,21 @@ class BatteryWaterNode(ArgoBaseNode):
     def _build_config(self, reg, scan, cs, sgl_dif):
         return ((reg & 1) << 7) | ((scan & 0b11) << 5) | ((cs & 0b1111) << 1) | (sgl_dif & 1)
 
-    def _read_adc_channel_avg(self, ch: int, repeats: int = 8, settle_delay_s: float = 0.001) -> int:
+    def _read_adc_channel_avg(self, ch: int, repeats: int = 8, settle_delay_s: float = 0.010) -> int:
         # SCAN=01: convert selected input eight times
+        # CRITICAL: Use separate write-then-read transactions (like SHT45) with explicit delay
+        # This matches the SHT45 pattern which works reliably with LP5814 on the bus
+        # Increased default delay from 1ms to 10ms to handle bus capacitance/timing issues
+        # when LP5814 is on the bus - gives ADC more time to complete conversion
         cfg = self._build_config(reg=0, scan=0b01, cs=ch, sgl_dif=1)
         acc = 0
-        self._i2c_write(self.adc_addr, cfg)
-        time.sleep(settle_delay_s)
         for _ in range(repeats):
+            # Write config byte (triggers conversion) - separate transaction
+            self._i2c_write(self.adc_addr, cfg)
+            # Explicit delay to allow conversion to complete (increased for LP5814 compatibility)
+            # SHT45 uses 15ms delay - using 10ms as compromise between speed and reliability
+            time.sleep(settle_delay_s)
+            # Read result - separate transaction
             d = self._i2c_read(self.adc_addr, 2)
             code = ((d[0] & 0x0F) << 8) | d[1]
             acc += code
@@ -2296,7 +2308,8 @@ class BatteryWaterNode(ArgoBaseNode):
         # Try to read sensors (will mark as healthy if successful)
         try:
             # Try a simple ADC read to test I2C
-            raw0 = self._read_adc_channel_avg(0, repeats=4, settle_delay_s=0.001)
+            # Use longer delay for reliability with LP5814 on bus
+            raw0 = self._read_adc_channel_avg(0, repeats=4, settle_delay_s=0.010)
             if raw0 > 0:  # Successful read
                 self._last_successful_read_time = time.monotonic()
                 self._consecutive_io_errors = 0
@@ -2380,7 +2393,7 @@ class BatteryWaterNode(ArgoBaseNode):
             # One-shot sample on CH3
             try:
                 raw = self._read_adc_channel_avg(
-                    3, repeats=1, settle_delay_s=0.0005)
+                    3, repeats=1, settle_delay_s=0.005)  # Increased for LP5814 compatibility
             except Exception:
                 raw = 0
             v = raw * self.lsb_value
@@ -2719,7 +2732,8 @@ class BatteryWaterNode(ArgoBaseNode):
             
         try:
             # Read only sail current channel (AIN2) - minimal I2C overhead
-            raw2 = self._read_adc_channel_avg(2, repeats=4, settle_delay_s=0.0005)  # Faster for 10Hz
+            # Increased delay for LP5814 compatibility (was 0.5ms, now 5ms - still fast enough for 10Hz)
+            raw2 = self._read_adc_channel_avg(2, repeats=4, settle_delay_s=0.005)
             sail_current = raw2 * self.lsb_value
             
             # Update successful read time
@@ -2800,6 +2814,19 @@ class BatteryWaterNode(ArgoBaseNode):
         # CRITICAL: Continue with last known values on failure to allow power control to detect stale data
         adc_read_successful = False
         try:
+            # CRITICAL: Re-write setup register before reading if we're getting zeros
+            # This may be needed when LP5814 is on the bus (ADC might reset or lose setup)
+            # Check if last reading was zero, and if so, re-initialize setup register
+            if (self._latest_battery_voltage == 0.0 or 
+                (not math.isnan(self._latest_battery_voltage) and self._latest_battery_voltage < 1.0)):
+                try:
+                    setup_byte = self._build_setup(reg=1, sel=0b101, clk=0, bip_uni=0, rst=1, x=0)
+                    self._i2c_write(self.adc_addr, setup_byte)
+                    time.sleep(0.01)  # Allow ADC to stabilize after setup
+                    self.get_logger().debug("Re-initialized ADC setup register (previous reading was zero/low)")
+                except Exception as e:
+                    self.get_logger().warn(f"Failed to re-initialize ADC setup register: {e}")
+            
             # ADC averages for battery and saltwater
             raw0 = self._read_adc_channel_avg(0)
             raw1 = self._read_adc_channel_avg(1)
@@ -2807,36 +2834,53 @@ class BatteryWaterNode(ArgoBaseNode):
             battery_voltage = raw0 * self.lsb_value * self.battery_divider_scale
             saltwater_voltage = raw1 * self.lsb_value
             
-            # Update successful read time for critical sensors
-            self._last_successful_read_time = time.monotonic()
-            
-            # Publish initial I2C failure state if never published before (for late-joining subscribers)
-            if self._last_published_i2c_failure_state is None:
-                self._publish_i2c_failure(self._critical_i2c_failure, force=True)
-                self.get_logger().info(f"Published initial I2C failure state (from sensor read): {self._critical_i2c_failure}")
-            
-            # Reset ADC failure timer on successful read
-            if self._adc_failure_start_time is not None:
-                self._adc_failure_start_time = None
-                if self._critical_i2c_failure:
-                    self._critical_i2c_failure = False
-                    self._publish_i2c_failure(False)
-                    self._last_i2c_failure_republish_time = 0.0  # Reset republish timer
-                    self.get_logger().info("✅ I2C recovery: ADC sensor communication restored - critical failure cleared")
-            
-            # If we were unhealthy but now have successful reads, recover to normal mode
-            if not self.node_healthy:
-                self.node_healthy = True
-                self.set_healthy("Automatic recovery successful")
-                self._switch_to_normal_mode()
-                self._recovery_attempt_count = 0
-                self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
+            # CRITICAL: Detect when ADC returns zeros or suspiciously low values
+            # This can happen with power supply issues or ADC reference problems
+            # (not I2C failures - those would throw exceptions)
+            if raw0 == 0 or (raw0 < 100 and battery_voltage < 1.0):
+                # Log raw ADC code for diagnostics
+                self.get_logger().warn(
+                    f"⚠️ ADC returned suspiciously low value: raw_code={raw0} (0x{raw0:04x}), "
+                    f"calculated_voltage={battery_voltage:.3f}V. "
+                    f"This may indicate power supply droop, ADC reference issue, or input problem. "
+                    f"Raw ADC bytes may be corrupted by bus capacitance.")
+                # Mark as stale/invalid to trigger NaN handling downstream
+                battery_voltage = float('nan')
+                saltwater_voltage = float('nan') if raw1 == 0 else saltwater_voltage
+                adc_read_successful = False  # Don't mark as successful
+                self._data_stale = True
+            else:
+                # Valid ADC reading
+                # Update successful read time for critical sensors
+                self._last_successful_read_time = time.monotonic()
+                
+                # Publish initial I2C failure state if never published before (for late-joining subscribers)
+                if self._last_published_i2c_failure_state is None:
+                    self._publish_i2c_failure(self._critical_i2c_failure, force=True)
+                    self.get_logger().info(f"Published initial I2C failure state (from sensor read): {self._critical_i2c_failure}")
+                
+                # Reset ADC failure timer on successful read
+                if self._adc_failure_start_time is not None:
+                    self._adc_failure_start_time = None
+                    if self._critical_i2c_failure:
+                        self._critical_i2c_failure = False
+                        self._publish_i2c_failure(False)
+                        self._last_i2c_failure_republish_time = 0.0  # Reset republish timer
+                        self.get_logger().info("✅ I2C recovery: ADC sensor communication restored - critical failure cleared")
+                
+                # If we were unhealthy but now have successful reads, recover to normal mode
+                if not self.node_healthy:
+                    self.node_healthy = True
+                    self.set_healthy("Automatic recovery successful")
+                    self._switch_to_normal_mode()
+                    self._recovery_attempt_count = 0
+                    self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
 
-            # Update latest critical sensor values
-            self._latest_battery_voltage = battery_voltage
-            self._latest_saltwater_voltage = saltwater_voltage
-            adc_read_successful = True
-            self._data_stale = False  # Data is fresh
+                # Update latest critical sensor values
+                self._latest_battery_voltage = battery_voltage
+                self._latest_saltwater_voltage = saltwater_voltage
+                adc_read_successful = True
+                self._data_stale = False  # Data is fresh
             
         except Exception as e:
             self._handle_io_error(e, "ADC sensors")

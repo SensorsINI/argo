@@ -57,7 +57,7 @@ from typing import Optional
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.logging import LoggingSeverity
-from std_msgs.msg import Float32, Float32MultiArray
+from std_msgs.msg import Float32, Float32MultiArray, String
 from geometry_msgs.msg import Vector3
 
 # I2C communication
@@ -149,7 +149,8 @@ TOPIC_BLUE = '/mastled_b'
 TOPIC_WHITE = '/mastled_w'
 TOPIC_RGBW = '/mastled_rgbw'
 # Power button LED mirroring topic
-TOPIC_POWER_BUTTON_RGB = '/argo/power_button/rgb'
+TOPIC_POWER_BUTTON_RGB = '/argo/power_button/rgb'  # Legacy - kept for backward compatibility
+TOPIC_POWER_BUTTON_PATTERN = '/argo/power_button/pattern'  # New pattern-based topic
 
 # I2C Error Recovery
 I2C_RETRY_DELAY_S = 1.0  # Delay between I2C retry attempts in seconds (initial retries)
@@ -175,6 +176,17 @@ class MastLEDsNode(ArgoBaseNode):
         self._green_brightness = 0.0
         self._blue_brightness = 0.0
         self._white_brightness = 0.0
+        
+        # Pattern-based mirroring state
+        self._pattern_active = False
+        self._pattern_category = None
+        self._pattern_string = None
+        self._pattern_cycle_duration = 3.0
+        self._pattern_slot_duration = 0.3
+        self._pattern_on_period = 0.03
+        self._pattern_off_period = 0.27
+        self._pattern_thread = None
+        self._pattern_stop_event = None
 
         # I2C bus and device state
         self.bus = None
@@ -793,11 +805,15 @@ class MastLEDsNode(ArgoBaseNode):
         self.sub_rgbw = self.create_subscription(
             Float32MultiArray, TOPIC_RGBW, self._rgbw_callback, 10)
 
-        # Power button RGB mirroring subscription (mirrors RGB from power control node)
+        # Power button RGB mirroring subscription (legacy - kept for backward compatibility)
         self.sub_power_button_rgb = self.create_subscription(
             Vector3, TOPIC_POWER_BUTTON_RGB, self._power_button_rgb_callback, 10)
+        
+        # Power button pattern subscription (new pattern-based approach)
+        self.sub_power_button_pattern = self.create_subscription(
+            String, TOPIC_POWER_BUTTON_PATTERN, self._power_button_pattern_callback, 10)
 
-        self.get_logger().info(f'Subscribed to {TOPIC_RED}, {TOPIC_GREEN}, {TOPIC_BLUE}, {TOPIC_WHITE}, {TOPIC_RGBW}, {TOPIC_POWER_BUTTON_RGB}')
+        self.get_logger().info(f'Subscribed to {TOPIC_RED}, {TOPIC_GREEN}, {TOPIC_BLUE}, {TOPIC_WHITE}, {TOPIC_RGBW}, {TOPIC_POWER_BUTTON_RGB}, {TOPIC_POWER_BUTTON_PATTERN}')
 
     def _red_callback(self, msg: Float32):
         """Callback for red channel subscription."""
@@ -843,7 +859,10 @@ class MastLEDsNode(ArgoBaseNode):
                 f"RGBW message has {len(msg.data)} elements, expected 4. Ignoring.")
 
     def _power_button_rgb_callback(self, msg: Vector3):
-        """Callback for power button RGB mirroring subscription.
+        """Callback for power button RGB mirroring subscription (legacy).
+        
+        DEPRECATED: This callback is kept for backward compatibility but should
+        not be used. Use pattern-based mirroring via _power_button_pattern_callback instead.
         
         Mirrors RGB channels from power button LEDs to mast head LEDs.
         x = red, y = green, z = blue (normalized 0.0-1.0).
@@ -851,19 +870,116 @@ class MastLEDsNode(ArgoBaseNode):
         
         Silently ignores updates if device unavailable (low-CPU mode).
         """
-        # Update RGB channels from power button (Vector3: x=R, y=G, z=B)
-        # Update internal state even if device unavailable (allows recovery)
-        self._red_brightness = self._normalize_brightness(msg.x)
-        self._green_brightness = self._normalize_brightness(msg.y)
-        self._blue_brightness = self._normalize_brightness(msg.z)
-        # White channel is NOT affected by power button mirroring
-        # (power button only has RGB, not RGBW)
-        # Hardware update will be ignored if device unavailable
-        self._update_hardware()
+        # Only process if pattern-based mirroring is not active
+        if not self._pattern_active:
+            # Update RGB channels from power button (Vector3: x=R, y=G, z=B)
+            # Update internal state even if device unavailable (allows recovery)
+            self._red_brightness = self._normalize_brightness(msg.x)
+            self._green_brightness = self._normalize_brightness(msg.y)
+            self._blue_brightness = self._normalize_brightness(msg.z)
+            # White channel is NOT affected by power button mirroring
+            # (power button only has RGB, not RGBW)
+            # Hardware update will be ignored if device unavailable
+            self._update_hardware()
+    
+    def _power_button_pattern_callback(self, msg: String):
+        """Callback for power button pattern subscription.
+        
+        Receives pattern description and recreates it locally on mast LEDs.
+        Pattern format: JSON string with category, pattern, cycle_duration, etc.
+        Recreates pattern with max 3s lag to stay synchronized.
+        """
+        try:
+            import json
+            import threading
+            import time
+            
+            pattern_data = json.loads(msg.data)
+            category = pattern_data.get('category', 'heartbeat')
+            pattern = pattern_data.get('pattern', '')
+            cycle_duration = pattern_data.get('cycle_duration', 3.0)
+            slot_duration = pattern_data.get('slot_duration', 0.3)
+            on_period = pattern_data.get('on_period', 0.03)
+            off_period = pattern_data.get('off_period', 0.27)
+            
+            # Stop any existing pattern thread
+            if self._pattern_active and self._pattern_stop_event:
+                self._pattern_stop_event.set()
+                if self._pattern_thread and self._pattern_thread.is_alive():
+                    self._pattern_thread.join(timeout=0.5)
+            
+            # Store pattern parameters
+            self._pattern_category = category
+            self._pattern_string = pattern
+            self._pattern_cycle_duration = cycle_duration
+            self._pattern_slot_duration = slot_duration
+            self._pattern_on_period = on_period
+            self._pattern_off_period = off_period
+            
+            # Start pattern recreation thread
+            self._pattern_stop_event = threading.Event()
+            self._pattern_active = True
+            self._pattern_thread = threading.Thread(
+                target=self._recreate_pattern,
+                args=(pattern, slot_duration, on_period, off_period),
+                daemon=True
+            )
+            self._pattern_thread.start()
+            
+        except Exception as e:
+            self.get_logger().warn(f"Failed to process pattern message: {e}")
+    
+    def _recreate_pattern(self, pattern: str, slot_duration: float, on_period: float, off_period: float):
+        """Recreate LED pattern locally on mast LEDs.
+        
+        Executes the pattern continuously until stopped.
+        Pattern string: 'g'=green, 'r'=red, 'b'=blue, '.'=off
+        """
+        try:
+            while not self._pattern_stop_event.is_set():
+                for slot_char in pattern:
+                    if self._pattern_stop_event.is_set():
+                        break
+                    
+                    # Set LEDs for this slot
+                    red_on = (slot_char == 'r')
+                    green_on = (slot_char == 'g')
+                    blue_on = (slot_char == 'b')
+                    
+                    # ON period
+                    self._red_brightness = 1.0 if red_on else 0.0
+                    self._green_brightness = 1.0 if green_on else 0.0
+                    self._blue_brightness = 1.0 if blue_on else 0.0
+                    self._update_hardware()
+                    
+                    # Sleep for ON period
+                    if self._pattern_stop_event.wait(timeout=on_period):
+                        break
+                    
+                    # OFF period - all LEDs off
+                    self._red_brightness = 0.0
+                    self._green_brightness = 0.0
+                    self._blue_brightness = 0.0
+                    self._update_hardware()
+                    
+                    # Sleep for OFF period
+                    if self._pattern_stop_event.wait(timeout=off_period):
+                        break
+                        
+        except Exception as e:
+            self.get_logger().error(f"Error in pattern recreation: {e}")
+        finally:
+            self._pattern_active = False
 
     def destroy_node(self):
         """Cleanup on node shutdown."""
         self.get_logger().info('Shutting down Mast LED Controller node')
+
+        # Stop pattern recreation thread
+        if self._pattern_active and self._pattern_stop_event:
+            self._pattern_stop_event.set()
+            if self._pattern_thread and self._pattern_thread.is_alive():
+                self._pattern_thread.join(timeout=1.0)
 
         # Turn off all LEDs
         if self.device_ready and self.bus:

@@ -1580,8 +1580,7 @@ class PowerController(ArgoBaseNode):
         # GPIO 228 (PH4) is controlled via sysfs when available (preferred method)
         # Falls back to direct GPIO if sysfs is not available
         self.green_led_state = state
-        # Publish RGB state for mast head LED mirroring
-        self._publish_rgb_state()
+        # Note: RGB state publishing removed - now publishes pattern once per cycle
         
         # Use sysfs control if available (preferred method)
         if self.green_led_available and self.green_led_using_sysfs:
@@ -1656,8 +1655,7 @@ class PowerController(ArgoBaseNode):
         # used for the green heartbeat signal due to hardware issues with PH4/PH0.
         # Still track state and publish RGB for future use when blue LED is enabled
         self.blue_led_state = state
-        # Publish RGB state for mast head LED mirroring
-        self._publish_rgb_state()
+        # Note: RGB state publishing removed - now publishes pattern once per cycle
 
     def set_red_led(self, state):
         """Control red LED (battery warning/SOS indicator)"""
@@ -1667,9 +1665,8 @@ class PowerController(ArgoBaseNode):
             # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
             value = LED_ON_STATE if state else LED_OFF_STATE
             self.red_led_line.set_value(value)
-            self.red_led_state = state  # Track red LED state for RGB publishing
-            # Publish RGB state for mast head LED mirroring
-            self._publish_rgb_state()
+            self.red_led_state = state  # Track red LED state
+            # Note: RGB state publishing removed - now publishes pattern once per cycle
         except Exception as e:
             self.get_logger().error(f"Error controlling red LED: {e}")
 
@@ -1981,6 +1978,9 @@ class PowerController(ArgoBaseNode):
             slot_states['B'].append('b' if self.blue_led_state else '-')
             
             self._heartbeat_sleep(0.27)  # LED off for 0.27s (90% of 0.3s)
+        
+        # Publish pattern message once per cycle for mast LED mirroring
+        self._publish_led_pattern(pattern)
         
         # Print summary of LED states across all periods (20 total: 10 slots × 2 periods each)
         # Only format and log if debug level is enabled to avoid CPU overhead
@@ -3080,9 +3080,10 @@ class PowerController(ArgoBaseNode):
                 String, '/argo/power/status', 10)
             self.button_event_publisher = self.create_publisher(
                 String, '/argo/power/button_events', 10)
-            # RGB LED state publisher for mast head LED mirroring
-            self.power_button_rgb_publisher = self.create_publisher(
-                Vector3, '/argo/power_button/rgb', 10)
+            # LED pattern publisher for mast head LED mirroring (publishes once per cycle)
+            # Format: JSON string with category, pattern, cycle_duration, slot_duration
+            self.power_button_pattern_publisher = self.create_publisher(
+                String, '/argo/power_button/pattern', 10)
 
             # Create subscription to controller pause state
             self.controller_pause_sub = self.create_subscription(
@@ -3208,21 +3209,53 @@ class PowerController(ArgoBaseNode):
             except Exception as e:
                 self.get_logger().debug(f"Failed to publish button event: {e}")
 
-    def _publish_rgb_state(self):
-        """Publish current RGB LED state for mast head LED mirroring"""
-        if not hasattr(self, 'power_button_rgb_publisher') or not self.power_button_rgb_publisher:
+    def _publish_led_pattern(self, pattern: str):
+        """Publish LED pattern for mast head LED mirroring (once per cycle).
+        
+        Publishes a JSON message with:
+        - category: Pattern category (heartbeat, sos, charging, shutdown, wifi_loss)
+        - pattern: Pattern string (e.g., "ggrrrr....")
+        - cycle_duration: Total cycle duration in seconds (3.0 for heartbeat)
+        - slot_duration: Duration of each slot in seconds (0.3 for heartbeat)
+        - on_period: ON period duration in seconds (0.03 for heartbeat)
+        - off_period: OFF period duration in seconds (0.27 for heartbeat)
+        """
+        if not hasattr(self, 'power_button_pattern_publisher') or not self.power_button_pattern_publisher:
             return  # Publisher not yet created (during initialization)
         
         try:
-            from geometry_msgs.msg import Vector3
-            msg = Vector3()
-            # Convert boolean states to normalized brightness (0.0 = OFF, 1.0 = ON)
-            msg.x = 1.0 if self.red_led_state else 0.0
-            msg.y = 1.0 if self.green_led_state else 0.0
-            msg.z = 1.0 if self.blue_led_state else 0.0
-            self.power_button_rgb_publisher.publish(msg)
+            import json
+            from std_msgs.msg import String
+            
+            # Determine pattern category
+            category = "heartbeat"
+            if self.heartbeat_paused:
+                if self.sos_led_active:
+                    category = "sos"
+                elif self.charge_state_led_active:
+                    category = "charging"
+                elif self.shutdown_initiated:
+                    category = "shutdown"
+                elif self.wifi_monitoring_active and not self.wifi_connected:
+                    category = "wifi_loss"
+                else:
+                    category = self.heartbeat_pause_reason or "unknown"
+            
+            # Create pattern message
+            pattern_data = {
+                "category": category,
+                "pattern": pattern,
+                "cycle_duration": 3.0,  # 10 slots × 0.3s = 3.0s
+                "slot_duration": 0.3,   # Each slot is 0.3s
+                "on_period": 0.03,      # ON period within each slot
+                "off_period": 0.27      # OFF period within each slot
+            }
+            
+            msg = String()
+            msg.data = json.dumps(pattern_data)
+            self.power_button_pattern_publisher.publish(msg)
         except Exception as e:
-            self.get_logger().debug(f"Failed to publish RGB state: {e}")
+            self.get_logger().debug(f"Failed to publish LED pattern: {e}")
 
     def _controller_pause_state_callback(self, msg):
         """Receive controller pause state updates from topic"""
