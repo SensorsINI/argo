@@ -15,7 +15,10 @@
 # HARDWARE CONFIGURATION (Rev3 PCB):
 #   - PI3 (Pin 40, wPi 27, GPIO 259): POW_OFF - Output for power relay control (active HIGH pulse to reset relay)
 #   - PI9 (Pin 28, wPi 18, GPIO 265): POW_BUT - Input from power button (active HIGH when pressed)
-#   - PH4 (Pin 18, wPi 10, GPIO 228): Green LED in power button (active LOW - cathode control)
+#   - PH4 (Pin 18, wPi 10, GPIO 228): Green LED in power button
+#     Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
+#     Device tree: GPIO_ACTIVE_LOW (kernel driver inverts polarity)
+#     Software: Inverts brightness values (state=True → brightness=0, state=False → brightness=1)
 #   - PI1 (Pin 12, wPi 6, GPIO 257): Blue LED in power button (active LOW - cathode control)
 #   - PI16 (Pin 37, wPi 25, GPIO 272): Red LED: GPIO controlled (active LOW - cathode control)
 #   - LEDs: Common anode RGB LED, GPIO controls cathode (LOW = ON, HIGH = OFF)
@@ -231,6 +234,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../node
 # ROS2 imports for service client
 try:
     import rclpy
+    from rclpy.logging import LoggingSeverity
     from std_srvs.srv import Trigger, SetBool
     from argo_base_node import ArgoBaseNode # Import the base node
     ROS2_AVAILABLE = True
@@ -352,7 +356,7 @@ SOS_PATTERN_DURATION_S = 2.0       # Total duration of one SOS pattern cycle (se
 
 # Charging State LED Pattern Configuration
 # LED to use for charging state indication (easy to change later)
-CHARGE_STATE_LED = 'green'  # Options: 'red', 'green', 'blue' (currently using green LED)
+CHARGE_STATE_LED = 'blue'  # Options: 'red', 'green', 'blue' (currently using blue LED)
 CHARGE_STATE_PERIOD_S = 3.0        # Total period for charge state flash pattern (seconds)
 CHARGE_STATE_DUTY_CYCLE = 0.2      # Duty cycle for charge state flashes (20% on, 80% off) - increased from 0.1 for better visibility
 CHARGE_STATE_LOG_INTERVAL_S = 30.0 # Log charge state pattern every 30 seconds when active
@@ -1563,7 +1567,16 @@ class PowerController(ArgoBaseNode):
     pass
 
     def set_green_led(self, state):
-        """Control green LED (system running indicator) via sysfs or direct GPIO."""
+        """Control green LED (system running indicator) via sysfs or direct GPIO.
+        
+        CRITICAL POLARITY NOTE:
+        - Hardware: PH4 controls green LED via NFET (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
+        - Device tree: Configured as GPIO_ACTIVE_LOW, causing kernel driver to invert polarity
+        - Kernel behavior: brightness=1 drives GPIO LOW, brightness=0 drives GPIO HIGH
+        - Software workaround: Invert brightness values to match hardware requirements
+          * state=True (LED ON) → brightness=0 (kernel drives GPIO HIGH → LED ON) ✓
+          * state=False (LED OFF) → brightness=1 (kernel drives GPIO LOW → LED OFF) ✓
+        """
         # GPIO 228 (PH4) is controlled via sysfs when available (preferred method)
         # Falls back to direct GPIO if sysfs is not available
         self.green_led_state = state
@@ -1573,11 +1586,49 @@ class PowerController(ArgoBaseNode):
         # Use sysfs control if available (preferred method)
         if self.green_led_available and self.green_led_using_sysfs:
             try:
-                # For ACTIVE_LOW LED with invert=0: brightness 1 = ON, brightness 0 = OFF
-                # The kernel LED driver handles the ACTIVE_LOW inversion automatically
-                brightness_value = 1 if state else 0
+                # POLARITY WORKAROUND: Invert brightness values due to kernel driver polarity inversion
+                # Hardware needs: GPIO HIGH = ON, GPIO LOW = OFF
+                # Kernel driver with GPIO_ACTIVE_LOW: brightness=1 → GPIO LOW, brightness=0 → GPIO HIGH
+                # Solution: Write inverted brightness (state=True → brightness=0, state=False → brightness=1)
+                brightness_value = 0 if state else 1
+                
+                # Write with explicit flush to ensure it takes effect immediately
                 with open(self.green_led_brightness_path, 'w') as f:
                     f.write(str(brightness_value))
+                    f.flush()
+                    import os
+                    os.fsync(f.fileno())  # Force write to disk
+                
+                # Verify the write took effect and check for trigger changes
+                try:
+                    with open(self.green_led_brightness_path, 'r') as f:
+                        actual_brightness = int(f.read().strip())
+                    
+                    # Log every write for debugging (will be verbose but necessary)
+                    if actual_brightness != brightness_value:
+                        self.get_logger().warning(
+                            f"PH4 brightness mismatch! Wrote {brightness_value}, read back {actual_brightness}")
+                    else:
+                        # Log OFF commands with timestamp to track when they occur
+                        if not state:
+                            import time
+                            self.get_logger().info(
+                                f"PH4 OFF write: wrote {brightness_value}, verified {actual_brightness}, time={time.time():.3f}")
+                    
+                    # Check if trigger changed (kernel might have taken control back)
+                    with open(self.green_led_trigger_path, 'r') as f:
+                        trigger_content = f.read()
+                        if '[none]' not in trigger_content:
+                            self.get_logger().warning(
+                                f"PH4 trigger changed! Expected [none], got: {trigger_content[:100]}")
+                            # Try to restore control
+                            with open(self.green_led_trigger_path, 'w') as f2:
+                                f2.write('none')
+                                f2.flush()
+                                os.fsync(f2.fileno())
+                except Exception as verify_e:
+                    self.get_logger().debug(f"Could not verify PH4 state: {verify_e}")
+                
                 return
             except Exception as e:
                 self.get_logger().error(f"Error controlling green LED via sysfs: {e}")
@@ -1678,6 +1729,88 @@ class PowerController(ArgoBaseNode):
             time.sleep(blink_interval)
 
     # TODO for rev3 PCB, LEDs are turned on by low signal on pin because LEDs in button are connected with positive side connected to 5V and negative to the pin, so we need to invert the driving logic signal
+    def _check_ph4_hardware_state(self):
+        """Check actual PH4 hardware state and compare with expected state"""
+        try:
+            expected_state = self.green_led_state
+            actual_state = None
+            method = None
+            
+            sysfs_state = None
+            gpio_state = None
+            
+            # Check sysfs state if available
+            if self.green_led_available and self.green_led_using_sysfs:
+                try:
+                    # Check trigger first - should be "none" for manual control
+                    try:
+                        with open(self.green_led_trigger_path, 'r') as f:
+                            trigger_content = f.read().strip()
+                            # Trigger file shows available triggers with [none] indicating current
+                            # Format is usually: "[none] heartbeat ..." where [none] means it's active
+                            trigger_is_none = '[none]' in trigger_content
+                            if not trigger_is_none:
+                                # Check if it's set to heartbeat (kernel control)
+                                if 'heartbeat' in trigger_content.lower() and '[heartbeat]' in trigger_content:
+                                    self.get_logger().warning(
+                                        f"PH4 trigger changed to heartbeat! Kernel may be controlling LED. "
+                                        f"Trigger content: {trigger_content[:200]}"
+                                    )
+                                else:
+                                    self.get_logger().warning(
+                                        f"PH4 trigger may have changed! Current trigger content: {trigger_content[:200]}"
+                                    )
+                    except Exception as e:
+                        self.get_logger().debug(f"Could not read PH4 trigger: {e}")
+                    
+                    # Check brightness
+                    with open(self.green_led_brightness_path, 'r') as f:
+                        brightness_str = f.read().strip()
+                        actual_brightness = int(brightness_str) if brightness_str.isdigit() else None
+                        if actual_brightness is not None:
+                            sysfs_state = (actual_brightness == 1)
+                except Exception as e:
+                    self.get_logger().debug(f"Could not read PH4 sysfs state: {e}")
+            
+            # ALWAYS check actual GPIO pin state when available (even if using sysfs)
+            # This detects if kernel driver is not properly controlling the GPIO
+            if self.gpio_available and self.green_led_line is not None:
+                try:
+                    gpio_value = self.green_led_line.get_value()
+                    # Active-low: GPIO 0 (LOW) = LED ON, GPIO 1 (HIGH) = LED OFF
+                    gpio_state = (gpio_value == LED_ON_STATE)
+                except Exception as e:
+                    self.get_logger().debug(f"Could not read PH4 GPIO state: {e}")
+            
+            # Use GPIO state as primary (actual hardware), sysfs as secondary (what kernel thinks)
+            if gpio_state is not None:
+                actual_state = gpio_state
+                method = "gpio"
+                # Compare with sysfs if both available
+                if sysfs_state is not None and sysfs_state != gpio_state:
+                    self.get_logger().warning(
+                        f"PH4 sysfs/GPIO mismatch! Sysfs brightness={sysfs_state}, "
+                        f"GPIO pin={gpio_state} (GPIO value={gpio_value}). "
+                        f"Kernel LED driver may not be controlling GPIO correctly."
+                    )
+            elif sysfs_state is not None:
+                actual_state = sysfs_state
+                method = "sysfs"
+            
+            # Log mismatch if detected
+            if actual_state is not None and actual_state != expected_state:
+                self.get_logger().warning(
+                    f"PH4 state mismatch detected! Expected={expected_state}, "
+                    f"Actual={actual_state} (via {method}), "
+                    f"GPIO228 may be controlled by another process"
+                )
+            elif actual_state is not None:
+                self.get_logger().debug(
+                    f"PH4 state check OK: expected={expected_state}, actual={actual_state} (via {method})"
+                )
+        except Exception as e:
+            self.get_logger().debug(f"Error checking PH4 hardware state: {e}")
+
     def green_led_heartbeat(self):
         """LED slot-based heartbeat - 3-second cycle with 10 slots of 0.3s each"""
         while self.running:
@@ -1814,6 +1947,11 @@ class PowerController(ArgoBaseNode):
 
     def _execute_led_pattern(self, pattern: str):
         """Execute LED pattern over 10 slots of 0.3s each"""
+        # Track LED states for both ON and OFF periods within each slot
+        # Each slot has: ON period (0.03s) + OFF period (0.27s) = 0.3s total
+        # Total: 10 slots × 2 periods = 20 states tracked
+        slot_states = {'R': [], 'G': [], 'B': []}  # Track red, green, blue for each period
+        
         for slot in range(10):
             if not self.running:
                 break
@@ -1827,6 +1965,11 @@ class PowerController(ArgoBaseNode):
                 self.set_red_led(False)
                 self.set_blue_led(False)
             
+            # Record LED states during ON period (0.03s)
+            slot_states['R'].append('r' if self.red_led_state else '-')
+            slot_states['G'].append('g' if self.green_led_state else '-')
+            slot_states['B'].append('b' if self.blue_led_state else '-')
+            
             # Each slot: 0.03s on + 0.27s off = 0.3s total (10% duty cycle)
             self._heartbeat_sleep(0.03)  # LED on for 0.03s (10% of 0.3s)
             
@@ -1837,7 +1980,23 @@ class PowerController(ArgoBaseNode):
             self.set_green_led(False)
             self.set_red_led(False)
             self.set_blue_led(False)
+            
+            # Record LED states during OFF period (0.27s) - should all be OFF
+            slot_states['R'].append('r' if self.red_led_state else '-')
+            slot_states['G'].append('g' if self.green_led_state else '-')
+            slot_states['B'].append('b' if self.blue_led_state else '-')
+            
             self._heartbeat_sleep(0.27)  # LED off for 0.27s (90% of 0.3s)
+        
+        # Print summary of LED states across all periods (20 total: 10 slots × 2 periods each)
+        if len(slot_states['R']) == 20:
+            r_line = f"R:{''.join(slot_states['R'])}"
+            g_line = f"G:{''.join(slot_states['G'])}"
+            b_line = f"B:{''.join(slot_states['B'])}"
+            self.get_logger().info(f"LED pattern execution summary (20 periods: 10 slots × [ON,OFF]):")
+            self.get_logger().info(r_line)
+            self.get_logger().info(g_line)
+            self.get_logger().info(b_line)
 
     def _set_leds_for_slot(self, led_state: str):
         """Set LED states for a single slot based on character"""
@@ -5142,9 +5301,11 @@ DESCRIPTION:
 HARDWARE CONFIGURATION (Rev3 PCB):
   - PI3 (Pin 40): POW_OFF - Output for power relay RESET coil (active HIGH pulse)
   - PI9 (Pin 28): POW_BUT - Input from power button (active HIGH when pressed)
-  - PH4 (Pin 18): Green LED in power button (active LOW - cathode control)
-      Temporary hack for rev2 board with blown PH4 pin: PH0 (40-pin header pin 8, line 224, by default  claimed byh UART0) is soldere to the GREEN led,
-      and thus low on PH0 should turn on green LED.
+  - PH4 (Pin 18): Green LED in power button
+      Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
+      Device tree: GPIO_ACTIVE_LOW (kernel driver inverts polarity)
+      Software: Inverts brightness values in set_green_led() to compensate
+      Note: Rev3 PCB uses NFET control, different from rev2 direct cathode control.
   - PI1 (Pin 12): Blue LED in power button (active LOW - cathode control)
   - Red LED: Not GPIO controlled (common anode RGB LED)
   - LEDs: Active LOW control (GPIO LOW = ON, GPIO HIGH = OFF)
@@ -5349,6 +5510,11 @@ def main():
     try:
         node = PowerController(
             test_mode=args.test_mode, threshold=args.threshold)
+        
+        # Set ROS2 logger level to DEBUG if debug flag is enabled
+        if args.debug and ROS2_AVAILABLE:
+            node.get_logger().set_level(LoggingSeverity.DEBUG)
+            node.get_logger().info('Debug logging enabled for ROS2 logger')
         
         # Start background threads
         node.run_threads()

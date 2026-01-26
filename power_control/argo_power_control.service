@@ -15,7 +15,7 @@ ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
 ExecStartPre=/bin/bash -c 'find /home/orangepi/argo/power_control -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true; find /home/orangepi/argo/power_control -name "*.pyc" -delete 2>/dev/null || true'
 # CRITICAL: Validate Python syntax before starting - fail fast if syntax is invalid
 ExecStartPre=/bin/bash -c 'source /opt/ros/humble/setup.bash && /usr/bin/python3 -m py_compile /home/orangepi/argo/power_control/argo_power_control.py'
-ExecStart=/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash && exec /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py |& tee -a /var/log.hdd/persistent/argo-power-control.log'
+ExecStart=/bin/bash -c 'set -eo pipefail; source /opt/ros/humble/setup.bash && exec /usr/bin/python3 /home/orangepi/argo/power_control/argo_power_control.py --debug |& tee -a /var/log.hdd/persistent/argo-power-control.log'
 Restart=always
 RestartSec=5
 StandardOutput=journal

@@ -14,6 +14,14 @@
 
                 green_heartbeat: heartbeat {
                     label = "argo:green:heartbeat";
+                    /* PH4 Green LED Polarity Configuration:
+                     * Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
+                     * Device tree: GPIO_ACTIVE_LOW causes kernel driver to invert polarity
+                     * Kernel behavior: brightness=1 → GPIO LOW, brightness=0 → GPIO HIGH
+                     * Software workaround: argo_power_control.py inverts brightness values
+                     *   (state=True → brightness=0, state=False → brightness=1)
+                     * This configuration works correctly with the software inversion.
+                     */
                     gpios = <&pio 7 4 GPIO_ACTIVE_LOW>; /* PH4 */
                     default-state = "off";
                     linux,default-trigger = "heartbeat";
