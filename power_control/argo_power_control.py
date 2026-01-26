@@ -1604,16 +1604,10 @@ class PowerController(ArgoBaseNode):
                     with open(self.green_led_brightness_path, 'r') as f:
                         actual_brightness = int(f.read().strip())
                     
-                    # Log every write for debugging (will be verbose but necessary)
+                    # Only log brightness mismatches (warnings)
                     if actual_brightness != brightness_value:
                         self.get_logger().warning(
                             f"PH4 brightness mismatch! Wrote {brightness_value}, read back {actual_brightness}")
-                    else:
-                        # Log OFF commands with timestamp to track when they occur
-                        if not state:
-                            import time
-                            self.get_logger().info(
-                                f"PH4 OFF write: wrote {brightness_value}, verified {actual_brightness}, time={time.time():.3f}")
                     
                     # Check if trigger changed (kernel might have taken control back)
                     with open(self.green_led_trigger_path, 'r') as f:
@@ -1989,14 +1983,19 @@ class PowerController(ArgoBaseNode):
             self._heartbeat_sleep(0.27)  # LED off for 0.27s (90% of 0.3s)
         
         # Print summary of LED states across all periods (20 total: 10 slots × 2 periods each)
+        # Only format and log if debug level is enabled to avoid CPU overhead
         if len(slot_states['R']) == 20:
-            r_line = f"R:{''.join(slot_states['R'])}"
-            g_line = f"G:{''.join(slot_states['G'])}"
-            b_line = f"B:{''.join(slot_states['B'])}"
-            self.get_logger().info(f"LED pattern execution summary (20 periods: 10 slots × [ON,OFF]):")
-            self.get_logger().info(r_line)
-            self.get_logger().info(g_line)
-            self.get_logger().info(b_line)
+            logger = self.get_logger()
+            # Check if debug logging is enabled before formatting (avoids string formatting overhead)
+            # Only format strings if DEBUG level is actually enabled
+            if logger.get_effective_level() <= logging.DEBUG:
+                r_line = f"R:{''.join(slot_states['R'])}"
+                g_line = f"G:{''.join(slot_states['G'])}"
+                b_line = f"B:{''.join(slot_states['B'])}"
+                logger.debug(f"LED pattern execution summary (20 periods: 10 slots × [ON,OFF]):")
+                logger.debug(r_line)
+                logger.debug(g_line)
+                logger.debug(b_line)
 
     def _set_leds_for_slot(self, led_state: str):
         """Set LED states for a single slot based on character"""
