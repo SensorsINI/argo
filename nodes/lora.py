@@ -282,6 +282,10 @@ class LoRaNode(ArgoBaseNode):
         self.packet_loss_count = 0
         self.last_packet_loss_check = time.time()
         
+        # Track last TX packet details for completion logging
+        self.last_tx_payload_size = 0
+        self.last_tx_total_size = 0
+        
         # Throttled reception logging for startup debugging
         self.first_reception_logged = False
         self.last_reception_log_time = 0.0
@@ -586,11 +590,11 @@ class LoRaNode(ArgoBaseNode):
             # Throttled reception success logging for startup debugging
             current_time = time.time()
             if not self.first_reception_logged:
-                self.get_logger().info(f"✅ FIRST PACKET RECEIVED: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
+                self.get_logger().info(f"✅ FIRST PACKET RECEIVED FROM SHORE: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
                 self.first_reception_logged = True
                 self.last_reception_log_time = current_time
             elif current_time - self.last_reception_log_time >= self.reception_log_interval:
-                self.get_logger().info(f"📡 LoRa reception active: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
+                self.get_logger().info(f"📡 Received FROM shore station: {len(payload)} bytes, RSSI: {rssi} dBm, SNR: {snr}")
                 self.last_reception_log_time = current_time
 
             # Strip Waveshare stream mode header if present
@@ -727,7 +731,11 @@ class LoRaNode(ArgoBaseNode):
             # Enter TX mode (DIO0 will trigger interrupt when done)
             self.set_mode(SX1276Registers.MODE_TX)
 
-            self.get_logger().debug(f"Transmitted {len(packet_with_header)} bytes via LoRa (payload: {len(data)}, header: 4)")
+            # Store packet details for completion logging
+            self.last_tx_payload_size = len(data)
+            self.last_tx_total_size = len(packet_with_header)
+            
+            # Don't log here - wait for TX_DONE confirmation
             return True
 
         except Exception as e:
@@ -764,8 +772,8 @@ class LoRaNode(ArgoBaseNode):
             
             # Transmit
             success = self.transmit_packet(packet_bytes)
-            if success:
-                self.get_logger().debug(f"Status transmitted: {status_packet}")
+            if not success:
+                self.get_logger().warn(f"⚠️  TX failed: Could not transmit status packet to shore station")
 
             return success
 
@@ -885,13 +893,17 @@ class LoRaNode(ArgoBaseNode):
                 safe_log(self, 'warn', f"LoRa data timeout - no data for {self.connection_timeout_sec}s")
         # Note: We don't set is_connected=True here anymore - only when receiving pings
 
-        # Log packet loss statistics periodically
+        # Log sequence tracking statistics periodically (monitors shore station packet sequence)
         if current_time - self.last_packet_loss_check > 60.0:  # Every minute
-            if self.tx_sequence > 0:
-                loss_rate = (self.packet_loss_count / self.tx_sequence) * 100
-                safe_log(self, 'info', f"Packet loss rate: {loss_rate:.1f}% ({self.packet_loss_count}/{self.tx_sequence})")
-                if loss_rate > 10.0:
-                    safe_log(self, 'warn', f"High packet loss detected: {loss_rate:.1f}%")
+            if self.rx_sequence > 0:
+                # This tracks sequence gaps in packets received FROM shore station
+                if self.packet_loss_count > 0:
+                    loss_rate = (self.packet_loss_count / self.rx_sequence) * 100
+                    safe_log(self, 'info', f"Shore station sequence gaps: {loss_rate:.1f}% ({self.packet_loss_count} gaps in {self.rx_sequence} packets received)")
+                    if loss_rate > 10.0:
+                        safe_log(self, 'warn', f"High sequence gap rate from shore: {loss_rate:.1f}%")
+                else:
+                    safe_log(self, 'info', f"Shore station packets: {self.rx_sequence} received, 0 sequence gaps")
             self.last_packet_loss_check = current_time
 
         # Publish connection status if changed or if enough time has passed
@@ -925,7 +937,7 @@ class LoRaNode(ArgoBaseNode):
                 # Handle the received packet
                 self.handle_packet_received()
             elif irq_flags & SX1276Registers.IRQ_TX_DONE:
-                self.get_logger().debug(f"TX Done flag detected: 0x{irq_flags:02X}")
+                self.get_logger().info(f"📤 Transmitted TO shore: {self.last_tx_payload_size} bytes payload, {self.last_tx_total_size} bytes total (seq: {self.tx_sequence})")
                 # Clear IRQ flags
                 self.spi_write_register(SX1276Registers.REG_IRQ_FLAGS, 0xFF)
                 # Return to RX mode
