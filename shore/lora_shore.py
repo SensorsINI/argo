@@ -443,75 +443,19 @@ class LoRaShoreNode(Node):
             self.get_logger().debug(f"Error sending ping: {e}")
     
     def report_diagnostics(self):
-        """Periodic diagnostics report - combines packet reception status with JSON parsing statistics"""
+        """Periodic diagnostics - only log WARN when there are JSON parsing failures."""
         if self.shutting_down:
             return
         
-        current_time = time.time()
-        elapsed = current_time - self.last_failure_report_time
-        
-        # Check packet reception status
-        time_since_last_packet = None
-        if self.last_packet_time:
-            time_since_last_packet = int(current_time - self.last_packet_time)
-        
-        # Determine if packets are being received (within last 30 seconds)
-        packets_being_received = (time_since_last_packet is not None and time_since_last_packet < 30)
-        
-        # Build diagnostic message
-        if packets_being_received:
-            # Packets are being received - INFO level
-            if self.failure_count > 0:
-                success_rate = (self.success_count / (self.success_count + self.failure_count)) * 100 if (self.success_count + self.failure_count) > 0 else 0
-                self.get_logger().info(
-                    f"📊 Diagnostics ({elapsed:.0f}s): "
-                    f"Packets OK | JSON parsed: {self.success_count} success, {self.failure_count} failures "
-                    f"(JSON errors={self.json_decode_errors}, Processing errors={self.processing_errors}) | "
-                    f"Success rate: {success_rate:.1f}%"
-                )
-            else:
-                self.get_logger().info(
-                    f"📊 Diagnostics ({elapsed:.0f}s): "
-                    f"Packets OK | JSON parsed: {self.success_count} success, 0 failures | All good! ✓"
-                )
-        else:
-            # No packets being received - WARN level
-            if time_since_last_packet is not None:
-                # Had packets before, but none recently
-                if self.failure_count > 0:
-                    success_rate = (self.success_count / (self.success_count + self.failure_count)) * 100 if (self.success_count + self.failure_count) > 0 else 0
-                    self.get_logger().warn(
-                        f"📊 Diagnostics ({elapsed:.0f}s): "
-                        f"No packets for {time_since_last_packet}s | "
-                        f"JSON parsed: {self.success_count} success, {self.failure_count} failures "
-                        f"(JSON errors={self.json_decode_errors}, Processing errors={self.processing_errors}) | "
-                        f"Success rate: {success_rate:.1f}%"
-                    )
-                else:
-                    self.get_logger().warn(
-                        f"📊 Diagnostics ({elapsed:.0f}s): "
-                        f"No packets for {time_since_last_packet}s | "
-                        f"JSON parsed: {self.success_count} success, 0 failures"
-                    )
-            else:
-                # Never received any packets
-                if self.failure_count > 0:
-                    success_rate = (self.success_count / (self.success_count + self.failure_count)) * 100 if (self.success_count + self.failure_count) > 0 else 0
-                    self.get_logger().warn(
-                        f"📊 Diagnostics ({elapsed:.0f}s): "
-                        f"No packets received | "
-                        f"JSON parsed: {self.success_count} success, {self.failure_count} failures "
-                        f"(JSON errors={self.json_decode_errors}, Processing errors={self.processing_errors}) | "
-                        f"Success rate: {success_rate:.1f}%"
-                    )
-                else:
-                    self.get_logger().warn(
-                        f"📊 Diagnostics ({elapsed:.0f}s): "
-                        f"No packets received | "
-                        f"JSON parsed: {self.success_count} success, 0 failures"
-                    )
-        
-        self.last_failure_report_time = current_time
+        self.last_failure_report_time = time.time()
+        if self.failure_count == 0:
+            return
+        success_rate = (self.success_count / (self.success_count + self.failure_count)) * 100 if (self.success_count + self.failure_count) > 0 else 0
+        self.get_logger().warn(
+            f"📊 JSON parsing failures: {self.failure_count} "
+            f"(JSON errors={self.json_decode_errors}, Processing errors={self.processing_errors}) | "
+            f"Success={self.success_count} | Success rate: {success_rate:.1f}%"
+        )
     
     def remote_command_callback(self, msg):
         """Receive command from ROS2 and send to Argo via LoRa"""
@@ -593,7 +537,8 @@ class LoRaShoreNode(Node):
                     f"LoRa not connected to {self.serial_port}. "
                     f"Attempting reconnection (attempt #{self.connection_attempts})..."
                 )
-            # Note: Packet reception warnings are now handled in report_diagnostics()
+            elif self.last_packet_time and (time.time() - self.last_packet_time) > 30:
+                self.get_logger().warn(f"No packets from Argo for {int(time.time() - self.last_packet_time)}s")
         
         except Exception as e:
             if not self.shutting_down:
