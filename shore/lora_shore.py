@@ -97,11 +97,13 @@ class LoRaShoreNode(Node):
         self.declare_parameter('serial_port', '/dev/ttyACM0')
         self.declare_parameter('baud_rate', 115200)
         self.declare_parameter('enable_debug', debug)
+        self.declare_parameter('configure_on_connect', True)  # Configure dongle after open (survives USB reset)
         
         # Get parameters
         self.serial_port = self.get_parameter('serial_port').get_parameter_value().string_value
         self.baud_rate = self.get_parameter('baud_rate').get_parameter_value().integer_value
         self.debug = self.get_parameter('enable_debug').get_parameter_value().bool_value
+        self.configure_on_connect = self.get_parameter('configure_on_connect').get_parameter_value().bool_value
         
         # Serial connection state
         self.ser = None
@@ -203,6 +205,9 @@ class LoRaShoreNode(Node):
                     f"(attempt #{self.connection_attempts})"
                 )
             self.connection_attempts = 0  # Reset counter on success
+            # Configure dongle after open (USB open can reset device; NETID etc. must match Argo)
+            if self.configure_on_connect:
+                self._configure_waveshare_dongle()
             return True
         except serial.SerialException as e:
             if not self.shutting_down:
@@ -212,6 +217,40 @@ class LoRaShoreNode(Node):
                 )
             self.ser = None
             return False
+    
+    def _configure_waveshare_dongle(self):
+        """Configure Waveshare dongle via AT commands after serial open (USB open can reset device)."""
+        if not self.ser or not self.ser.is_open or self.shutting_down:
+            return
+        try:
+            # Drain any data left from open/reset
+            time.sleep(0.2)
+            if self.ser.in_waiting:
+                self.ser.read(self.ser.in_waiting)
+            # Enter AT mode
+            self.ser.write(b"+++\r\n")
+            time.sleep(1.0)
+            if self.ser.in_waiting:
+                self.ser.read(self.ser.in_waiting)
+            # Required settings to match Argo (sync word 0x12 = NETID 18)
+            for param, value in [
+                ('NETID', '18'), ('MODE', '1'), ('SF', '7'), ('BW', '0'), ('CR', '1'),
+                ('TXCH', '23'), ('RXCH', '23'), ('KEY', '0'),
+            ]:
+                self.ser.write(f"AT+{param}={value}\r\n".encode())
+                time.sleep(0.3)
+                if self.ser.in_waiting:
+                    self.ser.read(self.ser.in_waiting)
+            # Exit AT mode back to stream
+            self.ser.write(b"AT+EXIT\r\n")
+            time.sleep(0.4)
+            if self.ser.in_waiting:
+                self.ser.read(self.ser.in_waiting)
+            if not self.shutting_down:
+                self.get_logger().info("Waveshare dongle configured (NETID=18, MODE=1) for Argo.")
+        except Exception as e:
+            if not self.shutting_down:
+                self.get_logger().warn(f"Dongle AT configure failed (continuing anyway): {e}")
     
     def serial_reader_loop(self):
         """Background thread that reads from serial port and processes packets"""
@@ -612,10 +651,11 @@ DEBUG MODE:
     - Packet reception timing and sequence numbers
 
 TROUBLESHOOTING:
+    - By default the node configures the dongle on connect (NETID=18, MODE=1, etc.)
+      so it works even if the USB open resets the device. Use --no-configure to skip.
     - Ensure Waveshare module is connected and recognized
     - Check serial port permissions (may need to add user to dialout group)
-    - Verify module is in stream mode (MODE=1)
-    - Check network ID matches Argo (NETID=18)
+    - Verify module is in stream mode (MODE=1) and NETID=18 matches Argo
     - Ensure proper antenna is connected
 
 For more information, see shore/README.md and shore/INSTALL.md
@@ -636,6 +676,8 @@ def parse_arguments():
                        help='Serial port device (default: /dev/ttyACM0)')
     parser.add_argument('--baud', '-b', type=int, default=115200,
                        help='Serial baud rate (default: 115200)')
+    parser.add_argument('--no-configure', action='store_true',
+                       help='Do not configure dongle on connect (use if dongle does not reset)')
     
     return parser.parse_args()
 
@@ -656,6 +698,8 @@ def main(args=None):
         ros_args.extend(['--ros-args', '-p', f'serial_port:={cli_args.port}'])
     if cli_args.baud != 115200:
         ros_args.extend(['--ros-args', '-p', f'baud_rate:={cli_args.baud}'])
+    if getattr(cli_args, 'no_configure', False):
+        ros_args.extend(['--ros-args', '-p', 'configure_on_connect:=false'])
     
     rclpy.init(args=ros_args)
     node = None
