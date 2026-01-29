@@ -487,6 +487,7 @@ class PowerController(ArgoBaseNode):
         self.last_logged_pattern = None
         self.last_pattern_log_time = 0.0
         self.pattern_log_interval = 60.0  # Log at least once per minute
+        self.paused_status_log_interval = 20.0  # When heartbeat paused (SOS etc.): 3 logs per minute
         
         # System status monitoring (updated via topic callbacks)
         self.anemometer_healthy = True
@@ -1661,6 +1662,9 @@ class PowerController(ArgoBaseNode):
         """Control red LED (battery warning/SOS indicator)"""
         if not self.gpio_available:
             return
+        if getattr(self, 'red_led_line', None) is None:
+            self.red_led_state = state  # Keep state consistent
+            return
         try:
             # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
             value = LED_ON_STATE if state else LED_OFF_STATE
@@ -1820,6 +1824,10 @@ class PowerController(ArgoBaseNode):
                     reason = self.heartbeat_pause_reason or "unspecified"
                     self.get_logger().debug(f"Heartbeat paused (reason: {reason})")
                     self.last_heartbeat_pause_log = current_time
+                # Periodic INFO log so SOS/special state is visible in logs (3 per minute when paused)
+                if current_time - self.last_pattern_log_time >= self.paused_status_log_interval:
+                    self._log_paused_state_status()
+                    self.last_pattern_log_time = current_time
                 time.sleep(0.1)
                 continue
 
@@ -3990,9 +3998,9 @@ class PowerController(ArgoBaseNode):
                             # Resume heartbeat now that charging state is inactive
                             self.resume_heartbeat(reason="charging_state_ended")
 
-                    # Battery voltage recovered above low threshold
-                    else:
-                        # Check if we were in low battery state
+                    # Battery voltage recovered above low threshold (run whenever voltage is OK, not only when critical was set)
+                    if battery_voltage >= LOW_BATTERY_THRESHOLD_V:
+                        # Clear low battery state and stop SOS if we were in it
                         if self.low_battery_detected:
                             # Always log battery recovery events regardless of voltage change threshold
                             self.get_logger().info(
@@ -4007,7 +4015,7 @@ class PowerController(ArgoBaseNode):
                                 "normal"
                             )
 
-                        # Check if we were in critical battery state
+                        # Clear critical battery state if we were in it
                         if self.critical_battery_detected:
                             # Always log critical battery recovery events regardless of voltage change threshold
                             self.get_logger().info(
@@ -5128,6 +5136,26 @@ If you take no action within 30 seconds, the system will automatically
         self.heartbeat_pause_reason = None
         self.heartbeat_pause_time = 0.0
         self.last_heartbeat_pause_log = 0.0
+
+    def _log_paused_state_status(self):
+        """Log a throttled INFO message describing current paused state (SOS, charging, etc.)."""
+        reason = self.heartbeat_pause_reason or "unspecified"
+        if reason == "low_battery":
+            volt = f"{self.last_battery_voltage:.2f}V" if self.last_battery_voltage is not None else "?"
+            ac = "yes" if self.ac_power_from_topic is True else "no"
+            self.get_logger().info(
+                f"Low battery SOS active | Battery: {volt} | AC: {ac} | Red LED blinking SOS"
+            )
+        elif reason == "i2c_failure" or reason == "i2c_failure_recovered":
+            self.get_logger().info(
+                "I2C failure SOS active | Battery monitoring unavailable | Red LED blinking SOS"
+            )
+        elif reason == "charging_state":
+            self.get_logger().info(
+                "Charging state pattern active | AC connected | Green LED showing charge state"
+            )
+        else:
+            self.get_logger().info(f"LED heartbeat paused (reason: {reason})")
 
     def _update_led_heartbeat_for_pause_state(self):
         """Update LED heartbeat frequency based on controller pause state and Argo service state"""
