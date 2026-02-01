@@ -118,8 +118,13 @@ BATTERY_CRITICAL_THRESHOLD_V = 6.8  # V, ~10% for 2S LiPo, may trigger shutdown
 BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with USB charging pluugged in under full laod (sans servos)
 
 # Battery lifetime estimation configuration
-BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression 
-BATTERY_LIFETIME_MIN_SAMPLES = 5     # Minimum samples required for estimation
+# Quantization: 12-bit ADC, Vref=4.096V, 27k/18k divider (2.5x) -> ~2.5mV per count at battery.
+# Sampling every 5s; a single step over 5s gives ~1.8 V/h apparent slope. Use more samples and
+# cap discharge slope magnitude to avoid noise-dominated estimates.
+BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression
+BATTERY_LIFETIME_MIN_SAMPLES = 15   # Minimum samples for slope (75s window); reduces quantization noise
+MAX_DISCHARGING_SLOPE_VPH = 2.0     # V/h; steeper magnitude is rejected (likely quantization/noise)
+MIN_DISCHARGING_SLOPE_VPH = 0.08    # V/h; discharge gentler than this is not "meaningful" (e.g. 6Ah @ 0.5A -> ~12h full to empty -> 1V/12h = 0.083 V/h)
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
 # Storage rundown: flag file set by astore; discharge to 7.6V then shut down (cleared on reboot)
 STORAGE_RUNDOWN_FLAG_FILE = '/tmp/argo_battery_storage_rundown'
@@ -1080,13 +1085,15 @@ class BatteryWaterNode(ArgoBaseNode):
                 return
             
             # Validate that slopes are meaningful (not None, not zero, within reasonable range)
-            # Use same minimum thresholds as in slope update to avoid saving near-zero slopes
-            MIN_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h minimum for meaningful slopes
+            MIN_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h minimum for charging
+            MIN_DISCHARGING_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # -0.08 V/h minimum magnitude for discharge
+            MAX_DISCHARGING_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0  # Reject steeper (quantization noise)
             has_meaningful_charging = (self._charging_slope_v_per_s is not None and 
                                       self._charging_slope_v_per_s > MIN_SLOPE_V_PER_S and 
                                       abs(self._charging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
             has_meaningful_discharging = (self._discharging_slope_v_per_s is not None and 
-                                         self._discharging_slope_v_per_s < -MIN_SLOPE_V_PER_S and 
+                                         self._discharging_slope_v_per_s < MIN_DISCHARGING_V_PER_S and  # At least -0.08 V/h
+                                         self._discharging_slope_v_per_s > MAX_DISCHARGING_V_PER_S and  # Cap magnitude
                                          abs(self._discharging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
             
             # Additional validation: slopes should only be saved if they represent
@@ -1311,9 +1318,9 @@ class BatteryWaterNode(ArgoBaseNode):
                 regression_slope_v_per_s, intercept = fit_result
                 
                 # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
-                # 0.3 V/h = 8.33e-5 V/s minimum for meaningful slope updates
                 MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -8.33e-5  # -0.3 V/h (magnitude)
+                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # -0.08 V/h (6Ah @ 0.5A ~12h full→empty)
+                MAX_DISCHARGING_SLOPE_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0  # Reject steeper (noise)
                 
                 # Also check that battery is not already fully charged to avoid capturing voltage float near full
                 # Note: voltage is already validated as not NaN above
@@ -1328,24 +1335,27 @@ class BatteryWaterNode(ArgoBaseNode):
                     not is_fully_charged):  # Don't update slope when already fully charged
                     self._charging_slope_v_per_s = regression_slope_v_per_s
                     self.get_logger().debug(f"Updated charging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    self._save_battery_slopes()  # Persist so file timestamp reflects last slope update
                     # Use the updated slope for this estimation
                     slope_v_per_s = regression_slope_v_per_s
                 elif (not charging and 
                       regression_slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and  # Significant negative slope
+                      regression_slope_v_per_s > MAX_DISCHARGING_SLOPE_V_PER_S and  # Not steeper than cap (noise)
                       len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
                       self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
                       not is_near_empty):  # Don't update slope when already near empty
                     self._discharging_slope_v_per_s = regression_slope_v_per_s
                     self.get_logger().debug(f"Updated discharging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    self._save_battery_slopes()  # Persist so file timestamp reflects last slope update
                     # Use the updated slope for this estimation
                     slope_v_per_s = regression_slope_v_per_s
                 elif slope_v_per_s is None:
-                    # If we have regression result but no persistent slope, validate sign before using
-                    # For charging: slope must be positive; for discharging: slope must be negative
+                    # If we have regression result but no persistent slope, validate sign and cap
                     if charging and regression_slope_v_per_s > 1e-6:
                         slope_v_per_s = regression_slope_v_per_s
                     elif not charging and regression_slope_v_per_s < -1e-6:
-                        slope_v_per_s = regression_slope_v_per_s
+                        # Clamp discharge slope to max magnitude to avoid noisy estimates
+                        slope_v_per_s = max(regression_slope_v_per_s, MAX_DISCHARGING_SLOPE_V_PER_S)
                     # Otherwise, regression slope has wrong sign - don't use it
             
             # If no slope available at all, cannot estimate

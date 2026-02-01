@@ -52,9 +52,9 @@ The node estimates time to full charge or depletion using linear regression on r
 
 **Key Features**:
 - **Persistent slopes**: Charging/discharging slopes saved to `battery_slopes.json`
-- **Early estimates**: Uses saved slopes immediately after startup (no waiting for 5 samples)
-- **Dynamic updates**: Updates slopes when sufficient data is available
-- **Slope validation**: Only saves meaningful slopes (>0.3 V/h for charging, <-0.3 V/h for discharging)
+- **Early estimates**: Uses saved slopes immediately after startup (no waiting for min samples)
+- **Dynamic updates**: Updates slopes when sufficient data is available (≥15 samples, ~75s window)
+- **Slope validation**: Saves slopes in range (>0.3 V/h charging; discharging between -2 V/h and -0.08 V/h). Gentler discharge is not "meaningful"; steeper is rejected as quantization noise. (6Ah @ 0.5A ≈ 12h full→empty → 1V/12h ≈ 0.083 V/h.)
 
 **Estimation Logic**:
 ```python
@@ -75,7 +75,9 @@ if fit_result and sufficient_samples:
 
 **Configuration**:
 - `battery_lifetime_sample_window = 60` - Number of samples for regression
-- `battery_lifetime_min_samples = 5` - Minimum samples required for estimation
+- `battery_lifetime_min_samples = 15` - Minimum samples for slope (~75s); reduces quantization noise
+- `MAX_DISCHARGING_SLOPE_VPH = 2.0` - Discharge slope steeper than this is rejected (ADC quantization ~2.5mV/step, 5s → ~1.8 V/h per step)
+- `MIN_DISCHARGING_SLOPE_VPH = 0.08` - Discharge gentler than -0.08 V/h is not "meaningful" (e.g. 6Ah @ 0.5A ≈ 12h full→empty → 1V/12h)
 - `BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2V` - Target voltage for "full"
 
 ### Charging Status Detection
@@ -121,7 +123,7 @@ The node detects when charger reports "charging" but voltage is actually decreas
 **Detection Criteria**:
 - Charging status = True (from GPIO or I2C)
 - Voltage slope < -0.05 V/h (falling faster than threshold)
-- Sufficient samples for slope calculation (≥5 samples)
+- Sufficient samples for slope calculation (≥15 samples)
 
 **Anomaly Codes**:
 - `charger_power_fault` - Charger not delivering power despite reporting charging
@@ -441,9 +443,8 @@ pip3 install pandas matplotlib
                 regression_slope_v_per_s, intercept = fit_result
                 
                 # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
-                # 0.3 V/h = 8.33e-5 V/s minimum for meaningful slope updates
                 MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -8.33e-5  # -0.3 V/h (magnitude)
+                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # -0.08 V/h (6Ah @ 0.5A ~12h full→empty)
                 
                 # Also check that battery is not already fully charged to avoid capturing voltage float near full
                 is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)  # Within 0.1V of full
@@ -646,7 +647,7 @@ ros2 node list | grep battery_water
 **Symptoms**: Time-to-full/empty estimates are None
 
 **Possible Causes**:
-- Insufficient voltage samples (<5 samples)
+- Insufficient voltage samples (<15 samples)
 - Battery voltage stable (no significant slope)
 - Charging status unknown
 
