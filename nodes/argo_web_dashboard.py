@@ -1794,8 +1794,12 @@ class ArgoWebDashboard(ArgoBaseNode):
         @self.app.route('/api/status')
         def get_status():
             """Get current system status as JSON."""
+            STORAGE_RUNDOWN_FLAG = Path('/tmp/argo_battery_storage_rundown')
             with self.state_lock:
-                return jsonify(self.state.copy())
+                state_copy = self.state.copy()
+                # Storage rundown is toggled via astore or dashboard; reflect current file so UI updates without battery service poll
+                state_copy['storage_rundown_active'] = STORAGE_RUNDOWN_FLAG.exists()
+                return jsonify(state_copy)
         
         @self.app.route('/api/status/critical')
         def get_critical_status():
