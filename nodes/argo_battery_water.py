@@ -2653,8 +2653,17 @@ class BatteryWaterNode(ArgoBaseNode):
         current_time = time.monotonic()
         
         try:
-            # Read raw GPIO values
+            # Read !ACOK first - needed to gate fault detection (only report fault when charger present)
+            ac_power_raw = False
+            if self.acok_gpio_line is not None:
+                acok_gpio_value = self.acok_gpio_line.get_value()
+                ac_power_raw = not acok_gpio_value  # Invert: !ACOK=0 means AC power present=True
+                if ac_power_raw:
+                    self._last_ac_power_true_time = current_time
+            
             # Read !CHARGING GPIO (PC12, line 76) - invert logic for charging status
+            # Note: Code uses !CHARGING (PC12) for transition tracking; MP2672 datasheet describes 1Hz blink on STAT.
+            # When no charger is present, !CHARGING may toggle (floating/different IC state) and must not be reported as fault.
             if self.charging_gpio_line is not None:
                 charging_gpio_value = self.charging_gpio_line.get_value()
                 charging_raw = not charging_gpio_value  # Invert: !CHARGING=0 means charging=True
@@ -2671,25 +2680,25 @@ class BatteryWaterNode(ArgoBaseNode):
                 
                 self._last_charging_gpio_value = charging_gpio_value
                 
-                # Analyze transitions to detect fault pattern (1-2 Hz blinking)
-                # Need at least 4 transitions to calculate frequency reliably
-                if len(self._charging_gpio_transitions) >= 4:
-                    # Calculate average period over recent transitions
+                # Only treat blinking as charging fault when AC power is present (charger plugged in).
+                # When no charger is present, !CHARGING/STAT may toggle or float -> false positive "battery missing" fault.
+                if not ac_power_raw:
+                    self._charging_fault_detected = False
+                    self._charging_fault_frequency = None
+                elif len(self._charging_gpio_transitions) >= 4:
+                    # AC present: analyze transitions for fault pattern (1-2 Hz blinking)
                     recent_periods = list(self._charging_gpio_transitions)[-8:]  # Use last 8 transitions
                     avg_period = sum(recent_periods) / len(recent_periods)
                     frequency = 1.0 / avg_period if avg_period > 0 else 0.0
                     
                     # MP2672 fault pattern: 1Hz blinking (datasheet), but we see ~2 Hz in practice
-                    # Accept 0.8-2.5 Hz range to account for measurement variations
                     if 0.8 <= frequency <= 2.5:
                         self._charging_fault_detected = True
                         self._charging_fault_frequency = frequency
                     else:
-                        # Normal operation - not fault pattern
                         self._charging_fault_detected = False
                         self._charging_fault_frequency = None
                 else:
-                    # Not enough data yet - reset fault state if we don't have enough transitions
                     if len(self._charging_gpio_transitions) < 2:
                         self._charging_fault_detected = False
                         self._charging_fault_frequency = None
@@ -2697,15 +2706,6 @@ class BatteryWaterNode(ArgoBaseNode):
                 # Update last-seen time when charging is active
                 if charging_raw:
                     self._last_charging_true_time = current_time
-                
-            # Read !ACOK GPIO (PH9, line 233) - invert logic for AC power present
-            if self.acok_gpio_line is not None:
-                acok_gpio_value = self.acok_gpio_line.get_value()
-                ac_power_raw = not acok_gpio_value  # Invert: !ACOK=0 means AC power present=True
-                
-                # Update last-seen time when AC power is present
-                if ac_power_raw:
-                    self._last_ac_power_true_time = current_time
             
             # Read !PG GPIO (PI4, line 260, pin 38) from CH221K USB-C voltage controller
             # CH221K PG pin (Pin 3) indicates successful USB Power Delivery (PD) negotiation
