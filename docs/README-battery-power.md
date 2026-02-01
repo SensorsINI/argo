@@ -179,6 +179,7 @@ Returns comprehensive battery status as JSON:
   "raw_data": {
     "battery_voltage": 7.8,
     "battery_remaining_pct": 45.2,
+    "battery_storage_rundown": false,
     "charging_status": true,
     "ac_power_present": true,
     "time_to_full_hours": 2.5,
@@ -251,6 +252,18 @@ The power control service implements two-tier battery protection:
 2. Pauses sensor nodes
 3. Executes `shutdown -h now` (normal shutdown)
 4. **Power relay cuts** (complete shutdown)
+
+#### 3. Storage Rundown Mode (7.6V target)
+
+**Purpose**: Discharge the battery to a safe storage voltage (7.6V) then shut down, for long-term storage. Mode is temporary (cleared on reboot).
+
+**CLI**: `astore` — toggles `/tmp/argo_battery_storage_rundown` (creates if missing, removes if present). When the flag is set:
+- Power control uses **7.6V** as the shutdown threshold (instead of 7.2V critical).
+- System runs until voltage ≤ 7.6V, then runs the same critical-battery halt (pause nodes, halt).
+- Battery/water status log line includes **" | Battery storage rundown to 7.6V"**.
+- `/battery_status` `raw_data` includes `battery_storage_rundown: true`.
+
+**Usage**: Run `astore` to enable before unplugging; run `astore` again to disable. After reboot, mode is off (flag is in `/tmp`).
 
 ### Charging State LED Pattern
 

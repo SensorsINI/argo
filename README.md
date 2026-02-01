@@ -400,6 +400,8 @@ Starts the Argo system in local simulation mode using `ros2 launch`.
 
 - `ar` - Start data recording (via ROS2 service)
 - `ac` - Stop data recording (via ROS2 service)
+- `abat` - Get battery status (formatted JSON)
+- `astore` - Toggle storage rundown (enable/disable discharge to 7.6V then shut down; mode cleared on reboot)
 - `am` - Monitor mode for lifecycle management
 - `ag` - Launch Argo GUI
 - `argo_status` - Detailed system status check

@@ -350,6 +350,9 @@ AC_POWER_TIMEOUT_S = AC_POWER_TIMEOUT_HOURS * 3600.0  # Convert to seconds
 BATTERY_SLOPES_JSON_PATH = Path(__file__).parent.parent / 'nodes' / 'battery_slopes.json'  # Path to battery slopes JSON file
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
+# Storage rundown: discharge to this voltage then shut down (mode set via /tmp flag, cleared on reboot)
+STORAGE_RUNDOWN_FLAG_FILE = '/tmp/argo_battery_storage_rundown'
+STORAGE_VOLTAGE_V = 7.6  # Target voltage for storage; shutdown when reached
 
 # SOS Pattern Configuration
 SOS_PATTERN_DURATION_S = 2.0       # Total duration of one SOS pattern cycle (seconds)
@@ -3600,6 +3603,8 @@ class PowerController(ArgoBaseNode):
                     # CRITICAL: Extract I2C failure and stale data flags to distinguish I2C failures from actual low voltage
                     i2c_failure = battery_data.get('i2c_failure', False)
                     stale_data = battery_data.get('stale_data', False)
+                    storage_rundown = battery_data.get('battery_storage_rundown', False)
+                    shutdown_threshold_v = STORAGE_VOLTAGE_V if storage_rundown else CRITICAL_BATTERY_THRESHOLD_V
                     # Prefer topic value if available (faster updates), otherwise use service value
                     ac_power = self.ac_power_from_topic if self.ac_power_from_topic is not None else ac_power_present
                     self.last_battery_voltage = battery_voltage
@@ -3758,16 +3763,36 @@ class PowerController(ArgoBaseNode):
 
                         # Handle NaN in logging
                         voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                        storage_note = " | Storage rundown to 7.6V" if storage_rundown else ""
                         self.get_logger().info(
                             f"Battery voltage check: {voltage_str} "
-                            f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
+                            f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}{storage_note}")
 
                         # Update the last logged voltage
                         self.last_logged_battery_voltage = battery_voltage
 
                     # Check for critical battery first (highest priority)
+                    # In storage rundown mode use 7.6V threshold; otherwise 7.2V
                     # Safety check: Skip if NaN (shouldn't happen here, but defensive programming)
-                    if not math.isnan(battery_voltage) and battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
+                    if not math.isnan(battery_voltage) and battery_voltage < shutdown_threshold_v:
+                        # Storage rundown: always shutdown at 7.6V (no AC bypass) so test with supply works
+                        if storage_rundown:
+                            if not self.critical_battery_detected:
+                                self.get_logger().info(
+                                    f"Storage rundown: voltage {battery_voltage:.3f}V reached {STORAGE_VOLTAGE_V}V target; initiating shutdown.")
+                                self.critical_battery_detected = True
+                                self.pause_heartbeat(reason="storage_rundown")
+                                if self.sos_led_active:
+                                    self.sos_led_active = False
+                                if self.i2c_failure_sos_active:
+                                    self.i2c_failure_sos_active = False
+                                if self.charge_state_led_active:
+                                    self.charge_state_led_active = False
+                                    self.charging_state_active = False
+                                    led_setter = self._get_charge_state_led_setter()
+                                    led_setter(False)
+                                self.initiate_critical_battery_halt(battery_voltage, reason="storage_rundown_7.6V")
+                            continue
                         # CRITICAL FIX: If AC power is present and charging is active, don't trigger shutdown
                         # The battery is being charged and will recover - shutdown is not needed
                         # Use topic value (ac_power) for faster updates, fallback to service value

@@ -121,6 +121,9 @@ BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with
 BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression 
 BATTERY_LIFETIME_MIN_SAMPLES = 5     # Minimum samples required for estimation
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
+# Storage rundown: flag file set by astore; discharge to 7.6V then shut down (cleared on reboot)
+STORAGE_RUNDOWN_FLAG_FILE = '/tmp/argo_battery_storage_rundown'
+STORAGE_VOLTAGE_V = 7.6  # Target voltage for storage; time-to-empty uses this when storage mode active
 
 # MP2672 CHG timer configuration (safety timer that disables charging after timeout)
 # Default: 20 hours (bits [2:1] = 10), can be disabled (00), 8hrs (01), or 12hrs (11)
@@ -844,6 +847,7 @@ class BatteryWaterNode(ArgoBaseNode):
                 'anomaly_reason': buffer_copy.get('anomaly_reason'),
                 'battery_low_alert': buffer_copy['battery_low_alert'],
                 'battery_remaining_pct': buffer_copy['battery_remaining_pct'] if buffer_copy['battery_remaining_pct'] is not None else 0.0,
+                'battery_storage_rundown': os.path.exists(STORAGE_RUNDOWN_FLAG_FILE),
                 'battery_voltage': buffer_copy['battery_voltage'],
                 'battery_water_health': buffer_copy.get('battery_water_health', 'UNKNOWN'),
                 'charging_anomaly': buffer_copy.get('charging_anomaly', False),
@@ -1365,10 +1369,10 @@ class BatteryWaterNode(ArgoBaseNode):
                     return 0.0  # Already at target - check this FIRST
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             else:
-                # Time to 0% (approximate as 6.0V for 2S LiPo, empty)
-                target_voltage = 6.0  # Conservative empty voltage
+                # Time to target: 7.6V when storage rundown active (astore), else 6.0V (empty)
+                target_voltage = STORAGE_VOLTAGE_V if os.path.exists(STORAGE_RUNDOWN_FLAG_FILE) else 6.0
                 if voltage <= target_voltage:
-                    return 0.0  # Already depleted - check this FIRST
+                    return 0.0  # Already at or below target - check this FIRST
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             
             # Convert to hours and clamp to reasonable range
@@ -3300,6 +3304,8 @@ class BatteryWaterNode(ArgoBaseNode):
             if hasattr(self, 'health_status') and hasattr(self, 'health_details'):
                 health_icon = "🟢" if self.health_status else "🔴"
                 health_status_str = f" | Health: {health_icon} {self.health_details}"
+            if os.path.exists(STORAGE_RUNDOWN_FLAG_FILE):
+                health_status_str += " | Battery storage rundown to 7.6V"
             
             # Handle NaN values in logging
             battery_voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"

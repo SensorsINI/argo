@@ -115,6 +115,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             'battery_usb_power': None,
             'battery_time_to_full': None,
             'battery_time_to_empty': None,
+            'storage_rundown_active': False,  # astore: discharge to 7.6V then shut down
             'battery_charging_fault_detected': False,  # GPIO-based charging fault detection
             'battery_charging_fault_frequency': None,  # Frequency of blinking if fault detected
             'battery_mp2672_fault_summary': None,  # MP2672 fault summary (GPIO or I2C based)
@@ -1531,6 +1532,7 @@ class ArgoWebDashboard(ArgoBaseNode):
                         charging_fault_detected = raw_data.get('charging_fault_detected', False)
                         charging_fault_frequency = raw_data.get('charging_fault_frequency')
                         mp2672_fault_summary = raw_data.get('mp2672_fault_summary')
+                        storage_rundown = raw_data.get('battery_storage_rundown', False)
                         # NOTE: I2C failure status comes ONLY from topic subscription (/argo/critical/i2c_failure)
                         # Service call timeout indicates battery service not running, which is a different error
                         
@@ -1571,6 +1573,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                             self.state['battery_charging_fault_detected'] = charging_fault_detected
                             self.state['battery_charging_fault_frequency'] = charging_fault_frequency
                             self.state['battery_mp2672_fault_summary'] = mp2672_fault_summary
+                            # Storage rundown (astore): discharge to 7.6V then shut down
+                            self.state['storage_rundown_active'] = storage_rundown
                             # Always update time estimates from service (topics don't provide this)
                             # CRITICAL: Always update (even if None) to clear stale values
                             # Respect charging status: if charging, clear TTE; if discharging, clear TTF
@@ -2150,6 +2154,35 @@ class ArgoWebDashboard(ArgoBaseNode):
             """Shutdown the entire system via power control service."""
             self.get_logger().info("System shutdown requested from web dashboard")
             return self._call_service(self.power_shutdown_client, '/argo/power/shutdown')
+        
+        @self.app.route('/api/storage/toggle', methods=['POST'])
+        def storage_toggle():
+            """Toggle storage rundown mode: create flag file if missing (activate), remove if present (deactivate). Mode cleared on reboot."""
+            STORAGE_RUNDOWN_FLAG = Path('/tmp/argo_battery_storage_rundown')
+            try:
+                if STORAGE_RUNDOWN_FLAG.exists():
+                    STORAGE_RUNDOWN_FLAG.unlink()
+                    with self.state_lock:
+                        self.state['storage_rundown_active'] = False
+                    self.get_logger().info("Storage rundown mode deactivated from web dashboard")
+                    return jsonify({
+                        'success': True,
+                        'active': False,
+                        'message': 'Storage rundown disabled.'
+                    })
+                else:
+                    STORAGE_RUNDOWN_FLAG.touch()
+                    with self.state_lock:
+                        self.state['storage_rundown_active'] = True
+                    self.get_logger().info("Storage rundown mode activated from web dashboard")
+                    return jsonify({
+                        'success': True,
+                        'active': True,
+                        'message': 'Storage rundown enabled. System will discharge to 7.6V then shut down (mode cleared on reboot).'
+                    })
+            except OSError as e:
+                self.get_logger().error(f"Failed to toggle storage mode: {e}")
+                return jsonify({'success': False, 'message': str(e)}), 500
     
     def _call_service(self, client, service_name):
         """Generic service call wrapper with improved timeout and error handling."""

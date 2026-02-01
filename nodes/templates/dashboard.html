@@ -18,6 +18,11 @@
             </div>
         </header>
 
+        <!-- Storage mode active banner (shown when astore is set) -->
+        <div id="storage-mode-banner" class="storage-mode-banner" style="display: none;">
+            🔋 Storage mode is active — discharge to 7.6V then shut down (cleared on reboot)
+        </div>
+
         <!-- System Status Card -->
         <div class="card">
             <h2>System Status</h2>
@@ -173,6 +178,9 @@
                 </button>
                 <button class="btn btn-danger" id="shutdown-btn" onclick="requestShutdown()">
                     🔌 Shutdown System
+                </button>
+                <button class="btn btn-storage" id="storage-mode-btn" onclick="toggleStorageMode()">
+                    🔋 Activate storage mode
                 </button>
             </div>
         </div>
@@ -523,6 +531,19 @@
                 }
             } else {
                 chargingFaultAlert.style.display = 'none';
+            }
+            
+            // Storage mode banner (astore: discharge to 7.6V then shut down)
+            const storageBanner = document.getElementById('storage-mode-banner');
+            const storageBtn = document.getElementById('storage-mode-btn');
+            if (data.storage_rundown_active === true) {
+                storageBanner.style.display = 'block';
+                storageBtn.textContent = '🔋 Deactivate storage mode';
+                storageBtn.disabled = false;
+            } else {
+                storageBanner.style.display = 'none';
+                storageBtn.textContent = '🔋 Activate storage mode';
+                storageBtn.disabled = false;
             }
             
             // Node summary - show non-running or non-healthy nodes
@@ -1116,6 +1137,58 @@
                 },
                 isOpen: true
             };
+        }
+
+        function toggleStorageMode() {
+            const isActive = statusData && statusData.storage_rundown_active === true;
+            if (isActive) {
+                showModal(
+                    '🔋 Deactivate storage mode',
+                    'Disable storage rundown:\n\n' +
+                    '• System will no longer shut down at 7.6V\n' +
+                    '• Normal critical/low battery thresholds apply\n\n' +
+                    'Deactivate now?',
+                    () => { performStorageToggle(); }
+                );
+            } else {
+                showModal(
+                    '🔋 Activate storage mode',
+                    'Enable storage rundown:\n\n' +
+                    '• System will discharge the battery to 7.6V (storage voltage)\n' +
+                    '• Then shut down automatically\n' +
+                    '• Mode is cleared on next boot\n\n' +
+                    'Activate now?',
+                    () => { performStorageToggle(); }
+                );
+            }
+        }
+
+        function performStorageToggle() {
+            const btn = document.getElementById('storage-mode-btn');
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = '⏳ ...';
+            fetch('/api/storage/toggle', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('✅ ' + data.message);
+                        closeModal();
+                        if (data.active !== undefined && statusData) {
+                            statusData.storage_rundown_active = data.active;
+                            updateUI(statusData);
+                        }
+                    } else {
+                        alert('❌ ' + (data.message || 'Failed to toggle storage mode'));
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
+                })
+                .catch(error => {
+                    alert('❌ Error: ' + error);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                });
         }
 
         function requestShutdown() {
