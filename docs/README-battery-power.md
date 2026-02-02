@@ -54,7 +54,7 @@ The node estimates time to full charge or depletion using linear regression on r
 - **Persistent slopes**: Charging/discharging slopes saved to `battery_slopes.json`
 - **Early estimates**: Uses saved slopes immediately after startup (no waiting for min samples)
 - **Dynamic updates**: Updates slopes when sufficient data is available (≥15 samples, ~75s window)
-- **Slope validation**: Saves slopes in range (>0.3 V/h charging; discharging between -2 V/h and -0.08 V/h). Gentler discharge is not "meaningful"; steeper is rejected as quantization noise. (6Ah @ 0.5A ≈ 12h full→empty → 1V/12h ≈ 0.083 V/h.)
+- **Slope validation**: Saves slopes in range (>0.3 V/h charging; discharging between -2 V/h and -0.05 V/h). Gentler discharge is not "meaningful"; steeper is rejected as quantization noise.
 
 **Estimation Logic**:
 ```python
@@ -74,11 +74,14 @@ if fit_result and sufficient_samples:
 ```
 
 **Configuration**:
-- `battery_lifetime_sample_window = 60` - Number of samples for regression
+- `battery_lifetime_sample_window = 360` - Number of samples for regression (5s interval → 30 min window)
 - `battery_lifetime_min_samples = 15` - Minimum samples for slope (~75s); reduces quantization noise
 - `MAX_DISCHARGING_SLOPE_VPH = 2.0` - Discharge slope steeper than this is rejected (ADC quantization ~2.5mV/step, 5s → ~1.8 V/h per step)
-- `MIN_DISCHARGING_SLOPE_VPH = 0.08` - Discharge gentler than -0.08 V/h is not "meaningful" (e.g. 6Ah @ 0.5A ≈ 12h full→empty → 1V/12h)
+- `MIN_DISCHARGING_SLOPE_VPH = 0.05` - Discharge gentler than -0.05 V/h is not "meaningful"
 - `BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2V` - Target voltage for "full"
+
+**Observed battery (Absima Greenhorn Line Vol2)**  
+Fresh 6000 mAh 2S LiPo. Storage rundown (8.3 V → 7.6 V) over ~11 h yields discharge slope ~-0.063 to -0.067 V/h by eye; regression from CSV in same ballpark. Measured slope can run ~20–25% higher over short windows (e.g. ~-0.08 V/h). Slope thresholds and 30 min moving window are tuned for this pack.
 
 ### Charging Status Detection
 
@@ -444,7 +447,7 @@ pip3 install pandas matplotlib
                 
                 # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
                 MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # -0.08 V/h (6Ah @ 0.5A ~12h full→empty)
+                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
                 
                 # Also check that battery is not already fully charged to avoid capturing voltage float near full
                 is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)  # Within 0.1V of full

@@ -121,10 +121,10 @@ BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with
 # Quantization: 12-bit ADC, Vref=4.096V, 27k/18k divider (2.5x) -> ~2.5mV per count at battery.
 # Sampling every 5s; a single step over 5s gives ~1.8 V/h apparent slope. Use more samples and
 # cap discharge slope magnitude to avoid noise-dominated estimates.
-BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression
+BATTERY_LIFETIME_SAMPLE_WINDOW = 360  # Number of samples for linear regression (5s interval -> 30 min window)
 BATTERY_LIFETIME_MIN_SAMPLES = 15   # Minimum samples for slope (75s window); reduces quantization noise
 MAX_DISCHARGING_SLOPE_VPH = 2.0     # V/h; steeper magnitude is rejected (likely quantization/noise)
-MIN_DISCHARGING_SLOPE_VPH = 0.08    # V/h; discharge gentler than this is not "meaningful" (e.g. 6Ah @ 0.5A -> ~12h full to empty -> 1V/12h = 0.083 V/h)
+MIN_DISCHARGING_SLOPE_VPH = 0.05    # V/h; discharge gentler than this is not "meaningful"
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
 # Storage rundown: flag file set by astore; discharge to 7.6V then shut down (cleared on reboot)
 STORAGE_RUNDOWN_FLAG_FILE = '/tmp/argo_battery_storage_rundown'
@@ -1086,7 +1086,7 @@ class BatteryWaterNode(ArgoBaseNode):
             
             # Validate that slopes are meaningful (not None, not zero, within reasonable range)
             MIN_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h minimum for charging
-            MIN_DISCHARGING_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # -0.08 V/h minimum magnitude for discharge
+            MIN_DISCHARGING_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
             MAX_DISCHARGING_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0  # Reject steeper (quantization noise)
             has_meaningful_charging = (self._charging_slope_v_per_s is not None and 
                                       self._charging_slope_v_per_s > MIN_SLOPE_V_PER_S and 
@@ -1319,7 +1319,7 @@ class BatteryWaterNode(ArgoBaseNode):
                 
                 # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
                 MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # -0.08 V/h (6Ah @ 0.5A ~12h full→empty)
+                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
                 MAX_DISCHARGING_SLOPE_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0  # Reject steeper (noise)
                 
                 # Also check that battery is not already fully charged to avoid capturing voltage float near full
