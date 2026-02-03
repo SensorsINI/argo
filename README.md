@@ -30,7 +30,7 @@ The main PCB design for Argo is available in the [pcb/](pcb/) folder. The latest
 - **Orange Pi Zero 2W** (Allwinner H618 SoC)
 - **GPS**: u-blox NEO-M9N via UART5 (/dev/ttyS5)
 - **IMU**: [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU via I2C0 (0x4a)
-- **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23). This PCB includes an RGBW LED and its I2C controller chip LP5814DLR at I2C address 0x2C.  
+- **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23). This PCB includes an RGBW LED and its I2C controller PCA9632 at individual address 0x62 (0x70 is LED All Call).  
   - **Design files:** See [`pcb/WindSensor/WindSensor-rev1/`](pcb/WindSensor/WindSensor-rev1/) directory for full hardware schematics, layout, and BOM.
 - **ADC**: MAX11612 for battery/water sensing via I2C0 (0x34)
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)

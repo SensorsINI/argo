@@ -10,11 +10,13 @@ TIMEOUT=1
 
 # Expected I2C addresses for Argo devices
 # Note: MP2672 (0x4B) excluded - using standalone mode (GPIO only), not I2C
+# Mast LED: PCA9632 shows as 0x62 (individual) and 0x70 (All Call); both expected for one device
 declare -A EXPECTED_DEVICES=(
     ["0x21"]="Wind sensor 1 (SDP3x)"
     ["0x22"]="Wind sensor 2 (SDP3x)"
     ["0x23"]="Wind sensor 3 (SDP3x)"
-    ["0x2c"]="Mast LED controller (LP5814DLR)"
+    ["0x62"]="Mast LED (PCA9632 individual)"
+    ["0x70"]="Mast LED (PCA9632 All Call)"
     ["0x34"]="ADC (MAX11612) - Battery/Water"
     ["0x44"]="Temperature/Humidity (SHT45)"
     ["0x4a"]="IMU (BNO085)"
