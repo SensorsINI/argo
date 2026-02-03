@@ -6,7 +6,7 @@ Outputs battery status in XML format for the genmon plugin
 
 import sys
 import json
-import time
+import math
 from typing import Optional, Dict, Any
 
 # ROS2 imports
@@ -30,15 +30,15 @@ class BatteryStatusGenmon(Node):
         self.get_battery_status()
     
     def _output_unavailable(self):
-        """Output service unavailable status"""
+        """Output service unavailable status - always show ??? so genmon does not keep old value"""
         print('<icon>battery-missing</icon>')
-        print('<txt>N/A</txt>')
+        print('<txt>???</txt>')
         print('<tool>Battery service unavailable</tool>')
     
     def _output_error(self, error_msg: str):
-        """Output error status"""
+        """Output error status - show ??? so genmon does not keep old value"""
         print('<icon>battery-missing</icon>')
-        print('<txt>Error</txt>')
+        print('<txt>???</txt>')
         print(f'<tool>Battery service error: {error_msg}</tool>')
     
     def get_battery_status(self):
@@ -65,12 +65,31 @@ class BatteryStatusGenmon(Node):
         except Exception as e:
             self._output_error(str(e))
     
+    def _output_invalid(self, reason: str):
+        """Output invalid/stale battery data - show ??? so genmon does not show cached or invalid values"""
+        print('<icon>battery-missing</icon>')
+        print('<txt>???</txt>')
+        print(f'<tool>{reason}</tool>')
+    
     def _format_genmon_output(self, battery_data: Dict[str, Any]):
         """Format battery data for genmon XML output"""
         try:
             raw_data = battery_data.get('raw_data', {})
             battery_summary = battery_data.get('battery_summary', 'N/A')
             critical_alerts = battery_data.get('critical_alerts')
+            
+            # Treat I2C failure or stale data as invalid - do not show possibly cached voltage
+            if raw_data.get('i2c_failure'):
+                self._output_invalid("I2C failure – battery monitoring unavailable")
+                return
+            if raw_data.get('stale_data'):
+                self._output_invalid("Stale data – using last known values (I2C failure)")
+                return
+            # Invalid or missing battery voltage
+            v = raw_data.get('battery_voltage')
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                self._output_invalid("Invalid battery voltage (sensor or I2C failure)")
+                return
             
             # Determine icon based on status
             if 'LOW BATTERY' in (critical_alerts or ''):
@@ -106,18 +125,22 @@ class BatteryStatusGenmon(Node):
                 ac_text = "AC power present" if ac_power else "Battery power"
                 tooltip_lines.append(f"Power: {ac_text}")
             
-            # Add other sensor data
-            saltwater_voltage = raw_data.get('saltwater_voltage', 0)
-            sail_current = raw_data.get('sail_current', 0)
+            # Add other sensor data (safe float for NaN/None from service during I2C failure)
+            def _f3(x):
+                try:
+                    v = float(x) if x is not None else 0.0
+                    return f"{v:.3f}" if not math.isnan(v) else "—"
+                except (TypeError, ValueError):
+                    return "—"
+            saltwater_v = raw_data.get('saltwater_voltage')
+            sail_a = raw_data.get('sail_current')
+            tooltip_lines.append(f"Saltwater: {_f3(saltwater_v)}V")
+            tooltip_lines.append(f"Sail current: {_f3(sail_a)}A")
             temperature = raw_data.get('pcb_temperature')
             humidity = raw_data.get('relative_humidity')
-            
-            tooltip_lines.append(f"Saltwater: {saltwater_voltage:.3f}V")
-            tooltip_lines.append(f"Sail current: {sail_current:.3f}A")
-            
-            if temperature is not None:
+            if temperature is not None and not math.isnan(temperature):
                 tooltip_lines.append(f"Temperature: {temperature:.1f}°C")
-            if humidity is not None:
+            if humidity is not None and not math.isnan(humidity):
                 tooltip_lines.append(f"Humidity: {humidity:.1f}%")
             
             # Add critical alerts
@@ -147,7 +170,7 @@ def main():
         
     except Exception:
         print('<icon>battery-missing</icon>')
-        print('<txt>Error</txt>')
+        print('<txt>???</txt>')
         print('<tool>Fatal error in battery status script</tool>')
     finally:
         if rclpy.ok():
