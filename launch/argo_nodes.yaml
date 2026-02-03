@@ -25,6 +25,7 @@ groups:
     - rudder_sail_radio_node
     - argo_power_control
     - argo_battery_water
+    - mastleds_node
     
   control:
     - controller_node
@@ -54,6 +55,7 @@ groups:
     - temp_monitor_node
     - lora_node
     - record_node
+    - mastleds_node
     - argo_web_dashboard
     - argo_transform_publisher
     - argo_boat_visualization
@@ -115,6 +117,11 @@ nodes:
     executable: nodes/lora.py
     description: "Long range radio communication"
     health_topic: "/lora_node_health"
+    
+  - name: mastleds_node
+    executable: nodes/argo_mast_leds.py
+    description: "Mast RGBW LED controller (PCA9632); mirrors power button state"
+    health_topic: "/mastleds_node_health"
     
   # Monitoring and Recording Nodes
   - name: record_node

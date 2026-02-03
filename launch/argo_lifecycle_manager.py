@@ -388,6 +388,7 @@ class ArgoLifecycleManager:
             'temp_monitor.py': '/temp_monitor_node/health',
             'argo_transform_publisher.py': '/argo_transform_publisher/health',
             'argo_boat_visualization.py': '/argo_boat_visualization/health',
+            'argo_mast_leds.py': '/mastleds_node/health',
             'bno085.py': '/bno085_bridge/health'  # BNO085 bridge health service
         }
         
@@ -399,6 +400,7 @@ class ArgoLifecycleManager:
             'argo_battery_water.py': '/battery_water_node_health',
             'rudder_sail_radio.py': '/rudder_sail_radio_node_health',
             'temp_monitor.py': '/temp_monitor_node_health',
+            'argo_mast_leds.py': '/mastleds_node_health',
             'bno085.py': '/imu_health'  # BNO085 IMU health status
         }
         
@@ -509,6 +511,7 @@ class ArgoLifecycleManager:
             'controller.py': '/controller_node/health',
             'argo_transform_publisher.py': '/argo_transform_publisher/health',
             'argo_boat_visualization.py': '/argo_boat_visualization/health',
+            'argo_mast_leds.py': '/mastleds_node/health',
             'record.py': '/record/health',
             'bno085.py': '/bno085_bridge/health'  # Monitor BNO085 health even when excluded from launch
         }
