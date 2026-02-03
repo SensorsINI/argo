@@ -329,6 +329,8 @@ TEST_MODE_SHUTDOWN_DELAY_S = 5
 # Notification Timeouts
 # Desktop notification timeout (seconds)
 DESKTOP_NOTIFICATION_TIMEOUT_S = 5
+# Minimum interval between desktop user re-detection attempts (seconds)
+DESKTOP_REDETECT_INTERVAL_S = 60
 WALL_MESSAGE_TIMEOUT_S = 5              # Wall message timeout (seconds)
 # Standard notification expire time (5 seconds)
 NOTIFICATION_EXPIRE_TIME_MS = 5000
@@ -513,6 +515,7 @@ class PowerController(ArgoBaseNode):
         self.cached_desktop_user = None
         self.cached_display_env = None
         self.desktop_user_detection_failed = False
+        self.last_desktop_redetect_time = 0.0
 
         # Battery monitoring state
         self.low_battery_detected = False
@@ -2831,123 +2834,126 @@ class PowerController(ArgoBaseNode):
                     "Recording Error", "Failed to start recording", "critical")
 
     def send_desktop_notification(self, title, message, urgency="normal", expire_time_ms=None):
-        """Send desktop notification using notify-send with proper environment for systemd"""
-        try:
-            # Check if desktop user detection failed previously
+        """Send desktop notification using notify-send with proper environment for systemd.
+
+        If a previous send failed, desktop_user_detection_failed is set and all notifications
+        are skipped until we re-detect (throttled to DESKTOP_REDETECT_INTERVAL_S). On send
+        failure we re-detect once and retry before setting the sticky failure flag.
+        """
+        # If we previously failed, try re-detecting desktop user (throttled) so notifications can recover
+        if self.desktop_user_detection_failed:
+            now = time.time()
+            if (now - self.last_desktop_redetect_time) >= DESKTOP_REDETECT_INTERVAL_S:
+                self.get_logger().debug("Re-detecting desktop user after previous notification failure")
+                self.last_desktop_redetect_time = now
+                self._detect_and_cache_desktop_user()
             if self.desktop_user_detection_failed:
                 self.get_logger().debug(
                     "Desktop user detection previously failed - skipping notification")
                 return
 
-            # Modify title and message for test mode
-            test_title = f"[TEST] {title}" if self.test_mode else title
-            test_message = f"{message}\n\n(This is a test notification)" if self.test_mode else message
-            if self.test_mode:
-                self.get_logger().debug(
-                    f"TEST MODE: Sending notification - {title}: {message}")
+        # Modify title and message for test mode
+        test_title = f"[TEST] {title}" if self.test_mode else title
+        test_message = f"{message}\n\n(This is a test notification)" if self.test_mode else message
+        if self.test_mode:
+            self.get_logger().debug(
+                f"TEST MODE: Sending notification - {title}: {message}")
 
-            # Use custom expire time or default
-            expire_time = expire_time_ms if expire_time_ms is not None else NOTIFICATION_EXPIRE_TIME_MS
+        expire_time = expire_time_ms if expire_time_ms is not None else NOTIFICATION_EXPIRE_TIME_MS
 
-            # For systemd services, we need to find the user's graphical session environment
-            if os.geteuid() == 0:
-                if not self.cached_desktop_user:
-                    self.get_logger().debug("No cached desktop user - skipping notification")
+        for attempt in range(2):
+            failed = False
+            try:
+                if self._do_send_desktop_notification(test_title, test_message, urgency, expire_time, title):
                     return
-
-                # Find the main process of the user's graphical session to get its environment
-                session_pid = None
-                try:
-                    # Try each desktop environment separately (fixed pgrep pattern)
-                    for process_name in ['gnome-shell', 'plasma-shell', 'xfce4-session',
-                                         'lxsession', 'i3', 'sway']:
-                        pgrep_cmd = ['pgrep', '-u', self.cached_desktop_user, '-o', process_name]
-                        result = subprocess.run(
-                            pgrep_cmd, capture_output=True, text=True, timeout=2)
-
-                        if result.returncode == 0:
-                            session_pid = result.stdout.strip()
-                            self.get_logger().debug(f"Found {process_name} session with PID: {session_pid}")
-                            break
-
-                    if session_pid:
-                        # Get environment variables from the session process
-                        # /proc/pid/environ uses null bytes as separators, not newlines
-                        with open(f'/proc/{session_pid}/environ', 'r') as f:
-                            environ_data = f.read()
-                            env_vars = dict(
-                                line.split('=', 1)
-                                for line in environ_data.split('\0')
-                                if '=' in line
-                            )
-
-                        display = env_vars.get('DISPLAY')
-                        dbus_address = env_vars.get('DBUS_SESSION_BUS_ADDRESS')
-
-                        if display and dbus_address:
-                            self.get_logger().debug(
-                                f"Found graphical session for user {self.cached_desktop_user} (PID: {session_pid})")
-                            self.get_logger().debug(
-                                f"  DISPLAY={display}, DBUS_SESSION_BUS_ADDRESS={dbus_address}")
-
-                            # Use 'env' command to properly set environment variables for sudo
-                            cmd = [
-                                'sudo', '-u', self.cached_desktop_user,
-                                'env',
-                                f'DISPLAY={display}',
-                                f'DBUS_SESSION_BUS_ADDRESS={dbus_address}',
-                                'notify-send', '--urgency', urgency,
-                                '--expire-time', str(expire_time),
-                                test_title, test_message
-                            ]
-                            subprocess.run(
-                                cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                            self.get_logger().debug(f"Desktop notification sent: {title}")
-                            return
-                        else:
-                            self.get_logger().warning(
-                                f"Could not find DISPLAY/DBUS for user {self.cached_desktop_user}")
-
-                except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
-                    self.get_logger().warning(
-                        f"Failed to get graphical session environment: {e}")
-
-                # Fallback to simple notification method with standard environment
-                self.get_logger().debug("Falling back to standard environment notification method")
-                cmd = [
-                    'sudo', '-u', self.cached_desktop_user,
-                    'env',
-                    'DISPLAY=:0',
-                    'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus',
-                    'notify-send', '--urgency', urgency,
-                    '--expire-time', str(expire_time),
-                    test_title, test_message
-                ]
-                subprocess.run(
-                    cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                self.get_logger().debug(f"Desktop notification sent (fallback): {title}")
+                # _do_send returned False (e.g. no cached desktop user)
+                failed = True
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, Exception) as e:
+                self.get_logger().warning(f"Desktop notification failed: {e}")
+                failed = True
+            if failed:
+                if attempt == 0:
+                    self.get_logger().info("Re-detecting desktop user and retrying notification")
+                    self._detect_and_cache_desktop_user()
+                    if not self.desktop_user_detection_failed:
+                        continue
+                self.desktop_user_detection_failed = True
                 return
+        self.desktop_user_detection_failed = True
 
-            else:
-                # Running as a regular user, direct call is fine
-                cmd = [
-                    'notify-send', '--urgency', urgency,
-                    '--expire-time', str(expire_time),
-                    test_title, test_message
-                ]
-                subprocess.run(
-                    cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                self.get_logger().debug(f"Desktop notification sent (user): {title}")
+    def _do_send_desktop_notification(self, test_title, test_message, urgency, expire_time, log_title):
+        """Perform one attempt to send a desktop notification. Returns True on success.
+        Raises on failure (caller handles retry and desktop_user_detection_failed)."""
+        if os.geteuid() == 0:
+            if not self.cached_desktop_user:
+                self.get_logger().debug("No cached desktop user - skipping notification")
+                return False
 
-        except subprocess.TimeoutExpired:
-            self.get_logger().warning("Desktop notification timed out")
-        except subprocess.CalledProcessError as e:
-            self.get_logger().warning(f"Failed to send desktop notification: {e}")
-            self.desktop_user_detection_failed = True
-        except Exception as e:
-            self.get_logger().warning(
-                f"Unexpected error sending desktop notification: {e}")
-            self.desktop_user_detection_failed = True
+            session_pid = None
+            try:
+                for process_name in ['gnome-shell', 'plasma-shell', 'xfce4-session',
+                                     'lxsession', 'i3', 'sway']:
+                    pgrep_cmd = ['pgrep', '-u', self.cached_desktop_user, '-o', process_name]
+                    result = subprocess.run(
+                        pgrep_cmd, capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        session_pid = result.stdout.strip()
+                        self.get_logger().debug(f"Found {process_name} session with PID: {session_pid}")
+                        break
+
+                if session_pid:
+                    with open(f'/proc/{session_pid}/environ', 'r') as f:
+                        environ_data = f.read()
+                        env_vars = dict(
+                            line.split('=', 1)
+                            for line in environ_data.split('\0')
+                            if '=' in line
+                        )
+                    display = env_vars.get('DISPLAY')
+                    dbus_address = env_vars.get('DBUS_SESSION_BUS_ADDRESS')
+                    if display and dbus_address:
+                        self.get_logger().debug(
+                            f"Found graphical session for user {self.cached_desktop_user} (PID: {session_pid})")
+                        cmd = [
+                            'sudo', '-u', self.cached_desktop_user,
+                            'env',
+                            f'DISPLAY={display}',
+                            f'DBUS_SESSION_BUS_ADDRESS={dbus_address}',
+                            'notify-send', '--urgency', urgency,
+                            '--expire-time', str(expire_time),
+                            test_title, test_message
+                        ]
+                        subprocess.run(cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                        self.get_logger().debug(f"Desktop notification sent: {log_title}")
+                        return True
+                    self.get_logger().warning(
+                        f"Could not find DISPLAY/DBUS for user {self.cached_desktop_user}")
+            except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
+                self.get_logger().warning(f"Failed to get graphical session environment: {e}")
+
+            self.get_logger().debug("Falling back to standard environment notification method")
+            cmd = [
+                'sudo', '-u', self.cached_desktop_user,
+                'env',
+                'DISPLAY=:0',
+                'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus',
+                'notify-send', '--urgency', urgency,
+                '--expire-time', str(expire_time),
+                test_title, test_message
+            ]
+            subprocess.run(cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+            self.get_logger().debug(f"Desktop notification sent (fallback): {log_title}")
+            return True
+
+        # Running as regular user
+        cmd = [
+            'notify-send', '--urgency', urgency,
+            '--expire-time', str(expire_time),
+            test_title, test_message
+        ]
+        subprocess.run(cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+        self.get_logger().debug(f"Desktop notification sent (user): {log_title}")
+        return True
 
     def broadcast_shutdown_message(self):
         """Broadcast shutdown message to all logged-in users"""
