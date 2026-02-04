@@ -1509,4 +1509,15 @@
 		(uuid "b7433f30-cebe-430d-b169-08f52196fa58")
 	)
 	(embedded_fonts no)
+	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/OPiZ2W_.STEP"
+		(offset
+			(xyz 7.5 -31 31.5)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz -90 -180 -180)
+		)
+	)
 )

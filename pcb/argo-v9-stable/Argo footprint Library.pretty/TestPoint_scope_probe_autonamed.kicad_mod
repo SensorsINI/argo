@@ -78,7 +78,7 @@
 		(layer "F.CrtYd")
 		(uuid "0954986c-88ce-4a86-87a6-88ee5484edeb")
 	)
-	(fp_text user "${NET_NAME(1)}"
+	(fp_text user "${SHORT_NET_NAME(1)}"
 		(at 0 2.2 0)
 		(unlocked yes)
 		(layer "F.SilkS")

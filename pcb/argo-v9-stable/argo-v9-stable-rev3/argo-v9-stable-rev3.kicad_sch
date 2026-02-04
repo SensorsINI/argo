@@ -13942,7 +13942,7 @@
 	)
 	(rectangle
 		(start 194.31 69.85)
-		(end 237.49 83.82)
+		(end 264.16 87.63)
 		(stroke
 			(width 0)
 			(type default)
@@ -13966,7 +13966,7 @@
 	)
 	(rectangle
 		(start 195.58 87.63)
-		(end 238.76 104.14)
+		(end 257.81 104.14)
 		(stroke
 			(width 0)
 			(type default)
@@ -14009,6 +14009,19 @@
 			)
 		)
 		(uuid "03f65502-4d44-43ee-95cc-c250c3af9280")
+	)
+	(text "Click for SDP32 datasheet\n"
+		(exclude_from_sim no)
+		(at 228.092 90.678 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 0 0 255 1)
+			)
+			(justify left)
+			(href "https://sensirion.com/products/catalog/SDP32")
+		)
+		(uuid "08432780-4cb4-498f-bb74-7153198e9ee4")
 	)
 	(text "Add testpoints for power supplies and MPC2672 charger voltages"
 		(exclude_from_sim no)
@@ -14070,7 +14083,7 @@
 	)
 	(text "add either rudder or power supply current shunt resistors\nto measure using AIN3"
 		(exclude_from_sim no)
-		(at 126.238 256.286 0)
+		(at 106.934 259.334 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -14182,6 +14195,20 @@
 		)
 		(uuid "37203486-96b3-4fce-8d67-806a30803fbd")
 	)
+	(text "Add testpoints for relay control"
+		(exclude_from_sim no)
+		(at 207.01 217.424 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.254)
+				(bold yes)
+				(color 255 0 0 1)
+			)
+			(justify left)
+		)
+		(uuid "3777d131-3e80-47be-8e4b-19e968d6756a")
+	)
 	(text "Fully charged battery makes 8.4V.\nRtop=27k Rbot=18k, then vout=0.4vin, \nso 8.4V will give 3.36V"
 		(exclude_from_sim no)
 		(at 117.348 213.36 0)
@@ -14193,6 +14220,18 @@
 			(justify right)
 		)
 		(uuid "39d8056d-86f0-437c-a0dd-56ec80e690ac")
+	)
+	(text "BLK"
+		(exclude_from_sim no)
+		(at 201.93 79.756 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 0 0 0 1)
+			)
+			(justify right)
+		)
+		(uuid "40dbc06d-47cf-4d5d-93ac-d5c6ec8b35bc")
 	)
 	(text "Solder R23 to make\npower button\nlight GREEN power\nbutton LED"
 		(exclude_from_sim no)
@@ -14215,6 +14254,19 @@
 			(justify right)
 		)
 		(uuid "44473b43-57bb-4882-adc3-b020ee5143f0")
+	)
+	(text "Click for BNO085 product page\n"
+		(exclude_from_sim no)
+		(at 194.818 85.344 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 0 0 255 1)
+			)
+			(justify left)
+			(href "https://www.adafruit.com/product/4754?srsltid=AfmBOoqq5LXPUfSRLzIPW6EC369kqhWas1ZF4KPSplO_62JEXQH6ESZj")
+		)
+		(uuid "48d44586-4437-4256-9e94-a3ff4cbec16c")
 	)
 	(text "Winch servo requires\nsmaller resistor to override\nradio output"
 		(exclude_from_sim no)
@@ -14339,6 +14391,19 @@
 		)
 		(uuid "80c43244-01e0-4a8f-8b90-98cd67785c0a")
 	)
+	(text "Again swapped the SDA and SCK :-("
+		(exclude_from_sim no)
+		(at 107.95 93.218 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.254)
+				(bold yes)
+				(color 255 0 0 1)
+			)
+		)
+		(uuid "848fd6b5-42bc-43b5-a2dd-f3c4a72ee1c7")
+	)
 	(text "!CHARGING configure as PU - signals battery is charging"
 		(exclude_from_sim no)
 		(at 176.53 133.604 0)
@@ -14383,6 +14448,20 @@
 		)
 		(uuid "945c4f0c-3baf-4c10-86d9-9231ddd56eec")
 	)
+	(text "Tie Q2A gate to POW_BUT to limit gate voltage\n(abs max Vgs is 8V)"
+		(exclude_from_sim no)
+		(at 222.758 191.008 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.254)
+				(bold yes)
+				(color 255 0 0 1)
+			)
+			(justify left)
+		)
+		(uuid "9aa2b718-9473-4751-ae89-3ff2daab485c")
+	)
 	(text "Solder R24 to let\nOPi drive BLUE\npower button LED"
 		(exclude_from_sim no)
 		(at 176.53 112.014 0)
@@ -14415,6 +14494,18 @@
 			)
 		)
 		(uuid "a12feca8-e821-4fa8-88e7-2e80dbbc87e2")
+	)
+	(text "GREEN"
+		(exclude_from_sim no)
+		(at 202.692 72.39 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 0 255 0 1)
+			)
+			(justify right)
+		)
+		(uuid "a18f0ea1-094c-447f-b441-425fd03bf5c1")
 	)
 	(text "R12: standalone\nsolder for standalone"
 		(exclude_from_sim no)
@@ -14449,6 +14540,18 @@
 			(justify left)
 		)
 		(uuid "a9de6632-ca1e-42f4-b4dc-fb4f1e0f41f6")
+	)
+	(text "WHITE"
+		(exclude_from_sim no)
+		(at 202.946 74.93 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 194 194 194 1)
+			)
+			(justify right)
+		)
+		(uuid "af79e6cf-ad29-4e84-a469-5955f04804e2")
 	)
 	(text "1 when power button pushed"
 		(exclude_from_sim no)
@@ -14574,6 +14677,18 @@
 			)
 		)
 		(uuid "ca108b07-6e4f-46cd-a2dc-8a5413959281")
+	)
+	(text "RED"
+		(exclude_from_sim no)
+		(at 201.93 77.47 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+			(justify right)
+		)
+		(uuid "cb53b863-18ce-46ee-985a-e6aa1211b7df")
 	)
 	(text "Using I2C bus 0"
 		(exclude_from_sim no)

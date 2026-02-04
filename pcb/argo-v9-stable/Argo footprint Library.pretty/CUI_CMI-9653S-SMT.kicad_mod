@@ -1,0 +1,363 @@
+(footprint "CUI_CMI-9653S-SMT"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(property "Reference" "U**"
+		(at -1.91416 -7.04918 0)
+		(layer "F.SilkS")
+		(uuid "974fd9f8-bd0f-4991-b867-97589eb851b7")
+		(effects
+			(font
+				(size 1.003543 1.003543)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "CUI_CMI-9653S-SMT"
+		(at 5.742545 6.908575 0)
+		(layer "F.Fab")
+		(uuid "119267eb-2b83-40db-b719-513790c03ca5")
+		(effects
+			(font
+				(size 1.004102 1.004102)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://4donline.ihs.com/images/VipMasterIC/IC/SSKY/SSKY-S-A0024278018/SSKY-S-A0025185645-1.pdf?hkey=8FF9937AB4D386CC6D0AAF3EE0D3F825"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "91c1a455-8360-4bca-bcb3-779cb6030176")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Buzzer, active (no PWM needed), 3-5V, 2.7kHz"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "613dcb04-0a0d-47a7-ad89-4adc1730ff5b")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "farnell" "https://ch.farnell.com/en-CH/same-sky/cmi-9653s-smt-tr/mag-buzzer-indicator-80dba-2-5vdc/dp/4814147"
+		(at 0 0 0)
+		(layer "F.SilkS")
+		(hide yes)
+		(uuid "5dde0ce9-e1c3-4be5-a0f8-39cd43973eb1")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.1)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -4.8 -4.8)
+		(end -1.6 -4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "e69b1db6-3245-4a03-b33b-83d5cfaff702")
+	)
+	(fp_line
+		(start -4.8 2.4)
+		(end -4.8 -4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "f628aa43-8e71-43f4-9de3-cde76900eb95")
+	)
+	(fp_line
+		(start -4.8 2.4)
+		(end -2.4 4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "1be50d0b-31d7-490b-a9d9-9cd37725a0f0")
+	)
+	(fp_line
+		(start -2.4 4.8)
+		(end -1.6 4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "765428e9-4697-4eba-8686-457342205b4f")
+	)
+	(fp_line
+		(start 1.6 4.8)
+		(end 4.8 4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "89b86512-a88b-447a-a1f8-5c59dc60ea61")
+	)
+	(fp_line
+		(start 4.8 -4.8)
+		(end 1.6 -4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "2a5bd44d-4306-4dc8-b760-2bd424410e66")
+	)
+	(fp_line
+		(start 4.8 -4.8)
+		(end 4.8 4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "fb567ca3-cb57-462f-b13e-f1df337b0289")
+	)
+	(fp_line
+		(start -5.05 -5.05)
+		(end -5.05 2.65)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "99756470-036b-4946-86e0-247f9e90c5bd")
+	)
+	(fp_line
+		(start -5.05 2.65)
+		(end -2.65 5.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "86618b27-1b3e-4216-a63a-df0f2e393ddf")
+	)
+	(fp_line
+		(start -2.65 5.05)
+		(end -1.5 5.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "86a0dc8e-86d1-41b9-97c4-841db2c8e2c0")
+	)
+	(fp_line
+		(start -1.5 -5.05)
+		(end -5.05 -5.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "294f88e7-dfad-4cdc-ad6d-7cd56d013afd")
+	)
+	(fp_line
+		(start -1.5 -5.05)
+		(end -1.5 -5.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "e23736e8-2d23-4079-bda8-87d143e54f52")
+	)
+	(fp_line
+		(start -1.5 5.75)
+		(end -1.5 5.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "daf187db-873c-4854-9ecf-d07ef8b1b190")
+	)
+	(fp_line
+		(start -1.5 5.75)
+		(end 1.5 5.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "0c889b4c-b112-4de2-8e3e-b7471b7fbec0")
+	)
+	(fp_line
+		(start 1.5 -5.75)
+		(end -1.5 -5.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "d71a8f4b-5ac9-47bb-85c8-b213c9fd2f78")
+	)
+	(fp_line
+		(start 1.5 -5.05)
+		(end 1.5 -5.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "f2f78c5c-2686-48c3-a556-1d1d91e1c226")
+	)
+	(fp_line
+		(start 1.5 5.05)
+		(end 5.05 5.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "cdda4a23-833c-4de0-999c-291e12720566")
+	)
+	(fp_line
+		(start 1.5 5.75)
+		(end 1.5 5.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "5c597dad-6088-4f11-98cf-c9253058930e")
+	)
+	(fp_line
+		(start 5.05 -5.05)
+		(end 1.5 -5.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "0f10ffe0-4152-4518-bc84-934d58f46f9a")
+	)
+	(fp_line
+		(start 5.05 5.05)
+		(end 5.05 -5.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "4dc23219-ad14-4746-bba9-f354fd83ecfc")
+	)
+	(fp_line
+		(start -4.8 -4.8)
+		(end 4.8 -4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "23cef5ce-8f93-41b5-a5f4-4ae9df33f518")
+	)
+	(fp_line
+		(start -4.8 2.4)
+		(end -4.8 -4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "7f7f2b78-2747-4278-9c9a-cc58d7357c9b")
+	)
+	(fp_line
+		(start -4.8 2.4)
+		(end -2.4 4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "8bfd123c-db71-4f78-8d2d-38a3996d47b1")
+	)
+	(fp_line
+		(start 4.8 -4.8)
+		(end 4.8 4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "fcee3f5f-e25b-48cb-bc37-e8a1c57875c3")
+	)
+	(fp_line
+		(start 4.8 4.8)
+		(end -2.4 4.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "069c1f5a-c65b-469c-b7b8-9abd45dbf159")
+	)
+	(fp_text user "-"
+		(at 2.56008 5.25816 0)
+		(layer "F.SilkS")
+		(uuid "b63fb98b-24fe-4c52-8de5-50d70154650c")
+		(effects
+			(font
+				(size 1.004189 1.004189)
+				(thickness 0.15)
+			)
+		)
+	)
+	(fp_text user "+"
+		(at 3.06808 -6.69547 0)
+		(layer "F.SilkS")
+		(uuid "d2f4862a-c56a-40be-aa78-3d0de076638b")
+		(effects
+			(font
+				(size 1.00426 1.00426)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "N" smd rect
+		(at 0 4)
+		(size 2.5 3)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "2ab00789-8f2c-466d-b7ca-42e46e9438b4")
+	)
+	(pad "P" smd rect
+		(at 0 -4)
+		(size 2.5 3)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "b5ac6338-cf3a-4271-9b98-3bcbb05d848c")
+	)
+	(embedded_fonts no)
+	(model "${ARGO}/argo-v9-stable/Argo footprint Library.pretty/CMI-9653S-SMT.step"
+		(offset
+			(xyz 0 0 3)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz -90 -0 90)
+		)
+	)
+)
