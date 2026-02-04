@@ -329,6 +329,8 @@ TEST_MODE_SHUTDOWN_DELAY_S = 5
 # Notification Timeouts
 # Desktop notification timeout (seconds)
 DESKTOP_NOTIFICATION_TIMEOUT_S = 5
+# Minimum interval between desktop user re-detection attempts (seconds)
+DESKTOP_REDETECT_INTERVAL_S = 60
 WALL_MESSAGE_TIMEOUT_S = 5              # Wall message timeout (seconds)
 # Standard notification expire time (5 seconds)
 NOTIFICATION_EXPIRE_TIME_MS = 5000
@@ -350,6 +352,9 @@ AC_POWER_TIMEOUT_S = AC_POWER_TIMEOUT_HOURS * 3600.0  # Convert to seconds
 BATTERY_SLOPES_JSON_PATH = Path(__file__).parent.parent / 'nodes' / 'battery_slopes.json'  # Path to battery slopes JSON file
 # Flag file for shutdown hook
 CRITICAL_BATTERY_FLAG_FILE = '/tmp/argo_critical_battery'
+# Storage rundown: discharge to this voltage then shut down (mode set via /tmp flag, cleared on reboot)
+STORAGE_RUNDOWN_FLAG_FILE = '/tmp/argo_battery_storage_rundown'
+STORAGE_VOLTAGE_V = 7.6  # Target voltage for storage; shutdown when reached
 
 # SOS Pattern Configuration
 SOS_PATTERN_DURATION_S = 2.0       # Total duration of one SOS pattern cycle (seconds)
@@ -487,6 +492,7 @@ class PowerController(ArgoBaseNode):
         self.last_logged_pattern = None
         self.last_pattern_log_time = 0.0
         self.pattern_log_interval = 60.0  # Log at least once per minute
+        self.paused_status_log_interval = 20.0  # When heartbeat paused (SOS etc.): 3 logs per minute
         
         # System status monitoring (updated via topic callbacks)
         self.anemometer_healthy = True
@@ -509,6 +515,7 @@ class PowerController(ArgoBaseNode):
         self.cached_desktop_user = None
         self.cached_display_env = None
         self.desktop_user_detection_failed = False
+        self.last_desktop_redetect_time = 0.0
 
         # Battery monitoring state
         self.low_battery_detected = False
@@ -1661,6 +1668,9 @@ class PowerController(ArgoBaseNode):
         """Control red LED (battery warning/SOS indicator)"""
         if not self.gpio_available:
             return
+        if getattr(self, 'red_led_line', None) is None:
+            self.red_led_state = state  # Keep state consistent
+            return
         try:
             # Active-low LED: state=True (ON) → GPIO=0 (LOW), state=False (OFF) → GPIO=1 (HIGH)
             value = LED_ON_STATE if state else LED_OFF_STATE
@@ -1820,6 +1830,10 @@ class PowerController(ArgoBaseNode):
                     reason = self.heartbeat_pause_reason or "unspecified"
                     self.get_logger().debug(f"Heartbeat paused (reason: {reason})")
                     self.last_heartbeat_pause_log = current_time
+                # Periodic INFO log so SOS/special state is visible in logs (3 per minute when paused)
+                if current_time - self.last_pattern_log_time >= self.paused_status_log_interval:
+                    self._log_paused_state_status()
+                    self.last_pattern_log_time = current_time
                 time.sleep(0.1)
                 continue
 
@@ -2820,123 +2834,126 @@ class PowerController(ArgoBaseNode):
                     "Recording Error", "Failed to start recording", "critical")
 
     def send_desktop_notification(self, title, message, urgency="normal", expire_time_ms=None):
-        """Send desktop notification using notify-send with proper environment for systemd"""
-        try:
-            # Check if desktop user detection failed previously
+        """Send desktop notification using notify-send with proper environment for systemd.
+
+        If a previous send failed, desktop_user_detection_failed is set and all notifications
+        are skipped until we re-detect (throttled to DESKTOP_REDETECT_INTERVAL_S). On send
+        failure we re-detect once and retry before setting the sticky failure flag.
+        """
+        # If we previously failed, try re-detecting desktop user (throttled) so notifications can recover
+        if self.desktop_user_detection_failed:
+            now = time.time()
+            if (now - self.last_desktop_redetect_time) >= DESKTOP_REDETECT_INTERVAL_S:
+                self.get_logger().debug("Re-detecting desktop user after previous notification failure")
+                self.last_desktop_redetect_time = now
+                self._detect_and_cache_desktop_user()
             if self.desktop_user_detection_failed:
                 self.get_logger().debug(
                     "Desktop user detection previously failed - skipping notification")
                 return
 
-            # Modify title and message for test mode
-            test_title = f"[TEST] {title}" if self.test_mode else title
-            test_message = f"{message}\n\n(This is a test notification)" if self.test_mode else message
-            if self.test_mode:
-                self.get_logger().debug(
-                    f"TEST MODE: Sending notification - {title}: {message}")
+        # Modify title and message for test mode
+        test_title = f"[TEST] {title}" if self.test_mode else title
+        test_message = f"{message}\n\n(This is a test notification)" if self.test_mode else message
+        if self.test_mode:
+            self.get_logger().debug(
+                f"TEST MODE: Sending notification - {title}: {message}")
 
-            # Use custom expire time or default
-            expire_time = expire_time_ms if expire_time_ms is not None else NOTIFICATION_EXPIRE_TIME_MS
+        expire_time = expire_time_ms if expire_time_ms is not None else NOTIFICATION_EXPIRE_TIME_MS
 
-            # For systemd services, we need to find the user's graphical session environment
-            if os.geteuid() == 0:
-                if not self.cached_desktop_user:
-                    self.get_logger().debug("No cached desktop user - skipping notification")
+        for attempt in range(2):
+            failed = False
+            try:
+                if self._do_send_desktop_notification(test_title, test_message, urgency, expire_time, title):
                     return
-
-                # Find the main process of the user's graphical session to get its environment
-                session_pid = None
-                try:
-                    # Try each desktop environment separately (fixed pgrep pattern)
-                    for process_name in ['gnome-shell', 'plasma-shell', 'xfce4-session',
-                                         'lxsession', 'i3', 'sway']:
-                        pgrep_cmd = ['pgrep', '-u', self.cached_desktop_user, '-o', process_name]
-                        result = subprocess.run(
-                            pgrep_cmd, capture_output=True, text=True, timeout=2)
-
-                        if result.returncode == 0:
-                            session_pid = result.stdout.strip()
-                            self.get_logger().debug(f"Found {process_name} session with PID: {session_pid}")
-                            break
-
-                    if session_pid:
-                        # Get environment variables from the session process
-                        # /proc/pid/environ uses null bytes as separators, not newlines
-                        with open(f'/proc/{session_pid}/environ', 'r') as f:
-                            environ_data = f.read()
-                            env_vars = dict(
-                                line.split('=', 1)
-                                for line in environ_data.split('\0')
-                                if '=' in line
-                            )
-
-                        display = env_vars.get('DISPLAY')
-                        dbus_address = env_vars.get('DBUS_SESSION_BUS_ADDRESS')
-
-                        if display and dbus_address:
-                            self.get_logger().debug(
-                                f"Found graphical session for user {self.cached_desktop_user} (PID: {session_pid})")
-                            self.get_logger().debug(
-                                f"  DISPLAY={display}, DBUS_SESSION_BUS_ADDRESS={dbus_address}")
-
-                            # Use 'env' command to properly set environment variables for sudo
-                            cmd = [
-                                'sudo', '-u', self.cached_desktop_user,
-                                'env',
-                                f'DISPLAY={display}',
-                                f'DBUS_SESSION_BUS_ADDRESS={dbus_address}',
-                                'notify-send', '--urgency', urgency,
-                                '--expire-time', str(expire_time),
-                                test_title, test_message
-                            ]
-                            subprocess.run(
-                                cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                            self.get_logger().debug(f"Desktop notification sent: {title}")
-                            return
-                        else:
-                            self.get_logger().warning(
-                                f"Could not find DISPLAY/DBUS for user {self.cached_desktop_user}")
-
-                except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
-                    self.get_logger().warning(
-                        f"Failed to get graphical session environment: {e}")
-
-                # Fallback to simple notification method with standard environment
-                self.get_logger().debug("Falling back to standard environment notification method")
-                cmd = [
-                    'sudo', '-u', self.cached_desktop_user,
-                    'env',
-                    'DISPLAY=:0',
-                    'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus',
-                    'notify-send', '--urgency', urgency,
-                    '--expire-time', str(expire_time),
-                    test_title, test_message
-                ]
-                subprocess.run(
-                    cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                self.get_logger().debug(f"Desktop notification sent (fallback): {title}")
+                # _do_send returned False (e.g. no cached desktop user)
+                failed = True
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, Exception) as e:
+                self.get_logger().warning(f"Desktop notification failed: {e}")
+                failed = True
+            if failed:
+                if attempt == 0:
+                    self.get_logger().info("Re-detecting desktop user and retrying notification")
+                    self._detect_and_cache_desktop_user()
+                    if not self.desktop_user_detection_failed:
+                        continue
+                self.desktop_user_detection_failed = True
                 return
+        self.desktop_user_detection_failed = True
 
-            else:
-                # Running as a regular user, direct call is fine
-                cmd = [
-                    'notify-send', '--urgency', urgency,
-                    '--expire-time', str(expire_time),
-                    test_title, test_message
-                ]
-                subprocess.run(
-                    cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
-                self.get_logger().debug(f"Desktop notification sent (user): {title}")
+    def _do_send_desktop_notification(self, test_title, test_message, urgency, expire_time, log_title):
+        """Perform one attempt to send a desktop notification. Returns True on success.
+        Raises on failure (caller handles retry and desktop_user_detection_failed)."""
+        if os.geteuid() == 0:
+            if not self.cached_desktop_user:
+                self.get_logger().debug("No cached desktop user - skipping notification")
+                return False
 
-        except subprocess.TimeoutExpired:
-            self.get_logger().warning("Desktop notification timed out")
-        except subprocess.CalledProcessError as e:
-            self.get_logger().warning(f"Failed to send desktop notification: {e}")
-            self.desktop_user_detection_failed = True
-        except Exception as e:
-            self.get_logger().warning(
-                f"Unexpected error sending desktop notification: {e}")
-            self.desktop_user_detection_failed = True
+            session_pid = None
+            try:
+                for process_name in ['gnome-shell', 'plasma-shell', 'xfce4-session',
+                                     'lxsession', 'i3', 'sway']:
+                    pgrep_cmd = ['pgrep', '-u', self.cached_desktop_user, '-o', process_name]
+                    result = subprocess.run(
+                        pgrep_cmd, capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        session_pid = result.stdout.strip()
+                        self.get_logger().debug(f"Found {process_name} session with PID: {session_pid}")
+                        break
+
+                if session_pid:
+                    with open(f'/proc/{session_pid}/environ', 'r') as f:
+                        environ_data = f.read()
+                        env_vars = dict(
+                            line.split('=', 1)
+                            for line in environ_data.split('\0')
+                            if '=' in line
+                        )
+                    display = env_vars.get('DISPLAY')
+                    dbus_address = env_vars.get('DBUS_SESSION_BUS_ADDRESS')
+                    if display and dbus_address:
+                        self.get_logger().debug(
+                            f"Found graphical session for user {self.cached_desktop_user} (PID: {session_pid})")
+                        cmd = [
+                            'sudo', '-u', self.cached_desktop_user,
+                            'env',
+                            f'DISPLAY={display}',
+                            f'DBUS_SESSION_BUS_ADDRESS={dbus_address}',
+                            'notify-send', '--urgency', urgency,
+                            '--expire-time', str(expire_time),
+                            test_title, test_message
+                        ]
+                        subprocess.run(cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+                        self.get_logger().debug(f"Desktop notification sent: {log_title}")
+                        return True
+                    self.get_logger().warning(
+                        f"Could not find DISPLAY/DBUS for user {self.cached_desktop_user}")
+            except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as e:
+                self.get_logger().warning(f"Failed to get graphical session environment: {e}")
+
+            self.get_logger().debug("Falling back to standard environment notification method")
+            cmd = [
+                'sudo', '-u', self.cached_desktop_user,
+                'env',
+                'DISPLAY=:0',
+                'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus',
+                'notify-send', '--urgency', urgency,
+                '--expire-time', str(expire_time),
+                test_title, test_message
+            ]
+            subprocess.run(cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+            self.get_logger().debug(f"Desktop notification sent (fallback): {log_title}")
+            return True
+
+        # Running as regular user
+        cmd = [
+            'notify-send', '--urgency', urgency,
+            '--expire-time', str(expire_time),
+            test_title, test_message
+        ]
+        subprocess.run(cmd, check=True, timeout=DESKTOP_NOTIFICATION_TIMEOUT_S)
+        self.get_logger().debug(f"Desktop notification sent (user): {log_title}")
+        return True
 
     def broadcast_shutdown_message(self):
         """Broadcast shutdown message to all logged-in users"""
@@ -3592,6 +3609,8 @@ class PowerController(ArgoBaseNode):
                     # CRITICAL: Extract I2C failure and stale data flags to distinguish I2C failures from actual low voltage
                     i2c_failure = battery_data.get('i2c_failure', False)
                     stale_data = battery_data.get('stale_data', False)
+                    storage_rundown = battery_data.get('battery_storage_rundown', False)
+                    shutdown_threshold_v = STORAGE_VOLTAGE_V if storage_rundown else CRITICAL_BATTERY_THRESHOLD_V
                     # Prefer topic value if available (faster updates), otherwise use service value
                     ac_power = self.ac_power_from_topic if self.ac_power_from_topic is not None else ac_power_present
                     self.last_battery_voltage = battery_voltage
@@ -3750,16 +3769,36 @@ class PowerController(ArgoBaseNode):
 
                         # Handle NaN in logging
                         voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"
+                        storage_note = " | Storage rundown to 7.6V" if storage_rundown else ""
                         self.get_logger().info(
                             f"Battery voltage check: {voltage_str} "
-                            f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}")
+                            f"(low: {LOW_BATTERY_THRESHOLD_V}V, critical: {CRITICAL_BATTERY_THRESHOLD_V}V){charging_str}{storage_note}")
 
                         # Update the last logged voltage
                         self.last_logged_battery_voltage = battery_voltage
 
                     # Check for critical battery first (highest priority)
+                    # In storage rundown mode use 7.6V threshold; otherwise 7.2V
                     # Safety check: Skip if NaN (shouldn't happen here, but defensive programming)
-                    if not math.isnan(battery_voltage) and battery_voltage < CRITICAL_BATTERY_THRESHOLD_V:
+                    if not math.isnan(battery_voltage) and battery_voltage < shutdown_threshold_v:
+                        # Storage rundown: always shutdown at 7.6V (no AC bypass) so test with supply works
+                        if storage_rundown:
+                            if not self.critical_battery_detected:
+                                self.get_logger().info(
+                                    f"Storage rundown: voltage {battery_voltage:.3f}V reached {STORAGE_VOLTAGE_V}V target; initiating shutdown.")
+                                self.critical_battery_detected = True
+                                self.pause_heartbeat(reason="storage_rundown")
+                                if self.sos_led_active:
+                                    self.sos_led_active = False
+                                if self.i2c_failure_sos_active:
+                                    self.i2c_failure_sos_active = False
+                                if self.charge_state_led_active:
+                                    self.charge_state_led_active = False
+                                    self.charging_state_active = False
+                                    led_setter = self._get_charge_state_led_setter()
+                                    led_setter(False)
+                                self.initiate_critical_battery_halt(battery_voltage, reason="storage_rundown_7.6V")
+                            continue
                         # CRITICAL FIX: If AC power is present and charging is active, don't trigger shutdown
                         # The battery is being charged and will recover - shutdown is not needed
                         # Use topic value (ac_power) for faster updates, fallback to service value
@@ -3990,9 +4029,9 @@ class PowerController(ArgoBaseNode):
                             # Resume heartbeat now that charging state is inactive
                             self.resume_heartbeat(reason="charging_state_ended")
 
-                    # Battery voltage recovered above low threshold
-                    else:
-                        # Check if we were in low battery state
+                    # Battery voltage recovered above low threshold (run whenever voltage is OK, not only when critical was set)
+                    if battery_voltage >= LOW_BATTERY_THRESHOLD_V:
+                        # Clear low battery state and stop SOS if we were in it
                         if self.low_battery_detected:
                             # Always log battery recovery events regardless of voltage change threshold
                             self.get_logger().info(
@@ -4007,7 +4046,7 @@ class PowerController(ArgoBaseNode):
                                 "normal"
                             )
 
-                        # Check if we were in critical battery state
+                        # Clear critical battery state if we were in it
                         if self.critical_battery_detected:
                             # Always log critical battery recovery events regardless of voltage change threshold
                             self.get_logger().info(
@@ -5128,6 +5167,26 @@ If you take no action within 30 seconds, the system will automatically
         self.heartbeat_pause_reason = None
         self.heartbeat_pause_time = 0.0
         self.last_heartbeat_pause_log = 0.0
+
+    def _log_paused_state_status(self):
+        """Log a throttled INFO message describing current paused state (SOS, charging, etc.)."""
+        reason = self.heartbeat_pause_reason or "unspecified"
+        if reason == "low_battery":
+            volt = f"{self.last_battery_voltage:.2f}V" if self.last_battery_voltage is not None else "?"
+            ac = "yes" if self.ac_power_from_topic is True else "no"
+            self.get_logger().info(
+                f"Low battery SOS active | Battery: {volt} | AC: {ac} | Red LED blinking SOS"
+            )
+        elif reason == "i2c_failure" or reason == "i2c_failure_recovered":
+            self.get_logger().info(
+                "I2C failure SOS active | Battery monitoring unavailable | Red LED blinking SOS"
+            )
+        elif reason == "charging_state":
+            self.get_logger().info(
+                "Charging state pattern active | AC connected | Green LED showing charge state"
+            )
+        else:
+            self.get_logger().info(f"LED heartbeat paused (reason: {reason})")
 
     def _update_led_heartbeat_for_pause_state(self):
         """Update LED heartbeat frequency based on controller pause state and Argo service state"""

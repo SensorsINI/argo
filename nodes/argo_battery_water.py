@@ -118,9 +118,17 @@ BATTERY_CRITICAL_THRESHOLD_V = 6.8  # V, ~10% for 2S LiPo, may trigger shutdown
 BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with USB charging pluugged in under full laod (sans servos)
 
 # Battery lifetime estimation configuration
-BATTERY_LIFETIME_SAMPLE_WINDOW = 60  # Number of samples for linear regression 
-BATTERY_LIFETIME_MIN_SAMPLES = 5     # Minimum samples required for estimation
+# Quantization: 12-bit ADC, Vref=4.096V, 27k/18k divider (2.5x) -> ~2.5mV per count at battery.
+# Sampling every 5s; a single step over 5s gives ~1.8 V/h apparent slope. Use more samples and
+# cap discharge slope magnitude to avoid noise-dominated estimates.
+BATTERY_LIFETIME_SAMPLE_WINDOW = 360  # Number of samples for linear regression (5s interval -> 30 min window)
+BATTERY_LIFETIME_MIN_SAMPLES = 15   # Minimum samples for slope (75s window); reduces quantization noise
+MAX_DISCHARGING_SLOPE_VPH = 2.0     # V/h; steeper magnitude is rejected (likely quantization/noise)
+MIN_DISCHARGING_SLOPE_VPH = 0.05    # V/h; discharge gentler than this is not "meaningful"
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
+# Storage rundown: flag file set by astore; discharge to 7.6V then shut down (cleared on reboot)
+STORAGE_RUNDOWN_FLAG_FILE = '/tmp/argo_battery_storage_rundown'
+STORAGE_VOLTAGE_V = 7.6  # Target voltage for storage; time-to-empty uses this when storage mode active
 
 # MP2672 CHG timer configuration (safety timer that disables charging after timeout)
 # Default: 20 hours (bits [2:1] = 10), can be disabled (00), 8hrs (01), or 12hrs (11)
@@ -844,6 +852,7 @@ class BatteryWaterNode(ArgoBaseNode):
                 'anomaly_reason': buffer_copy.get('anomaly_reason'),
                 'battery_low_alert': buffer_copy['battery_low_alert'],
                 'battery_remaining_pct': buffer_copy['battery_remaining_pct'] if buffer_copy['battery_remaining_pct'] is not None else 0.0,
+                'battery_storage_rundown': os.path.exists(STORAGE_RUNDOWN_FLAG_FILE),
                 'battery_voltage': buffer_copy['battery_voltage'],
                 'battery_water_health': buffer_copy.get('battery_water_health', 'UNKNOWN'),
                 'charging_anomaly': buffer_copy.get('charging_anomaly', False),
@@ -1076,13 +1085,15 @@ class BatteryWaterNode(ArgoBaseNode):
                 return
             
             # Validate that slopes are meaningful (not None, not zero, within reasonable range)
-            # Use same minimum thresholds as in slope update to avoid saving near-zero slopes
-            MIN_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h minimum for meaningful slopes
+            MIN_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h minimum for charging
+            MIN_DISCHARGING_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
+            MAX_DISCHARGING_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0  # Reject steeper (quantization noise)
             has_meaningful_charging = (self._charging_slope_v_per_s is not None and 
                                       self._charging_slope_v_per_s > MIN_SLOPE_V_PER_S and 
                                       abs(self._charging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
             has_meaningful_discharging = (self._discharging_slope_v_per_s is not None and 
-                                         self._discharging_slope_v_per_s < -MIN_SLOPE_V_PER_S and 
+                                         self._discharging_slope_v_per_s < MIN_DISCHARGING_V_PER_S and  # At least -0.08 V/h
+                                         self._discharging_slope_v_per_s > MAX_DISCHARGING_V_PER_S and  # Cap magnitude
                                          abs(self._discharging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
             
             # Additional validation: slopes should only be saved if they represent
@@ -1307,9 +1318,9 @@ class BatteryWaterNode(ArgoBaseNode):
                 regression_slope_v_per_s, intercept = fit_result
                 
                 # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
-                # 0.3 V/h = 8.33e-5 V/s minimum for meaningful slope updates
                 MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -8.33e-5  # -0.3 V/h (magnitude)
+                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
+                MAX_DISCHARGING_SLOPE_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0  # Reject steeper (noise)
                 
                 # Also check that battery is not already fully charged to avoid capturing voltage float near full
                 # Note: voltage is already validated as not NaN above
@@ -1324,24 +1335,27 @@ class BatteryWaterNode(ArgoBaseNode):
                     not is_fully_charged):  # Don't update slope when already fully charged
                     self._charging_slope_v_per_s = regression_slope_v_per_s
                     self.get_logger().debug(f"Updated charging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    self._save_battery_slopes()  # Persist so file timestamp reflects last slope update
                     # Use the updated slope for this estimation
                     slope_v_per_s = regression_slope_v_per_s
                 elif (not charging and 
                       regression_slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and  # Significant negative slope
+                      regression_slope_v_per_s > MAX_DISCHARGING_SLOPE_V_PER_S and  # Not steeper than cap (noise)
                       len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
                       self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
                       not is_near_empty):  # Don't update slope when already near empty
                     self._discharging_slope_v_per_s = regression_slope_v_per_s
                     self.get_logger().debug(f"Updated discharging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    self._save_battery_slopes()  # Persist so file timestamp reflects last slope update
                     # Use the updated slope for this estimation
                     slope_v_per_s = regression_slope_v_per_s
                 elif slope_v_per_s is None:
-                    # If we have regression result but no persistent slope, validate sign before using
-                    # For charging: slope must be positive; for discharging: slope must be negative
+                    # If we have regression result but no persistent slope, validate sign and cap
                     if charging and regression_slope_v_per_s > 1e-6:
                         slope_v_per_s = regression_slope_v_per_s
                     elif not charging and regression_slope_v_per_s < -1e-6:
-                        slope_v_per_s = regression_slope_v_per_s
+                        # Clamp discharge slope to max magnitude to avoid noisy estimates
+                        slope_v_per_s = max(regression_slope_v_per_s, MAX_DISCHARGING_SLOPE_V_PER_S)
                     # Otherwise, regression slope has wrong sign - don't use it
             
             # If no slope available at all, cannot estimate
@@ -1365,10 +1379,10 @@ class BatteryWaterNode(ArgoBaseNode):
                     return 0.0  # Already at target - check this FIRST
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             else:
-                # Time to 0% (approximate as 6.0V for 2S LiPo, empty)
-                target_voltage = 6.0  # Conservative empty voltage
+                # Time to target: 7.6V when storage rundown active (astore), else 6.0V (empty)
+                target_voltage = STORAGE_VOLTAGE_V if os.path.exists(STORAGE_RUNDOWN_FLAG_FILE) else 6.0
                 if voltage <= target_voltage:
-                    return 0.0  # Already depleted - check this FIRST
+                    return 0.0  # Already at or below target - check this FIRST
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             
             # Convert to hours and clamp to reasonable range
@@ -2649,8 +2663,17 @@ class BatteryWaterNode(ArgoBaseNode):
         current_time = time.monotonic()
         
         try:
-            # Read raw GPIO values
+            # Read !ACOK first - needed to gate fault detection (only report fault when charger present)
+            ac_power_raw = False
+            if self.acok_gpio_line is not None:
+                acok_gpio_value = self.acok_gpio_line.get_value()
+                ac_power_raw = not acok_gpio_value  # Invert: !ACOK=0 means AC power present=True
+                if ac_power_raw:
+                    self._last_ac_power_true_time = current_time
+            
             # Read !CHARGING GPIO (PC12, line 76) - invert logic for charging status
+            # Note: Code uses !CHARGING (PC12) for transition tracking; MP2672 datasheet describes 1Hz blink on STAT.
+            # When no charger is present, !CHARGING may toggle (floating/different IC state) and must not be reported as fault.
             if self.charging_gpio_line is not None:
                 charging_gpio_value = self.charging_gpio_line.get_value()
                 charging_raw = not charging_gpio_value  # Invert: !CHARGING=0 means charging=True
@@ -2667,25 +2690,25 @@ class BatteryWaterNode(ArgoBaseNode):
                 
                 self._last_charging_gpio_value = charging_gpio_value
                 
-                # Analyze transitions to detect fault pattern (1-2 Hz blinking)
-                # Need at least 4 transitions to calculate frequency reliably
-                if len(self._charging_gpio_transitions) >= 4:
-                    # Calculate average period over recent transitions
+                # Only treat blinking as charging fault when AC power is present (charger plugged in).
+                # When no charger is present, !CHARGING/STAT may toggle or float -> false positive "battery missing" fault.
+                if not ac_power_raw:
+                    self._charging_fault_detected = False
+                    self._charging_fault_frequency = None
+                elif len(self._charging_gpio_transitions) >= 4:
+                    # AC present: analyze transitions for fault pattern (1-2 Hz blinking)
                     recent_periods = list(self._charging_gpio_transitions)[-8:]  # Use last 8 transitions
                     avg_period = sum(recent_periods) / len(recent_periods)
                     frequency = 1.0 / avg_period if avg_period > 0 else 0.0
                     
                     # MP2672 fault pattern: 1Hz blinking (datasheet), but we see ~2 Hz in practice
-                    # Accept 0.8-2.5 Hz range to account for measurement variations
                     if 0.8 <= frequency <= 2.5:
                         self._charging_fault_detected = True
                         self._charging_fault_frequency = frequency
                     else:
-                        # Normal operation - not fault pattern
                         self._charging_fault_detected = False
                         self._charging_fault_frequency = None
                 else:
-                    # Not enough data yet - reset fault state if we don't have enough transitions
                     if len(self._charging_gpio_transitions) < 2:
                         self._charging_fault_detected = False
                         self._charging_fault_frequency = None
@@ -2693,15 +2716,6 @@ class BatteryWaterNode(ArgoBaseNode):
                 # Update last-seen time when charging is active
                 if charging_raw:
                     self._last_charging_true_time = current_time
-                
-            # Read !ACOK GPIO (PH9, line 233) - invert logic for AC power present
-            if self.acok_gpio_line is not None:
-                acok_gpio_value = self.acok_gpio_line.get_value()
-                ac_power_raw = not acok_gpio_value  # Invert: !ACOK=0 means AC power present=True
-                
-                # Update last-seen time when AC power is present
-                if ac_power_raw:
-                    self._last_ac_power_true_time = current_time
             
             # Read !PG GPIO (PI4, line 260, pin 38) from CH221K USB-C voltage controller
             # CH221K PG pin (Pin 3) indicates successful USB Power Delivery (PD) negotiation
@@ -3300,6 +3314,8 @@ class BatteryWaterNode(ArgoBaseNode):
             if hasattr(self, 'health_status') and hasattr(self, 'health_details'):
                 health_icon = "🟢" if self.health_status else "🔴"
                 health_status_str = f" | Health: {health_icon} {self.health_details}"
+            if os.path.exists(STORAGE_RUNDOWN_FLAG_FILE):
+                health_status_str += " | Battery storage rundown to 7.6V"
             
             # Handle NaN values in logging
             battery_voltage_str = f"{battery_voltage:.3f}V" if not math.isnan(battery_voltage) else "NaN (I2C failure)"

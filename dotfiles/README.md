@@ -23,6 +23,8 @@ Quick commands for Argo robot control:
 - `am` - Monitor mode
 - `ar` - Start recording
 - `ac` - Stop recording
+- `abat` - Get battery status (formatted JSON)
+- `astore` - Toggle storage rundown (enable/disable discharge to 7.6V then shut down; mode cleared on reboot)
 - `ah` - Show argo help
 - `ag` - Start argo GUI
 - `alog` - Show argo launch logs

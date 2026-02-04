@@ -46,6 +46,27 @@ On Orange Pi Zero 2W, the boot sequence timing is:
 
 The boot indicator service provides early feedback during this long boot sequence, reassuring users that the system is booting properly even though the main heartbeat takes nearly a minute to appear.
 
+## Hang diagnosis (no logs, LEDs not updating)
+
+If the service shows as running but there is no ongoing log output and power-button LEDs do not update:
+
+1. **Run the diagnostic script** (uses `/proc` to sample syscalls; no strace required):
+   ```bash
+   bash power_control/diagnose_power_control_hang.sh
+   ```
+   With sudo you get full syscall info; without sudo you still get tee state and instructions.
+
+2. **Trace the process** (recommended to see where it blocks):
+   ```bash
+   sudo apt install -y strace
+   PID=$(pgrep -f "python3.*argo_power_control\.py" | head -1)
+   # Use readlink to get the Python PID, not bash: for p in $(pgrep -f "argo_power_control\.py"); do readlink -f /proc/$p/exe 2>/dev/null | grep -q python && PID=$p && break; done
+   sudo strace -p $PID -f 2>&1
+   ```
+   Run for 10–15 seconds then Ctrl+C. Look for threads stuck in the same syscall (e.g. `futex`, `epoll_pwait`, or `read`/`write` on a fd).
+
+3. **Interpretation**: Tee in `read` means the pipe is empty—Python is not writing. So the process is stuck before producing log output (e.g. in a callback or in `_check_network_status` / WiFi check). If you temporarily remove `|& tee -a ...` from the service `ExecStart` and log only to the journal, you can confirm whether the problem is the pipeline or the Python process.
+
 ## Hardware Configuration (Rev3 PCB)
 
 ### GPIO Pin Assignments

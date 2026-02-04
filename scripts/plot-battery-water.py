@@ -21,6 +21,7 @@ Examples:
     python3 plot-battery-water.py /var/log.hdd/persistent/battery-monitor-20251005.csv
 """
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -249,6 +250,73 @@ def load_battery_data(csv_file_paths):
     print(f"  Files concatenated: {len(all_dfs)}")
     
     return combined_df
+
+
+def compute_discharge_slope_vph(df, exclude_drops_v=0.3, min_points=10):
+    """Compute battery voltage slope in V/h from CSV data (linear regression).
+    
+    Args:
+        df: DataFrame with 'timestamp' and 'battery_voltage'
+        exclude_drops_v: If > 0, split at voltage drops larger than this (V) and use
+                         the longest segment to avoid anomalies (e.g. power glitch).
+        min_points: Minimum points required for regression.
+    
+    Returns:
+        (slope_vph, segment_info) or (None, None) if insufficient data.
+        slope_vph: slope in V/h (negative = discharge).
+        segment_info: dict with 'n_points', 'duration_h', 'v_start', 'v_end', 'segment_used'.
+    """
+    if df is None or len(df) < min_points:
+        return None, None
+    # Coerce voltage to numeric; drop rows with FAILED/NaN/invalid
+    v = pd.to_numeric(df['battery_voltage'], errors='coerce')
+    valid = v.notna()
+    if valid.sum() < min_points:
+        return None, None
+    t = pd.to_datetime(df['timestamp'])
+    t = t[valid].reset_index(drop=True)
+    v = v[valid].reset_index(drop=True)
+    # Time in seconds from first point
+    t_sec = (t - t.iloc[0]).dt.total_seconds().values
+    v_vals = v.values
+    # Optionally split at large drops and use longest segment
+    if exclude_drops_v > 0 and len(v_vals) >= 2:
+        diff = np.diff(v_vals)
+        # Split after indices where voltage dropped more than exclude_drops_v
+        break_idx = np.where(diff < -exclude_drops_v)[0] + 1  # +1 to get index after drop
+        starts = np.concatenate([[0], break_idx])
+        ends = np.concatenate([break_idx, [len(v_vals)]])
+        segments = [(starts[i], ends[i]) for i in range(len(starts))]
+        # Use longest segment by number of points
+        best = max(segments, key=lambda s: s[1] - s[0])
+        if best[1] - best[0] < min_points:
+            return None, None
+        i0, i1 = best[0], best[1]
+        t_sec = t_sec[i0:i1]
+        v_vals = v_vals[i0:i1]
+        segment_used = f"longest segment (excluded {len(segments)-1} drop(s)), n={i1-i0}"
+    else:
+        segment_used = f"full series, n={len(v_vals)}"
+    # Linear regression: slope in V/s
+    n = len(t_sec)
+    sum_t = np.sum(t_sec)
+    sum_v = np.sum(v_vals)
+    sum_tv = np.sum(t_sec * v_vals)
+    sum_t2 = np.sum(t_sec * t_sec)
+    denom = n * sum_t2 - sum_t * sum_t
+    if abs(denom) < 1e-9:
+        return None, None
+    slope_v_per_s = (n * sum_tv - sum_t * sum_v) / denom
+    slope_vph = slope_v_per_s * 3600.0
+    duration_h = (t_sec[-1] - t_sec[0]) / 3600.0 if n > 1 else 0.0
+    info = {
+        'n_points': n,
+        'duration_h': duration_h,
+        'v_start': float(v_vals[0]),
+        'v_end': float(v_vals[-1]),
+        'segment_used': segment_used,
+    }
+    return slope_vph, info
 
 
 def plot_battery_voltage_decay(df, output_dir, show_plot=False):
@@ -730,6 +798,8 @@ Examples:
     python3 plot-battery-water.py --num-files 5      # Concatenate last 5 CSV files
     python3 plot-battery-water.py file.csv           # Plot single specific file
     python3 plot-battery-water.py --no-display       # Don't open plot viewer
+    python3 plot-battery-water.py --slope file.csv   # Compute discharge slope (V/h) from CSV
+    python3 plot-battery-water.py --slope --slope-exclude-drops 0.5  # Exclude sharp drops >0.5V
         """
     )
     parser.add_argument('csv_file', nargs='?',
@@ -754,6 +824,10 @@ Examples:
                         help='Font scale factor for plot text sizing (default: 1.0)')
     parser.add_argument('--max-points', type=int, default=5000,
                         help='Maximum data points to plot (default: 5000)')
+    parser.add_argument('--slope', action='store_true',
+                        help='Compute discharge slope (V/h) from voltage vs time; print and exit')
+    parser.add_argument('--slope-exclude-drops', type=float, default=0.3,
+                        help='When --slope: split at voltage drops larger than this (V) and use longest segment (default: 0.3)')
 
     args = parser.parse_args()
 
@@ -796,6 +870,17 @@ Examples:
 
     # Print summary
     print_data_summary(df)
+
+    if args.slope:
+        slope_vph, info = compute_discharge_slope_vph(
+            df, exclude_drops_v=args.slope_exclude_drops)
+        if slope_vph is not None:
+            print(f"\nDischarge slope: {slope_vph:.4f} V/h")
+            print(f"  Segment: {info['segment_used']}")
+            print(f"  Voltage: {info['v_start']:.3f} V -> {info['v_end']:.3f} V over {info['duration_h']:.2f} h")
+        else:
+            print("\nCould not compute slope (insufficient valid points or segment too short).")
+        sys.exit(0)
 
     if not args.no_plots:
         # Create output directory if it doesn't exist

@@ -52,9 +52,9 @@ The node estimates time to full charge or depletion using linear regression on r
 
 **Key Features**:
 - **Persistent slopes**: Charging/discharging slopes saved to `battery_slopes.json`
-- **Early estimates**: Uses saved slopes immediately after startup (no waiting for 5 samples)
-- **Dynamic updates**: Updates slopes when sufficient data is available
-- **Slope validation**: Only saves meaningful slopes (>0.3 V/h for charging, <-0.3 V/h for discharging)
+- **Early estimates**: Uses saved slopes immediately after startup (no waiting for min samples)
+- **Dynamic updates**: Updates slopes when sufficient data is available (≥15 samples, ~75s window)
+- **Slope validation**: Saves slopes in range (>0.3 V/h charging; discharging between -2 V/h and -0.05 V/h). Gentler discharge is not "meaningful"; steeper is rejected as quantization noise.
 
 **Estimation Logic**:
 ```python
@@ -74,9 +74,14 @@ if fit_result and sufficient_samples:
 ```
 
 **Configuration**:
-- `battery_lifetime_sample_window = 60` - Number of samples for regression
-- `battery_lifetime_min_samples = 5` - Minimum samples required for estimation
+- `battery_lifetime_sample_window = 360` - Number of samples for regression (5s interval → 30 min window)
+- `battery_lifetime_min_samples = 15` - Minimum samples for slope (~75s); reduces quantization noise
+- `MAX_DISCHARGING_SLOPE_VPH = 2.0` - Discharge slope steeper than this is rejected (ADC quantization ~2.5mV/step, 5s → ~1.8 V/h per step)
+- `MIN_DISCHARGING_SLOPE_VPH = 0.05` - Discharge gentler than -0.05 V/h is not "meaningful"
 - `BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2V` - Target voltage for "full"
+
+**Observed battery (Absima Greenhorn Line Vol2)**  
+Fresh 6000 mAh 2S LiPo. Storage rundown (8.3 V → 7.6 V) over ~11 h yields discharge slope ~-0.063 to -0.067 V/h by eye; regression from CSV in same ballpark. Measured slope can run ~20–25% higher over short windows (e.g. ~-0.08 V/h). Slope thresholds and 30 min moving window are tuned for this pack.
 
 ### Charging Status Detection
 
@@ -121,7 +126,7 @@ The node detects when charger reports "charging" but voltage is actually decreas
 **Detection Criteria**:
 - Charging status = True (from GPIO or I2C)
 - Voltage slope < -0.05 V/h (falling faster than threshold)
-- Sufficient samples for slope calculation (≥5 samples)
+- Sufficient samples for slope calculation (≥15 samples)
 
 **Anomaly Codes**:
 - `charger_power_fault` - Charger not delivering power despite reporting charging
@@ -179,6 +184,7 @@ Returns comprehensive battery status as JSON:
   "raw_data": {
     "battery_voltage": 7.8,
     "battery_remaining_pct": 45.2,
+    "battery_storage_rundown": false,
     "charging_status": true,
     "ac_power_present": true,
     "time_to_full_hours": 2.5,
@@ -251,6 +257,18 @@ The power control service implements two-tier battery protection:
 2. Pauses sensor nodes
 3. Executes `shutdown -h now` (normal shutdown)
 4. **Power relay cuts** (complete shutdown)
+
+#### 3. Storage Rundown Mode (7.6V target)
+
+**Purpose**: Discharge the battery to a safe storage voltage (7.6V) then shut down, for long-term storage. Mode is temporary (cleared on reboot).
+
+**CLI**: `astore` — toggles `/tmp/argo_battery_storage_rundown` (creates if missing, removes if present). When the flag is set:
+- Power control uses **7.6V** as the shutdown threshold (instead of 7.2V critical).
+- System runs until voltage ≤ 7.6V, then runs the same critical-battery halt (pause nodes, halt).
+- Battery/water status log line includes **" | Battery storage rundown to 7.6V"**.
+- `/battery_status` `raw_data` includes `battery_storage_rundown: true`.
+
+**Usage**: Run `astore` to enable before unplugging; run `astore` again to disable. After reboot, mode is off (flag is in `/tmp`).
 
 ### Charging State LED Pattern
 
@@ -428,9 +446,8 @@ pip3 install pandas matplotlib
                 regression_slope_v_per_s, intercept = fit_result
                 
                 # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
-                # 0.3 V/h = 8.33e-5 V/s minimum for meaningful slope updates
                 MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -8.33e-5  # -0.3 V/h (magnitude)
+                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
                 
                 # Also check that battery is not already fully charged to avoid capturing voltage float near full
                 is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)  # Within 0.1V of full
@@ -633,7 +650,7 @@ ros2 node list | grep battery_water
 **Symptoms**: Time-to-full/empty estimates are None
 
 **Possible Causes**:
-- Insufficient voltage samples (<5 samples)
+- Insufficient voltage samples (<15 samples)
 - Battery voltage stable (no significant slope)
 - Charging status unknown
 
