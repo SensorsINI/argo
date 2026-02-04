@@ -15306,6 +15306,12 @@
 		(uuid "4be902b1-1ecc-477e-845d-586a81c68d73")
 	)
 	(junction
+		(at 355.6 179.07)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "4c2ffe29-e21a-4d6c-bf51-c8e17e15dc27")
+	)
+	(junction
 		(at 193.04 255.27)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -15340,6 +15346,12 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "737c661f-2bbb-46c0-94f9-bd8efc8b662b")
+	)
+	(junction
+		(at 355.6 182.88)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "777b263f-ebea-4238-8c42-4ac343201425")
 	)
 	(junction
 		(at 289.56 97.79)
@@ -15412,6 +15424,12 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "a39c6c29-cc4d-45c3-8b90-84dd18362ad8")
+	)
+	(junction
+		(at 118.11 223.52)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "a4e66e22-4521-4d78-9cd1-361acc3d97b0")
 	)
 	(junction
 		(at 262.89 247.65)
@@ -15490,6 +15508,12 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "d632833b-e6fd-452d-bc55-caf9bb86c998")
+	)
+	(junction
+		(at 386.08 182.88)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "db576a5c-0f35-4eac-9dca-6ce9be38de13")
 	)
 	(junction
 		(at 254 198.12)
@@ -15717,7 +15741,7 @@
 	)
 	(wire
 		(pts
-			(xy 355.6 181.61) (xy 355.6 184.15)
+			(xy 355.6 181.61) (xy 355.6 182.88)
 		)
 		(stroke
 			(width 0)
@@ -15947,7 +15971,7 @@
 	)
 	(wire
 		(pts
-			(xy 353.06 179.07) (xy 359.41 179.07)
+			(xy 353.06 179.07) (xy 355.6 179.07)
 		)
 		(stroke
 			(width 0)
@@ -16114,6 +16138,16 @@
 			(type default)
 		)
 		(uuid "2ce216dc-54b1-4ebd-b51c-154751661748")
+	)
+	(wire
+		(pts
+			(xy 386.08 182.88) (xy 386.08 184.15)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2d35764b-ab77-402b-9267-69913fb9e325")
 	)
 	(wire
 		(pts
@@ -16338,7 +16372,7 @@
 	)
 	(wire
 		(pts
-			(xy 386.08 173.99) (xy 386.08 184.15)
+			(xy 386.08 173.99) (xy 386.08 182.88)
 		)
 		(stroke
 			(width 0)
@@ -17259,6 +17293,16 @@
 	)
 	(wire
 		(pts
+			(xy 355.6 179.07) (xy 359.41 179.07)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "9a1a4d9c-a5e9-411a-a62e-c98d7c8155ee")
+	)
+	(wire
+		(pts
 			(xy 217.17 189.23) (xy 217.17 187.96)
 		)
 		(stroke
@@ -17336,6 +17380,16 @@
 			(type default)
 		)
 		(uuid "a03abe24-d295-4346-a3f8-1f50d7b257ca")
+	)
+	(wire
+		(pts
+			(xy 355.6 182.88) (xy 355.6 184.15)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a1464b51-eafd-4d6e-8128-665f7b0da9c1")
 	)
 	(wire
 		(pts
@@ -17990,6 +18044,16 @@
 	)
 	(wire
 		(pts
+			(xy 118.11 223.52) (xy 119.38 223.52)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e8165b79-a54c-42b0-a13e-9f8feda19de9")
+	)
+	(wire
+		(pts
 			(xy 300.99 97.79) (xy 303.53 97.79)
 		)
 		(stroke
@@ -18260,7 +18324,7 @@
 	)
 	(wire
 		(pts
-			(xy 114.3 223.52) (xy 119.38 223.52)
+			(xy 114.3 223.52) (xy 118.11 223.52)
 		)
 		(stroke
 			(width 0)
@@ -36191,6 +36255,16 @@
 		)
 		(uuid "77aa02c2-1962-4795-bfae-2b2a89d53fa7")
 	)
+	(label "CC2"
+		(at 353.06 184.15 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "78f3e71c-a92d-4d02-afb5-52be99a736b7")
+	)
 	(label "BAT_MID"
 		(at 318.77 139.7 0)
 		(effects
@@ -36791,6 +36865,16 @@
 		)
 		(uuid "c835a7f4-b200-4ba4-9fc9-7b965eaa4a5d")
 	)
+	(label "CC1"
+		(at 353.06 179.07 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "c916a28a-fb36-4e98-babf-756a07d1c241")
+	)
 	(label "SALTWATER"
 		(at 119.38 226.06 180)
 		(effects
@@ -36990,6 +37074,16 @@
 			(justify right bottom)
 		)
 		(uuid "dcf30d31-db57-4a7d-9093-0695af06663a")
+	)
+	(label "CFG"
+		(at 386.08 179.07 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "de737889-1685-42c8-9b9a-3fd593d46941")
 	)
 	(label "SERVO_SAIL"
 		(at 165.1 116.84 0)
@@ -39260,6 +39354,72 @@
 			(project ""
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "argo-v9:TestPoint_Probe_small_autonamed")
+		(at 355.6 179.07 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "2eb4ca9b-0ea2-498a-99a0-818d57c8c04d")
+		(property "Reference" "TP38"
+			(at 358.902 178.562 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "TestPoint_Probe_autonamed"
+			(at 357.251 175.006 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Footprint" "Argo footprint Library:TestPoint_scope_small_autonamed"
+			(at 360.68 179.07 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 360.68 179.07 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "test point (alternative probe-style design)"
+			(at 355.6 179.07 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "7d0d2cc8-a77e-4054-b6aa-d58796ad6b43")
+		)
+		(instances
+			(project "argo-v9-stable-rev4"
+				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
+					(reference "TP38")
 					(unit 1)
 				)
 			)
@@ -45097,6 +45257,72 @@
 		)
 	)
 	(symbol
+		(lib_id "argo-v9:TestPoint_Probe_small_autonamed")
+		(at 118.11 223.52 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "b8b1d17e-df9c-44e6-bd80-9a9835a6f77c")
+		(property "Reference" "TP40"
+			(at 113.284 222.758 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "TestPoint_Probe_autonamed"
+			(at 119.761 219.456 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Footprint" "Argo footprint Library:TestPoint_scope_small_autonamed"
+			(at 123.19 223.52 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 123.19 223.52 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "test point (alternative probe-style design)"
+			(at 118.11 223.52 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "97c609fc-3053-4914-b006-24a4bec8841f")
+		)
+		(instances
+			(project "argo-v9-stable-rev4"
+				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
+					(reference "TP40")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "argo-v9:TSR_1-2450")
 		(at 190.5 181.61 0)
 		(mirror y)
@@ -45368,6 +45594,72 @@
 			(project ""
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "argo-v9:TestPoint_Probe_small_autonamed")
+		(at 386.08 182.88 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "c79212df-f0f6-452f-b5c7-73701b2f4dac")
+		(property "Reference" "TP37"
+			(at 389.382 182.372 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "TestPoint_Probe_autonamed"
+			(at 387.731 178.816 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Footprint" "Argo footprint Library:TestPoint_scope_small_autonamed"
+			(at 391.16 182.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 391.16 182.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "test point (alternative probe-style design)"
+			(at 386.08 182.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "24be83cf-1dd6-4cc1-bf0a-0868377ec481")
+		)
+		(instances
+			(project "argo-v9-stable-rev4"
+				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
+					(reference "TP37")
 					(unit 1)
 				)
 			)
@@ -46937,6 +47229,72 @@
 			(project "argo-v9-stable-rev2"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R16")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "argo-v9:TestPoint_Probe_small_autonamed")
+		(at 355.6 182.88 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "f0219edd-9994-4002-8825-84d741d06f3e")
+		(property "Reference" "TP39"
+			(at 358.902 182.372 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "TestPoint_Probe_autonamed"
+			(at 357.251 178.816 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Footprint" "Argo footprint Library:TestPoint_scope_small_autonamed"
+			(at 360.68 182.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 360.68 182.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "test point (alternative probe-style design)"
+			(at 355.6 182.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "c419841d-d75b-4cd9-9033-c859fbca1eda")
+		)
+		(instances
+			(project "argo-v9-stable-rev4"
+				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
+					(reference "TP39")
 					(unit 1)
 				)
 			)
