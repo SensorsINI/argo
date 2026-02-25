@@ -165,3 +165,62 @@ pcb/WindSensor/Sensirion_Differential_Pressure_Sensors_SDP3x_Digital_Datasheet.p
 pcb/WindSensor/WindSensor-rev1/WindSensor-rev1.FCStd.ff1af290-8525-4361-bb0e-402e02177297
 pcb/WindSensor/WindSensor-rev1/WindSensor-rev1a.FCStd.c72a58fe-b546-4caf-b672-82f1a6334219
 pcb/WindSensor/WindSensor-rev1/WindSensor-rev1b.FCStd.1f44a24d-55e9-45df-9ad2-dbe2fe54b3f0
+pcb/argo-v9-stable/argo-v9-stable-rev4/corona-ds-339hv-1.snapshot.2/Captura de tela 2026-01-26 094541.png
+pcb/argo-v9-stable/argo-v9-stable-rev4/corona-ds-339hv-1.snapshot.2/Corona DS-339HV.sldprt
+pcb/argo-v9-stable/argo-v9-stable-rev4/corona-ds-339hv-1.snapshot.2/Corona DS-339HV.step
+pcb/argo-v9-stable/argo-v9-stable-rev4/corona-ds-339hv-1.snapshot.2/Corona DS-339HV.x_t
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Boot - 3447707/LICENSE.txt
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Boot - 3447707/README.txt
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Boot - 3447707/files/DF65-Boot_Rumpf.STL
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Boot - 3447707/files/DF65-Boot_Segel.STL
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Boot - 3447707/images/0ca0d99ff717d8c8602a06541fb4064e.png
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Boot - 3447707/images/4891e2cabde6849946fcd130fa7d0572.png
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Boot - 3447707/images/DF65-Boot.jpg
+pcb/argo-v9-stable/argo-v9-stable-rev4/servo-emax-es08-mdii-1.snapshot.1/Servo EMAX ES08MDII.ipt
+pcb/argo-v9-stable/argo-v9-stable-rev4/servo-emax-es08-mdii-1.snapshot.1/Servo EMAX ES08MDII.png
+pcb/argo-v9-stable/argo-v9-stable-rev4/servo-emax-es08-mdii-1.snapshot.1/Servo EMAX ES08MDII.stp
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Hatch cover - 6440139/LICENSE.txt
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Hatch cover - 6440139/README.txt
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Hatch cover - 6440139/files/DF65Hatch.stl
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Hatch cover - 6440139/images/63e04bac-ef8a-4419-9660-c8ea0f6c7124.png
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Hatch cover - 6440139/images/987668ec-a1dd-4c93-88c1-541166548cd4.png
+pcb/argo-v9-stable/argo-v9-stable-rev4/argo-v9-stable-rev4-gerber.zip
+pcb/argo-v9-stable/argo-v9-stable-rev4/corona-ds-339hv-1.snapshot.2.zip
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Hatch cover - 6440139.zip
+.gitignore
+pcb/argo-v9-stable/argo-v9-stable-rev4/DF65 Boot - 3447707.zip
+pcb/argo-v9-stable/argo-v9-stable-rev4/Hull RG 65 Alpha Sabre (Shrink RG65GreenMagicSwing2).STL
+pcb/argo-v9-stable/argo-v9-stable-rev4/servo-emax-es08-mdii-1.snapshot.1.zip
+pcb/argo-v9-stable/CMI-9653S-SMT.kicad_sym
+pcb/argo-v9-stable/CUI_CMI-9653S-SMT.kicad_mod
+pcb/argo-v9-stable/orange-pi-zero-2w-1.snapshot.11.zip
+pcb/datasheets/bsd840n-rev2-4.pdf
+pcb/datasheets/DP_DS_SDP3x_digital_D1.pdf
+pcb/datasheets/TS4148 SERIES_A2301.pdf
+pcb/WindSensor/Macros/parseerrrors.py
+pcb/WindSensor/Macros/fixlinks.FCMacro
+pcb/WindSensor/WindSensor-rev1/MFG_599-2310-427F.webp
+pcb/WindSensor/WindSensor-rev1/RGBW LED C18645.pdf
+pcb/WindSensor/QBLP679-RGBXW.pdf
+pcb/WindSensor/QBLP679-RGBXW.zip
+pcb/WindSensor/QBLP679E-RGB.zip
+pcb/WindSensor/WindSensor-rev1c/WindSensor-rev1c-gerber.zip
+pcb/WindSensor/WindSensor-rev1c/WindSensor3D-rev1c-ArgoWindSensormast mount.3mf
+pcb/WindSensor/WindSensor-rev1c/WindSensor3D-rev1c-top.3mf
+pcb/WindSensor/WindSensor-rev1c/WindSensor3D-rev1b.FCStd.539d1cfd-b18d-4781-a930-1c81beaf6e0e
+pcb/WindSensor/WindSensor-rev1c/RGBW LED C18645.pdf
+pcb/WindSensor/WindSensor-rev1c/PCA9632.pdf
+pcb/WindSensor/WindSensor-rev1b/PCA9632DP2,118--3DModel-STEP-510211.STEP
+pcb/WindSensor/WindSensor-rev1c/fp-lib-table
+pcb/WindSensor/WindSensor-rev1c/sym-lib-table
+pcb/WindSensor/WindSensor-rev1b/PCA9632DP2_118/how-to-import.htm
+pcb/WindSensor/WindSensor-rev1b/PCA9632DP2_118/PCA9632DP2_118.kicad_sym
+pcb/WindSensor/WindSensor-rev1b/PCA9632DP2_118/PCA9632DP2_118.step
+pcb/WindSensor/WindSensor-rev1b/PCA9632DP2_118/SOP50P490X110-10N.kicad_mod
+pcb/WindSensor/WindSensor-rev1/WindSensor3D-rev1-domed-channels-FC1.1-mast step up.3mf
+pcb/WindSensor/WindSensor-rev1/WindSensor3D-rev1-domed-channels-FC1.1-windsensor-cable-gland.3mf
+pcb/WindSensor/WindSensor-rev1/lp5814.pdf
+pcb/WindSensor/WindSensor-rev1b/lp5814.pdf
+pcb/WindSensor/WindSensor-rev1b/sym-lib-table
+pcb/WindSensor/WindSensor-rev1b/PCA9632DP2_118.zip
+pcb/WindSensor/WindSensor-rev1b/fp-lib-table
