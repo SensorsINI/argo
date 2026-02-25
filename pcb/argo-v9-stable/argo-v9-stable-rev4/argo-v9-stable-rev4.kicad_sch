@@ -14454,7 +14454,7 @@
 		)
 		(uuid "113242b9-fc69-4ff0-8fc2-1dbfc08970a5")
 	)
-	(text "!PG configure as PU - signals that CH221K has found \na PD cable (power delivery) and negociated the 5V VBUS.\nBut failure also just indicates original USB (non PD) cable."
+	(text "PI4=!PG configure as PU - signals that CH221K has found \na PD cable (power delivery) and negociated the 5V VBUS.\nBut failure also just indicates original USB (non PD) cable."
 		(exclude_from_sim no)
 		(at 169.418 136.144 0)
 		(effects
@@ -14651,6 +14651,17 @@
 		)
 		(uuid "4a4117c4-2f21-46be-92ed-a0982fa4ebf9")
 	)
+	(text "configure PC12=!CHG as open drain, \nactivate to turn on blue power button LED"
+		(exclude_from_sim no)
+		(at 172.466 133.096 0)
+		(effects
+			(font
+				(size 0.762 0.762)
+			)
+			(justify left)
+		)
+		(uuid "4e0efe74-d026-4448-b327-d01bb314e946")
+	)
 	(text "holds relay coil off \neven if OPi is off"
 		(exclude_from_sim no)
 		(at 169.926 200.66 0)
@@ -14757,17 +14768,6 @@
 			)
 		)
 		(uuid "80a0db39-b451-4058-889f-d4c9cc2f478d")
-	)
-	(text "!CHARGING configure as PU - signals battery is charging"
-		(exclude_from_sim no)
-		(at 176.53 133.604 0)
-		(effects
-			(font
-				(size 1.016 1.016)
-			)
-			(justify left)
-		)
-		(uuid "876cb1cf-f496-4523-aa0b-7904060d2ebc")
 	)
 	(text "Power buttons"
 		(exclude_from_sim no)
@@ -15013,20 +15013,6 @@
 		)
 		(uuid "bae18f72-253b-4b7b-8f98-c89e08961a95")
 	)
-	(text "Add heartbeat (green) LED"
-		(exclude_from_sim no)
-		(at 168.91 232.664 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-				(thickness 0.254)
-				(bold yes)
-				(color 255 0 0 1)
-			)
-			(justify left)
-		)
-		(uuid "bcb1cd4c-8941-4651-b1c5-3f65b3feacdb")
-	)
 	(text "Test in 3.5% NaCl \nwater with 2mm wire spacing\nmeasured about 400kOhm\nRC=1MOhm * 100nF=0.1s"
 		(exclude_from_sim no)
 		(at 92.964 242.824 0)
@@ -15125,9 +15111,9 @@
 		)
 		(uuid "e46c7eec-3803-4f3f-8738-215ea8f2a7ef")
 	)
-	(text "Solder R22 to let\n!CHARGING drive BLUE\npower button LED"
+	(text "!CHG (STAT) pulls low to signal\ncharging or blinks low to signal fault"
 		(exclude_from_sim no)
-		(at 356.87 115.824 0)
+		(at 348.742 114.3 0)
 		(effects
 			(font
 				(size 0.889 0.889)
@@ -15520,12 +15506,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "df40b28b-1044-4cb4-a407-8124eeb541e5")
-	)
-	(junction
-		(at 336.55 115.57)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "e0d4a547-9e7f-46eb-a49d-a24e4a07299f")
 	)
 	(junction
 		(at 370.84 167.64)
@@ -16083,6 +16063,16 @@
 	)
 	(wire
 		(pts
+			(xy 334.01 115.57) (xy 340.36 115.57)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2726fcd2-86d0-4382-bd02-18e38cfae199")
+	)
+	(wire
+		(pts
 			(xy 92.71 129.54) (xy 95.25 129.54)
 		)
 		(stroke
@@ -16484,16 +16474,6 @@
 	)
 	(wire
 		(pts
-			(xy 165.1 134.62) (xy 163.83 134.62)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "45abb36f-5b89-4b11-b50a-43d92a1a0aba")
-	)
-	(wire
-		(pts
 			(xy 370.84 167.64) (xy 372.11 167.64)
 		)
 		(stroke
@@ -16581,6 +16561,16 @@
 			(type default)
 		)
 		(uuid "4dbfe37d-494a-4bbc-accc-73fefdda7efd")
+	)
+	(wire
+		(pts
+			(xy 170.18 133.35) (xy 170.18 134.62)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "4dd7bee8-b922-4921-87ba-dca7c8001089")
 	)
 	(wire
 		(pts
@@ -17165,6 +17155,16 @@
 	)
 	(wire
 		(pts
+			(xy 163.83 134.62) (xy 170.18 134.62)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "894dc8b0-225c-4cfc-89d4-0f2fdcc5e08b")
+	)
+	(wire
+		(pts
 			(xy 163.83 119.38) (xy 170.18 119.38)
 		)
 		(stroke
@@ -17345,7 +17345,7 @@
 	)
 	(wire
 		(pts
-			(xy 166.37 114.3) (xy 163.83 114.3)
+			(xy 177.8 114.3) (xy 163.83 114.3)
 		)
 		(stroke
 			(width 0)
@@ -17976,16 +17976,6 @@
 	)
 	(wire
 		(pts
-			(xy 336.55 115.57) (xy 346.71 115.57)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "d8fc1e5d-b13f-4bf6-9ea5-622f51727b03")
-	)
-	(wire
-		(pts
 			(xy 125.73 74.93) (xy 125.73 68.58)
 		)
 		(stroke
@@ -18023,16 +18013,6 @@
 			(type default)
 		)
 		(uuid "ded0c77f-0a76-47a4-a535-83ec3ef3d3a9")
-	)
-	(wire
-		(pts
-			(xy 334.01 115.57) (xy 336.55 115.57)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "e0a3ce81-5b6e-476c-99e2-bebf2dd969a2")
 	)
 	(wire
 		(pts
@@ -18233,6 +18213,16 @@
 			(type default)
 		)
 		(uuid "f3bdd5aa-855d-467c-98c5-0919501a50af")
+	)
+	(wire
+		(pts
+			(xy 171.45 133.35) (xy 170.18 133.35)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f4d9b67a-e345-4152-9d9c-cea393afe6f1")
 	)
 	(wire
 		(pts
@@ -36037,6 +36027,16 @@
 		)
 		(uuid "55a2f350-7a57-4048-bd1c-b3acbb667588")
 	)
+	(label "PI1"
+		(at 167.64 114.3 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "596e343a-4f56-45b6-a430-af4dbefed7cb")
+	)
 	(label "SDAL"
 		(at 124.46 85.09 180)
 		(effects
@@ -36048,7 +36048,7 @@
 		(uuid "5a32a50d-8a01-4439-82a2-bc68ec59a198")
 	)
 	(label "!CHG"
-		(at 334.01 115.57 0)
+		(at 335.28 115.57 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -36767,16 +36767,6 @@
 		)
 		(uuid "b850414a-fa43-4e93-84f9-1c6d828d78d7")
 	)
-	(label "BLUE"
-		(at 351.79 115.57 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "b9199105-fe1a-457a-81bf-908911b8f687")
-	)
 	(label "PSR"
 		(at 186.69 209.55 180)
 		(effects
@@ -36817,8 +36807,8 @@
 		)
 		(uuid "bc7da509-26f8-4dad-8239-0aa20bb00c84")
 	)
-	(label "BLUE"
-		(at 166.37 114.3 0)
+	(label "!CHG"
+		(at 166.37 134.62 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -36997,16 +36987,6 @@
 		)
 		(uuid "d2f8c53c-989a-476a-96b5-55f7745d99a9")
 	)
-	(label "!CHG"
-		(at 165.1 134.62 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "d3c4d2ba-3161-4f16-b179-d3a73174264b")
-	)
 	(label "LORA_OUT"
 		(at 93.98 134.62 180)
 		(effects
@@ -37107,7 +37087,7 @@
 		)
 		(uuid "dce12d5a-0e6c-4dc8-86b5-4345e1af4e2f")
 	)
-	(label "BLUE"
+	(label "!CHG"
 		(at 257.81 181.61 180)
 		(effects
 			(font
@@ -37542,10 +37522,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "0164bf6d-1258-40ec-8d1b-a53be4bc6ce8")
 		(property "Reference" "R14"
-			(at 171.45 251.4599 0)
+			(at 165.354 251.206 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -37553,8 +37532,8 @@
 				(justify left)
 			)
 		)
-		(property "Value" "5k"
-			(at 171.45 253.9999 0)
+		(property "Value" "5.1k"
+			(at 164.084 253.238 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -37599,6 +37578,72 @@
 			(project "argo-v9-stable"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R14")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "argo-v9:TestPoint_Probe_small_autonamed")
+		(at 177.8 114.3 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "023c0f60-8af0-4490-be8f-24c8086f0345")
+		(property "Reference" "TP43"
+			(at 181.102 113.792 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "TestPoint_Probe_autonamed"
+			(at 179.451 110.236 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Footprint" "Argo footprint Library:TestPoint_scope_small_autonamed"
+			(at 182.88 114.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 182.88 114.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "test point (alternative probe-style design)"
+			(at 177.8 114.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "502935f0-0adf-43ab-9ab4-b4c029823491")
+		)
+		(instances
+			(project "argo-v9-stable-rev4"
+				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
+					(reference "TP43")
 					(unit 1)
 				)
 			)
@@ -37763,10 +37808,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "0c3c7fc8-08b8-4233-95a9-b8d09c867a52")
 		(property "Reference" "R35"
-			(at 238.76 250.1899 0)
+			(at 231.648 250.19 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -37774,8 +37818,8 @@
 				(justify left)
 			)
 		)
-		(property "Value" "10k"
-			(at 238.76 252.7299 0)
+		(property "Value" "5.1k"
+			(at 231.14 252.222 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -37899,10 +37943,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "0d874dd8-f2f6-4563-8278-6ebaec54540c")
 		(property "Reference" "R19"
-			(at 223.52 251.4599 0)
+			(at 216.408 251.206 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -37910,8 +37953,8 @@
 				(justify left)
 			)
 		)
-		(property "Value" "1k"
-			(at 223.52 253.9999 0)
+		(property "Value" "5.1k"
+			(at 216.154 253.238 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -43284,10 +43327,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "8262fa6c-ad3f-4fb0-9ea6-4ddd0c9ae9f3")
 		(property "Reference" "R17"
-			(at 195.58 251.4599 0)
+			(at 188.722 251.46 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -43296,7 +43338,7 @@
 			)
 		)
 		(property "Value" "10k"
-			(at 195.58 253.9999 0)
+			(at 188.722 253.746 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -45092,10 +45134,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "b30c1393-c49c-4586-9c1e-872b3b98bc57")
 		(property "Reference" "R20"
-			(at 165.1 251.4599 0)
+			(at 158.75 250.952 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -45103,8 +45144,8 @@
 				(justify left)
 			)
 		)
-		(property "Value" "5k"
-			(at 165.1 253.9999 0)
+		(property "Value" "5.1k"
+			(at 157.734 252.984 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -46391,10 +46432,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "d93709de-9e4a-4ac9-bcb8-2fcee9ac2878")
 		(property "Reference" "R15"
-			(at 180.34 251.4599 0)
+			(at 173.736 251.206 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -46403,7 +46443,7 @@
 			)
 		)
 		(property "Value" "10k"
-			(at 180.34 253.9999 0)
+			(at 173.482 253.492 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -46799,10 +46839,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "e0764a98-8dee-4171-85b5-e2197a7f2cc5")
 		(property "Reference" "R18"
-			(at 210.82 251.4599 0)
+			(at 203.962 251.46 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -46811,7 +46850,7 @@
 			)
 		)
 		(property "Value" "10k"
-			(at 210.82 253.9999 0)
+			(at 204.216 253.746 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -47476,7 +47515,7 @@
 	)
 	(symbol
 		(lib_id "argo-v9:TestPoint_Probe_small_autonamed")
-		(at 336.55 115.57 0)
+		(at 340.36 115.57 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
@@ -47484,7 +47523,7 @@
 		(dnp no)
 		(uuid "f141cf1c-e765-4cd8-8dcb-53f559f663d5")
 		(property "Reference" "TP19"
-			(at 339.852 115.062 0)
+			(at 343.408 113.538 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -47493,7 +47532,7 @@
 			)
 		)
 		(property "Value" "TestPoint_Probe_autonamed"
-			(at 338.201 111.506 0)
+			(at 342.011 111.506 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -47502,7 +47541,7 @@
 			)
 		)
 		(property "Footprint" "Argo footprint Library:TestPoint_scope_small_autonamed"
-			(at 341.63 115.57 0)
+			(at 345.44 115.57 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -47511,7 +47550,7 @@
 			)
 		)
 		(property "Datasheet" "~"
-			(at 341.63 115.57 0)
+			(at 345.44 115.57 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -47520,7 +47559,7 @@
 			)
 		)
 		(property "Description" "test point (alternative probe-style design)"
-			(at 336.55 115.57 0)
+			(at 340.36 115.57 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -47693,73 +47732,6 @@
 			(project "argo-v9-stable"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "J2")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:R_Small_US")
-		(at 349.25 115.57 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "f7e7c453-a889-4fa0-8e95-6cd979c0e933")
-		(property "Reference" "R22"
-			(at 348.234 113.03 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "0R"
-			(at 351.79 116.586 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric_Pad0.98x0.95mm_HandSolder"
-			(at 349.25 115.57 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 349.25 115.57 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Resistor, small US symbol"
-			(at 349.25 115.57 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "e1323525-8a25-408f-9840-1923e407d268")
-		)
-		(pin "2"
-			(uuid "2292d302-b27e-444a-a1c1-f380eb800b34")
-		)
-		(instances
-			(project "argo-v9-stable-rev2"
-				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
-					(reference "R22")
 					(unit 1)
 				)
 			)
