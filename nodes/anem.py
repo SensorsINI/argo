@@ -8,7 +8,8 @@
 # to determine wind speed and direction using directional wind meter principles.
 #
 # Hardware Setup:
-# - Uses I2C bus 0 (not bus 1)
+# - As of argo PCB version 4, uses I2C bus 1 (not bus 0 as do other nodes) 
+#   for electrical isolation of the wind sensor in case of short circuit from the mast and salt water intrusion.
 # - Three sensors at addresses:
 #   * I2C_CTR (0x21): Center sensor (0° - front/back)
 #   * I2C_CW (0x22): Clockwise 120° from front (looking down on mast)
@@ -91,6 +92,9 @@ from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Vector3
 from std_msgs.msg import Bool, Float32
 from std_srvs.srv import Trigger
+
+# I2C Configuration
+I2C_BUS = 1  # I2C bus number (same as LED controller)
 
 # I2C sensor addresses
 I2C_CTR = 0x21  # Center sensor (0° - front/back)
@@ -378,8 +382,8 @@ class AnemNode(ArgoBaseNode):
         """Attempts to initialize I2C bus and sensors, returns True on success."""
         try:
             if not self.bus:
-                self.bus = smbus.SMBus(0)
-                self.get_logger().info('Opened I2C SMBus')
+                self.bus = smbus.SMBus(I2C_BUS)
+                self.get_logger().info(f'Opened I2C SMBus bus {I2C_BUS}')
         except FileNotFoundError:
             # Only log this error on the first attempt in a retry cycle
             if not hasattr(self, '_is_first_retry_log') or self._is_first_retry_log:

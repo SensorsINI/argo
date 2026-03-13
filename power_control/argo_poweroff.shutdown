@@ -117,6 +117,48 @@ c_echo "╔═══════════════════════
 c_echo "║ NORMAL SHUTDOWN - CUTTING POWER RELAY by Asserting GPIO 259 to cut power NOW ║"
 c_echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 
+# Best-effort buzzer cue before final power cut.
+# argo_power_control should have already released GPIO 258 (PI2) by shutdown phase.
+c_echo "Best-effort buzzer pulse on GPIO 258 (PI2) for 0.5s before final power cut"
+if command -v python3 >/dev/null 2>&1; then
+python3 - <<'PY'
+import time
+import sys
+
+try:
+    import gpiod
+except Exception:
+    # Graceful no-op: buzzer pulse is optional.
+    sys.exit(0)
+
+chip = None
+line = None
+try:
+    chip = gpiod.Chip("/dev/gpiochip0")
+    line = chip.get_line(258)  # PI2 buzzer line (active HIGH)
+    line.request(consumer="argo_poweroff_buzzer", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+    line.set_value(1)
+    time.sleep(0.5)
+    line.set_value(0)
+except Exception:
+    # Graceful no-op if line is unavailable or cannot be acquired.
+    pass
+finally:
+    try:
+        if line is not None:
+            line.release()
+    except Exception:
+        pass
+    try:
+        if chip is not None:
+            chip.close()
+    except Exception:
+        pass
+PY
+else
+    c_echo "python3 not available for buzzer pulse; continuing shutdown"
+fi
+
 if command -v python3 >/dev/null 2>&1; then
     c_echo "Using python3 method to assert GPIO 259 HIGH for 0.5s"
 python3 - <<'PY'

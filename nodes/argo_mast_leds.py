@@ -6,10 +6,11 @@
 # PCB as the wind sensor. The LED controller is used to provide visual status on the mast.
 #
 # Hardware Setup:
-# - Uses I2C bus 0 (same as wind sensor)
+# - Uses I2C bus 1 (same as wind sensor, different from other nodes)
+#   for electrical isolation of the LED controller in case of short circuit from the mast and salt water intrusion.
 # - PCA9632 individual address 0x62 (hardware pins A1 A0; 0x70 is LED All Call, not used here)
 # - Four LED channels: Red, Green, Blue, White (RGBW) via LED0-LED3
-# - Run "i2cdetect -y 0" to verify: expect 0x62 (individual) and 0x70 (All Call) for PCA9632
+# - Run "i2cdetect -y 1" to verify: expect 0x62 (individual) and 0x70 (All Call) for PCA9632
 #
 # Features:
 # - Four individual subscriptions (one per color channel: R, G, B, W)
@@ -68,7 +69,7 @@ from argo_base_node import ArgoBaseNode
 # ============================================================================
 
 # I2C Configuration
-I2C_BUS = 0  # I2C bus number (same as wind sensor)
+I2C_BUS = 1  # I2C bus number (same as wind sensor)
 # 7-bit individual address (hardware pins A1 A0; 0x70 is LED All Call, active at power-up)
 PCA9632_I2C_ADDRESS = 0x62
 
