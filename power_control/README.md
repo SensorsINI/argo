@@ -71,7 +71,7 @@ If the service shows as running but there is no ongoing log output and power-but
 
 ### GPIO Pin Assignments
 - **PI3 (pin 40, GPIO 259)**: `POW_OFF` - Output pulse to relay RESET coil (active HIGH)
-- **PI9 (pin 28, GPIO 265)**: `POW_BUT` - Power button input (active HIGH when pressed)
+- **PH0 (pin 8, GPIO 224)**: `POW_BUT` - Power button input (active HIGH when pressed)
 - **PH4 (pin 18, GPIO 228)**: Green LED in power button (ACTIVE_HIGH - NFET control: HIGH = ON, LOW = OFF)
 - **PI1 (pin 12, GPIO 257)**: Blue LED in power button (active LOW - cathode control)
 - **PI16 (pin 37, GPIO 272)**: Red LED for SOS warnings (active LOW - cathode control)
@@ -402,10 +402,10 @@ sudo journalctl -u argo_power_control.service -n 50
 ### Button Presses Not Detected
 ```bash
 # Check GPIO line status
-gpioinfo | grep -E "(259|265|228|257|272)"
+gpioinfo | grep -E "(259|224|228|257|272)"
 
 # Test button manually
-gpioget gpiochip0 265  # Should be 0 when released, 1 when pressed
+gpioget gpiochip0 224  # Should be 0 when released, 1 when pressed
 
 # Check service is running
 sudo systemctl status argo_power_control.service
@@ -475,7 +475,7 @@ sudo journalctl -u argo_power_control.service | grep ROS
 | Function | Pin | GPIO Line | Direction | Active |
 |----------|-----|-----------|-----------|--------|
 | POW_OFF (relay reset) | 40 | 259 (PI3) | Output | HIGH |
-| POW_BUT (power button) | 28 | 265 (PI9) | Input | HIGH |
+| POW_BUT (power button) | 8 | 224 (PH0) | Input | HIGH |
 | Green LED | 18 | 228 (PH4) | Output | LOW |
 | Blue LED | 12 | 257 (PI1) | Output | LOW |
 | Red LED | 37 | 272 (PI16) | Output | LOW |

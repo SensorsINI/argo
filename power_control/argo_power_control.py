@@ -14,7 +14,7 @@
 #
 # HARDWARE CONFIGURATION (Rev3 PCB):
 #   - PI3 (Pin 40, wPi 27, GPIO 259): POW_OFF - Output for power relay control (active HIGH pulse to reset relay)
-#   - PI9 (Pin 28, wPi 18, GPIO 265): POW_BUT - Input from power button (active HIGH when pressed)
+#   - PH0 (Pin 8, wPi 3, GPIO 224): POW_BUT - Input from power button (active HIGH when pressed)
 #   - PI2 (Pin 35, wPi 24, GPIO 258): BUZZER - Output for buzzer control (active HIGH = ON)
 #   - PH4 (Pin 18, wPi 10, GPIO 228): Green LED in power button
 #     Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
@@ -475,9 +475,14 @@ class PowerController(ArgoBaseNode):
         self.buzzer_line = None
 
         # Sysfs LED control paths (for kernel overlay)
-        self.green_led_sysfs_path = Path("/sys/class/leds/argo:green:heartbeat")
-        self.green_led_brightness_path = self.green_led_sysfs_path / "brightness"
-        self.green_led_trigger_path = self.green_led_sysfs_path / "trigger"
+        # Support both legacy/custom overlay label and generic kernel LED label.
+        self.green_led_sysfs_candidates = [
+            Path("/sys/class/leds/argo:green:heartbeat"),
+            Path("/sys/class/leds/green_led"),
+        ]
+        self.green_led_sysfs_path = None
+        self.green_led_brightness_path = None
+        self.green_led_trigger_path = None
         self.green_led_available = False
         self.green_led_using_sysfs = False  # Track if we're using sysfs control
 
@@ -554,7 +559,7 @@ class PowerController(ArgoBaseNode):
 
         # Correct GPIO Line offsets from gpio readall
         self.POWER_RELAY_LINE = 259    # PI3 (Pin 40) - !POW
-        self.POWER_BUTTON_LINE = 265   # PI9 (Pin 28) - !POW_BUT
+        self.POWER_BUTTON_LINE = 224   # PH0 (Pin 8) - POW_BUT
         self.BUZZER_LINE = 258         # PI2 (Pin 35) - BUZZER (active HIGH)
         # GREEN_LED_LINE: GPIO 228 (PH4) - Green LED
         # Controlled via sysfs (no direct GPIO access needed when using sysfs)
@@ -800,12 +805,28 @@ class PowerController(ArgoBaseNode):
         # We control it via sysfs by setting trigger to "none" and controlling brightness
         # This approach works with the permissions set by argo-ph4-led-perms.service
         try:
-            if not self.green_led_sysfs_path.exists():
-                self.get_logger().warning("Green LED sysfs path not found - kernel overlay may not be loaded")
+            self.green_led_sysfs_path = None
+            for candidate in self.green_led_sysfs_candidates:
+                if candidate.exists():
+                    self.green_led_sysfs_path = candidate
+                    break
+
+            if self.green_led_sysfs_path is None:
+                candidate_str = ", ".join(str(p) for p in self.green_led_sysfs_candidates)
+                self.get_logger().warning(
+                    f"Green LED sysfs path not found (checked: {candidate_str}) - "
+                    "kernel overlay/LED label may not be loaded"
+                )
                 self.green_led_available = False
                 self.green_led_using_sysfs = False
                 return
-            
+
+            self.green_led_brightness_path = self.green_led_sysfs_path / "brightness"
+            self.green_led_trigger_path = self.green_led_sysfs_path / "trigger"
+            self.get_logger().info(
+                f"Using green LED sysfs path: {self.green_led_sysfs_path}"
+            )
+
             # Check if brightness and trigger files are accessible
             if not self.green_led_brightness_path.exists() or not self.green_led_trigger_path.exists():
                 self.get_logger().warning("Green LED sysfs control files not found")
@@ -821,7 +842,10 @@ class PowerController(ArgoBaseNode):
                 self.green_led_available = True
                 self.green_led_using_sysfs = True
             except PermissionError:
-                self.get_logger().error("Permission denied setting LED trigger - check argo-ph4-led-perms.service")
+                self.get_logger().error(
+                    "Permission denied setting LED trigger - "
+                    "check argo-ph4-led-perms.service for current LED label"
+                )
                 self.green_led_available = False
                 self.green_led_using_sysfs = False
                 return
@@ -832,7 +856,10 @@ class PowerController(ArgoBaseNode):
                 return
             
             if self.green_led_available:
-                self.get_logger().info("Successfully initialized sysfs LED control for GPIO 228 (PH4)")
+                self.get_logger().info(
+                    f"Successfully initialized sysfs LED control for GPIO 228 (PH4) "
+                    f"via {self.green_led_sysfs_path}"
+                )
         except Exception as e:
             self.get_logger().error(f"Failed to initialize sysfs LED control: {e}")
             self.green_led_available = False
@@ -5367,7 +5394,7 @@ DESCRIPTION:
 
 HARDWARE CONFIGURATION (Rev3 PCB):
   - PI3 (Pin 40): POW_OFF - Output for power relay RESET coil (active HIGH pulse)
-  - PI9 (Pin 28): POW_BUT - Input from power button (active HIGH when pressed)
+  - PH0 (Pin 8): POW_BUT - Input from power button (active HIGH when pressed)
   - PI2 (Pin 35): BUZZER - Output for buzzer control (active HIGH = ON)
   - PH4 (Pin 18): Green LED in power button
       Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)

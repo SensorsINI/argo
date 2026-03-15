@@ -16,20 +16,20 @@ The Argo system consists of multiple sensor and control nodes that work together
 - **Orange Pi Zero 2W** (Allwinner H618 SoC)
 - **GPS**: u-blox NEO-M9N via UART5 (/dev/ttyS5)
 - **IMU**: [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU via I2C0 (0x4a)
-- **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C0 (0x21, 0x22, 0x23)
+- **Wind Sensor**: 3x Sensirion SDP3x differential pressure sensors via I2C2 (0x21, 0x22, 0x23)
 - **ADC**: MAX11612 for battery/water sensing via I2C0 (0x34)
 - **Environment**: SHT45 temperature/humidity via I2C0 (0x44)
 - **PWM I/O**: Custom kernel module for radio control and servo interfaces
 
 ### I2C Bus Configuration
-**Exclusive I2C Bus 0 Usage**: All sensor nodes exclusively use I2C bus 0 (Orange Pi Zero 2W default I2C interface)
+**Split I2C usage**:
+- **I2C bus 0**: battery/water and IMU sensors
+- **I2C bus 2**: wind sensors and mast LED controller
 - **I2C Bus 0 Pins**: SDA=PI6 (twi0-sda), SCL=PI5 (twi0-sck)
 - **Configuration**: Enabled via `pi-i2c0` overlay in `/boot/orangepiEnv.txt`
 - **Address Map**:
-  - 0x21, 0x22, 0x23: Wind sensors (SDP3x differential pressure)
-  - 0x34: MAX11612 ADC (battery/water monitoring)
-  - 0x44: SHT45 temperature/humidity sensor
-  - 0x4a: BNO085 IMU (9-DOF Orientation)
+  - Bus 2: 0x21, 0x22, 0x23 (wind sensors), 0x62/0x70 (mast LED driver/all-call)
+  - Bus 0: 0x34 (MAX11612 ADC), 0x44 (SHT45), 0x4a (BNO085 IMU)
 - **Bus Speed**: Standard 100kHz I2C operation
 - **Power**: 3.3V logic levels, pull-up resistors on PCB
 
@@ -118,7 +118,7 @@ python3 bno085.py status
 **Purpose**: Calculates wind speed and direction using 3 differential pressure sensors
 
 **Hardware**: 
-- I2C0 addresses 0x21 (CCW), 0x22 (Center), 0x23 (CW)
+- I2C2 addresses 0x21 (CCW), 0x22 (Center), 0x23 (CW)
 - Based on Sensirion SDP3x directional wind meter design
 
 **Algorithm**: Uses pressure differentials across directional ports to compute wind vector
@@ -318,15 +318,16 @@ Key packages:
    overlays=pi-i2c0 disable-uart0 ph-uart5 pi-pwm2 pi-pwm4
    user_overlays=argo_radio_servo_overlay
    ```
-   Note: `pi-i2c0` overlay configures I2C bus 0 on pins SDA=PI6 (twi0-sda), SCL=PI5 (twi0-sck)
+   Note: `pi-i2c0` configures bus 0 on PI5/PI6; v4 also uses bus 2 on header pins 27/28 (SDA.2/SCL.2) for wind/mast devices.
 
 2. **Install PWM capture module** (see `pwm_capture_module/README.md`)
 
 3. **I2C device verification**:
    ```bash
    sudo i2cdetect -y 0
-   # Should show: 21 22 23 (wind), 34 (ADC), 44 (humidity), 4a (BNO085 IMU)
-   # All sensors are on I2C bus 0 exclusively
+   # Should show: 34 (ADC), 44 (humidity), 4a (BNO085 IMU)
+   sudo i2cdetect -y 2
+   # Should show: 21 22 23 (wind), 62 70 (mast LED driver)
    ```
 
 ## Debugging and Testing
@@ -339,9 +340,12 @@ ros2 run argo <node_name>.py --debug
 
 ### System Health Check
 ```bash
-# Check I2C devices on bus 0 (all sensors use this bus exclusively)
+# Check I2C devices on bus 0 (battery/IMU sensors)
 sudo i2cdetect -y 0
-# Expected devices: 21 22 23 (wind), 34 (ADC), 44 (humidity), 4a (BNO085 IMU)
+# Expected devices: 34 (ADC), 44 (humidity), 4a (BNO085 IMU)
+# Check I2C devices on bus 2 (wind + mast LEDs)
+sudo i2cdetect -y 2
+# Expected devices: 21 22 23 (wind), 62 70 (mast LEDs)
 
 # Check PWM kernel module
 lsmod | grep argo

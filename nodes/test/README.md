@@ -55,7 +55,7 @@ python3 test_lora_spi.py all
 
 ```
 Orange Pi Pin -> LoRa Module
-PI10 (GPIO 266) -> CS   (Chip Select)
+SDA.1 / Pin 3 (GPIO 264) -> CS   (Chip Select)
 PI0  (GPIO 256) -> RST  (Reset)
 PI15 (GPIO 271) -> DIO0 (Interrupt)
 SPI1_MOSI       -> MOSI
@@ -95,7 +95,7 @@ python3 test_lora_spi.py pins
 
 The main LoRa node is at `../lora.py`. These test scripts use the same:
 - SPI configuration (bus 1, device 0, mode 0, 1 MHz)
-- GPIO pins (266, 256, 271)
+- GPIO pins (264, 256, 271)
 - Register addresses (0x42 version, 0x01 opmode, etc.)
 
 If these test scripts work but `lora.py` doesn't, the issue is in the higher-level logic (modes, packet handling, etc.).

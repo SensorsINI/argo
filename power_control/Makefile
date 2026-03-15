@@ -13,7 +13,7 @@ POWER_SERVICE_FILE = argo_power_control.service
 INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else id -un; fi)
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 
-.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook
+.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook install-orangpienv install-sys-heartbeat
 
 # Default target
 all: install
@@ -21,7 +21,7 @@ all: install
 # ==================== POWER CONTROL SYSTEM ====================
 
 # Main power control installation target
-install: check_deps install_service enable_service install_shutdown_hook
+install: install-orangpienv install-sys-heartbeat check_deps install_service enable_service install_shutdown_hook
 	@echo ""
 	@echo "✅ Argo Power Control System Installation Complete!"
 	@echo ""
@@ -44,6 +44,21 @@ check_deps:
 	else \
 		echo "✅ python3-libgpiod already installed"; \
 	fi
+
+# Install authoritative orangepiEnv boot config from repo to /boot
+install-orangpienv:
+	@echo "📋 Installing authoritative orangepiEnv.txt to /boot..."
+	@if [ ! -f "$(SCRIPT_DIR)/orangepiEnv.txt" ]; then \
+		echo "❌ Source file not found: $(SCRIPT_DIR)/orangepiEnv.txt"; \
+		exit 1; \
+	fi
+	@if [ -f /boot/orangepiEnv.txt ]; then \
+		backup="/boot/orangepiEnv.txt.bak.$$(date +%Y%m%d_%H%M%S)"; \
+		echo "📦 Backing up existing /boot/orangepiEnv.txt to $$backup"; \
+		sudo cp /boot/orangepiEnv.txt "$$backup"; \
+	fi
+	@sudo install -m 0644 "$(SCRIPT_DIR)/orangepiEnv.txt" /boot/orangepiEnv.txt
+	@echo "✅ Installed /boot/orangepiEnv.txt from $(SCRIPT_DIR)/orangepiEnv.txt"
 	@echo "🔍 Checking for gpioset tool..."
 	@if ! command -v gpioset >/dev/null 2>&1; then \
 		echo "📦 Installing gpiod (or libgpiod-tools)..."; \
@@ -89,6 +104,12 @@ install_shutdown_hook:
 	@echo "📋 Installing late shutdown hook..."
 	@sudo install -m 0755 $(SCRIPT_DIR)/argo_poweroff.shutdown /lib/systemd/system-shutdown/argo_poweroff
 	@echo "✅ Late shutdown hook installed"
+
+# Install PH4 sys_heartbeat overlay and permissions service
+install-sys-heartbeat:
+	@echo "📋 Installing PH4 sys_heartbeat overlay..."
+	@$(MAKE) -C sys_heartbeat install
+	@echo "✅ PH4 sys_heartbeat overlay installed"
 
 # # Install early boot power-on hook (runs once at early boot)
 # DISABLED: not needed anymore with rev3 board that uses dual coil relay
@@ -210,6 +231,8 @@ help:
 	@echo ""
 	@echo "Component Targets:"
 	@echo "  check_deps           - Check and install required dependencies"
+	@echo "  install-orangpienv   - Install power_control/orangepiEnv.txt to /boot"
+	@echo "  install-sys-heartbeat - Install PH4 LED overlay + permissions service"
 	@echo "  install_service      - Install systemd service only"
 	@echo "  enable_service       - Enable and start the service"
 	@echo "  install_shutdown_hook - Install late shutdown hook (poweroff/halt only, not reboot)"

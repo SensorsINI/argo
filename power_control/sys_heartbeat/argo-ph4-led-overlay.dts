@@ -3,6 +3,37 @@
 
 #include <dt-bindings/gpio/gpio.h>
 
+/*
+ * Argo PH4 Green LED overlay
+ *
+ * Purpose:
+ * - Exposes PH4 as a kernel LED class device used for early/boot heartbeat.
+ * - Creates sysfs LED label "argo:green:heartbeat" (or platform-compatible aliasing).
+ *
+ * Integration path (how this reaches /boot/orangepiEnv.txt):
+ * 1) Install from this directory:
+ *      make install
+ *    (Makefile compiles .dts -> .dtbo, copies to /boot/overlay-user, and updates boot config)
+ * 2) Boot config update is performed via:
+ *      ../../orangepiEnv/manage_overlays.sh add argo-ph4-led-overlay
+ *    which appends to:
+ *      user_overlays=... argo-ph4-led-overlay
+ *    in /boot/orangepiEnv.txt
+ *
+ * Also integrated by top-level power-control install flow:
+ * - power_control/Makefile target "install" calls "install-sys-heartbeat"
+ *   which runs `make -C sys_heartbeat install`.
+ *
+ * Runtime control model:
+ * - Kernel default trigger is heartbeat.
+ * - power_control/argo_power_control.py switches trigger to "none" and controls
+ *   brightness manually during normal operation.
+ *
+ * Documentation:
+ * - power_control/sys_heartbeat/README.md
+ * - power_control/README.md
+ */
+
 / {
     compatible = "xunlong,orangepi-zero2w", "allwinner,sun50i-h618";
 

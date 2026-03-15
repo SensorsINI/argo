@@ -6,11 +6,12 @@
 # PCB as the wind sensor. The LED controller is used to provide visual status on the mast.
 #
 # Hardware Setup:
-# - Uses I2C bus 1 (same as wind sensor, different from other nodes)
+# - Uses TWI2 on pins 27/28 (same electrical bus as wind sensor)
 #   for electrical isolation of the LED controller in case of short circuit from the mast and salt water intrusion.
 # - PCA9632 individual address 0x62 (hardware pins A1 A0; 0x70 is LED All Call, not used here)
 # - Four LED channels: Red, Green, Blue, White (RGBW) via LED0-LED3
-# - Run "i2cdetect -y 1" to verify: expect 0x62 (individual) and 0x70 (All Call) for PCA9632
+# - Resolve Linux adapter: "ls /sys/devices/platform/soc*/5002800.i2c/i2c-*"
+# - Run "i2cdetect -y <resolved_bus_index>" to verify: expect 0x62 (individual) and 0x70 (All Call) for PCA9632
 #
 # Features:
 # - Four individual subscriptions (one per color channel: R, G, B, W)
@@ -47,6 +48,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 # Standard library imports
 import time
 import argparse
+import glob
 import argcomplete
 from typing import Optional
 
@@ -69,7 +71,10 @@ from argo_base_node import ArgoBaseNode
 # ============================================================================
 
 # I2C Configuration
-I2C_BUS = 1  # I2C bus number (same as wind sensor)
+# Mast LED controller is on TWI2 (pins 27/28: PI10/PI9). The Linux adapter
+# index can vary by image/kernel (often i2c-4 on Orange Pi 6.1 images).
+TWI2_CONTROLLER_BASENAME = "5002800.i2c"
+TWI2_DEFAULT_LINUX_BUS = 4
 # 7-bit individual address (hardware pins A1 A0; 0x70 is LED All Call, active at power-up)
 PCA9632_I2C_ADDRESS = 0x62
 
@@ -119,6 +124,20 @@ I2C_MAX_INITIAL_RETRIES = 3  # Maximum retries during initial startup before ent
 I2C_LOW_CPU_CHECK_INTERVAL_S = 60.0  # Interval for checking device availability in low-CPU mode (60 seconds)
 
 
+def resolve_twi2_linux_bus(default_bus: int = TWI2_DEFAULT_LINUX_BUS) -> int:
+    """Resolve Linux i2c-* index for TWI2 controller (5002800.i2c)."""
+    try:
+        matches = sorted(
+            glob.glob(f"/sys/devices/platform/soc*/{TWI2_CONTROLLER_BASENAME}/i2c-*")
+        )
+        if not matches:
+            return default_bus
+        bus_name = os.path.basename(matches[0])  # e.g. "i2c-4"
+        return int(bus_name.split("-")[1])
+    except Exception:
+        return default_bus
+
+
 class MastLEDsNode(ArgoBaseNode):
     """ROS2 node for controlling mast RGBW LEDs via PCA9632 driver."""
 
@@ -149,6 +168,7 @@ class MastLEDsNode(ArgoBaseNode):
         self._pattern_stop_event = None
 
         # I2C bus and device state
+        self.i2c_bus = resolve_twi2_linux_bus()
         self.bus = None
         self.device_ready = False
         self.device_unavailable = False  # True when device is permanently unavailable (low-CPU mode)
@@ -190,11 +210,14 @@ class MastLEDsNode(ArgoBaseNode):
         """Initialize I2C bus, returns True on success."""
         try:
             if not self.bus:
-                self.bus = smbus.SMBus(I2C_BUS)
-                self.get_logger().info(f'Opened I2C bus {I2C_BUS}')
+                self.bus = smbus.SMBus(self.i2c_bus)
+                self.get_logger().info(f'Opened I2C SMBus bus {self.i2c_bus} for mast LED controller (TWI2)')
                 return True
         except FileNotFoundError:
-            self.get_logger().error("I2C bus not found. Is I2C enabled?")
+            self.get_logger().error(
+                "I2C bus not found for TWI2 mast LED controller. Check overlays and resolve path "
+                f"for {TWI2_CONTROLLER_BASENAME}."
+            )
             return False
         except Exception as e:
             self.get_logger().error(f"Failed to open I2C bus: {e}")
@@ -874,13 +897,14 @@ def main(args=None):
 This ROS2 node controls the PCA9632 4-bit I2C LED driver (NXP) on the wind sensor PCB.
 
 Hardware Setup:
-  - Uses I2C bus 0 (same as wind sensor)
+  - Uses TWI2 (same bus as wind sensor on pins 27/28)
   - PCA9632 individual address 0x62 (0x70 is LED All Call; i2cdetect shows 7-bit addresses)
   - Four LED channels: Red, Green, Blue, White (RGBW) via LED0-LED3
-  - Run "i2cdetect -y 0" to verify: expect 0x62 and 0x70 for PCA9632
+  - Resolve Linux adapter: "ls /sys/devices/platform/soc*/5002800.i2c/i2c-*"
+  - Run "i2cdetect -y <resolved_bus_index>" to verify: expect 0x62 and 0x70 for PCA9632
 
 Configuration Constants (modify at top of file):
-  - I2C_BUS: I2C bus number (default: 0)
+  - TWI2_DEFAULT_LINUX_BUS: fallback Linux bus number when sysfs resolver has no match
   - PCA9632_I2C_ADDRESS: individual device address (default: 0x62)
   - REG_PWM0-REG_PWM3: PWM registers for R, G, B, W
 

@@ -11,16 +11,17 @@
 
 ## I2C Bus Overview
 
-The Argo sailboat uses **I2C bus 0 exclusively** for all sensor communication on the Orange Pi Zero 2W (Allwinner H616 SoC).
+The Argo sailboat uses multiple I2C buses on the Orange Pi Zero 2W:
+- **I2C bus 0** for battery/water and IMU sensors
+- **I2C bus 2** (pins 27/28) for mast/wind sensors
 
 ### I2C Bus Mapping
 
 | Controller | I2C Bus | Physical Pins | Device Tree | Devices | Usage |
 |------------|---------|---------------|-------------|---------|-------|
-| `5002000.i2c` | **bus 0** | PI5 (pin 15), PI6 (pin 22) | Enabled via `pi-i2c0` overlay | Sensors (0x21-0x23, 0x34, 0x44, 0x4a) | **Argo sensors** |
+| `5002000.i2c` | **bus 0** | PI5 (pin 15), PI6 (pin 22) | Enabled via `pi-i2c0` overlay | Sensors (0x34, 0x44, 0x4a) | **Battery/IMU sensors** |
+| `i2c-2 (v4 header bus)` | **bus 2** | Pin 27 (SDA.2), pin 28 (SCL.2) | Enabled on v4 pin mapping | Sensors (0x21-0x23, 0x62, 0x70) | **Wind + mast LED sensors** |
 | `7081400.i2c` | bus 1 | Internal | Built-in | PMIC (0x36) | **⚠️ CRITICAL - Power Management** |
-| `5002c00.i2c` | bus 3 | PH pins | Available | AC200 (failed probe) | Unused |
-| `6000000.hdmi` | bus 2 | HDMI connector | Built-in | HDMI DDC | System |
 
 ### Critical Warning
 
@@ -46,33 +47,39 @@ user_overlays=argo_radio_servo_overlay argo-ph4-led-overlay
 
 The `pi-i2c0` overlay enables I2C bus 0 on pins PI5/PI6.
 
-### Connected Devices on I2C Bus 0
+### I2C Bus 2 Pin Assignment (v4 mast/wind bus)
 
-| Address | Device | Purpose | Node |
-|---------|--------|---------|------|
-| 0x21 | Sensirion SDP3x | Wind sensor (CCW) | `anem.py` | 5V supply |
-| 0x22 | Sensirion SDP3x | Wind sensor (Center) | `anem.py` | 5V supply |
-| 0x23 | Sensirion SDP3x | Wind sensor (CW) | `anem.py` | 5V supply |
-| 0x62 | NXP PCA9632 | Mast RGBW LED controller (individual addr) | `argo_mast_leds.py` | 5V supply |
-| 0x70 | NXP PCA9632 | LED All Call (broadcast; active at power-up) | — | — |
-| 0x34 | MAX11612 ADC | Battery/water monitoring | `argo_battery_water.py` | 5V supply |
-| 0x44 | SHT45 | Temperature/humidity | `argo_battery_water.py` | 3.3V supply |
-| 0x4a | Adafruit BNO085 | 9-DOF IMU | `bno085.py` (via C++ driver) | 5V supply |
+- **SDA (Data)**: GPIO 266 (SDA.2) - Physical pin 27
+- **SCL (Clock)**: GPIO 265 (SCL.2) - Physical pin 28
+- **Function**: Dedicated mast/wind bus on v4 pin mapping
+
+### Connected Devices by I2C Bus
+
+| Bus | Address | Device | Purpose | Node |
+|-----|---------|--------|---------|------|
+| 2 | 0x21 | Sensirion SDP3x | Wind sensor (CCW) | `anem.py` |
+| 2 | 0x22 | Sensirion SDP3x | Wind sensor (Center) | `anem.py` |
+| 2 | 0x23 | Sensirion SDP3x | Wind sensor (CW) | `anem.py` |
+| 2 | 0x62 | NXP PCA9632 | Mast RGBW LED controller (individual addr) | `argo_mast_leds.py` |
+| 2 | 0x70 | NXP PCA9632 | LED All Call (broadcast; active at power-up) | — |
+| 0 | 0x34 | MAX11612 ADC | Battery/water monitoring | `argo_battery_water.py` |
+| 0 | 0x44 | SHT45 | Temperature/humidity | `argo_battery_water.py` |
+| 0 | 0x4a | Adafruit BNO085 | 9-DOF IMU | `bno085.py` (via C++ driver) |
 
 **Power and Logic Levels**:
 - **Orange Pi I2C**: 3.3V logic levels (PI5/PI6 pins)
 - **Most sensors**: 5V power supply (SDP3x, MAX11612, BNO085) but I2C compatible with 3.3V logic
 - **SHT45**: 3.3V power supply
-- **Pull-up resistors**: On PCB (to 3.3V)
-- **Level shifter**: TXS0102DCT on PCB (currently disabled due to rev2 PCB design error, will be enabled in rev3)
+- **Pull-up resistors**: Provided by the two TXS0102 level-shifter sections on both sides of the bus path (3.3V OPi side and 5V sensor side)
+- **Level shifter**: TXS0102DCT used in the active I2C path
 - **Bus speed**: 100kHz (standard I2C)
 
 ### I2C Services
 
-These systemd services actively use I2C bus 0:
+These systemd services actively use I2C:
 - `argo_battery_water.service` - Battery/water monitoring
 - `argo_bno085.service` - IMU sensor fusion
-- `argo_launch_standard.service` - Main ROS2 launch (includes `anem.py`)
+- `argo_launch_standard.service` - Main ROS2 launch (includes `anem.py` on bus 2)
 
 ## I2C Bus Lock Issue
 
@@ -372,7 +379,7 @@ sudo /home/orangepi/argo/scripts/i2c_gpio_recovery.sh
 ### Related Files
 
 - `nodes/README.md` - I2C sensor configuration and addresses
-- `nodes/anem.py` - Wind sensor node (I2C 0x21, 0x22, 0x23)
+- `nodes/anem.py` - Wind sensor node (I2C bus 2: 0x21, 0x22, 0x23)
 - `nodes/argo_battery_water.py` - ADC and humidity (I2C 0x34, 0x44)
 - `nodes/bno085.py` - IMU node (I2C 0x4a via C++ driver)
 
@@ -401,7 +408,7 @@ sudo /home/orangepi/argo/scripts/i2c_gpio_recovery.sh
 
 ## Summary
 
-- **Current State**: I2C bus 0 can lock, requires manual cable replug
+- **Current State**: I2C bus lock issues are primarily observed on bus 0; bus 2 hosts wind/mast devices on v4.
 - **Root Cause**: Missing pinctrl device tree configuration for GPIO-based recovery
 - **Proper Solution**: Install device tree overlay to enable kernel automatic recovery
 - **Workaround**: Physical cable replug (works but impractical for remote operation)

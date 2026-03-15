@@ -8,22 +8,30 @@
 
 set -e
 
-LED_SYSFS_PATH="/sys/class/leds/argo:green:heartbeat"
 TARGET_GROUP="orangepi"
+LED_SYSFS_CANDIDATES=(
+    "/sys/class/leds/argo:green:heartbeat"
+    "/sys/class/leds/green_led"
+)
+LED_SYSFS_PATH=""
 
-# Wait for the sysfs entry to be created by the kernel
+# Wait for a matching sysfs entry to be created by the kernel
 # It can take a few moments after the overlay is loaded.
 WAIT_SECONDS=10
 for (( i=0; i<WAIT_SECONDS; i++ )); do
-    if [ -d "$LED_SYSFS_PATH" ]; then
-        echo "Found LED sysfs directory: $LED_SYSFS_PATH"
-        break
-    fi
+    for candidate in "${LED_SYSFS_CANDIDATES[@]}"; do
+        if [ -d "$candidate" ]; then
+            LED_SYSFS_PATH="$candidate"
+            echo "Found LED sysfs directory: $LED_SYSFS_PATH"
+            break 2
+        fi
+    done
     sleep 1
 done
 
-if [ ! -d "$LED_SYSFS_PATH" ]; then
+if [ -z "$LED_SYSFS_PATH" ]; then
     echo "Error: LED sysfs directory not found after $WAIT_SECONDS seconds." >&2
+    echo "Checked candidates: ${LED_SYSFS_CANDIDATES[*]}" >&2
     exit 1
 fi
 
@@ -37,7 +45,7 @@ chmod g+w "$LED_SYSFS_PATH/brightness"
 chmod g+w "$LED_SYSFS_PATH/trigger"
 echo "Set group write permissions for LED control files."
 
-echo "Permissions set for argo:green:heartbeat LED."
+echo "Permissions set for LED at $LED_SYSFS_PATH."
 ls -l "$LED_SYSFS_PATH"
 
 

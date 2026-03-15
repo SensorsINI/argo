@@ -27,6 +27,7 @@ alias abat='bash $ARGO_DIR/scripts/abat.sh'  # Get battery status
 alias astore='if [ -f /tmp/argo_battery_storage_rundown ]; then rm -f /tmp/argo_battery_storage_rundown && echo "Storage rundown disabled."; else touch /tmp/argo_battery_storage_rundown && echo "Storage rundown enabled: will discharge to 7.6V then shut down (mode cleared on reboot)."; fi'  # Toggle storage rundown (create or remove flag file)
 alias ahealth='if systemctl is-active --quiet argo_health_monitor.service; then source /opt/ros/humble/setup.bash && timeout 30 ros2 service call /argo/health/status std_srvs/srv/Trigger "{}" 2>&1 | ${ARGO_DIR:-$HOME/argo}/scripts/format_service_response.sh; else echo "❌ Error: argo_health_monitor.service is not running"; echo "   Start it first with: sudo systemctl start argo_health_monitor.service"; fi'  # Get health monitor status
 alias ah='bash $ARGO_DIR/launch/argo_help.sh' # show argo help
+alias ahelp='bash $ARGO_DIR/launch/argo_help.sh' # show argo help (long form)
 alias ag='sudo python3 $ARGO_DIR/launch/argo_gui.py' # start argo gui
 alias alog='$ARGO_DIR/scripts/argo_logs.sh' # show argo system logs
 alias asim='python3 $ARGO_DIR/launch/argo_lifecycle_manager.py simulate_local' # start argo in LOCAL simulation mode (default: mock sim, use --real for real sim, --mock for explicit mock)
@@ -49,4 +50,4 @@ alias vacuum='sudo journalctl --vacuum-size=10M ;sudo find /tmp -type f -atime +
 
 # I2C bus reset (requires sudo)
 alias ai2creset='sudo $ARGO_DIR/scripts/reset_i2c_bus.sh'  # Reset I2C bus (stops services, resets bus, restarts services)
-alias ai2c='$ARGO_DIR/scripts/ai2c.sh'  # Scan I2C bus 0 and report sensor status
+alias ai2c='$ARGO_DIR/scripts/ai2c.sh'  # Scan I2C buses 0 and 2, report sensor status

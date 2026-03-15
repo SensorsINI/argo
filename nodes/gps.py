@@ -22,6 +22,12 @@ import re
 import math
 from functools import reduce
 import pynmea2
+try:
+    import gpiod
+    GPIO_AVAILABLE = True
+except ImportError:
+    gpiod = None
+    GPIO_AVAILABLE = False
 
 
 
@@ -41,6 +47,7 @@ class GpsNode(ArgoBaseNode):
     - /gps_velocity (geometry_msgs/Vector3): Velocity vector (x=north, y=east, z=speed)
     - /gps_num_satellites (std_msgs/UInt8): Number of satellites used in GPS fix
     - /fix (sensor_msgs/NavSatFix): Standard GPS fix for mapping applications
+    - /gps_pps_status (std_msgs/Bool): True when PPS pulses are being received on GPS_PPS line
     - /gps_health (std_msgs/Bool): Node health status (true=healthy, false=failed)
 
     Hardware Configuration:
@@ -183,6 +190,8 @@ class GpsNode(ArgoBaseNode):
         # Publisher for standard ROS NavSatFix messages (for mapping)
         self.pub_navsat = self.create_publisher(
             NavSatFix, 'fix', 10)  # Standard GPS fix for mapping
+        self.pub_pps_status = self.create_publisher(
+            Bool, 'gps_pps_status', 10)  # True when PPS pulses are actively received
 
         # Health status is now handled by ArgoBaseNode
 
@@ -234,6 +243,21 @@ class GpsNode(ArgoBaseNode):
             import sys
             sys.exit(1)
 
+        # GPIO lines for GPS reset and PPS monitoring
+        self.GPIO_CHIP = '/dev/gpiochip0'
+        self.GPS_RESET_LINE = 225  # Pin 10 (RXD.0) - !GPS_RESET (active low)
+        self.GPS_PPS_LINE = 229    # Pin 24 (CE.0) - GPS_PPS input
+        self.gpio_chip = None
+        self.gps_reset_line = None
+        self.gps_pps_line = None
+        self.last_pps_pulse_time = 0.0
+        self._last_pps_line_value = 0
+        self.pps_status = False
+        self.last_pps_status_publish_time = 0.0
+        self.pps_status_publish_interval = 5.0
+        self.pps_timeout_seconds = 2.5
+        self._initialize_gpio_lines()
+
         self.setup_gps()
 
         # Initialize data counter for debugging
@@ -276,9 +300,113 @@ class GpsNode(ArgoBaseNode):
 
         # Timer to check for extended no-fix condition and trigger reset if needed
         self.reset_check_timer = self.create_timer(60.0, self.check_and_reset_if_needed)  # Check every 60 seconds
+        # Timer to monitor PPS line and publish reception status
+        self.pps_timer = self.create_timer(0.1, self.monitor_pps_status)  # 10 Hz polling for PPS
 
         # Track pause state to manage power save transitions (PSMOO)
         self._prev_paused = False
+
+    def _initialize_gpio_lines(self):
+        """Initialize GPIO lines for !GPS_RESET output and GPS_PPS input monitoring."""
+        if not GPIO_AVAILABLE:
+            self.get_logger().warn("gpiod not available - GPS reset pin and PPS GPIO monitoring disabled")
+            return
+
+        try:
+            self.gpio_chip = gpiod.Chip(self.GPIO_CHIP)
+
+            # !GPS_RESET is active-low: keep HIGH during normal operation.
+            self.gps_reset_line = self.gpio_chip.get_line(self.GPS_RESET_LINE)
+            self.gps_reset_line.request(
+                consumer="gps_node_reset",
+                type=gpiod.LINE_REQ_DIR_OUT,
+                default_vals=[1],
+            )
+
+            # GPS_PPS is an input pulse line.
+            self.gps_pps_line = self.gpio_chip.get_line(self.GPS_PPS_LINE)
+            self.gps_pps_line.request(
+                consumer="gps_node_pps",
+                type=gpiod.LINE_REQ_DIR_IN,
+                flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE,
+            )
+            self._last_pps_line_value = self.gps_pps_line.get_value()
+            self.get_logger().info(
+                f"Initialized GPS GPIO lines: !GPS_RESET={self.GPS_RESET_LINE}, GPS_PPS={self.GPS_PPS_LINE}"
+            )
+        except Exception as e:
+            self.get_logger().warn(f"Failed to initialize GPS GPIO lines: {e}")
+            self.gps_reset_line = None
+            self.gps_pps_line = None
+            if self.gpio_chip:
+                try:
+                    self.gpio_chip.close()
+                except Exception:
+                    pass
+                self.gpio_chip = None
+
+    def _pulse_gps_reset_pin(self, hold_seconds: float = 0.2) -> bool:
+        """Pulse !GPS_RESET low to hard-reset the GPS module."""
+        if self.gps_reset_line is None:
+            self.get_logger().warn("!GPS_RESET GPIO line unavailable - skipping hardware reset pulse")
+            return False
+
+        try:
+            self.get_logger().warn("Pulsing !GPS_RESET low for GPS hardware reset")
+            self.gps_reset_line.set_value(0)  # Active low reset asserted
+            time.sleep(hold_seconds)
+            self.gps_reset_line.set_value(1)  # Release reset
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Failed to pulse !GPS_RESET line: {e}")
+            return False
+
+    def _reopen_serial_port(self) -> bool:
+        """Close and reopen GPS serial port after a hardware reset."""
+        try:
+            if self.serial_port and self.serial_port.is_open:
+                self.serial_port.close()
+                self.get_logger().debug("Closed serial port for GPS reset recovery")
+            time.sleep(2.0)
+            self.serial_port = serial.Serial(self.serial_port_name, self.baud_rate, timeout=1.0)
+            time.sleep(1.0)
+            self.get_logger().info("Serial port reopened after GPS reset")
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Failed to reopen serial port after reset: {e}")
+            return False
+
+    def monitor_pps_status(self):
+        """Monitor GPS_PPS input and publish whether pulses are being received."""
+        now = time.time()
+        pps_detected = False
+
+        if self.gps_pps_line is not None:
+            try:
+                current_value = self.gps_pps_line.get_value()
+                # Detect rising edge of PPS pulse
+                if self._last_pps_line_value == 0 and current_value == 1:
+                    self.last_pps_pulse_time = now
+                    self.get_logger().debug("GPS PPS pulse detected")
+                self._last_pps_line_value = current_value
+                pps_detected = (now - self.last_pps_pulse_time) <= self.pps_timeout_seconds
+            except Exception as e:
+                self.get_logger().warn(f"Failed reading GPS_PPS GPIO: {e}")
+                pps_detected = False
+
+        should_publish = (
+            pps_detected != self.pps_status
+            or (now - self.last_pps_status_publish_time) >= self.pps_status_publish_interval
+        )
+        if should_publish:
+            status_changed = (pps_detected != self.pps_status)
+            self.pps_status = pps_detected
+            self.last_pps_status_publish_time = now
+            self.pub_pps_status.publish(Bool(data=pps_detected))
+            if status_changed and pps_detected:
+                self.get_logger().info("GPS PPS status: ACTIVE (pulses received)")
+            elif status_changed and not pps_detected:
+                self.get_logger().info("GPS PPS status: INACTIVE (no recent pulses)")
 
     # --- UBX helpers for power save control (PSMOO via CFG-RXM) ---
     def _ubx_checksum(self, payload: bytes) -> bytes:
@@ -570,7 +698,20 @@ class GpsNode(ArgoBaseNode):
                     (current_time - self.last_reset_time) >= self.min_reset_interval_seconds):
                     self.get_logger().warn(
                         f"GPS has been without fix for {time_without_fix/60:.1f} minutes. "
-                        f"Performing hardware factory reset to clear all state and recover from potential firmware issues...")
+                        f"attempting hardware reset recovery...")
+                    # First try dedicated hardware reset pin (!GPS_RESET), then reconfigure.
+                    if self._pulse_gps_reset_pin():
+                        self.last_reset_time = current_time
+                        self.last_fix_time = current_time
+                        self.get_logger().warn("!GPS_RESET pulse sent. Waiting for GPS reboot...")
+                        time.sleep(5.0)
+                        if self._reopen_serial_port():
+                            self.get_logger().info("Reconfiguring GPS after !GPS_RESET pulse...")
+                            self.setup_gps()
+                            self.get_logger().info("GPS recovery via !GPS_RESET completed.")
+                            return
+                        self.get_logger().error("Serial recovery failed after !GPS_RESET pulse; falling back to UBX reset.")
+
                     # For extended no-fix periods (10+ minutes), use hardware factory reset to clear ALL state
                     # This is more aggressive than cold start - it performs a full hardware reset (like power cycle)
                     # which can recover from firmware bugs, illegal commands, or hung states
@@ -588,9 +729,8 @@ class GpsNode(ArgoBaseNode):
                         time.sleep(2.0)  # Additional wait for GPS to fully boot
                         # Reopen serial port (may need to try different baud rates)
                         try:
-                            self.serial_port = serial.Serial(self.serial_port_name, self.baud_rate, timeout=1.0)
-                            time.sleep(1.0)  # Allow serial port to stabilize
-                            self.get_logger().info("Serial port reopened after GPS reboot")
+                            if not self._reopen_serial_port():
+                                raise RuntimeError("Serial reopen failed")
                         except Exception as e:
                             self.get_logger().error(f"Failed to reopen serial port after factory reset: {e}")
                             # Try to recover by reopening with setup
@@ -1953,6 +2093,27 @@ class GpsNode(ArgoBaseNode):
 
     def _cleanup_on_exit(self):
         """GPS-specific cleanup on exit"""
+        if hasattr(self, 'gps_reset_line') and self.gps_reset_line is not None:
+            try:
+                self.gps_reset_line.release()
+            except Exception:
+                pass
+            self.gps_reset_line = None
+
+        if hasattr(self, 'gps_pps_line') and self.gps_pps_line is not None:
+            try:
+                self.gps_pps_line.release()
+            except Exception:
+                pass
+            self.gps_pps_line = None
+
+        if hasattr(self, 'gpio_chip') and self.gpio_chip is not None:
+            try:
+                self.gpio_chip.close()
+            except Exception:
+                pass
+            self.gpio_chip = None
+
         if hasattr(self, 'serial_port') and self.serial_port and self.serial_port.is_open:
             self.get_logger().debug("Closing serial connection to GPS")
             self.serial_port.close()
@@ -1974,6 +2135,7 @@ Published Topics:
 - /gps_velocity (geometry_msgs/Vector3): Velocity vector (x=north, y=east, z=speed)
 - /gps_num_satellites (std_msgs/UInt8): Number of satellites used in GPS fix
 - /fix (sensor_msgs/NavSatFix): Standard GPS fix for mapping applications
+- /gps_pps_status (std_msgs/Bool): True when PPS pulses are actively received
 - /gps_health (std_msgs/Bool): Node health status (true=healthy, false=failed)
 
 Services:

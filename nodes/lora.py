@@ -25,7 +25,7 @@ Pins on Orange Pi:
   * MOSI on pin 19 (PH7/SPI1_MOSI); this is the output to the LORA chip
   * SPISCLK on pin 23 (PH6/SPI1_SCLK)
   * LORA_OUT on pin 31 (PI15) - this is interrupt ouptut from the LORA chip
-  * !LORA_SEL on pin 27 (PI10) - low to select LORA chip for SPI
+  * !LORA_SEL on pin 3 (SDA.1) - low to select LORA chip for SPI
   * !LORA_RST on pin 29 (PI0) - low to reset LORA chip
   
 The LoRa radio node is connected to the Orange Pi via SPI. On the remote host side (shore side) 
@@ -147,7 +147,7 @@ class SX1276Registers:
 
 # Orange Pi GPIO line numbers for gpiod
 # These are the GPIO chip line numbers used by gpiod library
-LORA_SEL_LINE = 266   # PI10 (Pin 27) - Chip Select
+LORA_SEL_LINE = 264   # SDA.1 (Pin 3) - Chip Select
 LORA_RST_LINE = 256   # PI0 (Pin 29) - Reset  
 LORA_IRQ_LINE = 271   # PI15 (Pin 31) - Interrupt/DIO0
 
@@ -331,7 +331,7 @@ class LoRaNode(ArgoBaseNode):
             
             self.spi.max_speed_hz = 100000  # 100 kHz SPI clock (reduced for signal integrity)
             self.spi.mode = 0  # SPI Mode 0 (CPOL=0, CPHA=0)
-            # Note: We manually control CS via GPIO (LORA_SEL on pin 27)
+            # Note: We manually control CS via GPIO (LORA_SEL on pin 3)
             # Hardware CS on pin 24 is not used
 
             self.get_logger().info(
@@ -1063,7 +1063,7 @@ Hardware:
     - MISO: Pin 21 (PH8/SPI1_MISO)
     - MOSI: Pin 19 (PH7/SPI1_MOSI)
     - SCLK: Pin 23 (PH6/SPI1_SCLK)
-    - CS:   Pin 27 (PI10/LORA_SEL)
+    - CS:   Pin 3 (SDA.1/LORA_SEL)
     - RST:  Pin 29 (PI0/LORA_RST)
     - IRQ:  Pin 31 (PI15/LORA_OUT/DIO0)
         """

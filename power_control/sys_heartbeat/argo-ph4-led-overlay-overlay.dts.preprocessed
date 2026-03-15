@@ -19,6 +19,7 @@
 
                 green_heartbeat: heartbeat {
                     label = "argo:green:heartbeat";
+# 25 "argo-ph4-led-overlay.dts"
                     gpios = <&pio 7 4 1>;
                     default-state = "off";
                     linux,default-trigger = "heartbeat";

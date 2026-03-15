@@ -8,13 +8,15 @@
 # to determine wind speed and direction using directional wind meter principles.
 #
 # Hardware Setup:
-# - As of argo PCB version 4, uses I2C bus 1 (not bus 0 as do other nodes) 
+# - As of argo PCB version 4, uses TWI2 on pins 27/28 (SDA.2/SCL.2)
 #   for electrical isolation of the wind sensor in case of short circuit from the mast and salt water intrusion.
 # - Three sensors at addresses:
 #   * I2C_CTR (0x21): Center sensor (0° - front/back)
 #   * I2C_CW (0x22): Clockwise 120° from front (looking down on mast)
 #   * I2C_CCW (0x23): Counter-clockwise 120° from front (240° - looking down on mast)
-# - Run "sudo i2cdetect -y 0" to verify sensor connections
+# - Resolve Linux bus index for TWI2 and verify with:
+#   ls /sys/devices/platform/soc*/5002800.i2c/i2c-*
+#   sudo i2cdetect -y <resolved_bus_index>
 # - Sensors show as addresses 21, 22, 23 in hex
 #
 # Algorithm based on Sensirion's directional wind meter application:
@@ -85,6 +87,7 @@ import argcomplete
 import numpy as np
 import time
 import smbus
+import glob
 # Import ArgoBaseNode for standardized functionality
 from argo_base_node import ArgoBaseNode
 import rclpy
@@ -94,7 +97,10 @@ from std_msgs.msg import Bool, Float32
 from std_srvs.srv import Trigger
 
 # I2C Configuration
-I2C_BUS = 1  # I2C bus number (same as LED controller)
+# Wind sensors are on TWI2 (pins 27/28: PI10/PI9). The Linux adapter
+# index can vary by image/kernel (often i2c-4 on Orange Pi 6.1 images).
+TWI2_CONTROLLER_BASENAME = "5002800.i2c"
+TWI2_DEFAULT_LINUX_BUS = 4
 
 # I2C sensor addresses
 I2C_CTR = 0x21  # Center sensor (0° - front/back)
@@ -174,6 +180,21 @@ def verify_crc(data_bytes, received_crc):
     '''
     calculated_crc = calculate_crc8(data_bytes)
     return calculated_crc == received_crc
+
+
+def resolve_twi2_linux_bus(default_bus=TWI2_DEFAULT_LINUX_BUS):
+    """Resolve Linux i2c-* index for TWI2 controller (5002800.i2c)."""
+    try:
+        matches = sorted(
+            glob.glob(f"/sys/devices/platform/soc*/{TWI2_CONTROLLER_BASENAME}/i2c-*")
+        )
+        if not matches:
+            return default_bus
+
+        bus_name = os.path.basename(matches[0])  # e.g. "i2c-4"
+        return int(bus_name.split("-")[1])
+    except Exception:
+        return default_bus
 
 
 # following from sensirion https://developer.sensirion.com/applications/directional-wind-meter-using-sdp3x/
@@ -355,10 +376,14 @@ class AnemNode(ArgoBaseNode):
         # I2C setup
         self.i2cAddr = (I2C_CTR, I2C_CW, I2C_CCW)
         self.bus = None
+        self.i2c_bus = resolve_twi2_linux_bus()
         self.sensors_ready = False
         self._last_error_log_time = 0.0
         self.retry_timer = None
         self.main_timer = None
+        self.get_logger().info(
+            f"Resolved wind bus TWI2 ({TWI2_CONTROLLER_BASENAME}) to Linux i2c-{self.i2c_bus}"
+        )
 
         # Attempt initial sensor setup
         if not self._initial_setup():
@@ -382,12 +407,14 @@ class AnemNode(ArgoBaseNode):
         """Attempts to initialize I2C bus and sensors, returns True on success."""
         try:
             if not self.bus:
-                self.bus = smbus.SMBus(I2C_BUS)
-                self.get_logger().info(f'Opened I2C SMBus bus {I2C_BUS}')
+                self.bus = smbus.SMBus(self.i2c_bus)
+                self.get_logger().info(f'Opened I2C SMBus bus {self.i2c_bus} for wind sensors')
         except FileNotFoundError:
             # Only log this error on the first attempt in a retry cycle
             if not hasattr(self, '_is_first_retry_log') or self._is_first_retry_log:
-                self.get_logger().error("I2C bus not found. Is I2C enabled?")
+                self.get_logger().error(
+                    f"I2C bus i2c-{self.i2c_bus} not found for TWI2 wind bus. Is pi-i2c2 enabled?"
+                )
             return False
 
         if self.bus:
@@ -987,12 +1014,14 @@ This ROS2 node reads three Sensirion SDP3x differential pressure sensors over I2
 to determine wind speed and direction using directional wind meter principles.
 
 Hardware Setup:
-  - Uses I2C bus 0 (not bus 1)
+  - Uses TWI2 on pins 27/28 (SDA.2/SCL.2)
+  - Linux bus index is resolved at runtime from controller 5002800.i2c
   - Three sensors at addresses:
     * I2C_CTR (0x21): Center sensor (0° - front/back)
     * I2C_CW (0x22): Clockwise 120° from front (looking down on mast)
     * I2C_CCW (0x23): Counter-clockwise 120° from front (240° - looking down on mast)
-  - Run "sudo i2cdetect -y 0" to verify sensor connections
+  - Run "ls /sys/devices/platform/soc*/5002800.i2c/i2c-*" to resolve Linux i2c-* index
+  - Then run "sudo i2cdetect -y <resolved_bus_index>" to verify sensor connections
   - Sensors show as addresses 21, 22, 23 in hex
 
 Algorithm based on Sensirion's directional wind meter application:

@@ -5,10 +5,10 @@ The mast head has four LEDs (Red, Green, Blue, White) driven by an NXP **PCA9632
 ## Hardware
 
 - **Device:** PCA9632 (4-channel I2C LED driver, NXP)
-- **Bus:** I2C bus 0 (same as wind sensor)
+- **Bus:** I2C bus 2 (same as wind sensor, pins 27/28)
 - **Addresses:** Individual **0x62** (used by the node); **0x70** is LED All Call (broadcast, visible at power-up)
 - **Channels:** LED0 = Red, LED1 = Green, LED2 = Blue, LED3 = White (RGBW)
-- **Verify:** `i2cdetect -y 0` should show `62` and `70`
+- **Verify:** `i2cdetect -y 2` should show `62` and `70`
 
 See [docs/README-i2c.md](README-i2c.md) for the I2C address table.
 
@@ -58,4 +58,4 @@ ros2 topic pub --once /mastled_rgbw std_msgs/Float32MultiArray "{data: [0.0, 0.0
 
 - **Startup:** Run with `--diagnostic` to print MODE1, LEDOUT, PWM registers and recommendations.
 - **Health:** Node publishes health; lifecycle manager and health monitor use `/mastleds_node_health` and `/mastleds_node/health`.
-- **I2C:** If the node reports device unavailable, run `i2cdetect -y 0` and check for 0x62/0x70; see [README-i2c.md](README-i2c.md).
+- **I2C:** If the node reports device unavailable, run `i2cdetect -y 2` and check for 0x62/0x70; see [README-i2c.md](README-i2c.md).

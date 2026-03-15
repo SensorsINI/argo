@@ -23,12 +23,14 @@ This system is designed to provide the "best of both worlds": a kernel-driven bo
 
 When the `argo_power_control.py` service starts, it needs to take exclusive control of the green LED to display its own complex patterns (e.g., for button presses, recording status, etc.). It does this by:
 
-1.  Locating the kernel-managed LED in `sysfs` at `/sys/class/leds/argo:green:heartbeat`.
+1.  Locating the kernel-managed LED in `sysfs`.
+    - Preferred custom label: `/sys/class/leds/argo:green:heartbeat`
+    - Compatibility label seen on some systems: `/sys/class/leds/green_led`
 2.  Writing the string `none` to the `trigger` file within that directory:
     ```bash
-    echo none > /sys/class/leds/argo:green:heartbeat/trigger
+    echo none > /sys/class/leds/<active-green-led>/trigger
     ```
-3.  This action detaches the kernel's `heartbeat` trigger, allowing the LED to be controlled manually. The script can then turn the LED on or off by writing `1` or `0` to the `brightness` file.
+3.  This action detaches the kernel's `heartbeat` trigger, allowing the LED to be controlled manually. The script can then turn the LED on or off by writing to the `brightness` file.
 
 #### B. Releasing Control (Application Exit)
 
@@ -36,9 +38,13 @@ When `argo_power_control.py` shuts down cleanly (e.g., on service stop or system
 
 1.  Writing the original trigger name, `heartbeat`, back to the `trigger` file:
     ```bash
-    echo heartbeat > /sys/class/leds/argo:green:heartbeat/trigger
+    echo heartbeat > /sys/class/leds/<active-green-led>/trigger
     ```
 2.  The kernel immediately resumes the heartbeat blinking pattern, ensuring the LED continues to indicate system status.
+
+### LED Naming Note
+
+The sysfs LED directory name is a label, not a different GPIO pin. Both `argo:green:heartbeat` and `green_led` can map to the same physical PH4 LED depending on overlay/boot configuration. The current `argo_power_control.py` and `argo-ph4-led-postinit.sh` handle both labels.
 
 ## 5. Installation and Management
 

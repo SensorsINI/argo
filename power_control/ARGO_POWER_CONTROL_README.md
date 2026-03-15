@@ -6,7 +6,7 @@ This system provides intelligent power control for the Argo project using extern
 
 ### Pin Assignments
 - **PI3 (Pin 40)**: `!POW` - Open drain output to control power relay
-- **PI9 (Pin 28)**: `!POW_BUT` - Input from power button (external pullup required)
+- **PH0 (Pin 8)**: `POW_BUT` - Input from power button (external pullup required)
 - **PH4 (Pin 18)**: Green LED in power button
 - **PI1 (Pin 12)**: Blue LED in power button
 - **Red LED**: Directly connected to power button (not controlled by GPIO)
@@ -119,7 +119,7 @@ sudo ~/argo/launch/argo_power_control.py --test-mode
 ### 2. Verify GPIO Pin Assignments
 ```bash
 # Check GPIO line numbers
-sudo gpioinfo | grep -E "(259|265|228|257)"
+sudo gpioinfo | grep -E "(259|224|228|257)"
 ```
 
 ### 3. Manual GPIO Testing
@@ -129,7 +129,7 @@ sudo gpioinfo
 
 # Test specific pins manually
 sudo gpioset gpiochip0 259=1  # Set power relay (PI3)
-sudo gpioget gpiochip0 265    # Read power button (PI9)
+sudo gpioget gpiochip0 224    # Read power button (PH0)
 sudo gpioset gpiochip0 257=1  # Set blue LED (PI1)
 sudo gpioset gpiochip0 228=1  # Set green LED (PH4)
 ```
@@ -144,8 +144,8 @@ sudo gpioset gpiochip0 228=1  # Set green LED (PH4)
 
 2. **Power Button Not Responding**
    - Verify external pullup resistor is connected
-   - Check GPIO line number (should be 265 for PI9)
-   - Test with `sudo gpioget gpiochip0 265`
+   - Check GPIO line number (should be 224 for PH0)
+   - Test with `sudo gpioget gpiochip0 224`
 
 3. **LED Not Working**
    - Check GPIO line numbers (257 for PI1, 228 for PH4)
@@ -208,7 +208,7 @@ leds:
 ### GPIO Line Numbers
 The system uses these verified GPIO line numbers:
 - PI3 (Power Relay): Line 259
-- PI9 (Power Button): Line 265  
+- PH0 (Power Button): Line 224  
 - PH4 (Green LED): Line 228
 - PI1 (Blue LED): Line 257
 
