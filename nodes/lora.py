@@ -333,6 +333,9 @@ class LoRaNode(ArgoBaseNode):
             self.spi.mode = 0  # SPI Mode 0 (CPOL=0, CPHA=0)
             # Note: We manually control CS via GPIO (LORA_SEL on pin 3)
             # Hardware CS on pin 24 is not used
+            # TODO(v4-spi-overlay): Replace spi1-cs0-spidev dependency with a custom SPI1
+            # overlay that keeps SPI1 data/clock available for LoRa but does not claim CS0.
+            # This will free pin 24 (PH5/SPI1_CS0) for GPS_PPS GPIO monitoring in gps.py.
 
             self.get_logger().info(
                 f"SPI initialized on bus {self.spi_bus}, device {self.spi_device}")

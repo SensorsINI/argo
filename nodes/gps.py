@@ -246,6 +246,10 @@ class GpsNode(ArgoBaseNode):
         # GPIO lines for GPS reset and PPS monitoring
         self.GPIO_CHIP = '/dev/gpiochip0'
         self.GPS_RESET_LINE = 225  # Pin 10 (RXD.0) - !GPS_RESET (active low)
+        # TODO(v4-spi-overlay): Pin 24 (line 229 / PH5) is SPI1_CS0 on current boot
+        # overlay (spi1-cs0-spidev) used by LoRa SPI access. Add a custom SPI1 overlay
+        # that keeps SPI1 data/clock available for LoRa while freeing CS0 as GPIO so
+        # GPS_PPS monitoring can be re-enabled on this pin.
         self.GPS_PPS_LINE = 229    # Pin 24 (CE.0) - GPS_PPS input
         self.gpio_chip = None
         self.gps_reset_line = None
@@ -312,32 +316,88 @@ class GpsNode(ArgoBaseNode):
             self.get_logger().warn("gpiod not available - GPS reset pin and PPS GPIO monitoring disabled")
             return
 
+        req_out = getattr(gpiod, "LINE_REQ_DIR_OUT", None)
+        req_in = getattr(gpiod, "LINE_REQ_DIR_IN", None)
+        bias_disable = getattr(gpiod, "LINE_REQ_FLAG_BIAS_DISABLE", None)
+
         try:
             self.gpio_chip = gpiod.Chip(self.GPIO_CHIP)
+            self.get_logger().info(
+                f"Opened GPIO chip {self.GPIO_CHIP} for GPS lines "
+                f"(reset={self.GPS_RESET_LINE}, pps={self.GPS_PPS_LINE})"
+            )
+        except Exception as e:
+            self.get_logger().warn(
+                f"Failed to open GPIO chip {self.GPIO_CHIP} for GPS lines "
+                f"(reset={self.GPS_RESET_LINE}, pps={self.GPS_PPS_LINE}): "
+                f"{type(e).__name__}: {e}"
+            )
+            self.gpio_chip = None
+            return
 
+        try:
             # !GPS_RESET is active-low: keep HIGH during normal operation.
             self.gps_reset_line = self.gpio_chip.get_line(self.GPS_RESET_LINE)
             self.gps_reset_line.request(
                 consumer="gps_node_reset",
-                type=gpiod.LINE_REQ_DIR_OUT,
+                type=req_out,
                 default_vals=[1],
             )
+        except Exception as e:
+            self.get_logger().warn(
+                f"Failed requesting !GPS_RESET line {self.GPS_RESET_LINE} "
+                f"on {self.GPIO_CHIP} (consumer=gps_node_reset, type={req_out}, default_vals=[1]): "
+                f"{type(e).__name__}: {e}"
+            )
+            self.gps_reset_line = None
 
+        try:
             # GPS_PPS is an input pulse line.
             self.gps_pps_line = self.gpio_chip.get_line(self.GPS_PPS_LINE)
-            self.gps_pps_line.request(
-                consumer="gps_node_pps",
-                type=gpiod.LINE_REQ_DIR_IN,
-                flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE,
-            )
+            # First try with BIAS_DISABLE; some kernels/drivers may reject this with EINVAL.
+            try:
+                self.gps_pps_line.request(
+                    consumer="gps_node_pps",
+                    type=req_in,
+                    flags=bias_disable,
+                )
+                self.get_logger().info(
+                    f"Requested GPS_PPS line {self.GPS_PPS_LINE} with BIAS_DISABLE (flags={bias_disable})"
+                )
+            except Exception as pps_bias_e:
+                self.get_logger().warn(
+                    f"GPS_PPS request with BIAS_DISABLE failed on line {self.GPS_PPS_LINE} "
+                    f"(consumer=gps_node_pps, type={req_in}, flags={bias_disable}): "
+                    f"{type(pps_bias_e).__name__}: {pps_bias_e}. Retrying without flags."
+                )
+                self.gps_pps_line.request(
+                    consumer="gps_node_pps",
+                    type=req_in,
+                )
+                self.get_logger().info(
+                    f"Requested GPS_PPS line {self.GPS_PPS_LINE} without bias flags"
+                )
             self._last_pps_line_value = self.gps_pps_line.get_value()
-            self.get_logger().info(
-                f"Initialized GPS GPIO lines: !GPS_RESET={self.GPS_RESET_LINE}, GPS_PPS={self.GPS_PPS_LINE}"
-            )
         except Exception as e:
-            self.get_logger().warn(f"Failed to initialize GPS GPIO lines: {e}")
-            self.gps_reset_line = None
+            self.get_logger().warn(
+                f"Failed requesting GPS_PPS line {self.GPS_PPS_LINE} "
+                f"on {self.GPIO_CHIP}: {type(e).__name__}: {e}"
+            )
             self.gps_pps_line = None
+
+        if self.gps_reset_line is not None or self.gps_pps_line is not None:
+            self.get_logger().info(
+                "Initialized GPS GPIO lines: "
+                f"!GPS_RESET={'ok' if self.gps_reset_line is not None else 'unavailable'} "
+                f"(line {self.GPS_RESET_LINE}), "
+                f"GPS_PPS={'ok' if self.gps_pps_line is not None else 'unavailable'} "
+                f"(line {self.GPS_PPS_LINE})"
+            )
+        else:
+            self.get_logger().warn(
+                "GPS GPIO initialization completed with no active lines. "
+                "Serial GPS can still run, but PPS and reset pin support are disabled."
+            )
             if self.gpio_chip:
                 try:
                     self.gpio_chip.close()
