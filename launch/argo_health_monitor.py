@@ -15,6 +15,7 @@ import sys
 import time
 import yaml
 import signal
+import subprocess
 from typing import Dict, Optional
 from datetime import datetime
 
@@ -67,6 +68,9 @@ class ArgoHealthMonitor(ArgoBaseNode):
         self.fast_poll_period = 5.0   # 5 seconds during startup
         self.normal_poll_period = 30.0  # 30 seconds after startup
         self.using_fast_poll = True
+        self.healthy_beep_threshold = 5
+        self.healthy_threshold_beep_sent = False
+        self.abeep_script = os.path.join(argo_dir, 'scripts', 'abeep.sh')
         
         # Load all node configs (normal + simulation) and build mappings
         # Use explicit groups to determine which nodes belong to which mode
@@ -326,11 +330,35 @@ class ArgoHealthMonitor(ArgoBaseNode):
         healthy_count = sum(1 for h in self.node_health.values() if h['healthy'] is True)
         unhealthy_count = sum(1 for h in self.node_health.values() if h['healthy'] is False)
         total_count = len(self.node_health)
+        self._maybe_beep_on_healthy_threshold(healthy_count)
         
         status_msg = String()
         status_msg.data = f"Nodes: {healthy_count}/{total_count} healthy, {unhealthy_count} unhealthy"
         
         self.health_pub.publish(status_msg)
+
+    def _maybe_beep_on_healthy_threshold(self, healthy_count: int):
+        """Emit one startup beep once at least N nodes are healthy."""
+        if self.healthy_threshold_beep_sent:
+            return
+        if healthy_count < self.healthy_beep_threshold:
+            return
+        if not os.path.isfile(self.abeep_script):
+            self.get_logger().warning(f"abeep script not found: {self.abeep_script}")
+            self.healthy_threshold_beep_sent = True
+            return
+        try:
+            subprocess.Popen(
+                ['bash', self.abeep_script, '0.5'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.healthy_threshold_beep_sent = True
+            self.get_logger().info(
+                f"Startup health milestone reached: {healthy_count} healthy nodes (>= {self.healthy_beep_threshold})"
+            )
+        except Exception as e:
+            self.get_logger().warning(f"Failed to trigger startup milestone beep: {e}")
     
     def _check_poll_transition(self):
         """Check if we should transition from fast to normal polling rate."""

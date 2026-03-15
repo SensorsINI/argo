@@ -15,7 +15,7 @@
 # HARDWARE CONFIGURATION (Rev3 PCB):
 #   - PI3 (Pin 40, wPi 27, GPIO 259): POW_OFF - Output for power relay control (active HIGH pulse to reset relay)
 #   - PH0 (Pin 8, wPi 3, GPIO 224): POW_BUT - Input from power button (active HIGH when pressed)
-#   - PI2 (Pin 35, wPi 24, GPIO 258): BUZZER - Output for buzzer control (active HIGH = ON)
+#   - PI2 (Pin 35, wPi 24, GPIO 258): BUZZER - Pulsed via scripts/abeep.sh when needed
 #   - PH4 (Pin 18, wPi 10, GPIO 228): Green LED in power button
 #     Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
 #     Device tree: GPIO_ACTIVE_LOW (kernel driver inverts polarity)
@@ -472,7 +472,6 @@ class PowerController(ArgoBaseNode):
         self.blue_led_state = False
         self.red_led_state = False  # Track red LED state for RGB publishing
         self.green_led_line = None  # Initialize to None, will be set if GPIO control is needed
-        self.buzzer_line = None
 
         # Sysfs LED control paths (for kernel overlay)
         # Support both legacy/custom overlay label and generic kernel LED label.
@@ -556,11 +555,13 @@ class PowerController(ArgoBaseNode):
 
         # GPIO Configuration
         self.GPIO_CHIP = '/dev/gpiochip0'
+        self.abeep_script = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', 'scripts', 'abeep.sh')
+        )
 
         # Correct GPIO Line offsets from gpio readall
         self.POWER_RELAY_LINE = 259    # PI3 (Pin 40) - !POW
         self.POWER_BUTTON_LINE = 224   # PH0 (Pin 8) - POW_BUT
-        self.BUZZER_LINE = 258         # PI2 (Pin 35) - BUZZER (active HIGH)
         # GREEN_LED_LINE: GPIO 228 (PH4) - Green LED
         # Controlled via sysfs (no direct GPIO access needed when using sysfs)
         self.GREEN_LED_LINE = 228      # PH4 (Pin 18) - Green LED (kernel overlay, controlled via sysfs)
@@ -634,6 +635,8 @@ class PowerController(ArgoBaseNode):
             self.query_current_recording_status()
 
         self.get_logger().info("Power controller initialized")
+        # Boot confirmation beep as soon as power control is up.
+        self._run_abeep_async(0.5, "power_control_boot")
 
         # Initialize desktop user detection and caching
         self._detect_and_cache_desktop_user()
@@ -902,7 +905,6 @@ class PowerController(ArgoBaseNode):
                 self.green_led_line = None
                 self.blue_led_line = None
                 self.red_led_line = None
-                self.buzzer_line = None
                 return
             else:
                 # Should never reach here due to check in __init__
@@ -944,7 +946,6 @@ class PowerController(ArgoBaseNode):
             # Blue and red LEDs are always controlled via direct GPIO
             self.blue_led_line = self.chip.get_line(self.BLUE_LED_LINE)
             self.red_led_line = self.chip.get_line(self.RED_LED_LINE)
-            self.buzzer_line = self.chip.get_line(self.BUZZER_LINE)
 
             # Initially request power button line as input to read initial state
             # Will be reconfigured for interrupts after reading initial state
@@ -969,11 +970,6 @@ class PowerController(ArgoBaseNode):
                 type=gpiod.LINE_REQ_DIR_OUT,
                 default_vals=[LED_OFF_STATE]  # Start with LED off (HIGH for active-low)
             )
-            self.buzzer_line.request(
-                consumer="argo_power_control.py",
-                type=gpiod.LINE_REQ_DIR_OUT,
-                default_vals=[0]  # Start with buzzer off (LOW for active-high)
-            )
             self.get_logger().info("GPIO pins configured successfully")
             self.gpio_available = True
         except Exception as e:
@@ -991,7 +987,6 @@ class PowerController(ArgoBaseNode):
                 self.green_led_line = None
                 self.blue_led_line = None
                 self.red_led_line = None
-                self.buzzer_line = None
             else:
                 self.get_logger().error(f"Failed to initialize GPIO: {e}")
                 self.get_logger().error(f"GPIO chip path attempted: {self.GPIO_CHIP}")
@@ -1718,24 +1713,47 @@ class PowerController(ArgoBaseNode):
         except Exception as e:
             self.get_logger().error(f"Error controlling red LED: {e}")
 
-    def set_buzzer(self, state: bool):
-        """Control buzzer output (active HIGH: True = ON, False = OFF)."""
-        if not self.gpio_available:
+    def _run_abeep(self, duration_s: float = 0.5, reason: str = ""):
+        """Pulse buzzer using scripts/abeep.sh in a best-effort way."""
+        script = self.abeep_script
+        if not os.path.isfile(script):
+            self.get_logger().warning(f"abeep script missing: {script}")
             return
-        if getattr(self, 'buzzer_line', None) is None:
-            return
+        cmd = ['bash', script, f"{duration_s:.3f}"]
         try:
-            self.buzzer_line.set_value(1 if state else 0)
+            result = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                if reason:
+                    self.get_logger().info(f"Buzzer pulse complete ({reason})")
+                else:
+                    self.get_logger().info("Buzzer pulse complete")
+            else:
+                stderr = (result.stderr or "").strip()
+                stdout = (result.stdout or "").strip()
+                detail = stderr or stdout or f"exit {result.returncode}"
+                if reason:
+                    self.get_logger().warning(f"Buzzer pulse failed ({reason}): {detail}")
+                else:
+                    self.get_logger().warning(f"Buzzer pulse failed: {detail}")
         except Exception as e:
-            self.get_logger().error(f"Error controlling buzzer: {e}")
+            if reason:
+                self.get_logger().warning(f"Buzzer pulse exception ({reason}): {e}")
+            else:
+                self.get_logger().warning(f"Buzzer pulse exception: {e}")
 
-    def buzzer_on(self):
-        """Turn buzzer on."""
-        self.set_buzzer(True)
-
-    def buzzer_off(self):
-        """Turn buzzer off."""
-        self.set_buzzer(False)
+    def _run_abeep_async(self, duration_s: float = 0.5, reason: str = ""):
+        """Run buzzer pulse asynchronously so control flow is not blocked."""
+        threading.Thread(
+            target=self._run_abeep,
+            args=(duration_s, reason),
+            daemon=True
+        ).start()
 
     def test_recording_function(self):
         """Test the recording function with visual feedback"""
@@ -3052,6 +3070,7 @@ class PowerController(ArgoBaseNode):
         self.shutdown_initiated = True
 
         self.get_logger().info("Initiating shutdown sequence...")
+        self._run_abeep_async(0.5, "shutdown_initiated")
 
         # IMMEDIATE: Start shutdown LED pattern first for instant visual feedback
         # This runs in a daemon thread and does not block other actions
@@ -5193,14 +5212,6 @@ If you take no action within 30 seconds, the system will automatically
             if hasattr(self, 'get_logger'):
                 self.get_logger().warning(f"Error releasing blue_led_line: {e}")
 
-        try:
-            if hasattr(self, 'buzzer_line') and self.buzzer_line is not None:
-                self.buzzer_line.release()
-                self.buzzer_line = None
-        except Exception as e:
-            if hasattr(self, 'get_logger'):
-                self.get_logger().warning(f"Error releasing buzzer_line: {e}")
-
     def set_heartbeat_frequency(self, frequency_hz):
         """Set the heartbeat frequency"""
         if frequency_hz > 0:
@@ -5395,7 +5406,7 @@ DESCRIPTION:
 HARDWARE CONFIGURATION (Rev3 PCB):
   - PI3 (Pin 40): POW_OFF - Output for power relay RESET coil (active HIGH pulse)
   - PH0 (Pin 8): POW_BUT - Input from power button (active HIGH when pressed)
-  - PI2 (Pin 35): BUZZER - Output for buzzer control (active HIGH = ON)
+  - PI2 (Pin 35): BUZZER - Pulsed via scripts/abeep.sh when needed
   - PH4 (Pin 18): Green LED in power button
       Hardware: NFET control (GPIO HIGH = LED ON, GPIO LOW = LED OFF)
       Device tree: GPIO_ACTIVE_LOW (kernel driver inverts polarity)

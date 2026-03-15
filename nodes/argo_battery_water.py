@@ -69,6 +69,7 @@ import signal
 import argparse
 import argcomplete
 import os
+import subprocess
 import csv
 import json
 import math
@@ -433,6 +434,13 @@ class BatteryWaterNode(ArgoBaseNode):
             self.declare_parameter('battery_low_threshold_v', BATTERY_LOW_THRESHOLD_V).value)
         self.batt_critical_threshold_v = float(
             self.declare_parameter('battery_critical_threshold_v', BATTERY_CRITICAL_THRESHOLD_V).value)
+        self.battery_sos_throttle_s = 60.0
+        self._last_battery_sos_time = 0.0
+        self._abeep_script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'scripts',
+            'abeep.sh',
+        )
         # Battery low hysteresis (Volts)
         self.batt_low_hysteresis_v = 0.05
         # Saltwater alert threshold (Volts)
@@ -3263,8 +3271,40 @@ class BatteryWaterNode(ArgoBaseNode):
             self._latest_battery_low_alert = bool(batt_low)
             self._latest_saltwater_alert = bool(salt_alert)
             self._latest_humidity_alert = bool(humid_alert)
+            self._maybe_emit_battery_sos(bool(batt_low), battery_voltage)
         except Exception:
             pass
+
+    def _maybe_emit_battery_sos(self, batt_low: bool, battery_voltage: float):
+        """Play throttled SOS buzzer pattern for low/critical battery state."""
+        if not batt_low:
+            return
+        if math.isnan(battery_voltage):
+            return
+        now = time.monotonic()
+        if (now - self._last_battery_sos_time) < self.battery_sos_throttle_s:
+            return
+        if not os.path.isfile(self._abeep_script):
+            self.get_logger().warning(f"abeep script not found: {self._abeep_script}")
+            return
+        try:
+            subprocess.Popen(
+                ['bash', self._abeep_script, '--sos'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self._last_battery_sos_time = now
+            is_critical = battery_voltage <= self.batt_critical_threshold_v
+            if is_critical:
+                self.get_logger().warning(
+                    f"Battery CRITICAL ({battery_voltage:.2f} V): triggered SOS buzzer (throttled {self.battery_sos_throttle_s:.0f}s)"
+                )
+            else:
+                self.get_logger().warning(
+                    f"Battery LOW ({battery_voltage:.2f} V): triggered SOS buzzer (throttled {self.battery_sos_throttle_s:.0f}s)"
+                )
+        except Exception as e:
+            self.get_logger().warning(f"Failed to trigger battery SOS buzzer: {e}")
 
     def _log_sensor_states(self, battery_voltage, battery_remaining_pct, saltwater_voltage,
                           sail_current, temperature, humidity, charging_status, ac_power_present):
