@@ -1,0 +1,16 @@
+[Unit]
+Description=Argo Early Boot Beep
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target
+ConditionPathExists=/dev/gpiochip0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/argo_bootbeep
+TimeoutStartSec=10
+RemainAfterExit=no
+
+[Install]
+WantedBy=sysinit.target
+

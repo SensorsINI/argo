@@ -635,8 +635,6 @@ class PowerController(ArgoBaseNode):
             self.query_current_recording_status()
 
         self.get_logger().info("Power controller initialized")
-        # Boot confirmation beep as soon as power control is up.
-        self._run_abeep_async(0.5, "power_control_boot")
 
         # Initialize desktop user detection and caching
         self._detect_and_cache_desktop_user()

@@ -13,7 +13,7 @@ POWER_SERVICE_FILE = argo_power_control.service
 INSTALL_USER := $(shell if [ -n "$$SUDO_USER" ]; then echo "$$SUDO_USER"; else id -un; fi)
 INSTALL_HOME := $(shell getent passwd $(INSTALL_USER) | cut -d: -f6)
 
-.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook install-orangpienv install-sys-heartbeat
+.PHONY: help install uninstall enable disable start stop restart check_deps install_service enable_service clean_power_control install_shutdown_hook install_boot_beep_hook install-orangpienv install-sys-heartbeat
 
 # Default target
 all: install
@@ -21,7 +21,7 @@ all: install
 # ==================== POWER CONTROL SYSTEM ====================
 
 # Main power control installation target
-install: install-orangpienv install-sys-heartbeat check_deps install_service enable_service install_shutdown_hook
+install: install-orangpienv install-sys-heartbeat check_deps install_service enable_service install_shutdown_hook install_boot_beep_hook
 	@echo ""
 	@echo "✅ Argo Power Control System Installation Complete!"
 	@echo ""
@@ -104,6 +104,15 @@ install_shutdown_hook:
 	@echo "📋 Installing late shutdown hook..."
 	@sudo install -m 0755 $(SCRIPT_DIR)/argo_poweroff.shutdown /lib/systemd/system-shutdown/argo_poweroff
 	@echo "✅ Late shutdown hook installed"
+
+# Install early boot beep hook (runs once during early boot)
+install_boot_beep_hook:
+	@echo "📋 Installing early boot beep hook..."
+	@sudo install -m 0755 $(SCRIPT_DIR)/argo_bootbeep.startup /usr/local/sbin/argo_bootbeep
+	@sudo install -m 0644 $(SCRIPT_DIR)/argo_bootbeep.service /etc/systemd/system/argo_bootbeep.service
+	@sudo systemctl daemon-reload
+	@sudo systemctl enable argo_bootbeep.service
+	@echo "✅ Early boot beep hook installed and enabled"
 
 # Install PH4 sys_heartbeat overlay and permissions service
 install-sys-heartbeat:
@@ -206,6 +215,9 @@ clean_power_control:
 	# @sudo systemctl disable argo_poweron.service 2>/dev/null || true
 	# @sudo rm -f /etc/systemd/system/argo_poweron.service
 	# @sudo rm -f /usr/local/sbin/argo_poweron
+	@sudo systemctl disable argo_bootbeep.service 2>/dev/null || true
+	@sudo rm -f /etc/systemd/system/argo_bootbeep.service
+	@sudo rm -f /usr/local/sbin/argo_bootbeep
 	@sudo rm -f /lib/systemd/system-shutdown/argo_poweroff
 	@sudo systemctl daemon-reload
 	@echo "✅ Power control cleanup complete"
@@ -236,6 +248,7 @@ help:
 	@echo "  install_service      - Install systemd service only"
 	@echo "  enable_service       - Enable and start the service"
 	@echo "  install_shutdown_hook - Install late shutdown hook (poweroff/halt only, not reboot)"
+	@echo "  install_boot_beep_hook - Install early boot startup beep hook"
 	@echo "  clean_power_control  - Stop and disable service, remove service file"
 	@echo ""
 	@echo "Usage examples:"

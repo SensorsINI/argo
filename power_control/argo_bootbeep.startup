@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# argo_bootbeep.startup
+# ---------------------
+# Early-boot one-shot buzzer beep.
+# Installed to /usr/local/sbin/argo_bootbeep and run by argo_bootbeep.service.
+
+set -euo pipefail
+
+ABEEP_SCRIPT=""
+for candidate in \
+    "/home/orangepi/argo/scripts/abeep.sh" \
+    "/root/argo/scripts/abeep.sh"
+do
+    if [ -f "$candidate" ]; then
+        ABEEP_SCRIPT="$candidate"
+        break
+    fi
+done
+
+if [ -z "$ABEEP_SCRIPT" ]; then
+    logger -t argo_bootbeep "abeep.sh not found; skipping startup beep"
+    exit 0
+fi
+
+# Use blocking mode so systemd keeps the process alive until beep completes.
+bash "$ABEEP_SCRIPT" --wait 0.5 >/dev/null 2>&1 || true
+logger -t argo_bootbeep "startup beep executed"
+
