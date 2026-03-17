@@ -85,6 +85,40 @@ The hardware implements a fail-safe shared control circuit where:
 This design ensures **radio control always works** when software is not running, providing maximum safety for autonomous sailboat operation.
 
 ## ROS2 Software Architecture
+```mermaid
+flowchart TB
+  subgraph OUTPUTS[Output Nodes]
+    RSR[rudder_sail_radio primary actuation output]
+    LORA[lora long range communications]
+  end
+
+  CTRL[controller primary decision and control logic]
+
+  subgraph SAFETY[Critical Safety Services]
+    BW[battery_water critical]
+    LA[launch critical]
+  end
+
+  subgraph SENSORS[Sensor Input Layer]
+    GPS[gps]
+    IMU[imu BNO085]
+    ANEM[anem]
+  end
+
+  VR[Visualization and Recording]
+
+  GPS --> CTRL
+  IMU --> CTRL
+  ANEM --> CTRL
+  CTRL --> RSR
+
+  BW --> LA
+  LA --> CTRL
+
+  CTRL --> VR
+
+  CTRL -.-> LORA
+```
 
 ### Project Organization
 
