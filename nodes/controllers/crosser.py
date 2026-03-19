@@ -156,6 +156,7 @@ class CrosserController(BaseController):
         self._crossing_heading = None  # Store the steady heading when crossing through middle
         self._turning_target_heading = None  # Target heading when turning around
         self._turning_maneuver_type = None  # Type of turn: 'tacking' or 'jibing'
+        self._turning_side_sign = None  # Locked side of wind during an active turn (+1 starboard, -1 port)
         self._current_maneuver = 'sailing'  # Current sailing maneuver: 'sailing', 'tacking', 'jibing'
         self._tacking_target_heading = None  # Target heading when tacking upwind
         self._last_tack_time = 0.0  # Time of last tack to prevent rapid switching
@@ -350,6 +351,7 @@ class CrosserController(BaseController):
         self._crossing_heading = None
         self._turning_target_heading = None
         self._turning_maneuver_type = None
+        self._turning_side_sign = None
         self._current_maneuver = 'sailing'
         self._tacking_target_heading = None
         self._last_tack_time = 0.0
@@ -367,6 +369,7 @@ class CrosserController(BaseController):
         self._crossing_heading = None
         self._turning_target_heading = None
         self._turning_maneuver_type = None
+        self._turning_side_sign = None
         self._current_maneuver = 'sailing'
         self._tacking_target_heading = None
         self._last_tack_time = 0.0
@@ -539,9 +542,15 @@ class CrosserController(BaseController):
                                 else:
                                     # Fallback: reverse heading to point back
                                     self._turning_target_heading = (state.compass_heading + 180.0) % 360.0
+                                if self._turning_target_heading is not None:
+                                    target_angle_to_wind = signed_angle_difference_degrees(wind_dir_abs, self._turning_target_heading)
+                                    self._turning_side_sign = 1 if target_angle_to_wind > 0 else -1
                             else:
                                 # Last resort: reverse bearing to middle
                                 self._turning_target_heading = (bearing_to_middle + 180.0) % 360.0 if bearing_to_middle is not None else 0.0
+                                if self._turning_target_heading is not None:
+                                    target_angle_to_wind = signed_angle_difference_degrees(wind_dir_abs, self._turning_target_heading)
+                                    self._turning_side_sign = 1 if target_angle_to_wind > 0 else -1
                         else:
                             # Sailing upwind - tack (need to be careful to avoid stays)
                             old_state = self.crossing_state
@@ -589,11 +598,15 @@ class CrosserController(BaseController):
                                 else:
                                     # Last resort: use first candidate
                                     self._turning_target_heading = candidate_target_1
+                            if self._turning_target_heading is not None:
+                                target_angle_to_wind = signed_angle_difference_degrees(wind_dir_abs, self._turning_target_heading)
+                                self._turning_side_sign = 1 if target_angle_to_wind > 0 else -1
                     else:
                         # No wind data - just reverse heading
                         old_state = self.crossing_state
                         self.crossing_state = 'turning_around'
                         self._turning_maneuver_type = 'turn'  # Generic turn (no wind data to determine tack vs jibe)
+                        self._turning_side_sign = None
                         self._log_state_transition(old_state, self.crossing_state,
                                                   f"Approaching boundary - no wind data, reversing heading",
                                                   {'boundary_distance': abs_distance_to_boundary, 'threshold': self.boundary_turn_threshold,
@@ -631,13 +644,16 @@ class CrosserController(BaseController):
                 if angle_to_wind < self.tack_min_angle_from_wind:
                     # Too close to wind - adjust target to get away from wind
                     if self._tack_wind_direction is not None:
-                        # Determine which side we should be on based on target
-                        target_angle_to_wind = signed_angle_difference_degrees(wind_dir_abs, self._turning_target_heading)
-                        if target_angle_to_wind > 0:
-                            # Target is to starboard of wind - ensure we're heading that way
+                        # Keep the same side of wind throughout the turn to avoid side-flip oscillation.
+                        # Without this lock, the correction can alternate each control tick and command +/- max rudder.
+                        if self._turning_side_sign is None:
+                            target_angle_to_wind = signed_angle_difference_degrees(wind_dir_abs, self._turning_target_heading)
+                            self._turning_side_sign = 1 if target_angle_to_wind > 0 else -1
+                        if self._turning_side_sign > 0:
+                            # Starboard side of wind
                             adjusted_target = (wind_dir_abs + self.tack_min_angle_from_wind) % 360.0
                         else:
-                            # Target is to port of wind - ensure we're heading that way
+                            # Port side of wind
                             adjusted_target = (wind_dir_abs - self.tack_min_angle_from_wind) % 360.0
                         self._turning_target_heading = adjusted_target
                         if self.logger:
@@ -716,6 +732,7 @@ class CrosserController(BaseController):
                                               details)
                     self._turning_target_heading = None
                     self._turning_maneuver_type = None
+                    self._turning_side_sign = None
                     self._crossing_heading = None
                     self._tack_start_heading = None
                     self._tack_wind_direction = None

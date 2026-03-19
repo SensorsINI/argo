@@ -46,9 +46,9 @@
         # GPS noise parameters
         # Values based on analysis of pond recording (argo_20251117_114846 first irchel pond in rain)
         gps:
-          position_noise_stddev: 0.5  # Standard deviation of position noise (meters) - measured: 0.51m from pond recording
-          cog_noise_stddev: 5.0       # Course over ground noise (degrees) - measured: 44.64° at low speeds, using conservative value
-          sog_noise_stddev: 0.16       # Speed over ground noise (m/s) - measured: 0.156 m/s from pond recording
+          position_noise_stddev: 0.1  # Standard deviation of position noise (meters) - measured: 0.51m from pond recording
+          cog_noise_stddev: 1.0       # Course over ground noise (degrees) - measured: 44.64° at low speeds, using conservative value
+          sog_noise_stddev: 0.005       # Speed over ground noise (m/s) - measured: 0.156 m/s from pond recording
           update_rate: 0.2            # GPS update rate (Hz) - measured: ~0.2 Hz (1/5 Hz) from pond recording, critical for sim2real gap
           noise_time_constant: 10.0    # Time constant for noise filtering (seconds) - measured: 3.01s from pond recording
           dropout_probability: 0.0    # Probability of GPS fix loss per update
@@ -78,9 +78,9 @@
         tack_turn_boost: 1.8  # Multiplier applied to turn rate during a tack window (increased for more aggressive tacks)
       # Wind characteristics (runtime configurable via ROS2 parameters)
       wind:
-        wind_min_speed: 5.0         # Minimum wind speed in m/s (used for mock simulator)
+        wind_min_speed: 4.0         # Minimum wind speed in m/s (used for mock simulator). 1m/s is about 2 knots.
         wind_max_speed: 10.0        # Maximum wind speed in m/s (placeholder for variable wind)
-        wind_direction: 300.0       # Degrees (compass, 0°=North), where wind COMES FROM
+        wind_direction: 10.0       # Degrees CW from North (compass, 0°=North), where wind COMES FROM
         # Placeholder parameters for future wind variability features:
         wind_max_delta_percent: 0.0        # Max wind speed variation percent (placeholder)
         wind_gust_probability: 0.0         # Probability of gusts (0.0-1.0, placeholder)
@@ -102,7 +102,7 @@
       yaw_offset_deg: 59.25
 controller_node:
   ros__parameters:
-    controller_type: human  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
+    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
     controller_initially_paused: false  # Start controller in paused (manual) mode if true
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)

@@ -736,9 +736,17 @@ class ControllerNode(ArgoBaseNode):
             elif not self.boat_state.human_controlled:
                 self.data_collector.stop_session()
             
-            # If human just took control and we have a PatrolController, notify it
-            if self.boat_state.human_controlled and isinstance(self.controller, PatrolController):
-                self.controller.on_human_control_started(self.boat_state)
+            # If human just took control, notify active controller if it supports
+            # takeover/reset handling (e.g. patrol, crosser, future stateful controllers).
+            if self.boat_state.human_controlled and self.controller is not None:
+                on_human_control_started = getattr(self.controller, 'on_human_control_started', None)
+                if callable(on_human_control_started):
+                    try:
+                        on_human_control_started(self.boat_state)
+                    except Exception as e:
+                        self.get_logger().warn(
+                            f"Controller {self.controller.name} on_human_control_started() failed: {e}"
+                        )
 
     def control_authority_callback(self, msg):
         """Receive detailed control authority info from rudder_sail_radio.py."""
