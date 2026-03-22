@@ -472,8 +472,13 @@
             if (data.battery_voltage && data.battery_pct !== null && data.battery_pct !== undefined) {
                 batteryText = `${data.battery_voltage.toFixed(1)} V (${data.battery_pct.toFixed(0)}%)`;
                 
-                // Add time estimate
-                if (data.battery_time_to_full !== null && data.battery_time_to_full !== undefined) {
+                // Time estimate: must follow charging state (backend may briefly have stale fields)
+                const storageRundown = data.storage_rundown_active === true;
+                const showTtf = data.battery_charging === true &&
+                    data.battery_time_to_full !== null && data.battery_time_to_full !== undefined;
+                const showTte = data.battery_charging === false &&
+                    data.battery_time_to_empty !== null && data.battery_time_to_empty !== undefined;
+                if (showTtf) {
                     if (data.battery_time_to_full < 0.1) {
                         batteryText += ' - Full';
                     } else if (data.battery_time_to_full < 1.0) {
@@ -481,13 +486,33 @@
                     } else {
                         batteryText += ` - ${data.battery_time_to_full.toFixed(1)}h to full`;
                     }
-                } else if (data.battery_time_to_empty !== null && data.battery_time_to_empty !== undefined) {
+                } else if (showTte) {
+                    const suf = storageRundown ? 'to shutdown' : 'left';
                     if (data.battery_time_to_empty < 0.1) {
-                        batteryText += ' - <6m left';
+                        batteryText += storageRundown ? ' - <6m to shutdown' : ' - <6m left';
                     } else if (data.battery_time_to_empty < 1.0) {
-                        batteryText += ` - ${Math.round(data.battery_time_to_empty * 60)}m left`;
+                        batteryText += ` - ${Math.round(data.battery_time_to_empty * 60)}m ${suf}`;
                     } else {
-                        batteryText += ` - ${data.battery_time_to_empty.toFixed(1)}h left`;
+                        batteryText += ` - ${data.battery_time_to_empty.toFixed(1)}h ${suf}`;
+                    }
+                } else if (data.battery_charging !== true && data.battery_charging !== false) {
+                    if (data.battery_time_to_empty !== null && data.battery_time_to_empty !== undefined) {
+                        const sufU = storageRundown ? 'to shutdown' : 'left';
+                        if (data.battery_time_to_empty < 0.1) {
+                            batteryText += storageRundown ? ' - <6m to shutdown' : ' - <6m left';
+                        } else if (data.battery_time_to_empty < 1.0) {
+                            batteryText += ` - ${Math.round(data.battery_time_to_empty * 60)}m ${sufU}`;
+                        } else {
+                            batteryText += ` - ${data.battery_time_to_empty.toFixed(1)}h ${sufU}`;
+                        }
+                    } else if (data.battery_time_to_full !== null && data.battery_time_to_full !== undefined) {
+                        if (data.battery_time_to_full < 0.1) {
+                            batteryText += ' - Full';
+                        } else if (data.battery_time_to_full < 1.0) {
+                            batteryText += ` - ${Math.round(data.battery_time_to_full * 60)}m to full`;
+                        } else {
+                            batteryText += ` - ${data.battery_time_to_full.toFixed(1)}h to full`;
+                        }
                     }
                 }
             } else {

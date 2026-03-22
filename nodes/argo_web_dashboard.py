@@ -1495,9 +1495,15 @@ class ArgoWebDashboard(ArgoBaseNode):
                 time_to_full = self.state.get('battery_time_to_full')
                 time_to_empty = self.state.get('battery_time_to_empty')
             
-            # Always query service if time estimates are missing (topics don't provide these)
-            # Also query if any other topic data is missing
+            # Always query service if time estimates are missing (topics don't provide these).
+            # Also re-query when charging (from topics) disagrees with which estimate we have —
+            # otherwise we skip the service forever while stale e.g. battery_time_to_full remains
+            # after unplugging (needs_time_estimates would be false because TTF is still set).
             needs_time_estimates = (time_to_full is None and time_to_empty is None)
+            if charging_from_topic is True:
+                needs_time_estimates = needs_time_estimates or time_to_full is None or time_to_empty is not None
+            elif charging_from_topic is False:
+                needs_time_estimates = needs_time_estimates or time_to_empty is None or time_to_full is not None
             needs_other_data = (charging_from_topic is None or usb_from_topic is None or 
                                voltage_from_topic is None or pct_from_topic is None or 
                                pcb_temp_from_topic is None)
@@ -1799,6 +1805,12 @@ class ArgoWebDashboard(ArgoBaseNode):
                 state_copy = self.state.copy()
                 # Storage rundown is toggled via astore or dashboard; reflect current file so UI updates without battery service poll
                 state_copy['storage_rundown_active'] = STORAGE_RUNDOWN_FLAG.exists()
+                # Drop misleading time estimates when charging topic disagrees (stale until next service refresh)
+                chg = state_copy.get('battery_charging')
+                if chg is True:
+                    state_copy['battery_time_to_empty'] = None
+                elif chg is False:
+                    state_copy['battery_time_to_full'] = None
                 return jsonify(state_copy)
         
         @self.app.route('/api/status/critical')

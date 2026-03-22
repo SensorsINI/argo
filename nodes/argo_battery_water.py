@@ -3139,6 +3139,7 @@ class BatteryWaterNode(ArgoBaseNode):
             if self._latest_time_to_empty_hours is not None:
                 # Prefer TTE when available (safer assumption)
                 self._latest_battery_lifetime_hours = self._latest_time_to_empty_hours
+                self._latest_time_to_full_hours = None  # Keep service/API from exposing stale TTF
             elif self._latest_time_to_full_hours is not None:
                 # Only use TTF if TTE is not available
                 # Check voltage trend to validate: if voltage is near full (>= 8.0V), TTF might be valid
