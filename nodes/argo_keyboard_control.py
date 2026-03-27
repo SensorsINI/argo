@@ -24,6 +24,7 @@ Keyboard Controls:
     ↑  : Sail out (increase)
     ↓  : Sail in (decrease)
     c  : Center both controls
+    t  : Select controller (popup)
     w  : Rotate wind +10°
     e  : Rotate wind -10°
     SPACE : Toggle simulation pause (SIGSTOP/SIGCONT - keeps markers visible!)
@@ -51,6 +52,7 @@ import signal
 import sys
 import psutil
 import os
+import math
 
 class KeyboardControlNode(Node):
     """ROS2 node for keyboard control of Argo simulator."""
@@ -71,6 +73,9 @@ class KeyboardControlNode(Node):
         self.wind_get_client = self.create_client(GetParameters, f'{self.wind_param_target}/get_parameters')
         self.wind_set_client = self.create_client(SetParameters, f'{self.wind_param_target}/set_parameters')
         self.wind_direction_deg = None
+        # Simulator publishes true wind here; parameters alone often never update this node’s UI.
+        self._sim_true_wind_deg = None
+        self.create_subscription(Float64, '/simulator/true_wind_direction', self._true_wind_direction_callback, 10)
         self.create_subscription(ParameterEvent, '/parameter_events', self.parameter_event_callback, 10)
         # Wind batching state
         self._pending_wind_delta = 0.0
@@ -90,6 +95,16 @@ class KeyboardControlNode(Node):
         # Controller pause service client
         self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
         self.controller_paused = False  # Track current pause state
+        self._controller_popup_open = False
+        self._controller_known_types = [
+            # Keep in sync with nodes/argo.yaml comment + nodes/controller.py
+            'crosser',
+            'patrol',
+            'wind_aware',
+            'proportional',
+            'human',
+            'return_to_home',
+        ]
         
         # Control state
         self.rudder_position = 0.0  # -1.0 to +1.0
@@ -125,11 +140,13 @@ class KeyboardControlNode(Node):
         
         # Log initialization messages BEFORE curses takes over terminal
         self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Toggle Manual | Q=Quit Sim | X=Quit Control | ENTER=Refresh')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | T=Select Controller | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Toggle Manual | Q=Quit Sim | X=Quit Control | ENTER=Refresh')
         
         # Setup curses (after logging to avoid polluting display)
+        self._curses_active = False
         self.stdscr = curses.initscr()
         self._setup_curses()
+        self._curses_active = True
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -199,6 +216,7 @@ class KeyboardControlNode(Node):
     
     def cleanup(self):
         """Restore terminal to normal state and resume simulation if paused."""
+        self._curses_active = False
         try:
             if hasattr(self, 'stdscr') and self.stdscr:
                 self.stdscr.keypad(False)
@@ -230,38 +248,68 @@ class KeyboardControlNode(Node):
                             os.kill(pid, signal.SIGCONT)
                         except:
                             pass
+
+    def _notify(self, message: str, level: str = "info"):
+        """Show feedback at bottom while curses is active; otherwise log normally."""
+        message = (message or "").rstrip("\n\r")
+        if getattr(self, "_curses_active", False):
+            self._add_diagnostic_message(message)
+            return
+        try:
+            if level == "warn":
+                self.get_logger().warn(message)
+            elif level == "error":
+                self.get_logger().error(message)
+            else:
+                self.get_logger().info(message)
+        except Exception:
+            pass
     def parameter_event_callback(self, event: ParameterEvent):
         """Handle parameter events to track wind direction and controller type updates."""
-        # Handle wind direction updates
-        if event.node == self.wind_param_target:
+        def _norm_node_name(name: str) -> str:
+            return (name or "").strip().strip('/')
+
+        event_node_norm = _norm_node_name(getattr(event, 'node', ''))
+        wind_target_norm = _norm_node_name(self.wind_param_target)
+        controller_target_norm = _norm_node_name(self.controller_param_target)
+
+        # Handle wind direction updates.
+        # Some ParameterEvent publishers don't match the exact node string we expect (leading '/', namespace),
+        # so we key primarily on parameter name and secondarily on node match.
+        for param in list(event.changed_parameters) + list(event.new_parameters):
+            if param.name == self.wind_param_name and param.value.type == ParameterType.PARAMETER_DOUBLE:
+                self.wind_direction_deg = param.value.double_value % 360.0
+                return
+        if wind_target_norm and event_node_norm and event_node_norm.endswith(wind_target_norm):
             for param in list(event.changed_parameters) + list(event.new_parameters):
                 if param.name != self.wind_param_name:
                     continue
                 if param.value.type == ParameterType.PARAMETER_DOUBLE:
                     self.wind_direction_deg = param.value.double_value % 360.0
-                    # Use diagnostic message system instead of logger to avoid polluting curses display
-                    self._add_diagnostic_message(f"Wind direction parameter event: {self.wind_direction_deg:.1f}°")
                 return
         
         # Handle controller type updates
-        if event.node == self.controller_param_target:
-            for param in list(event.changed_parameters) + list(event.new_parameters):
-                if param.name != 'controller_type':
+        for param in list(event.changed_parameters) + list(event.new_parameters):
+            if param.name != 'controller_type':
+                continue
+            if param.value.type == ParameterType.PARAMETER_STRING:
+                new_controller = param.value.string_value.strip().lower()
+                if controller_target_norm and event_node_norm and not event_node_norm.endswith(controller_target_norm):
+                    # Ignore controller_type updates from other nodes (rare, but possible)
                     continue
-                if param.value.type == ParameterType.PARAMETER_STRING:
-                    new_controller = param.value.string_value.strip().lower()
-                    self.current_controller_type = new_controller
-                    was_rth = self.is_rth_mode
-                    self.is_rth_mode = (new_controller == 'return_to_home')
-                    # If switching away from RTH to a non-RTH controller, update default
-                    if was_rth and not self.is_rth_mode:
-                        self.default_controller_type = new_controller
-                    # If we don't have a default yet and this is not RTH, save it
-                    elif not self.is_rth_mode and not self.default_controller_type:
-                        self.default_controller_type = new_controller
-                    # Use diagnostic message system instead of logger to avoid polluting curses display
-                    self._add_diagnostic_message(f"Controller type parameter event: {new_controller} (RTH mode: {self.is_rth_mode}, default: {self.default_controller_type})")
-                return
+                self.current_controller_type = new_controller
+                was_rth = self.is_rth_mode
+                self.is_rth_mode = (new_controller == 'return_to_home')
+                # If switching away from RTH to a non-RTH controller, update default
+                if was_rth and not self.is_rth_mode:
+                    self.default_controller_type = new_controller
+                # If we don't have a default yet and this is not RTH, save it
+                elif not self.is_rth_mode and not self.default_controller_type:
+                    self.default_controller_type = new_controller
+                self._add_diagnostic_message(
+                    f"Controller type parameter event: {new_controller} (RTH mode: {self.is_rth_mode}, default: {self.default_controller_type})"
+                )
+            return
 
     def _initialize_wind_direction(self):
         """Fetch current wind direction parameter from simulator (best effort)."""
@@ -379,7 +427,36 @@ class KeyboardControlNode(Node):
     def controller_pause_state_callback(self, msg):
         """Receive controller pause state."""
         self.controller_paused = bool(msg.data)
-    
+
+    def _true_wind_direction_callback(self, msg: Float64):
+        """True wind direction from simulator (degrees, compass from N)."""
+        try:
+            v = float(msg.data)
+            if math.isnan(v):
+                return
+            self._sim_true_wind_deg = v % 360.0
+        except (TypeError, ValueError):
+            pass
+
+    def _effective_wind_deg(self):
+        """Wind for display / W/E: prefer parameter-backed value, else sim topic."""
+        w = self.wind_direction_deg
+        if w is not None and not (isinstance(w, float) and math.isnan(w)):
+            return float(w) % 360.0
+        if self._sim_true_wind_deg is not None:
+            return self._sim_true_wind_deg
+        return None
+
+    @staticmethod
+    def _trunc_to_width(text: str, max_cells: int) -> str:
+        if max_cells < 1:
+            return ""
+        if len(text) <= max_cells:
+            return text
+        if max_cells <= 3:
+            return text[:max_cells]
+        return text[: max_cells - 3] + "..."
+
     def handle_keyboard_input(self):
         """Process keyboard input."""
         if not self.running:
@@ -411,6 +488,8 @@ class KeyboardControlNode(Node):
                 self.reset_simulation()
             elif key == ord('h') or key == ord('H'):
                 self.toggle_rth_controller()
+            elif key == ord('t') or key == ord('T'):
+                self.select_controller_popup()
             elif key == ord('m') or key == ord('M'):
                 self.toggle_controller_pause()
             elif key == ord('q') or key == ord('Q'):
@@ -489,7 +568,7 @@ class KeyboardControlNode(Node):
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception as e:
-            self.get_logger().warn(f"Error finding simulation processes: {e}")
+            self._notify(f"⚠️  Error finding simulation processes: {e}", level="warn")
         
         return sim_processes
     
@@ -498,7 +577,7 @@ class KeyboardControlNode(Node):
         self.simulation_pids = self._find_simulation_processes()
         
         if not self.simulation_pids:
-            self.get_logger().warn("No simulation processes found to pause")
+            self._notify("⚠️  No simulation processes found to pause", level="warn")
             return False
         
         paused_count = 0
@@ -507,15 +586,15 @@ class KeyboardControlNode(Node):
                 os.kill(pid, signal.SIGSTOP)
                 paused_count += 1
             except (ProcessLookupError, PermissionError) as e:
-                self.get_logger().warn(f"Could not pause process {pid}: {e}")
+                self._notify(f"⚠️  Could not pause process {pid}: {e}", level="warn")
         
-        self.get_logger().info(f"Paused {paused_count}/{len(self.simulation_pids)} simulation processes")
+        self._notify(f"Paused {paused_count}/{len(self.simulation_pids)} simulation processes")
         return paused_count > 0
     
     def _resume_simulation_processes(self):
         """Resume simulation by sending SIGCONT to all paused processes."""
         if not self.simulation_pids:
-            self.get_logger().warn("No simulation processes to resume")
+            self._notify("⚠️  No simulation processes to resume", level="warn")
             return False
         
         resumed_count = 0
@@ -524,9 +603,9 @@ class KeyboardControlNode(Node):
                 os.kill(pid, signal.SIGCONT)
                 resumed_count += 1
             except (ProcessLookupError, PermissionError) as e:
-                self.get_logger().warn(f"Could not resume process {pid}: {e}")
+                self._notify(f"⚠️  Could not resume process {pid}: {e}", level="warn")
         
-        self.get_logger().info(f"Resumed {resumed_count}/{len(self.simulation_pids)} simulation processes")
+        self._notify(f"Resumed {resumed_count}/{len(self.simulation_pids)} simulation processes")
         self.simulation_pids = []  # Clear list after resume
         return resumed_count > 0
     
@@ -535,7 +614,7 @@ class KeyboardControlNode(Node):
         sim_pids = self._find_simulation_processes()
         
         if not sim_pids:
-            self.get_logger().warn("No simulation processes found to quit")
+            self._notify("⚠️  No simulation processes found to quit", level="warn")
             return False
         
         terminated_count = 0
@@ -544,10 +623,9 @@ class KeyboardControlNode(Node):
                 os.kill(pid, signal.SIGTERM)
                 terminated_count += 1
             except (ProcessLookupError, PermissionError) as e:
-                self.get_logger().warn(f"Could not terminate process {pid}: {e}")
+                self._notify(f"⚠️  Could not terminate process {pid}: {e}", level="warn")
         
-        self.get_logger().info(f"Sent SIGTERM to {terminated_count}/{len(sim_pids)} simulation processes")
-        self._add_diagnostic_message(f"✅ Quit simulation: SIGTERM sent to {terminated_count} processes")
+        self._notify(f"✅ Quit simulation: SIGTERM sent to {terminated_count} processes")
         return terminated_count > 0
     
     def toggle_simulation_pause(self):
@@ -559,21 +637,21 @@ class KeyboardControlNode(Node):
             if self.simulation_paused:
                 success = self._pause_simulation_processes()
                 if success:
-                    self.get_logger().info('🔴 Simulation FROZEN (SIGSTOP) - markers will persist')
+                    self._notify('🔴 Simulation FROZEN (SIGSTOP) - markers will persist')
                 else:
-                    self.get_logger().warn('⚠️  Could not pause simulation processes')
+                    self._notify('⚠️  Could not pause simulation processes', level="warn")
                     self.simulation_paused = False  # Revert if failed
             else:
                 success = self._resume_simulation_processes()
                 if success:
-                    self.get_logger().info('🟢 Simulation RESUMED (SIGCONT)')
+                    self._notify('🟢 Simulation RESUMED (SIGCONT)')
                 else:
-                    self.get_logger().warn('⚠️  Could not resume simulation processes')
+                    self._notify('⚠️  Could not resume simulation processes', level="warn")
         else:
             # Fallback: use topic-based pause (old behavior)
             self.publish_simulation_paused()
             state = "PAUSED" if self.simulation_paused else "RUNNING"
-            self.get_logger().info(f'Simulation {state} (topic-based)')
+            self._notify(f'Simulation {state} (topic-based)')
     
     def publish_simulation_paused(self):
         """Publish current simulation pause state."""
@@ -584,8 +662,11 @@ class KeyboardControlNode(Node):
     def adjust_wind_direction(self, delta_deg: float):
         """Accumulate wind direction adjustments; flush later as one publish."""
         if self.wind_direction_deg is None:
-            self.get_logger().warn("Wind direction unknown; awaiting parameter event before adjusting")
-            return
+            if self._sim_true_wind_deg is not None:
+                self.wind_direction_deg = self._sim_true_wind_deg % 360.0
+            else:
+                self._notify("⚠️  Wind direction unknown; awaiting sim or parameter before adjusting", level="warn")
+                return
         self._pending_wind_delta += float(delta_deg)
         self._last_wind_keypress_time = time.time()
         # Update preview immediately for UI
@@ -604,7 +685,7 @@ class KeyboardControlNode(Node):
             msg = Float64()
             msg.data = float(self.wind_direction_deg) % 360.0
             self.pub_wind_direction_set.publish(msg)
-            self.get_logger().info(f"Wind direction batch set to {msg.data:.1f}° (Δ={self._pending_wind_delta:+.1f}°)")
+            self._notify(f"✅ Wind direction set to {msg.data:.1f}° (Δ={self._pending_wind_delta:+.1f}°)")
         finally:
             self._pending_wind_delta = 0.0
     
@@ -615,17 +696,15 @@ class KeyboardControlNode(Node):
         try:
             self.reset_service_client.call_async(request)
             message = "✅ Reset request sent"
-            self.get_logger().info(message)
-            self._add_diagnostic_message(message)
+            self._notify(message)
         except Exception as e:
             message = f"⚠️  Error sending reset request: {e}"
-            self.get_logger().warn(message)
-            self._add_diagnostic_message(message)
+            self._notify(message, level="warn")
     
     def toggle_rth_controller(self):
         """Toggle between default controller (from argo.yaml) and RTH controller."""
         if not self.controller_set_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().warn("Controller parameter service not available")
+            self._notify("⚠️  Controller parameter service not available", level="warn")
             return
         
         # Determine target controller
@@ -663,29 +742,169 @@ class KeyboardControlNode(Node):
                     self.current_controller_type = target_controller
                     mode = "RTH" if self.is_rth_mode else "DEFAULT"
                     message = f"✅ Controller switched to {target_controller} ({mode} mode)"
-                    self.get_logger().info(message)
-                    # Store diagnostic message for display (with newline)
-                    self._add_diagnostic_message(message)
+                    self._notify(message)
                 else:
                     reason = response.results[0].reason if response and response.results else "Unknown error"
                     message = f"⚠️  Failed to switch controller: {reason}"
-                    self.get_logger().warn(message)
-                    self._add_diagnostic_message(message)
+                    self._notify(message, level="warn")
             except Exception as e:
                 message = f"❌ Error switching controller: {e}"
-                self.get_logger().error(message)
-                self._add_diagnostic_message(message)
+                self._notify(message, level="error")
         else:
             message = "⚠️  Controller switch service call timed out"
-            self.get_logger().warn(message)
-            self._add_diagnostic_message(message)
+            self._notify(message, level="warn")
+
+    def _available_controller_types(self):
+        """Return deduplicated known controller types, sorted alphabetically (stable for 1–9 keys)."""
+        names = set()
+        for raw in (self.default_controller_type, self.current_controller_type):
+            t = (raw or "").strip().lower()
+            if t:
+                names.add(t)
+        for raw in self._controller_known_types:
+            t = (raw or "").strip().lower()
+            if t:
+                names.add(t)
+        # If we ended up with only RTH (shouldn't happen), add a safe fallback
+        if names == {'return_to_home'}:
+            names.add('crosser')
+        return sorted(names, key=str.lower)
+
+    def _set_controller_type(self, target_controller: str):
+        """Set controller_type parameter on controller node (best effort)."""
+        target_controller = (target_controller or "").strip().lower()
+        if not target_controller:
+            return
+        if not self.controller_set_client.wait_for_service(timeout_sec=2.0):
+            message = "⚠️  Controller parameter service not available"
+            self._notify(message, level="warn")
+            return
+
+        request = SetParameters.Request()
+        param = Parameter()
+        param.name = 'controller_type'
+        param.value = ParameterValue()
+        param.value.type = ParameterType.PARAMETER_STRING
+        param.value.string_value = target_controller
+        request.parameters = [param]
+
+        future = self.controller_set_client.call_async(request)
+
+        start_time = time.time()
+        timeout = 3.0
+        while not future.done() and (time.time() - start_time) < timeout:
+            time.sleep(0.05)
+
+        if not future.done():
+            message = "⚠️  Controller switch service call timed out"
+            self._notify(message, level="warn")
+            return
+
+        try:
+            response = future.result()
+            if response and response.results and response.results[0].successful:
+                self.current_controller_type = target_controller
+                self.is_rth_mode = (target_controller == 'return_to_home')
+                if not self.is_rth_mode:
+                    self.default_controller_type = target_controller
+                message = f"✅ Controller switched to {target_controller}"
+                self._notify(message)
+            else:
+                reason = response.results[0].reason if response and response.results else "Unknown error"
+                message = f"⚠️  Failed to switch controller: {reason}"
+                self._notify(message, level="warn")
+        except Exception as e:
+            message = f"❌ Error switching controller: {e}"
+            self._notify(message, level="error")
+
+    def select_controller_popup(self):
+        """Open a popup to select controller type via numeric keys."""
+        if self._controller_popup_open:
+            return
+        self._controller_popup_open = True
+
+        try:
+            options = self._available_controller_types()
+            if not options:
+                self._notify("⚠️  No controllers available", level="warn")
+                return
+
+            term_width, term_height = self.get_terminal_size()
+            height, width = term_height, term_width
+
+            # Size popup to content but cap within terminal
+            popup_h = min(max(8, len(options) + 6), max(8, height - 4))
+            popup_w = min(max(44, max(len(o) for o in options) + 16), max(44, width - 4))
+
+            top = max(1, (height - popup_h) // 2)
+            left = max(1, (width - popup_w) // 2)
+
+            win = curses.newwin(popup_h, popup_w, top, left)
+            win.keypad(True)
+
+            # Temporarily make input blocking so selection feels snappy
+            prev_nodelay = self.stdscr.nodelay(False)
+            try:
+                self.stdscr.nodelay(False)
+            except Exception:
+                prev_nodelay = None
+
+            selected = None
+            while selected is None and self.running:
+                win.erase()
+                win.border()
+
+                title = "Select controller (press 1-9, ESC to cancel)"
+                if len(title) > popup_w - 4:
+                    title = "Select controller"
+                win.addstr(1, 2, title[: popup_w - 4])
+
+                current = (self.current_controller_type or "unknown").strip().lower()
+                default = (self.default_controller_type or "unknown").strip().lower()
+                meta = f"Current: {current} | Default: {default}"
+                win.addstr(2, 2, meta[: popup_w - 4])
+
+                win.addstr(3, 2, "─" * min(popup_w - 4, 40))
+
+                max_items = min(9, popup_h - 6)
+                visible = options[:max_items]
+                for idx, opt in enumerate(visible, start=1):
+                    marker = "→" if opt == current else " "
+                    line = f"{marker} {idx}) {opt}"
+                    win.addstr(4 + (idx - 1), 2, line[: popup_w - 4])
+
+                if len(options) > len(visible):
+                    more = f"... ({len(options) - len(visible)} more)"
+                    win.addstr(popup_h - 2, 2, more[: popup_w - 4])
+
+                win.refresh()
+
+                ch = win.getch()
+                if ch in (27, ord('q'), ord('Q')):  # ESC or q
+                    break
+                if ord('1') <= ch <= ord('9'):
+                    idx = ch - ord('1')
+                    if idx < len(visible):
+                        selected = visible[idx]
+                        break
+
+            if selected:
+                self._set_controller_type(selected)
+        except Exception as e:
+            self._notify(f"❌ Controller popup error: {e}", level="error")
+        finally:
+            try:
+                # Restore nodelay mode for normal operation
+                self.stdscr.nodelay(True)
+            except Exception:
+                pass
+            self._controller_popup_open = False
     
     def toggle_controller_pause(self):
         """Toggle controller pause state (manual/human control)."""
         if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
             message = "⚠️  Controller pause service not available"
-            self.get_logger().warn(message)
-            self._add_diagnostic_message(message)
+            self._notify(message, level="warn")
             return
         
         # Toggle pause state
@@ -711,28 +930,23 @@ class KeyboardControlNode(Node):
                     self.controller_paused = new_pause_state
                     mode = "PAUSED (Manual)" if new_pause_state else "UNPAUSED (Autonomous)"
                     message = f"✅ Controller {mode}"
-                    self.get_logger().info(message)
-                    self._add_diagnostic_message(message)
+                    self._notify(message)
                 else:
                     message = f"⚠️  Failed to toggle controller pause: {response.message}"
-                    self.get_logger().warn(message)
-                    self._add_diagnostic_message(message)
+                    self._notify(message, level="warn")
             except Exception as e:
                 message = f"❌ Error toggling controller pause: {e}"
-                self.get_logger().error(message)
-                self._add_diagnostic_message(message)
+                self._notify(message, level="error")
         else:
             message = "⚠️  Controller pause service call timed out"
-            self.get_logger().warn(message)
-            self._add_diagnostic_message(message)
+            self._notify(message, level="warn")
     
     def quit_simulation(self):
         """Quit simulation by sending SIGTERM to all simulation processes."""
         success = self._quit_simulation_processes()
         if not success:
             message = "⚠️  No simulation processes found to quit"
-            self.get_logger().warn(message)
-            self._add_diagnostic_message(message)
+            self._notify(message, level="warn")
     
     def clear_and_refresh_display(self):
         """Clear and refresh the display to fix corruption from logging messages."""
@@ -744,7 +958,7 @@ class KeyboardControlNode(Node):
                 del self._last_term_size
             # Immediately update display
             self.update_display()
-            self._add_diagnostic_message("Display cleared and refreshed")
+            self._notify("Display cleared and refreshed")
         except Exception as e:
             # If clearing fails, at least try to refresh
             try:
@@ -838,17 +1052,18 @@ class KeyboardControlNode(Node):
         return lines if lines else [message[:max_width-3] + "..."]
     
     def get_terminal_size(self):
-        """Get terminal size, handling resizing dynamically."""
+        """Get terminal size. Prefer curses window size so layout matches the actual pad."""
+        try:
+            if getattr(self, "_curses_active", False) and getattr(self, "stdscr", None):
+                rows, cols = self.stdscr.getmaxyx()
+                return (cols, rows)
+        except Exception:
+            pass
         try:
             import shutil
             return shutil.get_terminal_size()
-        except:
-            # Fallback: try to get from curses
-            try:
-                height, width = self.stdscr.getmaxyx()
-                return (width, height)
-            except:
-                return (80, 24)
+        except Exception:
+            return (80, 24)
     
     def update_display(self):
         """Update the curses display."""
@@ -856,127 +1071,126 @@ class KeyboardControlNode(Node):
             return
         
         try:
-            # Get current terminal size (handles dynamic resizing)
+            # Match curses pad size (shutil can disagree and cause overflow/garbled rows).
             term_width, term_height = self.get_terminal_size()
             
-            # Use erase() instead of clear() to reduce tearing (faster, less flicker)
-            # Only clear if terminal size changed
             if not hasattr(self, '_last_term_size') or self._last_term_size != (term_width, term_height):
                 self.stdscr.clear()
                 self._last_term_size = (term_width, term_height)
             else:
-                self.stdscr.erase()  # Faster than clear(), reduces tearing
+                self.stdscr.erase()
             
             self.stdscr.border()
             
-            # Use actual terminal dimensions
             height, width = term_height, term_width
+            max_text = max(0, width - 4)
+            last_content_row = height - 2
             
-            # Title
-            title = "🚢 ARGO KEYBOARD CONTROL"
-            self.stdscr.addstr(1, (width - len(title)) // 2, title)
+            # Title: ASCII only — wide glyphs (emoji/arrows) break len() vs terminal columns.
+            title = "ARGO KEYBOARD CONTROL"
+            title_x = max(1, (width - len(title)) // 2)
+            if title_x + len(title) > width - 1:
+                title = self._trunc_to_width(title, max(1, width - 2))
+                title_x = 1
+            try:
+                self.stdscr.addstr(1, title_x, title)
+            except curses.error:
+                pass
             
-            # Empty line
-            self.stdscr.addstr(2, 1, " " * (width - 2))
+            try:
+                self.stdscr.addstr(2, 1, " " * (width - 2))
+            except curses.error:
+                pass
             
-            # Rudder visualization
             rudder_bar = self.create_control_bar(self.rudder_position, 16, control="rudder")
-            self.stdscr.addstr(3, 2, f"Rudder: {rudder_bar} ({self.rudder_position:+.3f})")
+            try:
+                self.stdscr.addstr(3, 2, self._trunc_to_width(
+                    f"Rudder: {rudder_bar} ({self.rudder_position:+.3f})", max_text))
+            except curses.error:
+                pass
             
-            # Sail visualization
             sail_bar = self.create_control_bar(self.sail_position, 16, control="sail")
-            self.stdscr.addstr(4, 2, f"Sail:   {sail_bar} ({self.sail_position:+.3f})")
+            try:
+                self.stdscr.addstr(4, 2, self._trunc_to_width(
+                    f"Sail:   {sail_bar} ({self.sail_position:+.3f})", max_text))
+            except curses.error:
+                pass
             
-            # Empty line
-            self.stdscr.addstr(5, 1, " " * (width - 2))
+            try:
+                self.stdscr.addstr(5, 1, " " * (width - 2))
+            except curses.error:
+                pass
             
-            # Status info - split into multiple lines to prevent clipping
             line_num = 6
+
+            def put_row(text: str) -> None:
+                nonlocal line_num
+                if line_num > last_content_row:
+                    return
+                s = self._trunc_to_width(text, max_text)
+                try:
+                    self.stdscr.addstr(line_num, 2, s)
+                except curses.error:
+                    pass
+                line_num += 1
+            
             mode_line = f"Mode: {self.simulator_mode}"
             heading_line = f"Heading: {self.simulator_heading:.1f}°"
             speed_line = f"Speed: {self.simulator_speed:.1f}kt"
-            # Fit on one line if possible, otherwise split
             status_combined = f"{mode_line} | {heading_line} | {speed_line}"
-            if len(status_combined) <= width - 4:
-                self.stdscr.addstr(line_num, 2, status_combined)
-                line_num += 1
+            if len(status_combined) <= max_text:
+                put_row(status_combined)
             else:
-                # Split into multiple lines
-                self.stdscr.addstr(line_num, 2, mode_line)
-                line_num += 1
-                self.stdscr.addstr(line_num, 2, f"{heading_line} | {speed_line}")
-                line_num += 1
+                put_row(mode_line)
+                put_row(self._trunc_to_width(f"{heading_line} | {speed_line}", max_text))
             
-            wind_value = self.wind_direction_deg if self.wind_direction_deg is not None else float('nan')
-            wind_line = f"Wind Dir: {wind_value:.1f}° (absolute, compass, from)"
-            if len(wind_line) > width - 4:
-                # Split wind line
-                wind_line1 = f"Wind Dir: {wind_value:.1f}°"
-                wind_line2 = "(absolute, compass, from)"
-                self.stdscr.addstr(line_num, 2, wind_line1)
-                line_num += 1
-                if len(wind_line2) <= width - 4:
-                    self.stdscr.addstr(line_num, 2, wind_line2)
-                    line_num += 1
+            eff_wind = self._effective_wind_deg()
+            # One line only — avoids duplicate "(absolute...)" wrap and stray columns.
+            if eff_wind is None:
+                put_row(self._trunc_to_width(
+                    "Wind: ---  (true deg from N, /simulator/true_wind_direction)", max_text))
             else:
-                self.stdscr.addstr(line_num, 2, wind_line)
-                line_num += 1
+                put_row(self._trunc_to_width(
+                    f"Wind: {eff_wind:.1f}°  (true from N, /simulator/true_wind_direction)", max_text))
             
-            # Simulation status
             if self.simulation_paused:
                 pause_mode = "SIGSTOP" if self.use_process_pause else "topic"
-                pause_line1 = f"Simulation: FROZEN ({pause_mode})"
-                pause_line2 = "markers persist in Foxglove"
-                self.stdscr.addstr(line_num, 2, pause_line1)
-                line_num += 1
-                if len(pause_line2) <= width - 4:
-                    self.stdscr.addstr(line_num, 2, pause_line2)
-                    line_num += 1
+                put_row(f"Simulation: FROZEN ({pause_mode})")
+                put_row(self._trunc_to_width("markers persist in Foxglove", max_text))
             else:
-                pause_line = f"Simulation: RUNNING"
-                self.stdscr.addstr(line_num, 2, pause_line)
-                line_num += 1
+                put_row("Simulation: RUNNING")
             
-            # Controller status
             controller_name = self.current_controller_type.upper() if self.current_controller_type else 'UNKNOWN'
             pause_status = " [PAUSED]" if self.controller_paused else ""
+            rth = self.is_rth_mode
             controller_status = f"Controller: {controller_name}{pause_status}"
-            if self.is_rth_mode:
+            if rth:
                 controller_status += " (RTH MODE)"
             else:
                 controller_status += " (DEFAULT)"
-            if len(controller_status) > width - 4:
-                # Split controller status
-                self.stdscr.addstr(line_num, 2, f"Controller: {controller_name}")
-                line_num += 1
-                mode_text = "(RTH MODE)" if self.is_rth_mode else "(DEFAULT)"
-                self.stdscr.addstr(line_num, 2, mode_text)
-                line_num += 1
+            if len(controller_status) <= max_text:
+                put_row(controller_status)
             else:
-                self.stdscr.addstr(line_num, 2, controller_status)
+                put_row(self._trunc_to_width(f"Controller: {controller_name}{pause_status}", max_text))
+                put_row("(RTH MODE)" if rth else "(DEFAULT)")
+            
+            line_num += 1
+            if line_num <= last_content_row:
+                try:
+                    self.stdscr.addstr(line_num, 2, self._trunc_to_width("Controls:", max_text))
+                except curses.error:
+                    pass
                 line_num += 1
             
-            # Controls - split into multiple lines
-            line_num += 1  # Empty line before controls
-            self.stdscr.addstr(line_num, 2, "Controls:")
-            line_num += 1
-            controls_line1 = "  ←→ Rudder | ↑↓ Sail | C=Center"
-            controls_line2 = "  SPACE=Sim Pause | W/E=Wind ±10°"
-            controls_line3 = "  R=Reset | H=Toggle RTH | M=Toggle Manual"
-            controls_line4 = "  Q=Quit Sim | X=Quit Control | ENTER=Refresh"
-            self.stdscr.addstr(line_num, 2, controls_line1[:width-4])
-            line_num += 1
-            self.stdscr.addstr(line_num, 2, controls_line2[:width-4])
-            line_num += 1
-            self.stdscr.addstr(line_num, 2, controls_line3[:width-4])
-            line_num += 1
-            self.stdscr.addstr(line_num, 2, controls_line4[:width-4])
-            line_num += 1
+            for ctl in (
+                "  Left/Right Rudder | Up/Down Sail | C=Center",
+                "  SPACE=Sim Pause | W/E=Wind +/-10 deg",
+                "  T=Select Controller | R=Reset | H=Toggle RTH",
+                "  M=Toggle Manual | Q=Quit Sim | X=Quit Control | ENTER=Refresh",
+            ):
+                put_row(self._trunc_to_width(ctl, max_text))
             
-            # Topic info
-            topic_line = f"Publishing to: /rudder_sail_radio"
-            self.stdscr.addstr(line_num, 2, topic_line[:width-4])
-            line_num += 1
+            put_row(self._trunc_to_width("Publishing to: /rudder_sail_radio", max_text))
             
             # Diagnostic messages (preserve last few messages with newlines)
             current_time = time.time()
@@ -1005,9 +1219,9 @@ class KeyboardControlNode(Node):
                 # Add separator if we have messages
                 if diag_line_num < height - 2:
                     try:
-                        self.stdscr.addstr(diag_line_num, 2, "─" * min(40, width - 4))
+                        self.stdscr.addstr(diag_line_num, 2, "-" * min(40, max_text))
                         diag_line_num += 1
-                    except:
+                    except Exception:
                         pass
                 
                 for msg, msg_time in self.diagnostic_messages[-self.max_diagnostic_messages:]:
@@ -1016,7 +1230,8 @@ class KeyboardControlNode(Node):
                     for msg_line in msg_lines:
                         if diag_line_num < height - 2:  # Leave room for border
                             try:
-                                self.stdscr.addstr(diag_line_num, 2, msg_line)
+                                self.stdscr.addstr(
+                                    diag_line_num, 2, self._trunc_to_width(msg_line, max_text))
                                 diag_line_num += 1
                             except:
                                 break

@@ -326,7 +326,7 @@ class ControllerNode(ArgoBaseNode):
         # Patrol controller parameters
         self.declare_parameter('patrol_lookahead_time', 15.0)
         self.declare_parameter('boundary_turn_threshold', 15.0)
-        self.declare_parameter('arrival_distance_m', 10.0)  # Distance to middle waypoint to consider "arrived" (used by crosser controller)
+        self.declare_parameter('arrival_distance_m', 10.0)  # Crosser: middle waypoint; RTH: distance to home to consider "arrived" (meters)
         self.declare_parameter('tack_angle', 90.0)
         self.declare_parameter('tack_min_angle_from_wind', 50.0)  # Minimum angle from wind during tack to avoid stays
         self.declare_parameter('min_rudder_near_boundary', 0.3)  # Minimum rudder command when close to boundary
@@ -523,7 +523,9 @@ class ControllerNode(ArgoBaseNode):
         elif controller_type == 'return_to_home':
             config['sail_wind_gain'] = 0.5
             config['shore_connection_timeout'] = 120.0
-            config['arrival_distance_nm'] = 0.05
+            arrival_m = self.get_parameter('arrival_distance_m').get_parameter_value().double_value
+            config['arrival_distance_m'] = arrival_m
+            config['resume_navigation_distance_m'] = max(arrival_m * 1.5, arrival_m + 8.0)
             self.controller = ReturnToHomeController(config, logger=logger, parent_node=parent_node)
         elif controller_type == 'patrol':
             config['sail_wind_gain'] = 0.5
@@ -1143,12 +1145,14 @@ class ControllerNode(ArgoBaseNode):
                     # For any controller with should_activate method, check if RTH needed
                     if isinstance(self.controller, ReturnToHomeController) == False:
                         # Create temporary RTH controller to check
+                        rth_arrival_m = self.get_parameter('arrival_distance_m').get_parameter_value().double_value
                         rth_config = {
                             'rudder_gain': self.get_parameter('rudder_gain').get_parameter_value().double_value,
                             'rudder_full_scale_deg': self.get_parameter('rudder_full_scale_deg').get_parameter_value().double_value,
                             'sail_wind_gain': 0.5,
                             'shore_connection_timeout': 120.0,
-                            'arrival_distance_nm': 0.05
+                            'arrival_distance_m': rth_arrival_m,
+                            'resume_navigation_distance_m': max(rth_arrival_m * 1.5, rth_arrival_m + 8.0),
                         }
                         temp_rth = ReturnToHomeController(rth_config, logger=self.get_logger(), parent_node=self)
                         if temp_rth.should_activate(self.boat_state):
