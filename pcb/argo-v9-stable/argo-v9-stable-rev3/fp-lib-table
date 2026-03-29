@@ -1,7 +1,0 @@
-(fp_lib_table
-  (version 7)
-  (lib (name "Argo footprint Library")(type "KiCad")(uri "${KIPRJMOD}/../Argo footprint Library.pretty")(options "")(descr ""))
-  (lib (name "sparkfun")(type "KiCad")(uri "${KIPRJMOD}/../../sparkfun")(options "")(descr ""))
-  (lib (name "SamacSys_Parts")(type "KiCad")(uri "${KIPRJMOD}/../../library_loader/SamacSys_Parts.pretty")(options "")(descr ""))
-  (lib (name "PRL3-5V-DC-1A")(type "KiCad")(uri "${KIPRJMOD}/../../snapeda/PRL3-5V-DC-1A/PRL3-5V-DC-1A.pretty")(options "")(descr "Relay PRL3-5V-DC-1A footprint"))
-)
