@@ -12740,7 +12740,7 @@
 			(pin bidirectional line
 				(at 0 -27.94 0)
 				(length 5.08)
-				(name "PI10/TWI1_SDA/UART3_RX"
+				(name "PI10/TWI2_SDA/UART3_RX"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -13123,7 +13123,7 @@
 			(pin bidirectional line
 				(at 68.58 -27.94 180)
 				(length 5.08)
-				(name "PI9/TWI1_SCL/UART3_TX"
+				(name "PI9/TWI2_SCL/UART3_TX"
 					(effects
 						(font
 							(size 1.27 1.27)

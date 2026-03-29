@@ -29,10 +29,12 @@ I've created a complete SD card backup and restore system for your Orange Pi Zer
 
 ### Create a Backup
 
+**Can run on Argo itself or on another Linux computer with the SD card attached**
+
 ```bash
 cd ~/argo/scripts
 
-# Interactive mode (prompts for destination)
+# Interactive mode (auto-detects source device from current root disk)
 ./argo_sd_backup.sh
 
 # Or use Makefile
@@ -43,6 +45,15 @@ make backup-sd
 
 # Local backup only (no remote transfer)
 ./argo_sd_backup.sh --local
+
+# On Argo OPi: if no destination is given, script auto-detects host and uses default remote
+./argo_sd_backup.sh
+
+# Local backup from attached SD card partition (whole disk auto-resolved)
+./argo_sd_backup.sh --local --source-device /dev/sde1
+
+# If /dev/sdX changes between computers, select by mountpoint instead
+./argo_sd_backup.sh --local --source-mount /media/$USER/<sd_mount_name>
 ```
 
 ### Restore from Backup
@@ -61,7 +72,7 @@ sudo ./argo_sd_restore.sh user@host:~/backup.img.gz
 
 ### Backup Process
 
-1. **Creates image** using `dd` to read entire SD card (`/dev/mmcblk0`)
+1. **Creates image** using `dd` to read an SD card source disk (auto-detected or passed with `--source-device` / `--source-mount`)
 2. **Compresses** with `gzip` to reduce 30GB → ~10-15GB
 3. **Monitors progress** with `pv` pipe viewer
 4. **Transfers to remote** via `scp` to your configured storage location
@@ -129,12 +140,18 @@ sudo ./argo_sd_restore.sh ~/sd_backups/argo_orangepizero2w_20240115_143022.img.g
 
 ## Configuration
 
-Your SD card details:
-- **Device**: `/dev/mmcblk0`
-- **Boot partition**: `/dev/mmcblk0p1` (ext4)
-- **Total size**: ~30GB (29.7GB)
-- **Used space**: ~16GB (before compression)
-- **Compressed**: ~10-15GB
+Source selection options:
+- **Default**: auto-detect from current system root disk (best when run on Argo itself)
+- **Desktop/local attached SD**: use `--source-device /dev/sdX1` (script resolves to whole disk)
+- **Portable across changing device names**: use `--source-mount /path/to/mountpoint`
+- **Typical SD size**: ~30GB (compressed backup usually ~10-15GB)
+
+Host auto-detection and destination behavior:
+- If running on Argo Orange Pi (Armbian + Orange Pi kernel/model + Argo layout), script assumes self-backup mode
+- In that case, if no destination is passed and `--local` is not set, it uses default remote destination
+- Override default destination with env var: `ARGO_SD_BACKUP_REMOTE_DEST=user@host`
+- On non-Argo computers, script will **not** auto-select the current root/system disk; it only auto-selects external/removable candidates or asks you to choose
+- Root/system disk backup on non-Argo hosts is blocked by default; override only if intentional with `--allow-root-source`
 
 ## Documentation
 
@@ -181,5 +198,3 @@ make backup-help
 ```
 
 The backup system is ready to use!
-
-

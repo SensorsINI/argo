@@ -1,5 +1,0 @@
-(sym_lib_table
-  (version 7)
-  (lib (name "WindSensor")(type "KiCad")(uri "${KIPRJMOD}/../WindSensor.kicad_sym")(options "")(descr ""))
-  (lib (name "argo")(type "KiCad")(uri "${KIPRJMOD}/../../argo-v9-stable/argo-v9.kicad_sym")(options "")(descr ""))
-)

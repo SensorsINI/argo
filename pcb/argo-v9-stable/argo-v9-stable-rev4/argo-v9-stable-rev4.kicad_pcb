@@ -8333,7 +8333,7 @@
 		)
 		(property "Value" "1R"
 			(at -2.610214 -0.015009 90)
-			(layer "F.Fab")
+			(layer "F.SilkS")
 			(uuid "fd6437c6-f426-4665-b52f-fb8f219e5b0f")
 			(effects
 				(font

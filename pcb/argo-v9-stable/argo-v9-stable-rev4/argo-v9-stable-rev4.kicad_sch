@@ -13081,7 +13081,7 @@
 						(type background)
 					)
 				)
-				(pin power_out line
+				(pin power_in line
 					(at 0 0 0)
 					(length 5.08)
 					(name "3v3[2]"
@@ -13339,7 +13339,7 @@
 				(pin bidirectional line
 					(at 0 -27.94 0)
 					(length 5.08)
-					(name "PI10/TWI1_SDA/UART3_RX"
+					(name "PI10/TWI2_SDA/UART3_RX"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -13722,7 +13722,7 @@
 				(pin bidirectional line
 					(at 68.58 -27.94 180)
 					(length 5.08)
-					(name "PI9/TWI1_SCL/UART3_TX"
+					(name "PI9/TWI2_SCL/UART3_TX"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -14454,6 +14454,17 @@
 		)
 		(uuid "113242b9-fc69-4ff0-8fc2-1dbfc08970a5")
 	)
+	(text "requires custom overlay to free up CS0 for GPS_PPS"
+		(exclude_from_sim no)
+		(at 201.168 123.444 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+		)
+		(uuid "16e6accf-1cbf-4fd4-b56d-191fd3200d62")
+	)
 	(text "PI4=!PG configure as PU - signals that CH221K has found \na PD cable (power delivery) and negociated the 5V VBUS.\nBut failure also just indicates original USB (non PD) cable."
 		(exclude_from_sim no)
 		(at 169.418 136.144 0)
@@ -14579,6 +14590,16 @@
 		)
 		(uuid "33ca4453-97fa-4c69-a042-d94cdc66be9a")
 	)
+	(text "Note SCK/SDA 1 is actually TWI2\n(shematic symbol was wrong before rev 5)"
+		(exclude_from_sim no)
+		(at 130.048 132.842 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "36c64f9e-4b44-4398-b4ad-856bbf163ef4")
+	)
 	(text "Fully charged battery makes 8.4V.\nRtop=27k Rbot=18k, then vout=0.4vin, \nso 8.4V will give 3.36V"
 		(exclude_from_sim no)
 		(at 117.348 213.36 0)
@@ -14696,6 +14717,17 @@
 		)
 		(uuid "5cdde3e3-9506-4d68-a97b-992140d9a242")
 	)
+	(text "Fix JST headers to be actual size (too large now)"
+		(exclude_from_sim no)
+		(at 345.186 234.696 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+		)
+		(uuid "5ddbd66f-a9d8-4391-8457-1301007da1ee")
+	)
 	(text "IMU BNO055 I2C addr 0x69"
 		(exclude_from_sim no)
 		(at 216.916 82.804 0)
@@ -14769,6 +14801,27 @@
 		)
 		(uuid "80a0db39-b451-4058-889f-d4c9cc2f478d")
 	)
+	(text "band on cathode (-)"
+		(exclude_from_sim no)
+		(at 215.138 203.708 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "8202e718-68f4-496b-98be-f49067fbc917")
+	)
+	(text "Add 10k pulldown to prevent buzzer on boot"
+		(exclude_from_sim no)
+		(at 266.192 265.938 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+		)
+		(uuid "85ff95d1-3955-4b8f-a473-42a95b56933c")
+	)
 	(text "Power buttons"
 		(exclude_from_sim no)
 		(at 284.734 160.02 0)
@@ -14833,6 +14886,16 @@
 			(justify left)
 		)
 		(uuid "96b9852d-ed29-4d50-9a36-911ee9d5d94a")
+	)
+	(text "band on cathode (-)"
+		(exclude_from_sim no)
+		(at 191.516 219.71 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "974ea476-0907-4726-beb5-1b6f63f773dc")
 	)
 	(text "WindSensor is on separate \nI2C bus 1 for security \nin case water shorts it"
 		(exclude_from_sim no)
@@ -15034,6 +15097,17 @@
 			(justify right)
 		)
 		(uuid "c5f413ba-2cf2-4774-b1da-45cd2635650f")
+	)
+	(text "swap LORA_SEL on pin 3 with GPS_PPS\non pin 24 so that we can use SPI1 \nCS hardware to select LORA"
+		(exclude_from_sim no)
+		(at 133.604 103.378 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+		)
+		(uuid "c897856c-607f-4ae6-bbe0-53fd21e89c26")
 	)
 	(text "4-wire: 2 green are button,\nred/black are red LED"
 		(exclude_from_sim no)
@@ -36488,12 +36562,12 @@
 		(uuid "92cdf73d-2717-4f0d-a860-9a0ae4778833")
 	)
 	(label "PI7"
-		(at 95.25 106.68 0)
+		(at 95.25 106.68 180)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left bottom)
+			(justify right bottom)
 		)
 		(uuid "92d615f1-57a1-47fc-8baa-6eec8bdc4238")
 	)
@@ -41621,7 +41695,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Argo footprint Library:orange_pi_zero_2w_butted"
+		(property "Footprint" "orangepi-zero:orange_pi_zero_2w"
 			(at 100.33 100.33 0)
 			(effects
 				(font

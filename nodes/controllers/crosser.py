@@ -960,6 +960,9 @@ class CrosserController(BaseController):
             log_parts.append(f"Mode: {mode_desc}")
             if state.compass_heading is not None:
                 heading_info = f"heading: current={state.compass_heading:.1f}°, target={target_bearing:.1f}°"
+                if state.gps_sog is not None:
+                    speed_ms = state.gps_sog * 0.514444
+                    heading_info += f", speed={speed_ms:.2f}m/s"
                 log_parts.append(f"Heading: {heading_info}")
             if state.compass_heading is not None:
                 rudder_reason = f"rudder={cmd_rudder:+.3f}"
@@ -977,7 +980,12 @@ class CrosserController(BaseController):
                 log_parts.append(f"Rudder: 0.000 (no heading data)")
             log_parts.append(f"Sail: {cmd_sail:+.3f} ({sail_reason})")
             if distance_to_middle is not None:
-                log_parts.append(f"Distance to middle: {distance_to_middle:.1f}m")
+                if state.distance_to_boundary is not None:
+                    log_parts.append(
+                        f"Distance to middle: {distance_to_middle:.1f}m | Distance to boundary: {abs(state.distance_to_boundary):.1f}m"
+                    )
+                else:
+                    log_parts.append(f"Distance to middle: {distance_to_middle:.1f}m")
             log_message = "\n  ".join(log_parts)
             self.log_entry(log_message, level="INFO")
             self._last_captains_log_time = current_time
