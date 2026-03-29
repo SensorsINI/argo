@@ -147,7 +147,7 @@ show_summary() {
     echo "  • WiFi reconnection script: $NETWORK_DIR/scripts/wifi_reconnect.sh (runs from repo)"
     echo "  • NetworkManager config: /etc/NetworkManager/conf.d/argo_wifi_scan.conf"
     echo "  • Systemd service: argo_wifi_reconnect.service"
-    echo "  • Systemd timer: argo_wifi_reconnect.timer (runs every 5 minutes)"
+    echo "  • Systemd timer: argo_wifi_reconnect.timer (runs every 1 minute)"
     echo "  • Log file: /var/log.hdd/persistent/wifi-reconnect.log"
     echo
     echo "Network priorities:"

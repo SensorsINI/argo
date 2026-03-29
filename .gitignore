@@ -51,10 +51,10 @@ nodes/ain3_decay_20250905_103931.png
 # IMU calibration backups
 nodes/imu_calib_backups/
 
-# ROS2 build outputs
-build/
-install/
-log/
+# ROS2 build outputs (root only — bare install/ would ignore network/install/, etc.)
+/build/
+/install/
+/log/
 .idea/argo.iml
 .idea/GitLink.xml
 .idea/misc.xml
