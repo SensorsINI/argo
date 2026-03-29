@@ -2,6 +2,7 @@
 
 An autonomous sailboat system based on Dragonforce 65 hull, running on Orange Pi Zero 2W with ROS2. The system includes comprehensive sensor integration, autonomous navigation, and safety monitoring.
 
+<video><source src='https://drive.google.com/file/d/1qHtv56j81Q1ovCAY2RQFi9-3CZbyDH24/view?usp=sharing'></video>
 ## News
 - **Mar 2026:** Version 4 of argo PCB with bug fixes, wind sensor on separate I2C bus, and new buzzer. Version 3 of the wind sensor PCB with RGBW LED controller. See [Argo2: Robot Sailboat](https://docs.google.com/presentation/d/15X9GgjOmHowyNMNPRnduzyOgwyVcawP_Lhy54-Hc9cc/edit?usp=sharing) slides presented online at [Embodied Intelligence Conference](https://ei26.embodied-intelligence.org/) 20 March 2026.
 - **Feb 2026:** Updated [wind sensor design PCB and housing](pcb/WindSensor/WindSensor-rev1/) complete. 3D parts for wind sensor I2C cable and mast step up completed and printed.
