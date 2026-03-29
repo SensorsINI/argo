@@ -1,3 +1,0 @@
-(fp_lib_table
-  (lib (name WindSensor)(type KiCad)(uri ${KIPRJMOD}/WindSensor.pretty)(options "")(descr ""))
-)
