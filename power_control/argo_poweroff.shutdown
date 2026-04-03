@@ -13,6 +13,8 @@
 #   systemd runs scripts here with a single argument indicating mode:
 #   { poweroff | reboot | halt | kexec }. We only run power-off sequence
 #   for poweroff and halt modes, not for reboot or kexec.
+#   A short GPIO buzzer pulse runs at the start for every mode (including reboot)
+#   so shutdown is audible before any mode-specific path exits.
 #
 # Notes:
 #   - Minimal dependencies: do not rely on any systemd services.
@@ -20,15 +22,21 @@
 #   - Keep the pulse short; external circuit should cut power quickly.
 #   - Exit 0 regardless, to never block shutdown.
 # 
-# The hook is working correctly in rev3 board.
+# The hook is working correctly in rev4 argo PCB board.
 
 
 set -euo pipefail
 
 MODE="${1:-}"
 MODE_LC="$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')"
+# Duration (seconds) for the buzzer at the start of every shutdown/reboot.
+START_BUZZ_SEC=0.2
 
-# Persistent log file for shutdown hook
+# Persistent log file for shutdown hook.
+# During a real poweroff/reboot this directory is often already remounted
+# read-only before systemd runs system-shutdown scripts, so no file may appear
+# here. Console, /dev/kmsg, and logger (below) are the reliable trails; for a
+# prior boot try: journalctl -b -1 | grep argo_poweroff
 PERSIST_DIR="/var/log.hdd/persistent"
 PERSIST_LOG="$PERSIST_DIR/shutdown-hook-$(date +%Y%m%d-%H%M%S).log"
 
@@ -43,14 +51,60 @@ c_echo() {
     echo "$msg" > /dev/console 2>/dev/null || true
     # Also log to kernel message buffer for dmesg visibility
     echo "$msg" > /dev/kmsg 2>/dev/null || true
-    # Try to log to persistent storage (may fail if filesystem is read-only)
-    if [ -d "$PERSIST_DIR" ] && [ -w "$PERSIST_DIR" ]; then
+    # journald may still accept messages early in shutdown (best-effort).
+    command -v logger >/dev/null 2>&1 && logger -t argo_poweroff --priority daemon.notice -- "$msg" 2>/dev/null || true
+    # Persistent append: often fails silently when $PERSIST_DIR is read-only (do not use -w; it skips all writes).
+    if [ -d "$PERSIST_DIR" ]; then
         echo "$msg" >> "$PERSIST_LOG" 2>/dev/null || {
-            # If write fails, try to create directory and log again
             mkdir -p "$PERSIST_DIR" 2>/dev/null && echo "$msg" >> "$PERSIST_LOG" 2>/dev/null || true
         }
     fi
     sleep .1
+}
+
+# Short buzzer on GPIO 258 (PI2), active HIGH. Best-effort; never fails shutdown.
+# Optional duration in seconds (default 0.2).
+buzzer_pulse() {
+    local dur="${1:-0.2}"
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+    export _ARGO_BUZZ_SEC="$dur"
+    python3 <<'PY' || true
+import os
+import sys
+import time
+
+try:
+    import gpiod
+except Exception:
+    sys.exit(0)
+
+sec = float(os.environ.get("_ARGO_BUZZ_SEC", "0.2"))
+chip = None
+line = None
+try:
+    chip = gpiod.Chip("/dev/gpiochip0")
+    line = chip.get_line(258)  # PI2 buzzer line (active HIGH)
+    line.request(consumer="argo_poweroff_buzzer", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+    line.set_value(1)
+    time.sleep(sec)
+    line.set_value(0)
+except Exception:
+    pass
+finally:
+    try:
+        if line is not None:
+            line.release()
+    except Exception:
+        pass
+    try:
+        if chip is not None:
+            chip.close()
+    except Exception:
+        pass
+PY
+    unset _ARGO_BUZZ_SEC
 }
 
 # Announce invocation
@@ -63,6 +117,11 @@ if [ -z "${MODE}" ]; then
     sleep 2
     exit 0
 fi
+
+# Audible cue for any shutdown type (reboot, poweroff, halt, kexec) before mode branches.
+c_echo "Startup buzzer pulse (${MODE_LC}), GPIO 258 for ${START_BUZZ_SEC}s"
+buzzer_pulse "$START_BUZZ_SEC"
+
 # Check for critical battery flag first
 CRITICAL_BATTERY_FLAG="/tmp/argo_critical_battery"
 if [ -f "$CRITICAL_BATTERY_FLAG" ]; then
@@ -120,44 +179,7 @@ c_echo "╚═══════════════════════
 # Best-effort buzzer cue before final power cut.
 # argo_power_control should have already released GPIO 258 (PI2) by shutdown phase.
 c_echo "Best-effort buzzer pulse on GPIO 258 (PI2) for 0.5s before final power cut"
-if command -v python3 >/dev/null 2>&1; then
-python3 - <<'PY'
-import time
-import sys
-
-try:
-    import gpiod
-except Exception:
-    # Graceful no-op: buzzer pulse is optional.
-    sys.exit(0)
-
-chip = None
-line = None
-try:
-    chip = gpiod.Chip("/dev/gpiochip0")
-    line = chip.get_line(258)  # PI2 buzzer line (active HIGH)
-    line.request(consumer="argo_poweroff_buzzer", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-    line.set_value(1)
-    time.sleep(0.5)
-    line.set_value(0)
-except Exception:
-    # Graceful no-op if line is unavailable or cannot be acquired.
-    pass
-finally:
-    try:
-        if line is not None:
-            line.release()
-    except Exception:
-        pass
-    try:
-        if chip is not None:
-            chip.close()
-    except Exception:
-        pass
-PY
-else
-    c_echo "python3 not available for buzzer pulse; continuing shutdown"
-fi
+buzzer_pulse 0.5
 
 if command -v python3 >/dev/null 2>&1; then
     c_echo "Using python3 method to assert GPIO 259 HIGH for 0.5s"
