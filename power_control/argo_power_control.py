@@ -2120,6 +2120,15 @@ class PowerController(ArgoBaseNode):
         """SOS LED pattern for low battery warning - Red LED blinks SOS in Morse code"""
         self.get_logger().info("Starting SOS LED pattern for low battery warning")
         self.sos_led_active = True
+        # Clear green from last heartbeat slot (otherwise SOS mixes with green on the button)
+        self.set_green_led(False)
+        self.set_blue_led(False)
+        # Mast mirrors /argo/power_button/pattern only once per heartbeat cycle; while paused, publish SOS + RGB
+        try:
+            self._publish_led_pattern("..........")
+        except Exception:
+            pass
+        self._publish_power_button_rgb(0.0, 0.0, 0.0)
 
         # SOS in Morse code: ... --- ... (short-short-short, long-long-long, short-short-short)
         # Base timing: short = 0.2s, long = 0.6s, pause between letters = 0.6s, pause between SOS = 1.8s
@@ -2161,6 +2170,7 @@ class PowerController(ArgoBaseNode):
 
                     # Set red LED state for SOS warning
                     self.set_red_led(led_state)
+                    self._publish_power_button_rgb(1.0 if led_state else 0.0, 0.0, 0.0)
 
                     # Sleep in small increments for responsive shutdown
                     sleep_time = 0
@@ -2174,6 +2184,7 @@ class PowerController(ArgoBaseNode):
 
         # Turn off red LED when done
         self.set_red_led(False)
+        self._publish_power_button_rgb(0.0, 0.0, 0.0)
         self.sos_led_active = False
         self.get_logger().info("SOS LED pattern completed")
 
@@ -2181,6 +2192,13 @@ class PowerController(ArgoBaseNode):
         """SOS LED pattern for I2C failure warning - Red LED blinks SOS in Morse code"""
         self.get_logger().info("Starting SOS LED pattern for I2C failure warning")
         self.i2c_failure_sos_active = True
+        self.set_green_led(False)
+        self.set_blue_led(False)
+        try:
+            self._publish_led_pattern("..........")
+        except Exception:
+            pass
+        self._publish_power_button_rgb(0.0, 0.0, 0.0)
 
         # SOS in Morse code: ... --- ... (short-short-short, long-long-long, short-short-short)
         # Base timing: short = 0.2s, long = 0.6s, pause between letters = 0.6s, pause between SOS = 1.8s
@@ -2222,6 +2240,7 @@ class PowerController(ArgoBaseNode):
 
                     # Set red LED state for SOS warning
                     self.set_red_led(led_state)
+                    self._publish_power_button_rgb(1.0 if led_state else 0.0, 0.0, 0.0)
 
                     # Sleep in small increments for responsive shutdown
                     sleep_time = 0
@@ -2235,6 +2254,7 @@ class PowerController(ArgoBaseNode):
 
         # Turn off red LED when done
         self.set_red_led(False)
+        self._publish_power_button_rgb(0.0, 0.0, 0.0)
         self.i2c_failure_sos_active = False
         self.get_logger().info("I2C failure SOS LED pattern completed")
 
@@ -3175,6 +3195,8 @@ class PowerController(ArgoBaseNode):
             # Format: JSON string with category, pattern, cycle_duration, slot_duration
             self.power_button_pattern_publisher = self.create_publisher(
                 String, '/argo/power_button/pattern', 10)
+            self.power_button_rgb_publisher = self.create_publisher(
+                Vector3, '/argo/power_button/rgb', 10)
 
             # Create subscription to controller pause state
             self.controller_pause_sub = self.create_subscription(
@@ -3215,7 +3237,8 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("  - /argo/power/toggle_argo")
             self.get_logger().info("  - /argo/power/status (topic)")
             self.get_logger().info("  - /argo/power/button_events (topic)")
-            self.get_logger().info("  - /argo/power_button/rgb (topic - for mast head LED mirroring)")
+            self.get_logger().info("  - /argo/power_button/pattern (mast slot patterns)")
+            self.get_logger().info("  - /argo/power_button/rgb (mast mirrors SOS / instant RGB)")
             self.get_logger().info("  - /controller_pause_state (subscription)")
             self.get_logger().info("  - /ac_power_present (subscription - for fast charge state updates)")
             self.get_logger().info("  - /argo/critical/i2c_failure (subscription - for critical I2C failure detection)")
@@ -3323,6 +3346,8 @@ class PowerController(ArgoBaseNode):
             if self.heartbeat_paused:
                 if self.sos_led_active:
                     category = "sos"
+                elif self.i2c_failure_sos_active:
+                    category = "sos"
                 elif self.charge_state_led_active:
                     category = "charging"
                 elif self.shutdown_initiated:
@@ -3347,6 +3372,18 @@ class PowerController(ArgoBaseNode):
             self.power_button_pattern_publisher.publish(msg)
         except Exception as e:
             self.get_logger().debug(f"Failed to publish LED pattern: {e}")
+
+    def _publish_power_button_rgb(self, r: float, g: float, b: float):
+        """Instant RGB for mast mirroring (required when heartbeat is paused — no slot pattern published)."""
+        pub = getattr(self, 'power_button_rgb_publisher', None)
+        if not pub:
+            return
+        try:
+            from geometry_msgs.msg import Vector3 as Vector3Msg
+            msg = Vector3Msg(x=float(r), y=float(g), z=float(b))
+            pub.publish(msg)
+        except Exception as e:
+            self.get_logger().debug(f"Failed to publish RGB mirror: {e}")
 
     def _controller_pause_state_callback(self, msg):
         """Receive controller pause state updates from topic"""
