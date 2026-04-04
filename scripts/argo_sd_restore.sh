@@ -255,15 +255,29 @@ elif [[ "$BACKUP_FILE" == *.7z ]]; then
         if [[ "$BACKUP_FILE" == *":"* ]]; then
             REMOTE_HOST=$(echo "$BACKUP_FILE" | cut -d: -f1)
             REMOTE_PATH=$(echo "$BACKUP_FILE" | cut -d: -f2)
-            REMOTE_SIZE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "7z l '$REMOTE_PATH'" | awk '/^-----------/ {getline; print $3; exit}')
+            # Use -slt (structured output) to reliably extract uncompressed Size in bytes.
+            REMOTE_SIZE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "7z l -slt '$REMOTE_PATH'" \
+                | awk -F' = ' '/^Size = / {print $2; exit}')
             COMPRESSED_SIZE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" "stat -c%s '$REMOTE_PATH'")
         else
-            REMOTE_SIZE=$(7z l "$BACKUP_FILE" | awk '/^-----------/ {getline; print $3; exit}')
+            REMOTE_SIZE=$(7z l -slt "$BACKUP_FILE" | awk -F' = ' '/^Size = / {print $2; exit}')
             COMPRESSED_SIZE=$(stat -c%s "$BACKUP_FILE")
         fi
-        UNCOMPRESSED_SIZE_BYTES=$REMOTE_SIZE
+        # Prefer exact raw image size if we have it from metadata/filename.
+        if [[ "$SOURCE_SIZE_BYTES" =~ ^[0-9]+$ ]]; then
+            UNCOMPRESSED_SIZE_BYTES=$SOURCE_SIZE_BYTES
+        else
+            UNCOMPRESSED_SIZE_BYTES=$REMOTE_SIZE
+        fi
         COMPRESSED_SIZE_BYTES=$COMPRESSED_SIZE
-        REQUIRED_TEMP_BYTES=$((REMOTE_SIZE + COMPRESSED_SIZE + (1024*1024*1024)))
+        # Sanitize for arithmetic (7z output can be empty on some failures).
+        if ! [[ "$UNCOMPRESSED_SIZE_BYTES" =~ ^[0-9]+$ ]]; then
+            UNCOMPRESSED_SIZE_BYTES=0
+        fi
+        if ! [[ "$COMPRESSED_SIZE" =~ ^[0-9]+$ ]]; then
+            COMPRESSED_SIZE=0
+        fi
+        REQUIRED_TEMP_BYTES=$((UNCOMPRESSED_SIZE_BYTES + COMPRESSED_SIZE + (1024*1024*1024)))
         TMP_FREE_BYTES=$(df -P /tmp | awk 'NR==2 {print $4}')
         TMP_FREE_BYTES=$((TMP_FREE_BYTES * 1024))
         if [ "$TMP_FREE_BYTES" -lt "$REQUIRED_TEMP_BYTES" ]; then
