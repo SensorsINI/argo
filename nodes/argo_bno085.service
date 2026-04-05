@@ -1,6 +1,6 @@
 [Unit]
 Description=Argo BNO085 IMU Driver Service
-Documentation=file://%h/argo/nodes/README_BNO085.md
+Documentation=file://%h/argo/docs/README-imu-bno085.md
 After=network.target
 Before=argo_launch_standard.service
 # REMOVED: DefaultDependencies=no and Before=shutdown.target

@@ -156,7 +156,7 @@ The Waveshare module should be configured with:
 - **Mode**: Stream (1)
 - **Encryption**: Disabled (KEY=0)
 
-**See `../nodes/README-LORA-TO-WAVESHARE.md` for AT command configuration details and critical Waveshare packet format requirements.**
+**See [`../docs/README-lora-to-shore.md`](../docs/README-lora-to-shore.md) for link parameters, Waveshare AT usage, and packet format.**
 
 ### Serial Port Setup
 
@@ -445,7 +445,7 @@ groups | grep dialout
 
 ## References
 
+- [LoRa hardware & link parameters](../docs/README-lora-to-shore.md) (SX1276 ↔ Waveshare)
 - [Argo LoRa Communication Documentation](../.cursor/rules/argo-lora-communication.mdc)
-- [Waveshare Compatibility Guide](../nodes/README-LORA-TO-WAVESHARE.md)
 - [Argo Main LoRa Node](../nodes/lora.py)
 

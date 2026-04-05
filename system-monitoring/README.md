@@ -267,6 +267,6 @@ system-monitoring/
 
 - [Persistent Logging](../docs/README-persistent-logging.md)
 - [Argo Lifecycle Management](../README.md#node-lifecycle-management)
-- [Thermal Monitor Installation](../launch/README-thermal-monitor.md)
+- [Thermal monitoring (SBC)](../docs/README-thermal-monitoring.md)
 - [Network Improvements](../network/README.md)
 - [Power Control System](../power_control/README.md)

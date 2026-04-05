@@ -151,6 +151,9 @@ The Argo system follows a modular ROS2 architecture with clear separation of con
 
 ### Hardware & Configuration
 - [**I2C Configuration**](docs/README-i2c.md) - I2C bus setup and troubleshooting
+- [**LoRa (onboard ↔ shore)**](docs/README-lora-to-shore.md) - SX1276 / Waveshare hardware, link parameters, packet header
+- [**IMU BNO085**](docs/README-imu-bno085.md) - C++ driver, Python bridge, calibration, `argo_bno085` service
+- [**Thermal monitoring (SBC)**](docs/README-thermal-monitoring.md) - Orange Pi GPU/CPU/DDR temperature logging (`argo_thermal_monitor`)
 - [**Watchdog Configuration**](docs/README-watchdog.md) - Watchdog setup for Orange Pi Zero 2W
 - [**CPU Frequency Tuning**](docs/README-cpufreq-tuning-service.md) - CPU governor configuration
 - [**Battery & Power Monitoring**](docs/README-battery-power.md) - Battery monitoring system

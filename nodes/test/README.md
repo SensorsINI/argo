@@ -147,5 +147,5 @@ python3 test_lora_spi.py regs
 
 - `../lora.py` - Main LoRa ROS2 node
 - `../.cursor/rules/argo-lora-communication.mdc` - Full LoRa system documentation
-- `../README-LORA-TO-WAVESHARE.md` - Waveshare compatibility notes
+- [`../../docs/README-lora-to-shore.md`](../../docs/README-lora-to-shore.md) - LoRa hardware, link parameters, Waveshare AT notes
 

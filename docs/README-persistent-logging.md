@@ -861,7 +861,7 @@ The Argo lifecycle manager (`launch/argo_lifecycle_manager.py`) integrates with 
 ## Related Documentation
 
 - [Argo Lifecycle Management](README.md#node-lifecycle-management)
-- [Thermal Monitor Installation](launch/README-thermal-monitor.md)
+- [Thermal monitoring (SBC)](README-thermal-monitoring.md)
 - [Network Improvements](network/README.md)
 - [Power Control System](power_control/README.md)
 - [Battery Monitoring](scripts/README-plot-battery-water.md)
