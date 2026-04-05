@@ -129,8 +129,10 @@ main() {
     CURRENT_CONNECTION=$(get_current_connection)
     
     if [ -z "$CURRENT_CONNECTION" ]; then
-        log_message "No active WiFi connection found"
-        return 1
+        # Exit 0 so systemd does not mark the oneshot failed; NM may still be
+        # associating right after boot. The timer will run again shortly.
+        log_message "No active WiFi connection yet; skipping (will retry on next timer run)"
+        return 0
     fi
     
     log_message "Current connection: $CURRENT_CONNECTION"

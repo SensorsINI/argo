@@ -66,9 +66,9 @@ install_networkmanager_config() {
 setup_systemd_service() {
     log "Setting up systemd service and timer for WiFi reconnection..."
     
-    # Configure service file with correct paths
+    # Map template repo path to this checkout. Do not substitute /home/orangepi with $HOME:
+    # under sudo, HOME is /root and would rewrite .../home/orangepi/argo... into /root/argo.
     sed -e "s#/home/orangepi/argo#$ARGO_ROOT#g" \
-        -e "s#/home/orangepi#$HOME#g" \
         "$NETWORK_DIR/config/argo_wifi_reconnect.service" > /tmp/argo_wifi_reconnect.service
     
     # Copy configured service and timer files
@@ -147,7 +147,7 @@ show_summary() {
     echo "  • WiFi reconnection script: $NETWORK_DIR/scripts/wifi_reconnect.sh (runs from repo)"
     echo "  • NetworkManager config: /etc/NetworkManager/conf.d/argo_wifi_scan.conf"
     echo "  • Systemd service: argo_wifi_reconnect.service"
-    echo "  • Systemd timer: argo_wifi_reconnect.timer (runs every 5 minutes)"
+    echo "  • Systemd timer: argo_wifi_reconnect.timer (runs every 1 minute)"
     echo "  • Log file: /var/log.hdd/persistent/wifi-reconnect.log"
     echo
     echo "Network priorities:"
