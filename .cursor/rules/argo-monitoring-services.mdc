@@ -26,7 +26,7 @@ This rule documents the various monitoring services in the Argo system for refer
 ### Files
 - **[launch/thermal-monitor.sh](mdc:launch/thermal-monitor.sh)** - Shell script that logs thermal data
 - **[launch/thermal-monitor.service](mdc:launch/thermal-monitor.service)** - Systemd service configuration
-- **[launch/README-thermal-monitor.md](mdc:launch/README-thermal-monitor.md)** - Installation and usage documentation
+- **[docs/README-thermal-monitoring.md](mdc:docs/README-thermal-monitoring.md)** - Installation and usage documentation (see also [launch/README-thermal-monitor.md](mdc:launch/README-thermal-monitor.md) stub)
 
 ### Purpose
 Monitors Orange Pi Zero 2W thermal zones and logs temperatures every 30 seconds to persistent storage.
