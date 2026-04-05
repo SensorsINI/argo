@@ -1,6 +1,0 @@
-(sym_lib_table
-  (version 7)
-  (lib (name "myLib")(type "Legacy")(uri "/Users/foreverandy/Documents/WindSensor/myLib.lib")(options "")(descr ""))
-  (lib (name "NewLib")(type "Legacy")(uri "/Users/foreverandy/Documents/WindSensor/NewLib.lib")(options "")(descr ""))
-  (lib (name "WindSensor-rescue")(type "Legacy")(uri "${KIPRJMOD}/WindSensor-rescue.lib")(options "")(descr ""))
-)
