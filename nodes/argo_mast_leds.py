@@ -56,6 +56,7 @@ from typing import Optional
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.logging import LoggingSeverity
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import Float32, Float32MultiArray, String
 from geometry_msgs.msg import Vector3
 
@@ -118,10 +119,25 @@ TOPIC_POWER_BUTTON_RGB = '/argo/power_button/rgb'  # Legacy - kept for backward 
 TOPIC_POWER_BUTTON_PATTERN = '/argo/power_button/pattern'  # New pattern-based topic
 
 # I2C Error Recovery
-I2C_RETRY_DELAY_S = 1.0  # Delay between I2C retry attempts in seconds (initial retries)
+I2C_RETRY_DELAY_S = 5.0  # Fast retry interval (startup + runtime) for the first window below
+I2C_RECOVERY_FAST_WINDOW_S = 900.0  # 15 min at 5s cadence; then switch to 1 min retries
 I2C_ERROR_LOG_THROTTLE_S = 5.0  # Maximum I2C error logging frequency in seconds
-I2C_MAX_INITIAL_RETRIES = 3  # Maximum retries during initial startup before entering low-CPU mode
-I2C_LOW_CPU_CHECK_INTERVAL_S = 60.0  # Interval for checking device availability in low-CPU mode (60 seconds)
+I2C_LOW_CPU_CHECK_INTERVAL_S = 60.0  # Slow retry interval after I2C_RECOVERY_FAST_WINDOW_S
+
+# Throttled INFO logging of mast display mode (aligned with power_control pattern logging)
+PATTERN_LOG_INTERVAL_S = 60.0  # Repeat same pattern at most once per minute
+SOS_MIRROR_LOG_INTERVAL_S = 20.0  # SOS RGB mirror: busier signal — ~3 logs/min when unchanged
+
+# Only keep the latest power-button mirror message — avoids processing a backlog of identical
+# pattern cycles after I2C recovery (each would restart slot playback and produce mixed output).
+QOS_POWER_BUTTON_MIRROR = QoSProfile(
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+)
+
+# Optional: INFO-log each *distinct* PCA9632 PWM frame sent via _update_hardware (enable for bring-up).
+TRACE_I2C_LED_PWM_OUTPUT = False
 
 
 def resolve_twi2_linux_bus(default_bus: int = TWI2_DEFAULT_LINUX_BUS) -> int:
@@ -166,15 +182,25 @@ class MastLEDsNode(ArgoBaseNode):
         self._pattern_off_period = 0.27
         self._pattern_thread = None
         self._pattern_stop_event = None
+        # True: power button sends /argo/power_button/rgb during SOS (pattern not published while heartbeat paused)
+        self._sos_rgb_mirror_mode = False
+        self._connection_lost_since_ready = False
+        self._led_self_test_in_progress = False  # blocks _update_hardware during startup/recovery test
+        self._last_logged_mast_semantic_key = None  # category + pattern (or sos); not idle/playback mode
+        self._last_mast_pattern_log_time = 0.0
+        self._trace_last_pwm_frame = None  # last (R,G,B,W) hw tuple logged when TRACE_I2C_LED_PWM_OUTPUT
 
         # I2C bus and device state
         self.i2c_bus = resolve_twi2_linux_bus()
         self.bus = None
         self.device_ready = False
         self.device_unavailable = False  # True when device is permanently unavailable (low-CPU mode)
+        self.retry_timer = None
+        self._led_recovery_started = 0.0  # time.time(); 0 = not in phased recovery
+        self._led_recovery_fast_phase = False  # True while using I2C_RETRY_DELAY_S (first 15 min of recovery)
         self._last_i2c_error_log_time = 0.0
         self._consecutive_i2c_errors = 0
-        self._initial_retry_count = 0  # Count of initial retry attempts
+        self._initial_retry_count = 0  # Diagnostic: I2C init attempts while waiting for hardware
 
         # Initialize I2C bus and device
         if self._initialize_i2c():
@@ -341,24 +367,71 @@ class MastLEDsNode(ArgoBaseNode):
                 f"I2C error: {error_msg} (Total consecutive errors: {self._consecutive_i2c_errors})")
             self._last_i2c_error_log_time = current_time
 
-        # Mark as unhealthy after first error
+        # Mark as unhealthy after first error; schedule recovery (same bus as anem — replug needs re-init)
         if self.device_ready:
             self.device_ready = False
+            self._connection_lost_since_ready = True
             self.set_unhealthy("I2C communication error")
+            self.device_unavailable = False
+            self._led_recovery_started = time.time()
+            self._led_recovery_fast_phase = True
+            self._ensure_retry_timer(
+                I2C_RETRY_DELAY_S,
+                f"LED controller lost I2C; retry every {I2C_RETRY_DELAY_S:.0f}s for "
+                f"{I2C_RECOVERY_FAST_WINDOW_S / 60:.0f} min, then every {I2C_LOW_CPU_CHECK_INTERVAL_S:.0f}s "
+                "(mast replug recovery)",
+            )
+
+    def _ensure_retry_timer(self, period_s: float, log_message: Optional[str] = None):
+        """Cancel any existing retry timer and start a new one at period_s."""
+        if self.retry_timer is not None:
+            self.retry_timer.cancel()
+            self.retry_timer = None
+        self.retry_timer = self.create_timer(period_s, self._retry_initialization)
+        if log_message:
+            self.get_logger().info(log_message)
 
     def _start_retry_timer(self):
-        """Start timer to periodically retry device initialization."""
-        if not hasattr(self, 'retry_timer') or self.retry_timer is None:
-            self.get_logger().info("Starting device initialization retry timer (1 Hz)")
-            self.retry_timer = self.create_timer(I2C_RETRY_DELAY_S, self._retry_initialization)
+        """Start timer: 5s for first 15m of failure, then _maybe_transition switches to 60s."""
+        self._led_recovery_started = time.time()
+        self._led_recovery_fast_phase = True
+        self._ensure_retry_timer(
+            I2C_RETRY_DELAY_S,
+            f"LED controller init retry: every {I2C_RETRY_DELAY_S:.0f}s for "
+            f"{I2C_RECOVERY_FAST_WINDOW_S / 60:.0f} min, then every {I2C_LOW_CPU_CHECK_INTERVAL_S:.0f}s",
+        )
+
+    def _maybe_transition_recovery_to_slow_interval(self):
+        """After I2C_RECOVERY_FAST_WINDOW_S wall time, switch retry timer from 5s to 60s and mark long-term missing."""
+        if self.device_unavailable or not self._led_recovery_fast_phase:
+            return
+        if self._led_recovery_started <= 0:
+            return
+        if time.time() - self._led_recovery_started < I2C_RECOVERY_FAST_WINDOW_S:
+            return
+        self._led_recovery_fast_phase = False
+        self._ensure_retry_timer(
+            I2C_LOW_CPU_CHECK_INTERVAL_S,
+            f"LED controller recovery: switching to {I2C_LOW_CPU_CHECK_INTERVAL_S:.0f}s interval after "
+            f"{I2C_RECOVERY_FAST_WINDOW_S / 60:.0f} min",
+        )
+        self._mark_led_controller_long_term_missing()
+
+    def _clear_led_recovery_state(self):
+        self._led_recovery_started = 0.0
+        self._led_recovery_fast_phase = False
 
     def _retry_initialization(self):
         """Callback for retry timer - attempts to reinitialize device."""
         if self.device_ready:
-            if self.retry_timer:
+            if self.retry_timer is not None:
                 self.retry_timer.cancel()
+                self.retry_timer = None
             self.device_unavailable = False  # Clear unavailable flag if device is ready
+            self._clear_led_recovery_state()
             return
+
+        self._maybe_transition_recovery_to_slow_interval()
 
         # If device is marked as unavailable, use low-CPU check interval
         if self.device_unavailable:
@@ -383,42 +456,44 @@ class MastLEDsNode(ArgoBaseNode):
                     self.device_ready = True
                     self.device_unavailable = False
                     self.set_healthy("LED controller reinitialized successfully")
-                    if self.retry_timer:
+                    if self.retry_timer is not None:
                         self.retry_timer.cancel()
+                        self.retry_timer = None
                     self._consecutive_i2c_errors = 0
                     self._initial_retry_count = 0
+                    self._clear_led_recovery_state()
+                    self._after_reconnection_led_test()
+                    self._update_hardware()
         else:
             # Bus exists, just retry device init
             if self._initialize_device():
                 self.device_ready = True
                 self.device_unavailable = False
                 self.set_healthy("LED controller reinitialized successfully")
-                if self.retry_timer:
+                if self.retry_timer is not None:
                     self.retry_timer.cancel()
+                    self.retry_timer = None
                 self._consecutive_i2c_errors = 0
                 self._initial_retry_count = 0
-            else:
-                # Device init failed - check if we should enter low-CPU mode
-                # Only enter unavailable mode if I2C bus is available but device not found
-                # (I2C bus unavailable is a system config issue, not missing hardware)
-                if not self.device_unavailable and self._initial_retry_count >= I2C_MAX_INITIAL_RETRIES:
-                    self._enter_device_unavailable_mode()
+                self._clear_led_recovery_state()
+                self._after_reconnection_led_test()
+                self._update_hardware()
 
-    def _enter_device_unavailable_mode(self):
-        """Enter low-CPU mode when device is permanently unavailable (missing hardware)."""
+    def _mark_led_controller_long_term_missing(self):
+        """After fast retry window expires with no PCA9632: health + log (timer already set to slow interval)."""
+        if self.device_unavailable:
+            return
         self.device_unavailable = True
         self.device_ready = False
-        self.set_unhealthy(f"PCA9632 LED controller not found at I2C address 0x{PCA9632_I2C_ADDRESS:02x} - using wind sensor without LED controller")
+        self.set_unhealthy(
+            f"PCA9632 LED controller not found at I2C address 0x{PCA9632_I2C_ADDRESS:02x} "
+            f"after {I2C_RECOVERY_FAST_WINDOW_S / 60:.0f} min — using wind sensor without LED controller"
+        )
         self.get_logger().error(
-            f"PCA9632 LED controller not found at I2C address 0x{PCA9632_I2C_ADDRESS:02x}. "
-            "Node will continue running in low-CPU mode, ignoring LED control subscriptions. "
-            "Hardware will be checked periodically for device appearance.")
-        
-        # Switch retry timer to low-CPU interval if it exists
-        if hasattr(self, 'retry_timer') and self.retry_timer:
-            self.retry_timer.cancel()
-            # Start low-CPU periodic check timer (60s interval)
-            self.retry_timer = self.create_timer(I2C_LOW_CPU_CHECK_INTERVAL_S, self._retry_initialization)
+            f"PCA9632 LED controller not found at I2C address 0x{PCA9632_I2C_ADDRESS:02x} "
+            f"after {I2C_RECOVERY_FAST_WINDOW_S / 60:.0f} min of retries. "
+            "Continuing with slow I2C checks; hardware may still appear after mast replug."
+        )
 
     def read_device_status(self) -> Optional[dict]:
         """Read MODE1 and LEDOUT to diagnose device status.
@@ -559,6 +634,9 @@ class MastLEDsNode(ArgoBaseNode):
     def _startup_test_sequence(self):
         """Perform startup test sequence to verify all LEDs are working.
         
+        Sets _led_self_test_in_progress so /argo/power_button pattern/RGB threads cannot
+        call _update_hardware and overwrite direct I2C register writes (needed on I2C recovery).
+        
         Sequence:
         1. All LEDs at maximum brightness for 1 second
         2. Red LED only for 1 second
@@ -569,7 +647,8 @@ class MastLEDsNode(ArgoBaseNode):
         """
         if not self.device_ready or not self.bus:
             return
-        
+
+        self._led_self_test_in_progress = True
         try:
             self.get_logger().info("Starting LED test sequence...")
             
@@ -630,6 +709,101 @@ class MastLEDsNode(ArgoBaseNode):
             
         except Exception as e:
             self.get_logger().error(f"Error during startup test sequence: {e}")
+        finally:
+            self._led_self_test_in_progress = False
+
+    def _after_reconnection_led_test(self):
+        """Run the same full test sequence after I2C returns from a runtime disconnect."""
+        if not self._connection_lost_since_ready:
+            return
+        self._connection_lost_since_ready = False
+        self.get_logger().info("I2C link restored; running mast LED test sequence")
+        # Stop mirroring thread so it cannot race _write_register during the test (~6s)
+        self._stop_power_button_pattern_thread()
+        self._startup_test_sequence()
+        self._clear_power_button_mirror_state_after_recovery()
+
+    def _clear_power_button_mirror_state_after_recovery(self):
+        """Drop mirroring state and re-apply all-off so the next message starts a clean pattern."""
+        self._stop_power_button_pattern_thread()
+        self._sos_rgb_mirror_mode = False
+        self._pattern_category = None
+        self._pattern_string = None
+        self._pattern_cycle_duration = 3.0
+        self._pattern_slot_duration = 0.3
+        self._pattern_on_period = 0.03
+        self._pattern_off_period = 0.27
+        self._red_brightness = 0.0
+        self._green_brightness = 0.0
+        self._blue_brightness = 0.0
+        self._white_brightness = 0.0
+        self._last_logged_mast_semantic_key = None
+        self._last_mast_pattern_log_time = 0.0
+        self._trace_last_pwm_frame = None
+        if self.device_ready and self.bus and not self.device_unavailable:
+            self._update_hardware()
+
+    def _stop_power_button_pattern_thread(self):
+        if self._pattern_active and self._pattern_stop_event:
+            self._pattern_stop_event.set()
+            if self._pattern_thread and self._pattern_thread.is_alive():
+                self._pattern_thread.join(timeout=2.0)
+
+    def _mast_pattern_semantic_key(self) -> str:
+        """Identity of the displayed pattern only (ignore idle vs slot_playback — same pattern)."""
+        if self._sos_rgb_mirror_mode:
+            return "category=sos"
+        return f"category={self._pattern_category}|pattern={self._pattern_string!r}"
+
+    def _mast_pattern_log_key(self) -> str:
+        """Full state key for detail (includes playback mode)."""
+        if self._sos_rgb_mirror_mode:
+            return "category=sos|mode=rgb_mirror"
+        if self._pattern_active:
+            return (
+                f"category={self._pattern_category}|pattern={self._pattern_string!r}|mode=slot_playback"
+            )
+        return (
+            f"category={self._pattern_category}|pattern={self._pattern_string!r}|mode=idle"
+        )
+
+    def _explain_mast_led_pattern(self) -> str:
+        """Short human-readable description (cf. power_control _explain_led_pattern)."""
+        if self._sos_rgb_mirror_mode:
+            return (
+                "low battery / I2C SOS — mast follows /argo/power_button/rgb (Morse timing); "
+                "no slot pattern"
+            )
+        if self._pattern_active:
+            return (
+                f"slot playback: {self._pattern_cycle_duration:.1f}s cycle, "
+                f"{self._pattern_slot_duration:.2f}s slots, "
+                f"on {self._pattern_on_period:.2f}s / off {self._pattern_off_period:.2f}s "
+                f"(g=green r=red b=blue .=off)"
+            )
+        return "power-button slot playback not running (mast from /mastled_* topics or last state)"
+
+    def _log_mast_led_pattern_throttled(self) -> None:
+        """Log mast mirroring mode on semantic change or at interval (similar to argo_power_control)."""
+        semantic = self._mast_pattern_semantic_key()
+        detail_key = self._mast_pattern_log_key()
+        now = time.time()
+        semantic_changed = semantic != self._last_logged_mast_semantic_key
+        interval = SOS_MIRROR_LOG_INTERVAL_S if self._sos_rgb_mirror_mode else PATTERN_LOG_INTERVAL_S
+        due = (now - self._last_mast_pattern_log_time) >= interval
+        if not semantic_changed and not due:
+            return
+        explanation = self._explain_mast_led_pattern()
+        if semantic_changed:
+            self.get_logger().info(
+                f"Mast LED pattern changed to {semantic}: ({explanation})"
+            )
+            self._last_logged_mast_semantic_key = semantic
+        else:
+            self.get_logger().info(
+                f"Mast LED pattern {semantic} [{detail_key}]: ({explanation})"
+            )
+        self._last_mast_pattern_log_time = now
 
     def _normalize_brightness(self, value: float) -> float:
         """Clamp brightness value to valid range (0.0-1.0)."""
@@ -651,22 +825,35 @@ class MastLEDsNode(ArgoBaseNode):
             # Silently ignore hardware updates when device unavailable
             # This allows subscriptions to work without errors, but hardware is not updated
             return
+        if self._led_self_test_in_progress:
+            return
 
         try:
+            hw_r = self._brightness_to_hw(self._red_brightness)
+            hw_g = self._brightness_to_hw(self._green_brightness)
+            hw_b = self._brightness_to_hw(self._blue_brightness)
+            hw_w = self._brightness_to_hw(self._white_brightness)
+
+            frame = (hw_r, hw_g, hw_b, hw_w)
+            if TRACE_I2C_LED_PWM_OUTPUT and frame != self._trace_last_pwm_frame:
+                self._trace_last_pwm_frame = frame
+                self.get_logger().info(
+                    "[I2C trace] PCA9632 PWM bytes "
+                    f"PWM0 R={hw_r} PWM1 G={hw_g} PWM2 B={hw_b} PWM3 W={hw_w} | "
+                    f"norm R={self._red_brightness:.4f} G={self._green_brightness:.4f} "
+                    f"B={self._blue_brightness:.4f} W={self._white_brightness:.4f}"
+                )
+
             # Write all channels in quick succession for synchronization
-            self._write_register(REG_PWM0, self._brightness_to_hw(self._red_brightness))
-            self._write_register(REG_PWM1, self._brightness_to_hw(self._green_brightness))
-            self._write_register(REG_PWM2, self._brightness_to_hw(self._blue_brightness))
-            self._write_register(REG_PWM3, self._brightness_to_hw(self._white_brightness))
+            self._write_register(REG_PWM0, hw_r)
+            self._write_register(REG_PWM1, hw_g)
+            self._write_register(REG_PWM2, hw_b)
+            self._write_register(REG_PWM3, hw_w)
 
             # Reset error counter on successful write
             self._consecutive_i2c_errors = 0
 
             if self.debug_mode:
-                hw_r = self._brightness_to_hw(self._red_brightness)
-                hw_g = self._brightness_to_hw(self._green_brightness)
-                hw_b = self._brightness_to_hw(self._blue_brightness)
-                hw_w = self._brightness_to_hw(self._white_brightness)
                 self.get_logger().debug(
                     f"LED update: R={self._red_brightness:.3f} ({hw_r}) "
                     f"G={self._green_brightness:.3f} ({hw_g}) "
@@ -696,11 +883,11 @@ class MastLEDsNode(ArgoBaseNode):
 
         # Power button RGB mirroring subscription (legacy - kept for backward compatibility)
         self.sub_power_button_rgb = self.create_subscription(
-            Vector3, TOPIC_POWER_BUTTON_RGB, self._power_button_rgb_callback, 10)
+            Vector3, TOPIC_POWER_BUTTON_RGB, self._power_button_rgb_callback, QOS_POWER_BUTTON_MIRROR)
         
         # Power button pattern subscription (new pattern-based approach)
         self.sub_power_button_pattern = self.create_subscription(
-            String, TOPIC_POWER_BUTTON_PATTERN, self._power_button_pattern_callback, 10)
+            String, TOPIC_POWER_BUTTON_PATTERN, self._power_button_pattern_callback, QOS_POWER_BUTTON_MIRROR)
 
         self.get_logger().info(f'Subscribed to {TOPIC_RED}, {TOPIC_GREEN}, {TOPIC_BLUE}, {TOPIC_WHITE}, {TOPIC_RGBW}, {TOPIC_POWER_BUTTON_RGB}, {TOPIC_POWER_BUTTON_PATTERN}')
 
@@ -757,19 +944,17 @@ class MastLEDsNode(ArgoBaseNode):
         x = red, y = green, z = blue (normalized 0.0-1.0).
         White channel is not affected by power button mirroring.
         
-        Silently ignores updates if device unavailable (low-CPU mode).
+        During low-battery / I2C SOS, power_control publishes RGB here (heartbeat is paused so
+        /argo/power_button/pattern is not emitted). _sos_rgb_mirror_mode is set by pattern category sos.
         """
-        # Only process if pattern-based mirroring is not active
-        if not self._pattern_active:
-            # Update RGB channels from power button (Vector3: x=R, y=G, z=B)
-            # Update internal state even if device unavailable (allows recovery)
-            self._red_brightness = self._normalize_brightness(msg.x)
-            self._green_brightness = self._normalize_brightness(msg.y)
-            self._blue_brightness = self._normalize_brightness(msg.z)
-            # White channel is NOT affected by power button mirroring
-            # (power button only has RGB, not RGBW)
-            # Hardware update will be ignored if device unavailable
-            self._update_hardware()
+        if self._pattern_active and not self._sos_rgb_mirror_mode:
+            return
+        self._red_brightness = self._normalize_brightness(msg.x)
+        self._green_brightness = self._normalize_brightness(msg.y)
+        self._blue_brightness = self._normalize_brightness(msg.z)
+        self._update_hardware()
+        if self._sos_rgb_mirror_mode:
+            self._log_mast_led_pattern_throttled()
     
     def _power_button_pattern_callback(self, msg: String):
         """Callback for power button pattern subscription.
@@ -790,22 +975,42 @@ class MastLEDsNode(ArgoBaseNode):
             slot_duration = pattern_data.get('slot_duration', 0.3)
             on_period = pattern_data.get('on_period', 0.03)
             off_period = pattern_data.get('off_period', 0.27)
+
+            # power_control republishes the same JSON every ~cycle_duration. Restarting the thread
+            # each time resets slot phase → extra leading greens / wrong mix vs the physical button.
+            if (
+                self._pattern_active
+                and not self._sos_rgb_mirror_mode
+                and category == self._pattern_category
+                and pattern == self._pattern_string
+                and abs(cycle_duration - self._pattern_cycle_duration) < 1e-6
+                and abs(slot_duration - self._pattern_slot_duration) < 1e-6
+                and abs(on_period - self._pattern_on_period) < 1e-6
+                and abs(off_period - self._pattern_off_period) < 1e-6
+            ):
+                if self.debug_mode:
+                    self.get_logger().debug(
+                        "Ignoring duplicate /argo/power_button/pattern (same playback; keep phase)"
+                    )
+                return
             
-            # Stop any existing pattern thread
-            if self._pattern_active and self._pattern_stop_event:
-                self._pattern_stop_event.set()
-                if self._pattern_thread and self._pattern_thread.is_alive():
-                    self._pattern_thread.join(timeout=0.5)
-            
-            # Store pattern parameters
+            self._stop_power_button_pattern_thread()
+
             self._pattern_category = category
             self._pattern_string = pattern
             self._pattern_cycle_duration = cycle_duration
             self._pattern_slot_duration = slot_duration
             self._pattern_on_period = on_period
             self._pattern_off_period = off_period
-            
-            # Start pattern recreation thread
+
+            # SOS uses Morse timing on the button; power_control publishes RGB mirror instead of slots
+            if category == 'sos':
+                self._sos_rgb_mirror_mode = True
+                self._pattern_active = False
+                self._log_mast_led_pattern_throttled()
+                return
+
+            self._sos_rgb_mirror_mode = False
             self._pattern_stop_event = threading.Event()
             self._pattern_active = True
             self._pattern_thread = threading.Thread(
@@ -814,6 +1019,7 @@ class MastLEDsNode(ArgoBaseNode):
                 daemon=True
             )
             self._pattern_thread.start()
+            self._log_mast_led_pattern_throttled()
             
         except Exception as e:
             self.get_logger().warn(f"Failed to process pattern message: {e}")
@@ -859,16 +1065,13 @@ class MastLEDsNode(ArgoBaseNode):
             self.get_logger().error(f"Error in pattern recreation: {e}")
         finally:
             self._pattern_active = False
+            self._log_mast_led_pattern_throttled()
 
     def destroy_node(self):
         """Cleanup on node shutdown."""
         self.get_logger().info('Shutting down Mast LED Controller node')
 
-        # Stop pattern recreation thread
-        if self._pattern_active and self._pattern_stop_event:
-            self._pattern_stop_event.set()
-            if self._pattern_thread and self._pattern_thread.is_alive():
-                self._pattern_thread.join(timeout=1.0)
+        self._stop_power_button_pattern_thread()
 
         # Turn off all LEDs
         if self.device_ready and self.bus:

@@ -395,6 +395,8 @@ class AnemNode(ArgoBaseNode):
 
         # Visual mode init
         self._vis_initialized = False
+        # After I2C/sample failure, next successful redraw clears the whole terminal (no stale lines)
+        self._vis_pending_full_clear = False
         self._vis_width = VISUAL_DISPLAY_WIDTH
         self._vis_height = VISUAL_DISPLAY_HEIGHT
         # Full-scale visual radius corresponds to configured knots converted to m/s
@@ -450,6 +452,8 @@ class AnemNode(ArgoBaseNode):
         if self._initial_setup():
             self.get_logger().info("Successfully connected to anemometer sensors after retries.")
             self._is_first_retry_log = True # Reset for next potential failure
+            if self.debug_visually:
+                self._vis_pending_full_clear = True
             if self.retry_timer:
                 self.retry_timer.cancel()
             self.main_timer = self.create_timer(1.0 / PUBLISHING_RATE, self.publish_callback)
@@ -520,6 +524,14 @@ class AnemNode(ArgoBaseNode):
     def _render_visual(self, speed_mps: float, angle_deg: float, temp_c: float, dp_tuple):
         if not self._vis_initialized:
             self._init_visual()
+        if self._vis_pending_full_clear:
+            try:
+                sys.stdout.write('\x1b[2J')   # clear entire screen
+                sys.stdout.write('\x1b[H')    # cursor home
+                sys.stdout.flush()
+            except Exception:
+                pass
+            self._vis_pending_full_clear = False
         width = self._vis_width
         height = self._vis_height
         cx = width // 2
@@ -600,6 +612,8 @@ class AnemNode(ArgoBaseNode):
                     self._critical_i2c_failure = False
                     self._publish_i2c_failure(False)
                     self.get_logger().info("✅ I2C recovery: Wind sensors detected - critical failure cleared")
+                    if self.debug_visually:
+                        self._vis_pending_full_clear = True
         else:
             if log_on_fail:
                 self.get_logger().warn('Wind sensor not detected on I2C bus')
@@ -820,6 +834,8 @@ class AnemNode(ArgoBaseNode):
                 self.set_healthy("I2C communication recovered")
                 self._switch_to_normal_mode()
                 self._recovery_attempt_count = 0  # Reset counter on success
+                if self.debug_visually:
+                    self._vis_pending_full_clear = True
                 self.get_logger().info(f"Sensor re-initialization successful after {self._consecutive_io_errors} I2C errors")
             
             elif log_now: # Only log failures if we logged the attempt
@@ -830,6 +846,8 @@ class AnemNode(ArgoBaseNode):
                     self.set_healthy("I2C communication recovered after soft reset")
                     self._switch_to_normal_mode()
                     self._recovery_attempt_count = 0  # Reset counter on success
+                    if self.debug_visually:
+                        self._vis_pending_full_clear = True
                     self.get_logger().info(f"Sensor recovery with soft reset successful after {self._consecutive_io_errors} I2C errors")
                 else:
                     self.get_logger().error(f"All sensor recovery attempts failed, staying in retry mode")
@@ -863,6 +881,8 @@ class AnemNode(ArgoBaseNode):
                         self._critical_i2c_failure = False
                         self._publish_i2c_failure(False)
                         self.get_logger().info("✅ I2C recovery: Wind sensor communication restored - critical failure cleared")
+                        if self.debug_visually:
+                            self._vis_pending_full_clear = True
 
             # Check for recovery from I2C errors (do this even if no valid samples)
             if not self.node_healthy:
@@ -875,7 +895,9 @@ class AnemNode(ArgoBaseNode):
                     self.get_logger().warn("No valid sensor samples in this cycle, skipping publish. Will retry.")
                     self._last_no_valid_samples_log_time = current_time
                 self.set_unhealthy("No valid sensor samples")
-                
+                if self.debug_visually:
+                    self._vis_pending_full_clear = True
+
                 # Check for critical I2C failure (all sensors failed for extended period)
                 if self._all_sensors_failed_start_time is None:
                     self._all_sensors_failed_start_time = current_time

@@ -4,13 +4,7 @@
 # --------
 # Argo buzzer pulse helper.
 #
-# Usage:
-#   bash scripts/abeep.sh            # async 0.5s pulse (default, returns immediately)
-#   bash scripts/abeep.sh 1.0        # async 1.0s pulse
-#   bash scripts/abeep.sh --sos      # async one-shot SOS (...---...) ~1.5s total
-#   bash scripts/abeep.sh --wait     # blocking 0.5s pulse
-#   bash scripts/abeep.sh --wait 1.0 # blocking 1.0s pulse
-#   bash scripts/abeep.sh --wait --sos
+# Usage: abeep.sh --help
 #
 # Notes:
 # - Buzzer is active HIGH on GPIO 258 (PI2 / pin 35).
@@ -23,9 +17,40 @@ SOS_MODE=false
 DURATION="0.5"
 GPIO_CHIP="/dev/gpiochip0"
 BUZZER_LINE=258
+# Integer, decimal, or leading dot (e.g. 1, 0.5, .1).
+DURATION_RE='^([0-9]+([.][0-9]+)?|\.[0-9]+)$'
+
+print_usage() {
+    cat <<'EOF'
+Argo buzzer pulse (GPIO 258, PI2, active HIGH).
+
+Usage:
+  abeep.sh                     Async 0.5s pulse (returns immediately).
+  abeep.sh DURATION            Async pulse; DURATION is seconds (e.g. 0.5, 1, .1).
+  abeep.sh --sos               Async SOS (...---...) ~1.5s total.
+  abeep.sh --wait              Blocking 0.5s pulse.
+  abeep.sh --wait DURATION     Blocking pulse for DURATION seconds.
+  abeep.sh --wait --sos        Blocking SOS.
+
+Options:
+  --wait       Run in foreground (default is background).
+  --sos        Morse SOS instead of a single pulse.
+  -h, --help   Show this help.
+
+Examples:
+  abeep.sh
+  abeep.sh 1.0
+  abeep.sh --wait 0.2
+  abeep.sh .1
+EOF
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
         --wait)
             WAIT_MODE=true
             ;;
@@ -33,10 +58,10 @@ while [ $# -gt 0 ]; do
             SOS_MODE=true
             ;;
         *)
-            if [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            if [[ "$1" =~ $DURATION_RE ]]; then
                 DURATION="$1"
             else
-                echo "Error: unknown argument '$1'" >&2
+                echo "Error: unknown argument '$1' (try --help)" >&2
                 exit 1
             fi
             ;;
@@ -44,13 +69,17 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-if ! [[ "$DURATION" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-    echo "Error: duration must be numeric seconds (e.g. 0.5, 1, 1.25)" >&2
+if ! [[ "$DURATION" =~ $DURATION_RE ]]; then
+    echo "Error: duration must be numeric seconds (e.g. 0.5, 1, .1)" >&2
     exit 1
 fi
 
 run_beep_worker() {
 local pulse_duration="$1"
+# gpioset duration parsing below expects a digit before the dot (e.g. 0.1 not .1).
+if [[ "$pulse_duration" =~ ^\.[0-9]+$ ]]; then
+    pulse_duration="0${pulse_duration}"
+fi
 if command -v python3 >/dev/null 2>&1; then
     set +e
     python3 - "$GPIO_CHIP" "$BUZZER_LINE" "$pulse_duration" <<'PY'
