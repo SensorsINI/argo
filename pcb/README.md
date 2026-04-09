@@ -13,6 +13,8 @@ The current stable PCB [Argo PCB rev4](argo-v9-stable/argo-v9-stable-rev4) that 
 
 <img src="argo_v9_stable_rev4_pcb.jpg" width="800" alt="Argo v9 stable rev4 PCB with Orange Pi Zero 2W" />
 
+Outstanding bugs: The rev4 PCB requires soldering a single 10k resistor to ground from the buzzer testpoint to prevent buzzer activation during boot. This resistor should be added to rev 5.
+
 ## Directory Structure
 
 ### `argo-v9-stable/`
