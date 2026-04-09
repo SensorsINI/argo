@@ -135,6 +135,22 @@ def _guess_lan_ipv4() -> Optional[str]:
         return None
 
 
+def _read_default_controller_type_from_argo_yaml(argo_dir: str) -> Optional[str]:
+    """controller_node.ros__parameters.controller_type from nodes/argo.yaml (startup default)."""
+    path = os.path.join(argo_dir, 'nodes', 'argo.yaml')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+        node = (data or {}).get('controller_node') or {}
+        params = node.get('ros__parameters') or {}
+        raw = params.get('controller_type')
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().lower()
+    except (OSError, TypeError, yaml.YAMLError, AttributeError):
+        pass
+    return None
+
+
 class ArgoLifecycleManager:
     def __init__(self,
                  quiet: bool = True,
@@ -1806,7 +1822,7 @@ class ArgoLifecycleManager:
         if include_foxglove:
             port = FOXGLOVE_BRIDGE_WEB_PORT
             layout = os.path.join(self.argo_dir, 'foxglove', 'argo_simulation.json')
-            ws_local = f'ws://127.0.0.1:{port}'
+            ws_url_localhost = f'ws://localhost:{port}'
             print('')
             print('📊 Foxglove Studio (visualization)')
             print(
@@ -1818,9 +1834,10 @@ class ArgoLifecycleManager:
                 print(
                     f'   ⚠ Port {port} is not accepting connections yet; wait a few seconds and try again in Foxglove.')
             lan = _guess_lan_ipv4()
+            print('   • Download / install Foxglove Studio (e.g. Linux .deb): https://foxglove.dev/download')
             print('   • Open Foxglove Studio (desktop) or https://app.foxglove.dev in a browser.')
-            print('   • Add connection → WebSocket → enter:')
-            print(f'       {ws_local}')
+            print('   • Add connection → choose connection type “Foxglove WebSocket” (not generic WebSocket) → URL:')
+            print(f'       {ws_url_localhost}')
             if lan:
                 print(f'     (from another device on your LAN: ws://{lan}:{port})')
             if os.path.isfile(layout):
@@ -1839,6 +1856,23 @@ class ArgoLifecycleManager:
         print('   (`asimkb` → nodes/argo_keyboard_control.py: arrows for rudder/sail, q to quit; see docs/SIMULATION.md)')
         print('   Without the alias:')
         print(f'     python3 {shlex.quote(kb_script)}')
+        argo_yaml = os.path.join(self.argo_dir, 'nodes', 'argo.yaml')
+        ctrl = _read_default_controller_type_from_argo_yaml(self.argo_dir)
+        print('   Autonomous controller (startup default from nodes/argo.yaml, controller_node.ros__parameters.controller_type):')
+        if ctrl is not None:
+            print(f'     Current default: {ctrl!r}  ({argo_yaml})')
+            if ctrl == 'human':
+                print('     human = no autonomous path/boundary logic; the boat can leave the sailing area unless you')
+                print('     steer with asimkb or switch controller. For pond-bound autonomous sim, use crosser:')
+                print('       In asimkb press T → select crosser, or set controller_type: crosser in that YAML and restart asim.')
+            elif ctrl != 'crosser':
+                print('     For boundary-aware autonomous sailing in sim, crosser is recommended. If you want crosser:')
+                print('       In asimkb press T → select crosser, or set controller_type: crosser in nodes/argo.yaml and restart asim.')
+            else:
+                print('     Default is crosser (autonomous path/boundary-aware). Use T in asimkb to change if needed.')
+        else:
+            print(f'     (Could not read controller_type from {argo_yaml}.)')
+            print('     For sim, crosser is recommended; in asimkb press T to select it, or fix the YAML and restart asim.')
         print('')
 
     def _simulate(self, mode: str, force_mock: bool = False, force_real: bool = False, debug: bool = False) -> bool:
