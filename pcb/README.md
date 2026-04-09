@@ -8,6 +8,10 @@ The design was done with KiCad version 9 stable.
 
 ## See also
 Updated wind sensor design in [WindSensor](WindSensor).
+## Current PCB
+The current stable PCB [Argo PCB rev4](argo-v9-stable/argo-v9-stable-rev4) that will be tested at CapoCaccia 2026 is shown below, plugged into the OrangePiZero 2W. The only missing board is the GPS module, which sits on the standoffs. Note how the Ra-01 LORA module is soldered directly to the PCB to lower it to fit under the rudder winch. The white JST headers connect to water sensor, hatch power button with RGB LED, and 2S LiPo battery charger/balance cable. The large cables connect power from the LiPo battery, which sits alongside the keel/mast hull insert. The two black headers connect to the IMU on the rudder/winch servo chassis, and the wind sensor at the top of the mast. The board has a big white dual-coil power relay that completely cuts power when the boat is powered off.  The upper small black chip at lower left are the ADC that converts battery voltage, sail winch and rudder current, and water sensor voltage. The smaller chip below this is the humidity and PCB temperature sensor. The 4 large SMD caps at top left, below the inductor, are just to the left of the LiPo battery charger chip. The USB power input for charging is at lower right; it connects to the waterproof hatch USB port with a flex cable. Note how all cables exit on right because fore is the only available direction for connections; the PCB sits nestled up against the rudder insert and partly below the rudder/winch tray.
+
+<img src="argo_v9_stable_rev4_pcb.jpg" width="800" alt="Argo v9 stable rev4 PCB with Orange Pi Zero 2W" />
 
 ## Directory Structure
 
