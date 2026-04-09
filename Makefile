@@ -55,7 +55,7 @@ IS_ORANGEPI := $(shell if [ -f /proc/device-tree/compatible ] && grep -q "orange
 REQUIREMENTS_FILE := $(if $(filter 1,$(IS_ORANGEPI)),requirements.txt,requirements-host.txt)
 PLATFORM_NAME := $(if $(filter 1,$(IS_ORANGEPI)),Orange Pi Robot,Host Computer)
 
-.PHONY: help install-argo-cli uninstall-argo-cli install-deps install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks freeze-mac-address install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm install-watchdog status-watchdog disable-watchdog test-watchdog
+.PHONY: help install-argo-cli uninstall-argo-cli install-deps install-ros2-apt-repo host-setup install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap check-deps aliases-activate aliases-force aliases-install install-hardware install-all install-python-deps install-power-control start-power-control stop-power-control status-power-control uninstall-power-control submodule-init submodule-update submodule-status install-cpu-tuning fix-orangepi-ramlog install-motd uninstall-motd test-motd setup-wifi-networks freeze-mac-address install-battery-monitor setup-battery-panel test-battery-status install-network-improvements test-wifi-reconnection wifi-test-status wifi-test-results wifi-reconnect-status wifi-reconnect-logs wifi-reconnect-stop wifi-reconnect-start install-system-monitoring uninstall-system-monitoring simulate-local simulate-remote setup-vm clean-vm update-vm install-watchdog status-watchdog disable-watchdog test-watchdog
 
 VM_REQUIREMENTS_FILE := requirements-host.txt
 VM_INSTALL_SCOPE := $(shell if [ $$(id -u) -eq 0 ]; then printf 'system'; else printf 'user'; fi)
@@ -82,8 +82,10 @@ help:
 	@echo "=============================="
 	@echo ""
 	@echo "Hardware & Dependencies:"
+	@echo "  host-setup           - Host PC only: ROS2 apt repo, ros-base, install-deps, .venv, pip, CLI, submodules"
+	@echo "  install-ros2-apt-repo - Add packages.ros.org ROS 2 apt source (Ubuntu; sudo required)"
 	@echo "  install-deps         - Install all ROS2 dependencies (minimal ROS2, foxglove-bridge, rosbag2-mcap)"
-	@echo "  install-ros2-minimal - Install minimal ROS2 Humble packages (rclpy, messages, services, TF2, launch, rosbag2)"
+	@echo "  install-ros2-minimal - Install minimal ROS2 packages for \$$ROS_DISTRO (rclpy, TF2, launch, rosbag2, ...)"
 	@echo "  install-foxglove-bridge - Install foxglove-bridge package only"
 	@echo "  install-rosbag2-mcap - Install MCAP storage plugin for rosbag2 only"
 	@echo "  install-python-deps  - Auto-detect platform and install correct Python dependencies"
@@ -187,6 +189,7 @@ help:
 	@echo "  ac  - Close recording"
 	@echo "  af  - Launch argo with Foxglove visualization"
 	@echo "Development Environment (Host Machine Only):"
+	@echo "  host-setup     - Full host bootstrap: ROS2 apt, deps, .venv, pip, CLI, submodules"
 	@echo "  setup-venv     - Create Python venv with uv (automatic activation)"
 	@echo "  update-venv    - Update venv dependencies"
 	@echo "  clean-venv     - Remove venv"
@@ -210,15 +213,15 @@ setup-venv:
 	@echo "Setting up Python virtual environment for shore-side development..."
 	@if command -v uv >/dev/null 2>&1; then \
 		echo "Using uv (fast Python package installer)..."; \
-		uv venv .venv; \
+		if [ ! -d .venv ]; then uv venv .venv; else echo "Using existing .venv (no interactive replace prompt)."; fi; \
 		echo "Installing dependencies with uv..."; \
 		uv pip install -r requirements-host.txt; \
 	else \
 		echo "uv not found, using standard venv..."; \
 		echo "💡 Install uv for faster dependency management: curl -LsSf https://astral.sh/uv/install.sh | sh"; \
-		python3 -m venv .venv; \
-		.venv/bin/pip install --upgrade pip; \
-		.venv/bin/pip install -r requirements-host.txt; \
+		if [ ! -d .venv ]; then python3 -m venv .venv; else echo "Using existing .venv."; fi; \
+		.venv/bin/python -m pip install --upgrade pip; \
+		.venv/bin/python -m pip install -r requirements-host.txt; \
 	fi
 	@echo "✅ Virtual environment created at .venv"
 	@echo ""
@@ -264,11 +267,94 @@ clean-vm:
 
 # ==================== DEPENDENCY INSTALLATION ====================
 
-install-deps: install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap
+# Add ROS 2 apt repository (idempotent). See ROS docs: Ubuntu (deb packages) for your release.
+# Do not add ros2-latest.list if ROS 2 is already configured (e.g. official install uses another
+# .list or .sources file). Two stanzas for the same repo with different Signed-By break apt.
+install-ros2-apt-repo:
+	@echo "📦 Ensuring ROS 2 apt source (packages.ros.org) is configured..."
+	@set -e; \
+	N=$$(sudo grep -RlaF 'packages.ros.org/ros2' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | sort -u | wc -l); \
+	N=$$(echo $$N | tr -d ' '); \
+	if [ -z "$$N" ]; then N=0; fi; \
+	if [ "$$N" -gt 1 ]; then \
+		echo "❌ Multiple apt entries reference http://packages.ros.org/ros2/ubuntu/"; \
+		echo "   apt cannot merge different Signed-By settings for the same suite."; \
+		echo "   Files mentioning packages.ros.org/ros2:"; \
+		sudo grep -RlaF 'packages.ros.org/ros2' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | sort -u | sed 's/^/     /'; \
+		echo ""; \
+		echo "   Keep exactly one. If you already followed docs.ros.org, remove Argo's duplicate:"; \
+		echo "     sudo rm -f /etc/apt/sources.list.d/ros2-latest.list"; \
+		echo "     sudo apt-get update"; \
+		exit 1; \
+	fi; \
+	if [ "$$N" -eq 0 ]; then \
+		sudo apt-get update; \
+		sudo apt-get install -y curl software-properties-common; \
+		sudo add-apt-repository -y universe; \
+		sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+			-o /usr/share/keyrings/ros-archive-keyring.gpg; \
+		echo "deb [arch=$$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $$( . /etc/os-release && echo $$UBUNTU_CODENAME ) main" \
+			| sudo tee /etc/apt/sources.list.d/ros2-latest.list > /dev/null; \
+		echo "✅ Added /etc/apt/sources.list.d/ros2-latest.list"; \
+		sudo apt-get update; \
+	else \
+		echo "✅ ROS 2 apt source already configured; not adding ros2-latest.list."; \
+	fi
+
+# Laptop / desktop bootstrap: not for Orange Pi (use install-all on the boat).
+host-setup:
+	@if [ "$(IS_ORANGEPI)" = "1" ]; then \
+		echo "❌ host-setup is for development hosts (simulation / Foxglove / shore tools)."; \
+		echo "   On the Orange Pi boat use: make install-all"; \
+		exit 1; \
+	fi
+	@$(MAKE) install-ros2-apt-repo
+	@set -e; \
+	EFFECTIVE="$(ROS_DISTRO)"; \
+	if [ -z "$$EFFECTIVE" ]; then \
+		case "$$( . /etc/os-release && echo $$VERSION_CODENAME )" in \
+			jammy) EFFECTIVE=humble ;; \
+			noble) EFFECTIVE=jazzy ;; \
+			*) \
+				echo "❌ Unsupported or unknown Ubuntu codename; set ROS_DISTRO explicitly."; \
+				echo "   Example: make host-setup ROS_DISTRO=jazzy"; \
+				exit 1 ;; \
+		esac; \
+	fi; \
+	echo "🖥️  host-setup using ROS_DISTRO=$$EFFECTIVE"; \
+	if [ ! -f "/opt/ros/$$EFFECTIVE/setup.bash" ]; then \
+		echo "📥 Installing ros-$$EFFECTIVE-ros-base ..."; \
+		sudo apt-get install -y ros-$$EFFECTIVE-ros-base; \
+	fi; \
+	$(MAKE) install-deps ROS_DISTRO=$$EFFECTIVE; \
+	$(MAKE) setup-venv; \
+	$(MAKE) install-python-deps; \
+	$(MAKE) install-argo-cli; \
+	$(MAKE) submodule-init; \
+	echo ""; \
+	echo "✅ host-setup complete."; \
+	echo ""; \
+	echo "Next steps:"; \
+	echo "  New bash logins load ROS from dotfiles/bashrc when ROS_DISTRO is unset (see repo dotfiles)."; \
+	echo "  In *this* terminal:  source /opt/ros/$$EFFECTIVE/setup.bash"; \
+	echo "  Optional:  source .venv/bin/activate   # pip tooling (argcomplete, pyglet, …)"; \
+	echo "  Then:  asim   # local simulation (see below)"; \
+	echo ""; \
+	echo "Docs:"; \
+	echo "  $(REPO_DIR)/docs/SIMULATION.md"; \
+	echo "  $(REPO_DIR)/docs/README-3d-visualization.md"; \
+	echo "  $(REPO_DIR)/docs/README-lora-to-shore.md"
+
+# One apt refresh before all .deb installs (foxglove/mcap no longer run their own apt update).
+install-deps:
+	@sudo apt-get update
+	@$(MAKE) install-ros2-minimal
+	@$(MAKE) install-foxglove-bridge
+	@$(MAKE) install-rosbag2-mcap
 	@echo "✅ All ROS2 dependencies installed successfully!"
 	@echo ""
 	@echo "Installed packages:"
-	@echo "  - Minimal ROS2 Humble core packages (rclpy, messages, services, TF2, launch, rosbag2)"
+	@echo "  - Minimal ROS2 $(ROS_DISTRO) core packages (rclpy, messages, services, TF2, launch, rosbag2)"
 	@echo "  - ros-$(ROS_DISTRO)-foxglove-bridge (C++ WebSocket bridge for Foxglove Studio)"
 	@echo "  - ros-$(ROS_DISTRO)-rosbag2-storage-mcap (MCAP storage format for rosbag2)"
 	@echo ""
@@ -282,7 +368,7 @@ install-deps: install-ros2-minimal install-foxglove-bridge install-rosbag2-mcap
 	@echo "  ros2 bag record -s mcap -a -o my_bag  # Record with MCAP format"
 
 install-ros2-minimal:
-	@echo "Installing minimal ROS2 Humble packages for Argo..."
+	@echo "Installing minimal ROS2 packages for Argo (ROS_DISTRO=$(ROS_DISTRO))..."
 	@if [ -z "$(ROS_DISTRO)" ]; then \
 		echo "❌ ROS_DISTRO environment variable not set!"; \
 		echo "   Make sure ROS2 is properly sourced: source /opt/ros/*/setup.bash"; \
@@ -335,7 +421,7 @@ install-ros2-minimal:
 	sudo apt install -y \
 		ros-$(ROS_DISTRO)-launch \
 		ros-$(ROS_DISTRO)-launch-ros
-	@echo "✅ Minimal ROS2 Humble installation complete!"
+	@echo "✅ Minimal ROS2 $(ROS_DISTRO) installation complete!"
 	@echo ""
 	@echo "To verify installation, run:"
 	@echo "  source /opt/ros/$(ROS_DISTRO)/setup.bash"
@@ -349,8 +435,7 @@ install-foxglove-bridge:
 		exit 1; \
 	fi
 	@echo "Installing ros-$(ROS_DISTRO)-foxglove-bridge..."
-	sudo apt update
-	sudo apt install -y ros-$(ROS_DISTRO)-foxglove-bridge
+	sudo apt-get install -y ros-$(ROS_DISTRO)-foxglove-bridge
 	@echo "✅ Foxglove Bridge installed successfully!"
 	@echo ""
 	@echo "🔧 Quick Start:"
@@ -366,8 +451,7 @@ install-rosbag2-mcap:
 		exit 1; \
 	fi
 	@echo "Installing ros-$(ROS_DISTRO)-rosbag2-storage-mcap..."
-	sudo apt update
-	sudo apt install -y ros-$(ROS_DISTRO)-rosbag2-storage-mcap
+	sudo apt-get install -y ros-$(ROS_DISTRO)-rosbag2-storage-mcap
 	@echo "✅ MCAP storage plugin installed successfully!"
 	@echo ""
 	@echo "🔧 MCAP Recording:"
@@ -581,8 +665,17 @@ install-python-deps:
 	@echo "Requirements file: $(REQUIREMENTS_FILE)"
 	@echo "======================================================================="
 	@echo ""
-	@echo "Installing Python dependencies from $(REQUIREMENTS_FILE)..."
-	pip3 install -r $(REQUIREMENTS_FILE)
+	@if [ -d "$(REPO_DIR)/.venv" ] && [ -x "$(REPO_DIR)/.venv/bin/python" ]; then \
+		echo "Installing into repo .venv ($(REPO_DIR)/.venv)..."; \
+		if command -v uv >/dev/null 2>&1; then \
+			cd "$(REPO_DIR)" && uv pip install -r $(REQUIREMENTS_FILE); \
+		else \
+			"$(REPO_DIR)/.venv/bin/python" -m pip install -r $(REQUIREMENTS_FILE); \
+		fi; \
+	else \
+		echo "Installing with system Python (no $(REPO_DIR)/.venv)..."; \
+		python3 -m pip install -r $(REQUIREMENTS_FILE); \
+	fi
 	@echo ""
 	@echo "✅ Python dependencies installed successfully for $(PLATFORM_NAME)!"
 	@echo ""
@@ -602,9 +695,8 @@ else
 	@echo "  - Simulation: pyglet==1.5.27"
 	@echo "  - System: psutil, argparse, argcomplete"
 	@echo ""
-	@echo "💡 Note: ROS2 packages (rclpy, etc.) should be installed via apt:"
-	@echo "   sudo apt install ros-humble-desktop"
-	@echo "   (or ros-humble-ros-base for minimal footprint)"
+	@echo "💡 Note: ROS2 packages (rclpy, etc.) come from apt, not pip (see README)."
+	@echo "   On a host PC run: make host-setup   (or install ros-<distro>-desktop / ros-base)"
 endif
 	@echo ""
 	@echo "Both environments include ruamel.yaml for safe YAML comment preservation!"
@@ -632,10 +724,9 @@ else
 	@echo "Host computer setup complete. Hardware installation skipped (not on robot)."
 	@echo ""
 	@echo "Next steps for host computer:"
-	@echo "1. Ensure ROS2 is installed: sudo apt install ros-humble-desktop"
-	@echo "2. Initialize simulator submodule: make submodule-init"
-	@echo "3. Install simulation dependencies: make install-simulation-deps"
-	@echo "4. Run local simulation: make simulate-local"
+	@echo "1. Bootstrap ROS2 + venv + CLI: make host-setup   (or install ros-<distro>-* manually)"
+	@echo "2. Source: source /opt/ros/<distro>/setup.bash && source .venv/bin/activate"
+	@echo "3. Run local simulation: make submodule-init && asim   (or make simulate-local)"
 endif
 
 # ==================== CPU GOVERNOR TUNING ====================

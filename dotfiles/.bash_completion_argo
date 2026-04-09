@@ -2,10 +2,15 @@
 # Argo CLI Tab Completion
 # This file provides bash completion for Argo Python scripts
 
-# Enable global python-argcomplete for user (no sudo required)
-# This allows tab completion for any Python script with argcomplete enabled
-if [ ! -f ~/.bash_completion.d/python-argcomplete.sh ]; then
-    # Install global argcomplete for user if not already installed
+# Global python-argcomplete (tab-complete flags on Argo CLIs).
+# Do NOT run activate-global-python-argcomplete here: it shells out through Python and
+# can take several seconds per login (worse with ~/.bash_completion.d on cloud sync).
+# One-time setup (after pip/venv has argcomplete):
+#   activate-global-python-argcomplete3 --user || activate-global-python-argcomplete --user
+# Optional: same thing once with  ARGO_BOOTSTRAP_ARGCOMPLETE=1  bash  to auto-create hook.
+
+if [ "${ARGO_BOOTSTRAP_ARGCOMPLETE:-}" = "1" ] && [ ! -f ~/.bash_completion.d/python-argcomplete.sh ]; then
+    mkdir -p ~/.bash_completion.d
     if command -v activate-global-python-argcomplete3 &> /dev/null; then
         activate-global-python-argcomplete3 --user &> /dev/null || true
     elif command -v activate-global-python-argcomplete &> /dev/null; then

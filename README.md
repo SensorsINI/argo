@@ -13,6 +13,151 @@ An autonomous sailboat system based on Dragonforce 65 hull, running on Orange Pi
   - See [simulator/sailboat-playground/README.md](simulator/sailboat-playground/README.md) for usage and architecture.  
   - Additional docs: [Simulation Guide](docs/SIMULATION.md), [Debug Simulation Guide](docs/README-debug-simulation.md)  
 
+## Installation
+
+Pick **Argo (boat)** or **Host (PC)** below. ROS 2 **must match your Ubuntu LTS**: 22.04 (Jammy) → **Humble**; 24.04 (Noble) → **Jazzy**. Use the official [ROS 2 Ubuntu (deb) install](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html) page that corresponds to your ROS release.
+
+### Argo (boat — Orange Pi Zero 2W)
+
+On the robot, the stack targets **Ubuntu 22.04–based** Armbian and **ROS 2 Humble**. Bring up I²C/UART/PWM overlays, the radio/servo kernel module, Python dependencies, systemd services, and power control as described in the [launch](launch/) tree.
+
+```bash
+cd ~/argo   # or your clone path
+sudo apt update && sudo apt upgrade -y
+# Install ROS 2 Humble (.deb), then in each shell you use for builds:
+#   source /opt/ros/humble/setup.bash
+
+make install-all          # Python deps + optional hardware (see Makefile / messages)
+make install-argo-cli
+source ~/.bashrc
+make -C launch install    # install systemd units; enable per docs
+```
+
+#### First-time SD card and hardware bring-up
+
+**1. Flash Orange Pi OS** using Orange Pi Imager or equivalent.
+
+**2. Initial system setup**
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install python3-pip python3-dev build-essential
+sudo apt install i2c-tools device-tree-compiler git
+sudo apt install ros-humble-desktop
+```
+
+**3. Clone repository**
+
+```bash
+cd /home/orangepi
+git clone https://github.com/SensorsINI/argo.git
+cd argo
+```
+
+**4. Python and ROS helpers**
+
+```bash
+make install-python-deps   # requirements.txt on the boat
+# If needed:
+sudo apt install python3-rclpy python3-std-msgs python3-geometry-msgs
+```
+
+**5. Hardware configuration**
+
+Edit `/boot/orangepiEnv.txt` and add overlays:
+
+```
+overlays=pi-i2c0 disable-uart0 ph-uart5 pi-pwm2 pi-pwm4
+user_overlays=argo_radio_servo_overlay
+```
+
+Build and load the PWM capture module:
+
+```bash
+cd ~/argo/nodes/pwm_capture_module
+make all
+sudo modprobe argo_radio_servo_module   # or reboot
+```
+
+Add your user to hardware groups:
+
+```bash
+sudo usermod -a -G i2c,dialout $USER
+# log out and back in
+```
+
+**6. Verify**
+
+```bash
+sudo i2cdetect -y 0
+lsmod | grep argo
+ls -la /sys/kernel/argo_radio_servo/
+sudo cat /dev/ttyS5
+```
+
+**7. CLI and services**
+
+```bash
+make install-argo-cli && source ~/.bashrc
+make -C launch install
+sudo systemctl daemon-reload
+sudo systemctl enable argo_launch.service
+```
+
+### Host (simulation, Foxglove, remote monitoring)
+
+Use this on a **laptop or workstation** for **local simulation** (`asim`), **Foxglove Studio** (same Wi‑Fi, VPN, or SSH tunnel), log playback, and shore-side scripts. The boat still runs ROS 2 on the Orange Pi; your host subscribes/records like any ROS 2 client. **LoRa** is a boat link—the monitoring machine uses normal network ROS 2 or recorded bags unless you run a separate LoRa gateway stack.
+
+**Prerequisites:** Ubuntu **22.04** or **24.04** (see mapping to Humble/Jazzy above), `git`, `make`, `sudo`, and network access for `apt`.
+
+**One-shot bootstrap (Ubuntu 22.04 or 24.04):**
+
+```bash
+cd /path/to/argo
+make host-setup
+source ~/.bashrc                     # reload Argo dotfiles in this terminal (or open a new tab)
+# Dotfiles auto-source the first ROS found under /opt/ros (jazzy, iron, humble, rolling) when ROS_DISTRO is unset.
+
+source .venv/bin/activate            # optional; pip tooling (argcomplete, pyglet, …)
+asim
+```
+
+If a command in **this** terminal cannot find `rclpy` or `ros2` right after `host-setup`, the ROS underlay is not loaded yet: run `source ~/.bashrc` (as above), or explicitly `source /opt/ros/humble/setup.bash` / `source /opt/ros/jazzy/setup.bash` matching your install.
+
+`make host-setup` **refuses to run on Orange Pi** (use `make install-all` on the boat). It:
+
+- Adds **`/etc/apt/sources.list.d/ros2-latest.list`** only if no file already references **packages.ros.org/ros2/ubuntu** (avoids a second `Signed-By` if you installed ROS 2 from the official doc first)  
+- Installs **`ros-<distro>-ros-base`** when `/opt/ros/<distro>` is absent (Jammy → `humble`, Noble → `jazzy`, or override with `ROS_DISTRO=`)  
+- Runs **`make install-deps`** (single `apt-get update`, then Argo’s ROS .deb set, Foxglove bridge, MCAP storage)  
+- Runs **`make setup-venv`** (creates `.venv` with **uv** if available, otherwise `python3 -m venv`, and installs **`requirements-host.txt`**) then **`make install-python-deps`** (same host requirements file again into `.venv`—idempotent on a PC)  
+- Runs **`make install-argo-cli`** and **`make submodule-init`** (`install-argo-cli` appends **`source <repo>/dotfiles/bashrc`** to **`~/.bashrc`**; that file auto-sources **`/opt/ros/<distro>/setup.bash`** when **`ROS_DISTRO`** is not already set)  
+
+**Tab completion (optional):** Global argcomplete is **not** installed automatically on every shell (keeps login fast). After `host-setup`, run once: `activate-global-python-argcomplete3 --user` or `activate-global-python-argcomplete --user`, or see [dotfiles/README.md — Tab Completion Setup](dotfiles/README.md#tab-completion-setup).
+
+
+Force a distro explicitly, e.g. on non-LTS or mixed images:
+
+```bash
+make host-setup ROS_DISTRO=jazzy
+```
+
+If **`apt-get update`** reports **conflicting Signed-By** for `packages.ros.org/ros2/ubuntu`, you have two ROS 2 source files—keep one. For example, if you already used the official installer, remove Argo’s duplicate and refresh: `sudo rm -f /etc/apt/sources.list.d/ros2-latest.list && sudo apt-get update`.
+
+`install-ros2-apt-repo` checks for an existing ROS 2 source with **`sudo grep`** because some `sources.list.d` entries are **root-only**; without that, Make could miss your working repo and add a second file.
+
+**Foxglove:** with ROS sourced on the machine that runs the bridge, start `ros2 run foxglove_bridge foxglove_bridge` and connect from [Foxglove Studio](https://foxglove.dev/) to `ws://<that-host-ip>:8765`.
+
+### Makefile targets and shell aliases (reference)
+
+- `make host-setup` — **host-only** full bootstrap (see above)  
+- `make install-deps` — ROS packages for the current `ROS_DISTRO` (Foxglove, MCAP, …)  
+- `make install-python-deps` — robot uses `requirements.txt`; host uses `requirements-host.txt` (prefers `.venv` if present)  
+- `make install-hardware` — PWM module (boat)  
+- `make install-all` — boat-oriented dependency + hardware path  
+- `make -C launch …` — lifecycle systemd helpers  
+
+After `make install-argo-cli`, common aliases include `al` / `aq` / `ars` (services), `as` / `asq` (status), `asim` (local sim), `ar` / `ac` (recording), `alog`, `ah`. Run `make help` and see [dotfiles/](dotfiles/).
+
 ## System Overview
 
 The Argo system consists of multiple ROS2 nodes that work together to provide autonomous sailing capabilities:
@@ -310,142 +455,6 @@ python3 launch/argo_lifecycle_manager.py simulate_remote # Remote simulation mod
 - **Dependencies**: Waits for network and hardware module initialization
 - **Restart Policy**: Automatic restart on failure with 5-second delay
 - **Environment**: ROS2 Humble sourcing and logging configuration
-
-## Installation on New SD Card
-
-### 1. Flash Orange Pi OS
-```bash
-# Download Orange Pi OS from official website
-# Use Orange Pi Imager or similar tool to flash the OS
-```
-
-### 2. Initial System Setup
-```bash
-# Boot the system and connect via SSH
-# Update system packages
-sudo apt update && sudo apt upgrade -y
-
-# Install essential packages
-sudo apt install python3-pip python3-dev build-essential
-sudo apt install i2c-tools device-tree-compiler git
-sudo apt install ros-humble-desktop  # ROS2 Humble
-```
-
-### 3. Clone Repository
-```bash
-cd /home/orangepi
-git clone https://github.com/SensorsINI/argo.git
-cd argo
-```
-
-### 4. Install Python Dependencies
-```bash
-# Install Python runtime dependencies
-make install-python-deps  # installs from requirements.txt
-
-# Install ROS2 dependencies (if not already installed)
-sudo apt install python3-rclpy python3-std-msgs python3-geometry-msgs
-```
-
-### 5. Hardware Configuration
-
-#### Enable I2C and UART Overlays
-Edit `/boot/orangepiEnv.txt`:
-```bash
-sudo nano /boot/orangepiEnv.txt
-```
-
-Add these overlays:
-```
-overlays=pi-i2c0 disable-uart0 ph-uart5 pi-pwm2 pi-pwm4
-user_overlays=argo_radio_servo_overlay
-```
-
-#### Install PWM Capture Module
-```bash
-cd ~/argo/nodes/pwm_capture_module
-make all
-# Reboot or load the module manually after install
-sudo modprobe argo_radio_servo_module
-```
-
-#### Set User Permissions
-```bash
-# Add user to required groups
-sudo usermod -a -G i2c,dialout $USER
-# Logout and login again for group changes to take effect
-```
-
-### 6. Verify Hardware Setup
-```bash
-# Check I2C devices (should show: 21 22 23 34 44 4a)
-sudo i2cdetect -y 0
-
-# Check PWM kernel module
-lsmod | grep argo
-ls -la /sys/kernel/argo_radio_servo/
-
-# Check UART GPS (should show NMEA data)
-sudo cat /dev/ttyS5
-```
-
-### 7. Install Argo CLI and Configure Services
-```bash
-# Install Argo CLI (shell aliases and functions)
-make install-argo-cli
-
-# Activate CLI in current terminal
-source ~/.bashrc
-
-# Install and configure system services (optional)
-make -C launch install
-sudo systemctl daemon-reload
-sudo systemctl enable argo-launch.service
-```
-
-#### Makefile and Shell Aliases
-
-The repository includes a comprehensive Makefile system for easy management:
-
-**Top-level Makefile targets:**
-- `make install-deps` - Install ROS2 dependencies (foxglove-bridge)
-- `make install-python-deps` - Install Python runtime dependencies
-- `make install-hardware` - Install PWM capture module
-- `make install-all` - Complete hardware and dependency setup
-- `make install-argo-cli` - Install shell aliases and functions
-- `make -C launch start` - Start Argo system with monitoring
-- `make -C launch stop` - Stop Argo system
-- `make -C power_control install` - Install power control system
-
-**Shell aliases (available after `make install-argo-cli`):**
-- `al` - Launch Argo service with monitoring
-- `aq` - Quit/stop Argo service
-- `ars` - Restart Argo service
-- `as` - Show Status
-Shows a comprehensive status of the Argo system, including:
-- Service status (`argo_launch_standard.service`, `argo_power_control.service`, etc.)
-- Running ROS2 nodes and their health
-- System diagnostics (CPU, memory, temperature, battery)
-
-### `al` / `aq` / `ars` - Service Control
-- `al`: Start the `argo_launch_standard.service`
-- `aq`: Stop the `argo_launch_standard.service`
-- `ars`: Restart the `argo_launch_standard.service`
-
-### `alog` - View Logs
-Tails the logs for all major Argo services with color-coding.
-
-### `asim` - Local Simulation
-Starts the Argo system in local simulation mode using `ros2 launch`.
-
-- `ar` - Start data recording (via ROS2 service)
-- `ac` - Stop data recording (via ROS2 service)
-- `abat` - Get battery status (formatted JSON)
-- `astore` - Toggle storage rundown (enable/disable discharge to 7.6V then shut down; mode cleared on reboot)
-- `am` - Monitor mode for lifecycle management
-- `ag` - Launch Argo GUI
-- `argo_status` - Detailed system status check
-- `argo_help` - Show detailed help information
 
 ## Running the System
 

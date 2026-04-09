@@ -66,7 +66,7 @@ Default compass calibration data for IMU sensor.
 ### How It Works
 The tab completion system uses Python's `argcomplete` library:
 
-1. **Auto-Installation**: `dotfiles/.bash_completion_argo` automatically installs global argcomplete for your user (no sudo needed)
+1. **One-time hook**: Run `activate-global-python-argcomplete3 --user` (or `activate-global-python-argcomplete --user`) once so `~/.bash_completion.d/python-argcomplete.sh` exists. Optional: `ARGO_BOOTSTRAP_ARGCOMPLETE=1 bash` runs the same from `.bash_completion_argo`. The script only **sources** the hook if present so every login stays fast.
 2. **Auto-Detection**: Scripts with the `PYTHON_ARGCOMPLETE_OK` marker are automatically detected
 3. **Works Everywhere**: Completion works with `python3 script.py` or `./script.py`
 

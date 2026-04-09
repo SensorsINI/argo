@@ -51,6 +51,7 @@ import atexit
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import select
+import socket
 import yaml  # Add YAML import
 
 # Import centralized node utilities
@@ -87,6 +88,51 @@ except ImportError:
 # MP2672 CHG timer warning threshold (hours)
 # Warn users when remaining charging time drops below this threshold
 CHARGING_TIME_WARNING_THRESHOLD_HOURS = 5.0
+
+
+def _resolve_ros_setup_bash() -> str:
+    """Absolute path to ROS 2 setup.bash (honours ROS_DISTRO, then common installs)."""
+    env_distro = os.environ.get('ROS_DISTRO')
+    if env_distro:
+        candidate = f'/opt/ros/{env_distro}/setup.bash'
+        if os.path.isfile(candidate):
+            return candidate
+    for distro in ('jazzy', 'iron', 'humble', 'rolling'):
+        candidate = f'/opt/ros/{distro}/setup.bash'
+        if os.path.isfile(candidate):
+            return candidate
+    return '/opt/ros/humble/setup.bash'
+
+
+def _bash_source_ros_prefix() -> str:
+    """Shell prefix for bash -c: source <setup.bash> && """
+    return f'source {shlex.quote(_resolve_ros_setup_bash())} && '
+
+
+# Default WebSocket port for ros-jazzy/ros-humble foxglove_bridge (override with -p port:=...)
+FOXGLOVE_BRIDGE_WEB_PORT = 8765
+
+
+def _tcp_port_accepting_connections(host: str, port: int, timeout: float = 0.35) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _guess_lan_ipv4() -> Optional[str]:
+    """Best-effort routable IPv4 for ws:// hints (Foxglove from another device)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.settimeout(0.15)
+            s.connect(('10.254.254.254', 1))
+            return str(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        return None
 
 
 class ArgoLifecycleManager:
@@ -779,7 +825,7 @@ class ArgoLifecycleManager:
                 # Add parameter file so nodes can load argo.yaml parameters
                 python_cmd_parts.extend(['--ros-args', '--params-file', shlex.quote(argo_yaml_path)])
 
-                cmd_str = 'source /opt/ros/humble/setup.bash && ' + ' '.join(python_cmd_parts)
+                cmd_str = _bash_source_ros_prefix() + ' '.join(python_cmd_parts)
 
                 cmd = ['bash', '-c', cmd_str]
                 proc = subprocess.Popen(
@@ -820,15 +866,15 @@ class ArgoLifecycleManager:
                     'bash',
                     '-c',
                     (
-                        'source /opt/ros/humble/setup.bash && '
-                        'ros2 run foxglove_bridge foxglove_bridge '
+                        _bash_source_ros_prefix()
+                        + 'ros2 run foxglove_bridge foxglove_bridge '
                         '--ros-args --log-level warn'
                     ),
                 ]
                 try:
                     # First, verify the package exists by trying to get package info
                     import shutil
-                    check_cmd = ['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 pkg executables foxglove_bridge']
+                    check_cmd = ['bash', '-c', _bash_source_ros_prefix() + 'ros2 pkg executables foxglove_bridge']
                     check_proc = subprocess.run(
                         check_cmd,
                         cwd=self.argo_dir,
@@ -1678,28 +1724,55 @@ class ArgoLifecycleManager:
                 print("   Please run 'make install-foxglove-bridge' manually.")
                 return False
                 
-        # 3. Check for Python dependencies
+        # 3. Check for ROS 2 Python bindings (rclpy). These come from apt-installed
+        # ROS and PYTHONPATH from `source /opt/ros/<distro>/setup.bash` — not from
+        # pip / requirements-host.txt. Do not suggest `make install-python-deps` here.
         try:
-            import rclpy  # Check a core ROS2 dependency
+            import rclpy  # noqa: F401
         except ImportError:
-            print("❌ Python dependencies (rclpy) not found!")
-            print("   The simulation requires Python packages from requirements.txt.")
-            try:
-                response = input("   Would you like to install them now? (y/N): ").lower()
-                if response == 'y':
-                    print("🐍 Installing Python dependencies...")
-                    subprocess.run(
-                        ['make', '-C', self.argo_dir, 'install-python-deps'],
-                        check=True)
-                    print("✅ Python dependencies installed successfully!")
-                else:
-                    print("   Aborting. Please run 'make install-python-deps' to proceed.")
-                    return False
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                print(f"   Error installing Python dependencies: {e}")
-                print("   Please run 'make install-python-deps' manually.")
+            print("❌ ROS 2 Python bindings (rclpy) are not importable in this environment.")
+            ros_ok_if_sourced = False
+            sourced_distro = None
+            for distro in ("humble", "iron", "jazzy"):
+                setup_path = os.path.join("/opt/ros", distro, "setup.bash")
+                if not os.path.isfile(setup_path):
+                    continue
+                try:
+                    chk = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            f"set -e && source {setup_path} && "
+                            'exec python3 -c "import rclpy"',
+                        ],
+                        capture_output=True,
+                        timeout=15,
+                    )
+                    if chk.returncode == 0:
+                        ros_ok_if_sourced = True
+                        sourced_distro = distro
+                        break
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    continue
+            if ros_ok_if_sourced and sourced_distro:
+                print(
+                    f"   ROS 2 is present under /opt/ros/{sourced_distro}, but this shell "
+                    "has not sourced the setup script."
+                )
+                print(f"   Run:  source /opt/ros/{sourced_distro}/setup.bash")
+                print(
+                    "   Then run asim again. (You can keep .venv activated for pip-only "
+                    "tools such as argcomplete.)"
+                )
                 return False
-                
+            print("   Install ROS 2 packages, then source the workspace before asim, e.g.:")
+            print("     export ROS_DISTRO=jazzy   # or humble on Ubuntu 22.04 / Orange Pi")
+            print("     make install-ros2-minimal")
+            print("     source /opt/ros/$ROS_DISTRO/setup.bash")
+            print("   Pip-only host deps (pyglet, argcomplete, …) belong in .venv:")
+            print("     make setup-venv && source .venv/bin/activate")
+            return False
+
         return True
 
     def simulate_local(self, force_mock: bool = True, force_real: bool = False, debug: bool = False) -> bool:
@@ -1726,6 +1799,47 @@ class ArgoLifecycleManager:
             self._stop_remote_processes()
             return False
         return self._simulate(mode='remote')
+
+    def _print_simulation_operator_instructions(self, include_foxglove: bool) -> None:
+        """Foxglove Studio (optional) + keyboard control (`asimkb`) in another terminal."""
+        kb_script = os.path.join(self.argo_dir, 'nodes', 'argo_keyboard_control.py')
+        if include_foxglove:
+            port = FOXGLOVE_BRIDGE_WEB_PORT
+            layout = os.path.join(self.argo_dir, 'foxglove', 'argo_simulation.json')
+            ws_local = f'ws://127.0.0.1:{port}'
+            print('')
+            print('📊 Foxglove Studio (visualization)')
+            print(
+                f'   ros2 run foxglove_bridge foxglove_bridge listens on WebSocket port {port} by default.')
+            if _tcp_port_accepting_connections('127.0.0.1', port):
+                print(
+                    f'   ✓ Port {port} is accepting connections on this machine (bridge is likely ready).')
+            else:
+                print(
+                    f'   ⚠ Port {port} is not accepting connections yet; wait a few seconds and try again in Foxglove.')
+            lan = _guess_lan_ipv4()
+            print('   • Open Foxglove Studio (desktop) or https://app.foxglove.dev in a browser.')
+            print('   • Add connection → WebSocket → enter:')
+            print(f'       {ws_local}')
+            if lan:
+                print(f'     (from another device on your LAN: ws://{lan}:{port})')
+            if os.path.isfile(layout):
+                print('   • Import layout: File → Import layout from file… (or drag into the window):')
+                print(f'       {layout}')
+            else:
+                print(f'   • No bundled layout at {layout} — connect and add panels manually.')
+            print('   Studio is separate from the bridge: the bridge must be running (this launch starts it).')
+            print('')
+        print('⌨️  Keyboard control (separate terminal)')
+        print('   Keep this `asim` terminal running. Open a second terminal with the same ROS 2 environment,')
+        print('   then start the keyboard control node:')
+        print('     source ~/.bashrc')
+        print('       # or: source /opt/ros/$ROS_DISTRO/setup.bash')
+        print('     asimkb')
+        print('   (`asimkb` → nodes/argo_keyboard_control.py: arrows for rudder/sail, q to quit; see docs/SIMULATION.md)')
+        print('   Without the alias:')
+        print(f'     python3 {shlex.quote(kb_script)}')
+        print('')
 
     def _simulate(self, mode: str, force_mock: bool = False, force_real: bool = False, debug: bool = False) -> bool:
         """
@@ -1762,7 +1876,8 @@ class ArgoLifecycleManager:
         print("  - anem.py (wind data provided by simulator)")
         print("  - rudder_sail_radio.py (control handled by simulator)")
         print("Simulation mode includes visualization:")
-        print("  - foxglove_bridge (Foxglove Studio at ws://localhost:8765)")
+        print(
+            f"  - foxglove_bridge (WebSocket for Foxglove Studio, default port {FOXGLOVE_BRIDGE_WEB_PORT})")
 
         # Use simulation nodes from YAML configuration
         if not self.simulation_expected_nodes and not self.simulation_special_nodes:
@@ -1836,6 +1951,15 @@ class ArgoLifecycleManager:
         print(f"Expected simulation nodes: {', '.join(self.expected_nodes)}")
         print(f"Special simulation nodes: {', '.join(self.special_nodes)}")
         print(f"Critical simulation nodes: {', '.join(self.critical_nodes)}")
+
+        if 'foxglove_bridge' in self.special_nodes:
+            p = FOXGLOVE_BRIDGE_WEB_PORT
+            if _tcp_port_accepting_connections('127.0.0.1', p):
+                print(
+                    f"ℹ️  Port {p} already has a listener (another foxglove_bridge or service may be running).")
+                print(
+                    "   If the new bridge fails to bind, stop the other process:  pkill -f foxglove_bridge")
+                print('')
 
         # Launch simulation nodes
         self._launch_nodes_directly()
@@ -2015,7 +2139,8 @@ class ArgoLifecycleManager:
             print("Control commands sent to simulator via /rudder_sail_servo")
             print(
                 "Keyboard control: Use arrow keys in curses display to control rudder and sail")
-            print("Visualization available via Foxglove Studio at ws://localhost:8765")
+            self._print_simulation_operator_instructions(
+                include_foxglove='foxglove_bridge' in self.special_nodes)
             print("\n🔄 Simulation running... Press Ctrl+C to stop and clean up all nodes")
 
             # Start continuous monitoring with proper cleanup
@@ -2801,9 +2926,10 @@ class ArgoLifecycleManager:
         ros_domain_id = REMOTE_CONFIG['ros2']['domain_id']
 
         print(f"🚀 Launching remote simulator on {user}@{host}...")
+        # Remote (often boat) may use humble while host uses jazzy; let remote shell pick ROS_DISTRO.
         remote_cmd = (
             f"cd {argo_dir} && "
-            f"source /opt/ros/humble/setup.bash && "
+            f"source /opt/ros/${{ROS_DISTRO:-humble}}/setup.bash && "
             f"export ROS_DOMAIN_ID={ros_domain_id} && "
             f"python3 nodes/argo_unified_simulator_bridge.py --mode local"
         )

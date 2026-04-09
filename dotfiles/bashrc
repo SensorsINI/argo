@@ -8,6 +8,23 @@ if [ -z "$ARGO_DIR" ]; then
     export ARGO_DIR="$(dirname "$ARGO_DOTFILES_DIR")"
 fi
 
+# Put Argo on PATH early so aliases and tools work even if something below is slow or interrupted.
+PATH="$ARGO_DIR/launch:$ARGO_DIR/nodes:$ARGO_DIR/scripts:$ARGO_DIR/power_control:$PATH"
+export PATH
+
+# ROS 2 underlay: source when this shell has not already loaded ROS (e.g. new interactive terminal).
+# Order favours typical dev hosts (jazzy on 24.04) before humble (22.04 / Orange Pi).
+if [ -z "${ROS_DISTRO:-}" ]; then
+    for _argo_ros_distro in jazzy iron humble rolling; do
+        if [ -f "/opt/ros/${_argo_ros_distro}/setup.bash" ]; then
+            # shellcheck source=/dev/null
+            source "/opt/ros/${_argo_ros_distro}/setup.bash"
+            break
+        fi
+    done
+    unset _argo_ros_distro
+fi
+
 source "$ARGO_DIR/dotfiles/bash_aliases"
 
 # Enable bash completion for Argo Python scripts
@@ -86,8 +103,6 @@ argo_quick_timer() {
 
 # Set ROS_DOMAIN_ID for consistent ROS2 communication
 export ROS_DOMAIN_ID=0
-
-PATH="$ARGO_DIR/launch:$ARGO_DIR/nodes:$ARGO_DIR/scripts:$ARGO_DIR/power_control:$PATH"
 
 # Add argo_quick_timer to PROMPT_COMMAND for continuous status monitoring
 # Only enable on the boat (Orange Pi), not on host computers

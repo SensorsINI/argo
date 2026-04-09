@@ -138,17 +138,16 @@ class KeyboardControlNode(Node):
         self.create_subscription(Bool, '/human_controlled', self.control_mode_callback, 10)
         self.create_subscription(Bool, '/controller_pause_state', self.controller_pause_state_callback, 10)
         
-        # Log initialization messages BEFORE curses takes over terminal
+        # Log and block on ROS/sim until ready while TTY is still cooked. Curses (cbreak/noecho)
+        # breaks Rcutils line-oriented logging; keep fullscreen mode only after this phase.
         self.get_logger().info('Keyboard control node ready')
         self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | T=Select Controller | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Toggle Manual | Q=Quit Sim | X=Quit Control | ENTER=Refresh')
         
-        # Setup curses (after logging to avoid polluting display)
         self._curses_active = False
-        self.stdscr = curses.initscr()
-        self._setup_curses()
-        self._curses_active = True
+        self._curses_ever_initialized = False
+        self.stdscr = None
         
-        # Setup signal handlers
+        # Setup signal handlers before potentially long init waits
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGWINCH, self._signal_handler)
@@ -168,6 +167,12 @@ class KeyboardControlNode(Node):
         self._initialize_wind_direction()
         self._initialize_controller_type()
         self._initialize_controller_pause_state()
+        
+        self.get_logger().info('Simulator/controller handshake done; starting fullscreen UI')
+        self.stdscr = curses.initscr()
+        self._setup_curses()
+        self._curses_ever_initialized = True
+        self._curses_active = True
     
     def _setup_curses(self):
         """Setup curses for terminal control."""
@@ -203,10 +208,10 @@ class KeyboardControlNode(Node):
         if signum == signal.SIGWINCH:
             # Terminal resize - trigger display update
             try:
-                # Force display refresh on resize
-                self.stdscr.clear()
-                self.update_display()
-            except:
+                if getattr(self, "_curses_active", False) and getattr(self, "stdscr", None):
+                    self.stdscr.clear()
+                    self.update_display()
+            except Exception:
                 pass
         else:
             self.running = False
@@ -217,17 +222,22 @@ class KeyboardControlNode(Node):
     def cleanup(self):
         """Restore terminal to normal state and resume simulation if paused."""
         self._curses_active = False
-        try:
-            if hasattr(self, 'stdscr') and self.stdscr:
-                self.stdscr.keypad(False)
-                self.stdscr.nodelay(False)
-            
-            curses.nocbreak()
-            curses.echo()
-            curses.curs_set(1)
-            curses.endwin()
-        except:
-            pass
+        if getattr(self, "_curses_ever_initialized", False):
+            try:
+                if getattr(self, "stdscr", None):
+                    try:
+                        self.stdscr.keypad(False)
+                        self.stdscr.nodelay(False)
+                    except Exception:
+                        pass
+                curses.nocbreak()
+                curses.echo()
+                curses.curs_set(1)
+                curses.endwin()
+            except Exception:
+                pass
+            self._curses_ever_initialized = False
+        self.stdscr = None
         
         # Ensure simulation resumes when exiting
         if self.simulation_paused:
@@ -460,6 +470,8 @@ class KeyboardControlNode(Node):
     def handle_keyboard_input(self):
         """Process keyboard input."""
         if not self.running:
+            return
+        if not getattr(self, "_curses_active", False) or not getattr(self, "stdscr", None):
             return
         
         try:
@@ -821,6 +833,8 @@ class KeyboardControlNode(Node):
         """Open a popup to select controller type via numeric keys."""
         if self._controller_popup_open:
             return
+        if not getattr(self, "_curses_active", False) or not getattr(self, "stdscr", None):
+            return
         self._controller_popup_open = True
 
         try:
@@ -950,6 +964,8 @@ class KeyboardControlNode(Node):
     
     def clear_and_refresh_display(self):
         """Clear and refresh the display to fix corruption from logging messages."""
+        if not getattr(self, "_curses_active", False) or not getattr(self, "stdscr", None):
+            return
         try:
             # Force a complete screen clear and refresh
             self.stdscr.clear()
@@ -1068,6 +1084,8 @@ class KeyboardControlNode(Node):
     def update_display(self):
         """Update the curses display."""
         if not self.running:
+            return
+        if not getattr(self, "_curses_active", False) or not getattr(self, "stdscr", None):
             return
         
         try:
