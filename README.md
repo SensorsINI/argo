@@ -173,7 +173,7 @@ See the Argo autonomous sailboat in action at the 2024 CCNW (before current wate
 ![Argo Autonomous Sailboat](https://img.youtube.com/vi/tjC1262BsCY/maxresdefault.jpg)
 
 ## Hardware Platform
-The main PCB design for Argo is available in the [pcb/](pcb/) folder. The latest board version is [rev3](pcb/argo-v9-stable/argo-v9-stable-rev3/), which contains the current sailboat control and sensor interface design.
+The main PCB design for Argo is available in the [pcb/](pcb/) folder. The latest board version is [rev4](pcb/argo-v9-stable/argo-v9-stable-rev4/), which contains the current sailboat control and sensor interface design.
 
 - **Orange Pi Zero 2W** (Allwinner H618 SoC)
 - **GPS**: u-blox NEO-M9N via UART5 (/dev/ttyS5)
