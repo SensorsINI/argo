@@ -118,23 +118,13 @@ class PatrolController(BaseController):
             self.log_entry(f"New target heading set to current heading: {state.compass_heading:.1f}°", level="INFO")
 
     def _calculate_absolute_wind_direction(self, state: BoatState):
-        # First priority: Use true wind direction from bridge if available (simulation mode)
+        # Simulation: /simulator/true_wind_direction (same absolute value as bridge anem y)
         if self.true_wind_direction_from_bridge is not None:
             return self.true_wind_direction_from_bridge
         if state.wind_angle is None or state.compass_heading is None:
             return None
-        # Fallback: Try to detect if wind_angle is absolute or relative
-        # In simulation, wind_angle is absolute (0-360, compass convention)
-        # On real boat, wind_angle is relative (0-360, CW from front of boat)
-        # Heuristic: If wind_angle is close to compass_heading, it's likely absolute
-        # Otherwise, assume it's relative and convert
-        calculated_abs_from_relative = (state.compass_heading + state.wind_angle) % 360.0
-        heading_match_threshold = 5.0
-        if abs(signed_angle_difference_degrees(state.wind_angle, state.compass_heading)) < heading_match_threshold:
-            # wind_angle is close to compass_heading, likely absolute
-            return state.wind_angle % 360.0
-        # Assume wind_angle is relative, convert to absolute
-        return calculated_abs_from_relative
+        # Real anem (/anem_speed_angle_temp y): relative CW from bow → absolute (compass, where wind comes from)
+        return (state.compass_heading + state.wind_angle) % 360.0
 
     def _determine_sailing_mode(self, state: BoatState) -> str:
         current_time = time.time()

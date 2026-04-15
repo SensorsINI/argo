@@ -7,6 +7,7 @@ import time
 import math
 import json
 from pathlib import Path
+from typing import Optional
 
 # 2) Third-party
 import numpy as np
@@ -73,7 +74,7 @@ class CrosserController(BaseController):
        - Determines maneuver type based on wind angle:
          * TACK: If sailing upwind (wind_angle < 80° from heading)
          * JIBE: If sailing downwind (wind_angle > 80° from heading)
-       - Uses tack_angle (typically 100°) for target heading to ensure successful turn
+       - Uses tack_angle for jibe/boundary turn size; upwind_layline_angle_deg for close-hauled tacking headings
        - Monitors for stalling in stays (too close to wind) and adjusts if needed
        - Transitions:
          * → TOWARD_MIDDLE: When heading_error < 20° AND heading_to_middle < 60° (turn complete, heading toward middle)
@@ -84,7 +85,7 @@ class CrosserController(BaseController):
        - Calculates optimal tacking heading based on wind direction
        - Switches tacks when:
          * heading_error < 15° (reached tack target)
-         * tack_cooldown has passed
+         * tack_cooldown_s has passed (and on_target heading band)
          * angle_to_desired > 90° (getting too far off course)
        - Transitions:
          * → TOWARD_MIDDLE: When middle is no longer in no-go zone (can sail directly)
@@ -113,12 +114,19 @@ class CrosserController(BaseController):
         self.arrival_distance_m = config.get('arrival_distance_m', 10.0)  # meters
         self.boundary_turn_threshold = config.get('boundary_turn_threshold', 15.0)  # meters from boundary to start turn
         self.patrol_lookahead_time = config.get('patrol_lookahead_time', 20.0)  # seconds to predict ahead for boundary crossing
-        self.tack_angle = config.get('tack_angle', 90.0)  # degrees for tacking
+        self.tack_angle = config.get('tack_angle', 90.0)  # turn size for jibe / compass-based boundary turns (not wind laylines)
         # Log loaded parameter for debugging
         if self.logger:
             self.logger.info(f"CrosserController: arrival_distance_m = {self.arrival_distance_m:.1f}m, boundary_turn_threshold = {self.boundary_turn_threshold:.1f}m, patrol_lookahead_time = {self.patrol_lookahead_time:.1f}s (from config)")
         self.tack_min_angle_from_wind = config.get('tack_min_angle_from_wind', 50.0)  # minimum angle from wind during tack to avoid stays
         self.no_go_zone_angle = config.get('no_go_zone_angle', 45.0)  # degrees - angle from wind where sailing is impossible
+        # Close-hauled offset from true wind for tacking_upwind / boundary tack (must be > no-go half-width)
+        self.upwind_layline_angle_deg = float(
+            config.get(
+                'upwind_layline_angle_deg',
+                max(self.no_go_zone_angle + 3.0, self.tack_min_angle_from_wind),
+            )
+        )
         self.min_rudder_near_boundary = config.get('min_rudder_near_boundary', 0.3)  # minimum rudder command when close to boundary
         self.boundary_emergency_threshold = config.get('boundary_emergency_threshold', 5.0)  # meters - emergency turn threshold
         self.turn_rudder_gain_multiplier = config.get('turn_rudder_gain_multiplier', 2.0)  # multiplier for rudder gain during turns
@@ -160,10 +168,16 @@ class CrosserController(BaseController):
         self._current_maneuver = 'sailing'  # Current sailing maneuver: 'sailing', 'tacking', 'jibing'
         self._tacking_target_heading = None  # Target heading when tacking upwind
         self._last_tack_time = 0.0  # Time of last tack to prevent rapid switching
-        self._tack_cooldown = 5.0  # Minimum seconds between tacks
+        self._tack_on_layline_since = None  # When heading first entered on_target band (for stable leg)
+        self.tack_cooldown_s = float(config.get('tack_cooldown_s', 12.0))  # Min seconds after last switch before another
+        self.tacking_upwind_on_target_deg = float(config.get('tacking_upwind_on_target_deg', 15.0))  # "On layline" heading error band
+        self.tacking_upwind_stable_before_switch_s = float(
+            config.get('tacking_upwind_stable_before_switch_s', 4.0))  # Must hold on layline this long before switching
         self._tack_start_heading = None  # Heading when tack started (to detect when we've passed through wind)
         self._tack_wind_direction = None  # Wind direction when tack started
         self._last_state_log_time = 0.0  # For throttling periodic state logs
+        # Simulation: set from /simulator/true_wind_direction (absolute compass, where wind comes from)
+        self.true_wind_direction_from_bridge = None
 
     def _log_state_transition(self, old_state: str, new_state: str, reason: str, details: dict = None):
         """Log state transitions with detailed reasons immediately."""
@@ -288,17 +302,20 @@ class CrosserController(BaseController):
 
     def _calculate_absolute_wind_direction(self, state: BoatState):
         """
-        Calculate absolute wind direction from north.
-        
-        NOTE: This calculation is now centralized in controller.py._calculate_absolute_wind_direction().
-        This method is kept for backwards compatibility but should use the centralized version.
-        Future: Add absolute_wind_direction to BoatState and remove this method.
+        Absolute wind direction (compass convention, degrees, where wind comes from).
+
+        In simulation, /anem_speed_angle_temp y is already absolute; the bridge also publishes
+        /simulator/true_wind_direction which we prefer. On the real boat, anem y is relative to
+        the bow — same logic as PatrolController.
         """
+        if self.true_wind_direction_from_bridge is not None:
+            return self.true_wind_direction_from_bridge
         if state.wind_angle is None or state.compass_heading is None:
             return None
-        # wind_angle is relative to boat heading, convert to absolute
-        absolute_wind = (state.compass_heading + state.wind_angle) % 360.0
-        return absolute_wind
+        # Real anem (/anem_speed_angle_temp y): relative CW from bow — convert to absolute
+        # (compass, where wind comes from). Do not compare wind_angle to compass_heading;
+        # they are different domains (a 5° "match" was a flawed absolute-or-relative heuristic).
+        return (state.compass_heading + state.wind_angle) % 360.0
     
     def _is_target_in_no_go_zone(self, target_heading: float, state: BoatState) -> bool:
         """Check if target heading is in the no-go zone (upwind, cannot sail directly)."""
@@ -324,26 +341,104 @@ class CrosserController(BaseController):
         """
         wind_dir_abs = self._calculate_absolute_wind_direction(state)
         if wind_dir_abs is None or state.compass_heading is None:
-            # No wind data - just use current heading with tack angle
-            return (state.compass_heading + self.tack_angle) % 360.0
+            # No wind data - just use current heading with a typical close-hauled offset
+            return (state.compass_heading + self.upwind_layline_angle_deg) % 360.0
         
         # Determine which side of the wind the desired direction is on
         # Calculate angle from wind to desired direction
         angle_to_desired = signed_angle_difference_degrees(wind_dir_abs, desired_direction)
         
+        lay = self.upwind_layline_angle_deg
         # Choose tack that makes progress toward desired direction
         # If desired is to the right of wind (positive angle), tack to starboard (right)
         # If desired is to the left of wind (negative angle), tack to port (left)
         if angle_to_desired > 0:
             # Desired direction is to starboard of wind - use starboard tack
-            # Starboard tack means wind comes from port, so we sail at wind_dir + tack_angle
-            target = (wind_dir_abs + self.tack_angle) % 360.0
+            # Starboard tack: wind comes from port; heading ≈ wind_from + close_hauled
+            target = (wind_dir_abs + lay) % 360.0
         else:
-            # Desired direction is to port of wind - use port tack
-            # Port tack means wind comes from starboard, so we sail at wind_dir - tack_angle
-            target = (wind_dir_abs - self.tack_angle) % 360.0
+            # Port tack: heading ≈ wind_from - close_hauled
+            target = (wind_dir_abs - lay) % 360.0
         
         return target
+
+    def _opposite_upwind_layline(self, wind_dir_abs: float, current_target_heading: float) -> float:
+        """Return the other close-hauled layline (port ↔ starboard) for zigzag beats."""
+        lay = self.upwind_layline_angle_deg
+        port_lay = (wind_dir_abs - lay) % 360.0
+        star_lay = (wind_dir_abs + lay) % 360.0
+        d_port = abs(signed_angle_difference_degrees(current_target_heading, port_lay))
+        d_star = abs(signed_angle_difference_degrees(current_target_heading, star_lay))
+        if d_port < d_star:
+            return star_lay
+        if d_star < d_port:
+            return port_lay
+        # Rare tie (e.g. ambiguous target); default to starboard layline
+        return star_lay
+
+    def _shortest_arc_crosses_downwind(
+        self,
+        compass: float,
+        target_heading: float,
+        wind_dir_abs: float,
+        downwind_deg: float = 85.0,
+    ) -> bool:
+        """True if the shorter rotation from compass to target_heading passes a downwind heading."""
+        delta = signed_angle_difference_degrees(target_heading, compass)
+        for t in (0.0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0):
+            h = (compass + delta * t) % 360.0
+            rw = abs(signed_angle_difference_degrees(wind_dir_abs, h))
+            if rw > downwind_deg:
+                return True
+        return False
+
+    def _use_jibe_for_boundary_escape(
+        self, state: BoatState, bearing_to_middle: Optional[float]
+    ) -> bool:
+        """
+        Jibe when already sailing downwind, or when the shortest turn toward the middle
+        passes through downwind (jibe path). A tack-only rule (wind angle < 80°) misses
+        close-hauled legs where the pond edge requires a downwind turn back toward center.
+        """
+        wind_dir_abs = self._calculate_absolute_wind_direction(state)
+        if wind_dir_abs is None or state.compass_heading is None or bearing_to_middle is None:
+            return False
+        rw = abs(signed_angle_difference_degrees(wind_dir_abs, state.compass_heading))
+        if rw > 80.0:
+            return True
+        return self._shortest_arc_crosses_downwind(
+            state.compass_heading, bearing_to_middle, wind_dir_abs
+        )
+
+    def _arm_jibe_from_current_heading(
+        self, state: BoatState, bearing_to_middle: float, reason: str
+    ) -> None:
+        """Switch to jibe maneuver: pick ± tack_angle toward middle (same as boundary jibe init)."""
+        if state.compass_heading is None:
+            return
+        wind_dir_abs = self._calculate_absolute_wind_direction(state)
+        candidate_target_1 = (state.compass_heading + self.tack_angle) % 360.0
+        candidate_target_2 = (state.compass_heading - self.tack_angle) % 360.0
+        angle_to_middle_1 = abs(signed_angle_difference_degrees(bearing_to_middle, candidate_target_1))
+        angle_to_middle_2 = abs(signed_angle_difference_degrees(bearing_to_middle, candidate_target_2))
+        if angle_to_middle_1 < angle_to_middle_2:
+            self._turning_target_heading = candidate_target_1
+            chosen = candidate_target_1
+        else:
+            self._turning_target_heading = candidate_target_2
+            chosen = candidate_target_2
+        self._turning_maneuver_type = 'jibing'
+        self._current_maneuver = 'jibing'
+        self._tack_wind_direction = None
+        self._tack_start_heading = state.compass_heading
+        if wind_dir_abs is not None:
+            tw = signed_angle_difference_degrees(wind_dir_abs, chosen)
+            self._turning_side_sign = 1 if tw > 0 else -1
+        self.publish_state('jibing')
+        if self.logger:
+            self.logger.warn(
+                f"Boundary escape: switching to jibe — {reason} (target={chosen:.1f}°)"
+            )
 
     def reset(self):
         self.crossing_state = 'toward_middle'
@@ -355,6 +450,7 @@ class CrosserController(BaseController):
         self._current_maneuver = 'sailing'
         self._tacking_target_heading = None
         self._last_tack_time = 0.0
+        self._tack_on_layline_since = None
         self._tack_start_heading = None
         self._tack_wind_direction = None
         self.log_entry("Crosser controller activated - starting toward middle", level="INFO")
@@ -373,6 +469,7 @@ class CrosserController(BaseController):
         self._current_maneuver = 'sailing'
         self._tacking_target_heading = None
         self._last_tack_time = 0.0
+        self._tack_on_layline_since = None
         self._tack_start_heading = None
         self._tack_wind_direction = None
         self.log_entry("Autonomous control resumed - resetting crosser to head toward middle", level="INFO")
@@ -505,8 +602,8 @@ class CrosserController(BaseController):
                     wind_dir_abs = self._calculate_absolute_wind_direction(state)
                     if wind_dir_abs is not None and state.compass_heading is not None:
                         relative_wind_angle = abs(signed_angle_difference_degrees(wind_dir_abs, state.compass_heading))
-                        if relative_wind_angle > 80.0:
-                            # Sailing downwind - jibe
+                        if self._use_jibe_for_boundary_escape(state, bearing_to_middle):
+                            # Sailing downwind, or shortest path to middle passes through a run (jibe)
                             old_state = self.crossing_state
                             self.crossing_state = 'turning_around'
                             self._turning_maneuver_type = 'jibing'
@@ -567,11 +664,10 @@ class CrosserController(BaseController):
                             # Publish 'tacking' state for visualization
                             self.publish_state('tacking')
                             
-                            # Calculate tack target: turn through the wind using tack_angle
-                            # Use wider angle for boundary turns to ensure successful tack with momentum
+                            # Close-hauled laylines (wind ± upwind_layline_angle_deg), not tack_angle (turn size for jibes)
                             # CRITICAL: Ensure target points toward middle, not away from it
-                            candidate_target_1 = (wind_dir_abs + self.tack_angle) % 360.0
-                            candidate_target_2 = (wind_dir_abs - self.tack_angle) % 360.0
+                            candidate_target_1 = (wind_dir_abs + self.upwind_layline_angle_deg) % 360.0
+                            candidate_target_2 = (wind_dir_abs - self.upwind_layline_angle_deg) % 360.0
                             
                             # Choose the candidate that points more toward the middle
                             if bearing_to_middle is not None:
@@ -631,33 +727,94 @@ class CrosserController(BaseController):
                     else:
                         target_bearing = bearing_to_middle if bearing_to_middle is not None else 0.0
                 else:  # toward_middle
-                    # Continue heading toward middle
-                    target_bearing = bearing_to_middle if bearing_to_middle is not None else state.compass_heading if state.compass_heading is not None else 0.0
+                    self._arrival_logged = False
+                    # Upwind / no-go check MUST live here: the outer elif (crossing_through|toward_middle)
+                    # runs first for every toward_middle tick, so a separate "elif toward_middle" below
+                    # was unreachable and tacking_upwind never activated.
+                    if bearing_to_middle is not None and self._is_target_in_no_go_zone(bearing_to_middle, state):
+                        old_state = self.crossing_state
+                        self.crossing_state = 'tacking_upwind'
+                        self._current_maneuver = 'tacking'
+                        self._tacking_target_heading = self._calculate_tacking_target_heading(state, bearing_to_middle)
+                        self._last_tack_time = time.time()
+                        self._tack_on_layline_since = None
+                        wind_dir_abs = self._calculate_absolute_wind_direction(state)
+                        angle_from_wind = abs(signed_angle_difference_degrees(wind_dir_abs, bearing_to_middle)) if wind_dir_abs is not None else None
+                        self._log_state_transition(old_state, self.crossing_state,
+                                                  f"Middle is upwind (in no-go zone) - switching to tacking mode",
+                                                  {'bearing_to_middle': bearing_to_middle, 'angle_from_wind': angle_from_wind,
+                                                   'no_go_zone_angle': self.no_go_zone_angle})
+                        self.publish_state('tacking_upwind')
+                        target_bearing = self._tacking_target_heading if self._tacking_target_heading is not None else bearing_to_middle
+                    else:
+                        target_bearing = bearing_to_middle if bearing_to_middle is not None else state.compass_heading if state.compass_heading is not None else 0.0
         
         # Handle turning_around state (active turn execution)
         elif self.crossing_state == 'turning_around':
+            # After a boundary tack, still close-hauled along the next edge: middle may be abeam/aft — need a
+            # jibe (downwind turn) instead of freezing in turning_around until grounding.
+            if (
+                self._turning_maneuver_type == 'tacking'
+                and bearing_to_middle is not None
+                and state.compass_heading is not None
+                and self._turning_target_heading is not None
+            ):
+                wj = self._calculate_absolute_wind_direction(state)
+                heading_err_turn = abs(
+                    signed_angle_difference_degrees(self._turning_target_heading, state.compass_heading)
+                )
+                htm_chk = abs(signed_angle_difference_degrees(bearing_to_middle, state.compass_heading))
+                close_to_edge = abs_distance_to_boundary < (self.boundary_turn_threshold * 1.5)
+                if wj is not None and heading_err_turn < 20.0 and close_to_edge:
+                    rw_chk = abs(signed_angle_difference_degrees(wj, state.compass_heading))
+                    need_jibe = (
+                        self._shortest_arc_crosses_downwind(state.compass_heading, bearing_to_middle, wj)
+                        or (rw_chk < 80.0 and htm_chk > 78.0)
+                    )
+                    if need_jibe:
+                        self._arm_jibe_from_current_heading(
+                            state,
+                            bearing_to_middle,
+                            "skirting boundary on layline — jibe toward middle",
+                        )
             # During turn, check if we're going into stays and adjust
             wind_dir_abs = self._calculate_absolute_wind_direction(state)
             if wind_dir_abs is not None and state.compass_heading is not None and self._turning_target_heading is not None:
                 # Check if current heading is too close to wind (in stays)
                 angle_to_wind = abs(signed_angle_difference_degrees(wind_dir_abs, state.compass_heading))
-                if angle_to_wind < self.tack_min_angle_from_wind:
-                    # Too close to wind - adjust target to get away from wind
+                # Laylines are ~tack_min_angle_from_wind to wind; use margin so we don't fight a valid 50° heading
+                stays_threshold = max(25.0, self.tack_min_angle_from_wind - 12.0)
+                if angle_to_wind < stays_threshold:
+                    # In irons / luffing — adjust target to get away from wind
                     if self._tack_wind_direction is not None:
-                        # Keep the same side of wind throughout the turn to avoid side-flip oscillation.
-                        # Without this lock, the correction can alternate each control tick and command +/- max rudder.
-                        if self._turning_side_sign is None:
-                            target_angle_to_wind = signed_angle_difference_degrees(wind_dir_abs, self._turning_target_heading)
-                            self._turning_side_sign = 1 if target_angle_to_wind > 0 else -1
-                        if self._turning_side_sign > 0:
-                            # Starboard side of wind
-                            adjusted_target = (wind_dir_abs + self.tack_min_angle_from_wind) % 360.0
+                        # Use the same close-hauled laylines as the initial boundary tack (upwind_layline_angle_deg).
+                        # Picking by _turning_side_sign alone can flip to the wrong tack: e.g. target 100° (toward
+                        # middle) but sign maps to "starboard" and (wind+50°)→200°, i.e. back toward the boundary.
+                        lay_starboard = (wind_dir_abs + self.upwind_layline_angle_deg) % 360.0
+                        lay_port = (wind_dir_abs - self.upwind_layline_angle_deg) % 360.0
+                        if bearing_to_middle is not None:
+                            a_s = abs(signed_angle_difference_degrees(bearing_to_middle, lay_starboard))
+                            a_p = abs(signed_angle_difference_degrees(bearing_to_middle, lay_port))
+                            adjusted_target = lay_starboard if a_s < a_p else lay_port
                         else:
-                            # Port side of wind
-                            adjusted_target = (wind_dir_abs - self.tack_min_angle_from_wind) % 360.0
-                        self._turning_target_heading = adjusted_target
-                        if self.logger:
-                            self.logger.warn(f"Adjusting tack to avoid stays - new target: {adjusted_target:.1f}°")
+                            # Keep the same side of wind throughout the turn to avoid side-flip oscillation.
+                            if self._turning_side_sign is None:
+                                target_angle_to_wind = signed_angle_difference_degrees(
+                                    wind_dir_abs, self._turning_target_heading)
+                                self._turning_side_sign = 1 if target_angle_to_wind > 0 else -1
+                            if self._turning_side_sign > 0:
+                                adjusted_target = (wind_dir_abs + self.tack_min_angle_from_wind) % 360.0
+                            else:
+                                adjusted_target = (wind_dir_abs - self.tack_min_angle_from_wind) % 360.0
+                        if adjusted_target != self._turning_target_heading:
+                            self._turning_target_heading = adjusted_target
+                            tw = signed_angle_difference_degrees(wind_dir_abs, adjusted_target)
+                            self._turning_side_sign = 1 if tw > 0 else -1
+                            if self.logger:
+                                self.logger.warn(
+                                    f"Adjusting tack to avoid stays - new target: {adjusted_target:.1f}° "
+                                    f"(layline toward middle)"
+                                )
             
             # Use turning target heading (always use it during turn)
             if self._turning_target_heading is not None:
@@ -683,15 +840,17 @@ class CrosserController(BaseController):
                 # This prevents the turn-complete-turn cycle near boundaries
                 safe_to_complete_turn = True
                 if abs_distance_to_boundary < (self.boundary_turn_threshold * 1.5):
-                    # Still close to boundary - check if middle is in a safe direction
-                    # If predicted_crossing_time is low, heading toward middle will hit boundary
+                    # Still close to boundary — only block completion if we're *aimed at* middle (would drive
+                    # into the edge soon). If middle is abeam, we must exit turning_around so tacking_upwind
+                    # or a jibe can run; otherwise we freeze on the layline until grounding.
                     if predicted_crossing_time < self.patrol_lookahead_time:
-                        safe_to_complete_turn = False
-                        if self.logger and (time.time() - self._last_state_log_time) > 5.0:
-                            self.logger.debug(
-                                f"Turn not complete yet - still too close to boundary "
-                                f"(dist={abs_distance_to_boundary:.1f}m, predicted_crossing={predicted_crossing_time:.1f}s)"
-                            )
+                        if heading_to_middle < 55.0:
+                            safe_to_complete_turn = False
+                            if self.logger and (time.time() - self._last_state_log_time) > 5.0:
+                                self.logger.debug(
+                                    f"Turn not complete yet - still too close to boundary "
+                                    f"(dist={abs_distance_to_boundary:.1f}m, predicted_crossing={predicted_crossing_time:.1f}s)"
+                                )
                 
                 # Primary check: are we heading toward middle AND safe to complete?
                 if heading_to_middle < 70.0 and safe_to_complete_turn:  # Within 70 degrees of middle (relaxed from 90)
@@ -738,32 +897,29 @@ class CrosserController(BaseController):
                     self._tack_wind_direction = None
                     self.publish_state('toward_middle')
                     target_bearing = bearing_to_middle
-        
-        # Normal crossing: heading toward middle
-        elif self.crossing_state == 'toward_middle':
-            self._arrival_logged = False
-            
-            # Check if middle is in no-go zone (upwind)
-            if bearing_to_middle is not None and self._is_target_in_no_go_zone(bearing_to_middle, state):
-                # Middle is upwind - need to tack
-                old_state = self.crossing_state
-                self.crossing_state = 'tacking_upwind'
-                self._current_maneuver = 'tacking'  # Tacking maneuver when sailing upwind
-                self._tacking_target_heading = self._calculate_tacking_target_heading(state, bearing_to_middle)
-                self._last_tack_time = time.time()
-                wind_dir_abs = self._calculate_absolute_wind_direction(state)
-                angle_from_wind = abs(signed_angle_difference_degrees(wind_dir_abs, bearing_to_middle)) if wind_dir_abs is not None else None
-                self._log_state_transition(old_state, self.crossing_state,
-                                          f"Middle is upwind (in no-go zone) - switching to tacking mode",
-                                          {'bearing_to_middle': bearing_to_middle, 'angle_from_wind': angle_from_wind,
-                                           'no_go_zone_angle': self.no_go_zone_angle})
-                self.publish_state('tacking_upwind')
-                
-                # Use tacking target heading
-                target_bearing = self._tacking_target_heading if self._tacking_target_heading is not None else bearing_to_middle
-            else:
-                # Middle is not upwind - can sail directly
-                target_bearing = bearing_to_middle if bearing_to_middle is not None else state.compass_heading if state.compass_heading is not None else 0.0
+                elif (not turn_complete and heading_error < 12.0 and heading_to_middle > 75.0
+                      and self._is_target_in_no_go_zone(bearing_to_middle, state)
+                      and abs_distance_to_boundary is not None
+                      and abs_distance_to_boundary > 0.5):
+                    # On close-hauled target after boundary tack, but not aimed at middle — start beat
+                    old_state = self.crossing_state
+                    self.crossing_state = 'tacking_upwind'
+                    self._current_maneuver = 'tacking'
+                    self._tacking_target_heading = self._calculate_tacking_target_heading(state, bearing_to_middle)
+                    self._last_tack_time = time.time()
+                    self._tack_on_layline_since = None
+                    self._log_state_transition(
+                        old_state, self.crossing_state,
+                        "On layline after boundary — middle still upwind, switching to tacking beat",
+                        {'heading_to_middle': heading_to_middle, 'heading_error': heading_error})
+                    self._turning_target_heading = None
+                    self._turning_maneuver_type = None
+                    self._turning_side_sign = None
+                    self._tack_start_heading = None
+                    self._tack_wind_direction = None
+                    self.publish_state('tacking_upwind')
+                    target_bearing = (
+                        self._tacking_target_heading if self._tacking_target_heading is not None else bearing_to_middle)
         
         # Tacking upwind toward middle
         elif self.crossing_state == 'tacking_upwind':
@@ -776,6 +932,7 @@ class CrosserController(BaseController):
                 self.crossing_state = 'toward_middle'
                 self._current_maneuver = 'sailing'  # Return to normal sailing
                 self._tacking_target_heading = None
+                self._tack_on_layline_since = None
                 wind_dir_abs = self._calculate_absolute_wind_direction(state)
                 angle_from_wind = abs(signed_angle_difference_degrees(wind_dir_abs, bearing_to_middle)) if wind_dir_abs is not None else None
                 self._log_state_transition(old_state, self.crossing_state,
@@ -790,29 +947,23 @@ class CrosserController(BaseController):
                 
                 # Check if we should switch tacks (zigzag pattern)
                 if self._tacking_target_heading is not None and state.compass_heading is not None:
-                    # Check if we've reached the tacking target heading
                     heading_error = abs(signed_angle_difference_degrees(self._tacking_target_heading, state.compass_heading))
-                    
-                    # If we're close to target heading and enough time has passed, consider switching tacks
-                    if heading_error < 15.0 and (current_time - self._last_tack_time) > self._tack_cooldown:
-                        # Check if we've made enough progress or if we should switch tacks
-                        # Switch if we're getting too far from the desired direction
-                        angle_to_desired = abs(signed_angle_difference_degrees(bearing_to_middle, state.compass_heading))
-                        
-                        # If we're more than 90 degrees off from desired direction, switch tacks
-                        if angle_to_desired > 90.0:
-                            # Switch to opposite tack
+                    # Require continuous time inside on_target band (avoids switching every few seconds while
+                    # still turning or dithering on the edge of the 15° window).
+                    if heading_error >= self.tacking_upwind_on_target_deg:
+                        self._tack_on_layline_since = None
+                    else:
+                        if self._tack_on_layline_since is None:
+                            self._tack_on_layline_since = current_time
+                        stable_s = current_time - self._tack_on_layline_since
+                        if (stable_s >= self.tacking_upwind_stable_before_switch_s
+                                and (current_time - self._last_tack_time) > self.tack_cooldown_s):
                             wind_dir_abs = self._calculate_absolute_wind_direction(state)
                             if wind_dir_abs is not None:
-                                # Calculate opposite tack
-                                current_angle_to_wind = signed_angle_difference_degrees(wind_dir_abs, state.compass_heading)
-                                if current_angle_to_wind > 0:
-                                    # Currently on starboard tack, switch to port
-                                    self._tacking_target_heading = (wind_dir_abs - self.tack_angle) % 360.0
-                                else:
-                                    # Currently on port tack, switch to starboard
-                                    self._tacking_target_heading = (wind_dir_abs + self.tack_angle) % 360.0
+                                self._tacking_target_heading = self._opposite_upwind_layline(
+                                    wind_dir_abs, self._tacking_target_heading)
                                 self._last_tack_time = current_time
+                                self._tack_on_layline_since = None
                                 self.log_entry(f"Switching tacks - new target: {self._tacking_target_heading:.1f}°", level="INFO")
                 
                 target_bearing = self._tacking_target_heading if self._tacking_target_heading is not None else bearing_to_middle
@@ -832,7 +983,7 @@ class CrosserController(BaseController):
         # Calculate rudder command using P controller
         # P controller: output = Kp * error
         # where Kp = p_heading_gain and error = heading_error / rudder_full_scale_deg
-        distance_to_boundary = abs(state.distance_to_boundary) if state.distance_to_boundary is not None else float('inf')
+        # Geofence: signed distance negative = inside polygon, positive = outside (see geofence_manager).
         
         if state.compass_heading is not None:
             compass_err = signed_angle_difference_degrees(target_bearing, state.compass_heading)
@@ -879,29 +1030,21 @@ class CrosserController(BaseController):
                 # Normal P controller for non-turning states
                 cmd_rudder = self.p_heading_gain * normalized_error
             
-            # Emergency: if very close to boundary, ensure minimum rudder to turn away
-            if distance_to_boundary < self.boundary_emergency_threshold:
-                # Very close to boundary - need aggressive turn
-                # Determine which direction to turn (away from boundary)
-                if state.distance_to_boundary is not None and state.distance_to_boundary > 0:
-                    # Outside boundary - turn toward inside (away from boundary)
-                    # Use minimum rudder in direction that turns away from boundary
-                    if abs(cmd_rudder) < self.min_rudder_near_boundary:
-                        # Increase rudder command to minimum
-                        if cmd_rudder >= 0:
-                            cmd_rudder = max(cmd_rudder, self.min_rudder_near_boundary)
-                        else:
-                            cmd_rudder = min(cmd_rudder, -self.min_rudder_near_boundary)
-                        if self.logger:
-                            self.logger.warn(f"Emergency: near boundary ({distance_to_boundary:.1f}m) - applying minimum rudder {cmd_rudder:+.3f}")
-                else:
-                    # Inside boundary but very close - ensure we can turn
-                    if abs(cmd_rudder) < self.min_rudder_near_boundary and abs(compass_err) > 5.0:
-                        # If we have a heading error but small rudder, increase it
-                        if cmd_rudder >= 0:
-                            cmd_rudder = max(cmd_rudder, self.min_rudder_near_boundary)
-                        else:
-                            cmd_rudder = min(cmd_rudder, -self.min_rudder_near_boundary)
+            # Emergency minimum rudder: only when INSIDE the sailing area (signed dist < 0) but very close
+            # to the edge. Using abs(distance) alone also matched "2 m outside" (|+2| < 5 m), which wrongly
+            # triggered fence-skirting logic while still approaching from the beach / outside the polygon.
+            signed_db = state.distance_to_boundary
+            if (signed_db is not None and signed_db < 0
+                    and abs(signed_db) < self.boundary_emergency_threshold):
+                if abs(cmd_rudder) < self.min_rudder_near_boundary and abs(compass_err) > 5.0:
+                    if cmd_rudder >= 0:
+                        cmd_rudder = max(cmd_rudder, self.min_rudder_near_boundary)
+                    else:
+                        cmd_rudder = min(cmd_rudder, -self.min_rudder_near_boundary)
+                    if self.logger:
+                        self.logger.warn(
+                            f"Emergency: near boundary inside area ({abs(signed_db):.1f}m from edge) - "
+                            f"applying minimum rudder {cmd_rudder:+.3f}")
             
             cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
         else:

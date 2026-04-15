@@ -335,6 +335,11 @@ class ControllerNode(ArgoBaseNode):
         self.declare_parameter('broad_reach_angle', 110.0)
         self.declare_parameter('no_go_zone_angle', 45.0)  # Degrees from wind where sailing is impossible
         self.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
+        # CrosserController only — tacking_upwind beat timing (ignored by other controllers)
+        self.declare_parameter('upwind_layline_angle_deg', 50.0)
+        self.declare_parameter('tack_cooldown_s', 12.0)
+        self.declare_parameter('tacking_upwind_on_target_deg', 15.0)
+        self.declare_parameter('tacking_upwind_stable_before_switch_s', 4.0)
 
         self.param_file = Path(self.get_parameter(
             'param_file_path').get_parameter_value().string_value)
@@ -544,6 +549,12 @@ class ControllerNode(ArgoBaseNode):
             config['tack_angle'] = self.get_parameter('tack_angle').get_parameter_value().double_value if self.has_parameter('tack_angle') else 90.0
             config['tack_min_angle_from_wind'] = self.get_parameter('tack_min_angle_from_wind').get_parameter_value().double_value if self.has_parameter('tack_min_angle_from_wind') else 50.0
             config['no_go_zone_angle'] = self.get_parameter('no_go_zone_angle').get_parameter_value().double_value if self.has_parameter('no_go_zone_angle') else 45.0
+            config['upwind_layline_angle_deg'] = self.get_parameter('upwind_layline_angle_deg').get_parameter_value().double_value if self.has_parameter('upwind_layline_angle_deg') else 50.0
+            config['tack_cooldown_s'] = self.get_parameter('tack_cooldown_s').get_parameter_value().double_value if self.has_parameter('tack_cooldown_s') else 12.0
+            config['tacking_upwind_on_target_deg'] = self.get_parameter('tacking_upwind_on_target_deg').get_parameter_value().double_value if self.has_parameter('tacking_upwind_on_target_deg') else 15.0
+            config['tacking_upwind_stable_before_switch_s'] = (
+                self.get_parameter('tacking_upwind_stable_before_switch_s').get_parameter_value().double_value
+                if self.has_parameter('tacking_upwind_stable_before_switch_s') else 4.0)
             config['min_rudder_near_boundary'] = self.get_parameter('min_rudder_near_boundary').get_parameter_value().double_value if self.has_parameter('min_rudder_near_boundary') else 0.3
             config['boundary_emergency_threshold'] = self.get_parameter('boundary_emergency_threshold').get_parameter_value().double_value if self.has_parameter('boundary_emergency_threshold') else 5.0
             config['turn_rudder_gain_multiplier'] = self.get_parameter('turn_rudder_gain_multiplier').get_parameter_value().double_value if self.has_parameter('turn_rudder_gain_multiplier') else 2.0
@@ -765,8 +776,8 @@ class ControllerNode(ArgoBaseNode):
     def true_wind_callback(self, msg):
         """Receive true wind direction from bridge (compass convention, where wind comes from)."""
         self.true_wind_direction_from_bridge = msg.data
-        # Pass true wind direction to patrol controller if it's active
-        if isinstance(self.controller, PatrolController):
+        # Pass true wind to controllers that interpret anem wind (sim: absolute; hardware: relative)
+        if isinstance(self.controller, (PatrolController, CrosserController)):
             self.controller.true_wind_direction_from_bridge = msg.data
     
     def pose_callback(self, msg):

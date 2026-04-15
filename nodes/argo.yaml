@@ -7,7 +7,7 @@
 /**:
   ros__parameters:
     # Map configuration (used by sailing_area_publisher, argo_transform_publisher, controllers)
-    geofence_map_name: Argo Irchel North pond sailing area
+    geofence_map_name: Hotel dei Pini # Argo Irchel North pond sailing area
     # Controller parameters (used by controller.py and crosser controller)
     p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
     min_rudder_near_boundary: 0.5  # Minimum rudder command when close to boundary (0.0-1.0)
@@ -80,7 +80,7 @@
       wind:
         wind_min_speed: 4.0         # Minimum wind speed in m/s (used for mock simulator). 1m/s is about 2 knots.
         wind_max_speed: 10.0        # Maximum wind speed in m/s (placeholder for variable wind)
-        wind_direction: 60.0       # Degrees CW from North (compass, 0°=North), where wind COMES FROM
+        wind_direction: 90.0       # Degrees CW from North (compass, 0°=North), where wind COMES FROM
         # Placeholder parameters for future wind variability features:
         wind_max_delta_percent: 0.0        # Max wind speed variation percent (placeholder)
         wind_gust_probability: 0.0         # Probability of gusts (0.0-1.0, placeholder)
@@ -102,7 +102,7 @@
       yaw_offset_deg: 59.25
 controller_node:
   ros__parameters:
-    controller_type: human  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
+    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
     controller_initially_paused: false  # Start controller in paused (manual) mode if true
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
@@ -110,7 +110,11 @@ controller_node:
     param_file_path: argo.yaml
     patrol_lookahead_time: 15.0  # Seconds to predict ahead for boundary crossing (used by patrol/crosser controllers)
     boundary_turn_threshold: 4.0  # Distance to boundary (meters) to trigger turn maneuver
-    tack_angle: 120.0  # Degrees to turn during tack maneuver (increased from 90° for better tack success - more momentum through wind, less likely to stall)
+    tack_angle: 120.0  # Degrees to turn for jibe / compass-based turn candidates at boundary (NOT close-hauled laylines)
+    upwind_layline_angle_deg: 50.0  # Crosser only: angle from true wind for upwind tacking headings (close-hauled; must be > no_go_zone_angle/2)
+    tack_cooldown_s: 20.0  # Crosser tacking_upwind: minimum seconds after last switch before another is allowed
+    tacking_upwind_on_target_deg: 15.0  # Crosser: max heading error (deg) to count as "on" current layline
+    tacking_upwind_stable_before_switch_s: 4.0  # Crosser: seconds continuously on layline before switching (reduces rapid short-tacking)
     arrival_distance_m: 3.0  # Distance to middle waypoint (meters) to consider "arrived" (used by crosser controller)
     tack_min_angle_from_wind: 50.0  # Minimum angle from wind during tack to avoid stays (degrees, used by crosser controller)
     no_go_zone_angle: 45.0  # Angle from wind where sailing is impossible (degrees, used by crosser controller)
@@ -125,4 +129,4 @@ rudder_sail_radio_node:
     param_file_path: argo.yaml
 argo_boat_visualization:
   ros__parameters:
-    visualization_scale: 6.0        # Scale factor for boat visualization (1.0 realistic)
+    visualization_scale: 12.0        # Scale factor for boat visualization (1.0 realistic)
