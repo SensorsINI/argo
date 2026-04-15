@@ -109,6 +109,24 @@ def _bash_source_ros_prefix() -> str:
     return f'source {shlex.quote(_resolve_ros_setup_bash())} && '
 
 
+def _python3_can_import_ruamel_yaml() -> bool:
+    """True if python3 (same as launched nodes: ROS sourced, inherits PATH for .venv) can import ruamel.yaml."""
+    try:
+        chk = subprocess.run(
+            [
+                'bash',
+                '-c',
+                _bash_source_ros_prefix()
+                + 'exec python3 -c "from ruamel.yaml import YAML"',
+            ],
+            capture_output=True,
+            timeout=20,
+        )
+        return chk.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
 # Default WebSocket port for ros-jazzy/ros-humble foxglove_bridge (override with -p port:=...)
 FOXGLOVE_BRIDGE_WEB_PORT = 8765
 
@@ -1788,6 +1806,43 @@ class ArgoLifecycleManager:
             print("   Pip-only host deps (pyglet, argcomplete, …) belong in .venv:")
             print("     make setup-venv && source .venv/bin/activate")
             return False
+
+        # 4. ruamel.yaml (pip): required by argo_unified_simulator_bridge.py and other nodes for YAML round-trips
+        if _python3_can_import_ruamel_yaml():
+            print("✅ ruamel.yaml is available (simulator / parameter YAML).")
+        else:
+            print("❌ ruamel.yaml is not installed for the Python used to run Argo nodes.")
+            print("   Without it, argo_unified_simulator_bridge.py exits immediately (FATAL).")
+            print("   From the repo root, install host Python dependencies:")
+            print("     make install-python-deps")
+            print("   If you use the repo virtualenv, activate it first so python3 matches:")
+            print("     source .venv/bin/activate && make install-python-deps")
+            print("   Or install only ruamel.yaml into that environment:")
+            print("     .venv/bin/pip install 'ruamel.yaml>=0.17,<0.18'")
+            try:
+                response = input("   Run `make install-python-deps` now? (y/N): ").lower()
+            except EOFError:
+                response = 'n'
+            if response == 'y':
+                try:
+                    print("🔧 Installing Python dependencies...")
+                    subprocess.run(
+                        ['make', '-C', self.argo_dir, 'install-python-deps'],
+                        check=True,
+                    )
+                    if _python3_can_import_ruamel_yaml():
+                        print("✅ ruamel.yaml is now available.")
+                    else:
+                        print("❌ ruamel.yaml still cannot be imported after install.")
+                        print("   Activate the same .venv you use for `asim`, then run:")
+                        print("     make install-python-deps")
+                        return False
+                except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                    print(f"   Install failed: {e}")
+                    print("   Fix the error above, then run `make install-python-deps` manually.")
+                    return False
+            else:
+                return False
 
         return True
 
