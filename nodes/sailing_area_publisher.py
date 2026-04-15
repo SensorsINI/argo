@@ -34,16 +34,16 @@ class SailingAreaPublisher(Node):
 
         self.get_logger().info(f"Using maps directory: {self.maps_dir}")
 
-        # Use TRANSIENT_LOCAL durability so late subscribers get the last published message
-        # MUST set QoS when creating publisher, not after
+        # RELIABLE + VOLATILE matches ros2 topic echo and foxglove_bridge DDS matching.
+        # TRANSIENT_LOCAL caused no data on the WebSocket while CLI echo still worked.
         qos_profile = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,  # Allows late subscribers to receive last message
+            durability=QoSDurabilityPolicy.VOLATILE,
             depth=10
         )
-        
-        # Create publishers with TRANSIENT_LOCAL QoS profile
+
+        # Create publishers (periodic republish below covers late subscribers)
         self.waypoint_pub = self.create_publisher(MarkerArray, '/sailing_waypoints', qos_profile)
         self.boundary_pub = self.create_publisher(MarkerArray, '/sailing_boundaries', qos_profile)
         self.hazard_pub = self.create_publisher(MarkerArray, '/sailing_hazards', qos_profile)
@@ -69,8 +69,9 @@ class SailingAreaPublisher(Node):
         self._logged_marker_publicaton=False
         # Publish markers at startup
         self.publish_all_markers()
-        
-        
+        # foxglove_bridge often starts after this node
+        self._startup_republish_timer = self.create_timer(1.0, self._startup_republish_once)
+
         # Clock time for timestamp preservation during re-recording
         # Subscribe to /clock topic to get simulated time from bag playback
         # Use BEST_EFFORT reliability to match ros2 bag play --clock QoS
@@ -93,6 +94,10 @@ class SailingAreaPublisher(Node):
         # Log comprehensive startup information
         self.log_startup_info()
     
+    def _startup_republish_once(self):
+        self.publish_all_markers()
+        self._startup_republish_timer.cancel()
+
     def clock_callback(self, msg):
         """Update simulated time from /clock topic for timestamp preservation"""
         # Store the clock time - this comes from ros2 bag play --clock

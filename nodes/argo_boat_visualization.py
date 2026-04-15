@@ -236,22 +236,21 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.create_subscription(Bool, '/human_controlled', self.human_controlled_callback, 10)
         self.create_subscription(String, '/controller/state', self.controller_state_callback, 10)
         
-        # Subscribe to sailing area markers for 3D visualization
-        # Use TRANSIENT_LOCAL QoS to receive last published message even if subscribing late
+        # Subscribe to sailing area markers (QoS must match sailing_area_publisher)
         from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
-        transient_qos = QoSProfile(
+        sailing_marker_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            durability=QoSDurabilityPolicy.VOLATILE,
             depth=10
         )
-        
+
         self.sailing_boundaries = []
         self.sailing_waypoints = []
         self.sailing_hazards = []
-        self.create_subscription(MarkerArray, '/sailing_boundaries', self.sailing_boundaries_callback, transient_qos)
-        self.create_subscription(MarkerArray, '/sailing_waypoints', self.sailing_waypoints_callback, transient_qos)
-        self.create_subscription(MarkerArray, '/sailing_hazards', self.sailing_hazards_callback, transient_qos)
+        self.create_subscription(MarkerArray, '/sailing_boundaries', self.sailing_boundaries_callback, sailing_marker_qos)
+        self.create_subscription(MarkerArray, '/sailing_waypoints', self.sailing_waypoints_callback, sailing_marker_qos)
+        self.create_subscription(MarkerArray, '/sailing_hazards', self.sailing_hazards_callback, sailing_marker_qos)
         
         # State variables
         self.boat_heading = 0.0  # degrees
@@ -1803,8 +1802,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
             else:
                 self._debug_counter = 0
             
-            # Log marker counts periodically for better debugging
-            if self._debug_counter % 300 == 0:  # Every 1 second at 10Hz
+            # Log marker counts periodically (300 ticks ≈ 150s at 2Hz; was wrongly labeled "1s @ 10Hz")
+            if self._debug_counter > 0 and self._debug_counter % 300 == 0:
                 boundary_count = len(self.sailing_boundaries)
                 waypoint_count = len(self.sailing_waypoints)
                 hazard_count = len(self.sailing_hazards)

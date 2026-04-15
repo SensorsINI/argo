@@ -274,7 +274,22 @@ class ArgoTransformPublisher(ArgoBaseNode):
     
     def publish_static_transforms(self):
         """Publish static transforms between sensor frames and base_link"""
-        
+        # Identity map->odom on /tf_static (latched). Foxglove/tf2 need this link for map-frame
+        # markers; publishing map->odom only on /tf each tick made lookups fragile when stamps
+        # or GPS timing diverged from visualization marker stamps.
+        map_odom = TransformStamped()
+        map_odom.header.stamp = self.get_current_time()
+        map_odom.header.frame_id = "map"
+        map_odom.child_frame_id = "odom"
+        map_odom.transform.translation.x = 0.0
+        map_odom.transform.translation.y = 0.0
+        map_odom.transform.translation.z = 0.0
+        map_odom.transform.rotation.x = 0.0
+        map_odom.transform.rotation.y = 0.0
+        map_odom.transform.rotation.z = 0.0
+        map_odom.transform.rotation.w = 1.0
+        self.static_tf_broadcaster.sendTransform(map_odom)
+
         # GPS antenna offset (assuming GPS is mounted forward and up from boat center)
         gps_transform = TransformStamped()
         gps_transform.header.stamp = self.get_current_time()
@@ -345,23 +360,9 @@ class ArgoTransformPublisher(ArgoBaseNode):
             if self.debug_trace:
                 self.get_logger().debug(f"[TF_TRACE:{tf_id}] TF_PUBLISH_START")
             
-            # Map to odom transform (identity for now, could be used for odometry drift correction)
-            map_to_odom = TransformStamped()
-            map_to_odom.header.stamp = self.get_current_time()
-            map_to_odom.header.frame_id = "map"
-            map_to_odom.child_frame_id = "odom"
-            map_to_odom.transform.translation.x = 0.0
-            map_to_odom.transform.translation.y = 0.0
-            map_to_odom.transform.translation.z = 0.0
-            map_to_odom.transform.rotation.x = 0.0
-            map_to_odom.transform.rotation.y = 0.0
-            map_to_odom.transform.rotation.z = 0.0
-            map_to_odom.transform.rotation.w = 1.0
-            self.tf_broadcaster.sendTransform(map_to_odom)
-            
-            if self.debug_trace:
-                self.get_logger().debug(f"[TF_TRACE:{tf_id}] Published map->odom transform (identity)")
-            
+            # map->odom is static (see publish_static_transforms). Only odom->base_link here.
+            stamp = self.get_current_time()
+
             # Odom to base_link transform (boat position and orientation)
             # For now, assume boat is at map origin (0,0,0) and only rotates
             # In a full implementation, this would include GPS position converted to map coordinates
@@ -385,13 +386,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
             qz = cr * cp * sy - sr * sp * cy
             
             odom_to_base = TransformStamped()
-            # Use GPS message timestamp if available, otherwise use current time
-            # This ensures transforms are ordered correctly with respect to GPS data
-            # and prevents backwards movement when GPS updates arrive
-            if self.last_gps_timestamp is not None:
-                odom_to_base.header.stamp = self.last_gps_timestamp
-            else:
-                odom_to_base.header.stamp = self.get_current_time()
+            odom_to_base.header.stamp = stamp
             odom_to_base.header.frame_id = "odom"
             odom_to_base.child_frame_id = "base_link"
             
