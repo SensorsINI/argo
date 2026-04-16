@@ -374,7 +374,10 @@ class ArgoUnifiedSimulatorBridge(Node):
         
         # Store initial boat state for reset capability
         self.initial_boat_state = None
-        self.initial_boat_heading = 0.0  # Will be set when initial state is calculated
+        # initial_boat_heading is set in _init_local_simulator() (local mode). Do not assign 0.0
+        # here — that ran after _init_local_simulator and overwrote the real heading, breaking reset.
+        if self.mode != 'local':
+            self.initial_boat_heading = 0.0
         
         # Log simulation parameters (already declared and set earlier)
         self.get_logger().info(f"Simulation rate: {self.simulation_rate:.1f} Hz")

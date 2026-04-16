@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Publish sailing area data from GeoJSON files as ROS2 markers for Foxglove visualization
+Publish sailing area data from GeoJSON files as ROS2 markers for Foxglove visualization.
+
+Marker identity is (frame_id, namespace, id). We use distinct namespaces per topic so that
+/sailing_boundaries and /sailing_hazards can both use id 0,1,... without Foxglove/RViz
+overwriting one stream with the other (empty ns would collide across topics).
 """
 
 import json
@@ -16,6 +20,11 @@ from pathlib import Path
 import math
 import argparse
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
+
+# visualization_msgs/Marker: unique ns per logical stream (ids restart at 0 per GeoJSON pass)
+MARKER_NS_WAYPOINTS = "argo_sailing_waypoints"
+MARKER_NS_BOUNDARIES = "argo_sailing_boundaries"
+MARKER_NS_HAZARDS = "argo_sailing_hazards"
 
 
 class SailingAreaPublisher(Node):
@@ -376,7 +385,7 @@ class SailingAreaPublisher(Node):
         if feature_type == "sailing_boundary":
             marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)  # Green, fully opaque
         elif feature_type == "sailing_area":
-            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)  # Blue, fully opaque
+            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)  # Green, fully opaque
         else:
             marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Red
         
@@ -426,7 +435,7 @@ class SailingAreaPublisher(Node):
         
         # Color based on type
         if feature_type == "sailing_area":
-            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)  # Blue, fully opaque
+            marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)  # Green, fully opaque
         elif feature_type == "hazard":
             marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)  # Red, fully opaque
         else:
@@ -483,19 +492,23 @@ class SailingAreaPublisher(Node):
                 
                 if geom_type == 'Point':
                     marker = self.create_waypoint_marker(feature, marker_id)
+                    marker.ns = MARKER_NS_WAYPOINTS
                     waypoint_markers.markers.append(marker)
                     marker_id += 1
                 
                 elif geom_type == 'LineString':
                     marker = self.create_line_marker(feature, marker_id)
+                    marker.ns = MARKER_NS_BOUNDARIES
                     boundary_markers.markers.append(marker)
                     marker_id += 1
                 
                 elif geom_type == 'Polygon':
                     marker = self.create_polygon_marker(feature, marker_id)
                     if feature_type == 'hazard':
+                        marker.ns = MARKER_NS_HAZARDS
                         hazard_markers.markers.append(marker)
                     else:
+                        marker.ns = MARKER_NS_BOUNDARIES
                         boundary_markers.markers.append(marker)
                     marker_id += 1
         
