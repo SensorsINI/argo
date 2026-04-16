@@ -1578,6 +1578,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         state_abbrev = {
             'toward_middle': 'TO-MID',
             'toward middle': 'TO-MID',
+            'launching': 'LAUNCH',
             'crossing_through': 'CROSS',
             'crossing through': 'CROSS',
             'turning_around': 'TURN',

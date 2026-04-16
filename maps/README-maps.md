@@ -1,6 +1,11 @@
 # Argo Maps - Source Maps Directory
 
-This directory contains the **source map files** drawn in Google Maps and exported as KMZ files.
+This directory contains the **source map files** drawn in [Google Maps MyMaps](https://www.google.com/maps/d/) and exported as KMZ files.
+
+Maps are originally draWn in Google Maps MyMpas. Here are samples
+
+<img src="images/google%20mymaps.png" alt="MyMaps Example" width="500"/>
+
 
 ## Contents
 
@@ -17,13 +22,17 @@ This directory contains the **source map files** drawn in Google Maps and export
 
 ## Converting Maps for Simulation
 
+ 1. [Hotel dei Pini](https://www.google.com/maps/d/viewer?mid=1YiW7Jl0Miv5geXh6tLaaxXCPSLpgqD0&usp=sharing)
+2. [Argo Irchel North pond sailing area](https://www.google.com/maps/d/viewer?mid=14-I2RigSZ3UgvEm4Odftd1UoRcAeuW8&usp=sharing)
+
 ### Step 1: Export Map from Google Maps
 
-1. Draw your sailing area in Google Maps (My Maps)
+1. Draw your sailing area in [Google Maps (My Maps)](https://www.google.com/maps/d/)
 2. Include a **"home" waypoint** - this will be the boat's start location
 3. Include a **"middle"** waypoint if you want to customize the point for crosser controller.
-4. Export as KMZ file
-5. Save the `.kmz` file to this directory (`maps/`)
+4. Include hazard markers/lines for Argo to avoid (rocks, sWimming lines, bouys)
+5. Export as KMZ file
+6. Save the `.kmz` file to this directory (`maps/`)
 
 ### Step 2: Convert KMZ to GeoJSON
 

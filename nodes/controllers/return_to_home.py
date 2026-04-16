@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 
 # 1) Standard library
+import json
+import math
 import os
+import re
 import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 # 2) Third-party
 import numpy as np
@@ -45,11 +50,71 @@ class ReturnToHomeController(BaseController):
         self.hold_sail = config.get('hold_sail', -1.0)  # sheet in while holding at home
         self._at_home_hold = False
         self._logged_hold_entry = False
+        # Reverse of approach_1…N (opposite course) before final leg to GPS home
+        map_name = config.get('geofence_map_name')
+        forward = self._load_approach_waypoints(map_name) if map_name else []
+        self._rth_reverse_legs: List[Tuple[float, float]] = list(reversed(forward))
+        self._rth_leg_index = 0
+        self._rth_logged_start = False
+
+    def _load_approach_waypoints(self, map_name: str) -> List[Tuple[float, float]]:
+        """Load approach_1, approach_2, … from GeoJSON (same convention as Crosser)."""
+        try:
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[2]
+            geojson_path = argo_dir / "foxglove" / "maps" / f"{map_name}.geojson"
+            if not geojson_path.exists():
+                return []
+            with open(geojson_path, 'r') as f:
+                data = json.load(f)
+            found: List[Tuple[int, float, float]] = []
+            pat = re.compile(r'^approach_(\d+)$', re.I)
+            for feature in data.get('features', []):
+                props = feature.get('properties', {})
+                if props.get('type') != 'waypoint':
+                    continue
+                name = props.get('name') or ''
+                m = pat.match(name.strip())
+                if not m:
+                    continue
+                geom = feature.get('geometry', {})
+                if geom.get('type') != 'Point':
+                    continue
+                coords = geom.get('coordinates', [])
+                if len(coords) < 2:
+                    continue
+                found.append((int(m.group(1)), float(coords[0]), float(coords[1])))
+            found.sort(key=lambda t: t[0])
+            return [(lon, lat) for _, lon, lat in found]
+        except Exception as e:
+            if self.logger:
+                self.logger.warn(f"RTH: could not load approach waypoints: {e}")
+            return []
+
+    def _bearing_and_distance_to_lonlat(
+        self, state: BoatState, lon: float, lat: float
+    ) -> Tuple[Optional[float], Optional[float]]:
+        if state.current_latitude is None or state.current_longitude is None:
+            return None, None
+        lat1 = math.radians(state.current_latitude)
+        lon1 = math.radians(state.current_longitude)
+        lat2 = math.radians(lat)
+        lon2 = math.radians(lon)
+        dlon = lon2 - lon1
+        y = math.sin(dlon) * math.cos(lat2)
+        x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+        bearing_deg = (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+        a = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+        c = 2 * math.asin(min(1.0, math.sqrt(a)))
+        distance_m = 6378137.0 * c
+        return bearing_deg, distance_m
 
     def reset(self):
         super().reset()
         self._at_home_hold = False
         self._logged_hold_entry = False
+        self._rth_leg_index = 0
+        self._rth_logged_start = False
 
     def should_activate(self, state: BoatState) -> bool:
         if state.return_to_home_active:
@@ -84,6 +149,45 @@ class ReturnToHomeController(BaseController):
             cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
             cmd_sail = 0.0
             return ControlCommand(rudder=cmd_rudder, sail=cmd_sail, timestamp=state.timestamp)
+
+        # Opposite course: approach_N → … → approach_1, then GPS home (same GeoJSON as Crosser launch).
+        if self._rth_reverse_legs and self._rth_leg_index < len(self._rth_reverse_legs):
+            while self._rth_leg_index < len(self._rth_reverse_legs):
+                lon_w, lat_w = self._rth_reverse_legs[self._rth_leg_index]
+                brg_w, dist_w = self._bearing_and_distance_to_lonlat(state, lon_w, lat_w)
+                if dist_w is None or brg_w is None:
+                    break
+                if dist_w < self.arrival_distance_m:
+                    self._rth_leg_index += 1
+                    if self._rth_leg_index >= len(self._rth_reverse_legs):
+                        self.log_entry(
+                            "RTH: reverse approach legs complete — navigating to home",
+                            level="INFO",
+                        )
+                    continue
+                break
+            if self._rth_leg_index < len(self._rth_reverse_legs):
+                lon_w, lat_w = self._rth_reverse_legs[self._rth_leg_index]
+                brg_w, dist_w = self._bearing_and_distance_to_lonlat(state, lon_w, lat_w)
+                if brg_w is not None:
+                    if not self._rth_logged_start:
+                        self.log_entry(
+                            f"RTH: {len(self._rth_reverse_legs)} reverse waypoint(s) then home",
+                            level="INFO",
+                        )
+                        self._rth_logged_start = True
+                    state.target_heading = brg_w
+                    compass_err = signed_angle_difference_degrees(brg_w, state.compass_heading)
+                    cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
+                    cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
+                    cmd_sail = 0.0
+                    if state.wind_angle is not None:
+                        wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
+                        wind_sail_cmd = float(np.clip(wind_sail_cmd, -1.0, 1.0))
+                        cmd_sail = self.sail_wind_gain * wind_sail_cmd
+                    return ControlCommand(
+                        rudder=cmd_rudder, sail=cmd_sail, timestamp=state.timestamp
+                    )
 
         # Hysteresis: enter hold inside inner radius; only resume navigation outside outer radius.
         if distance_to_home_m < self.arrival_distance_m:

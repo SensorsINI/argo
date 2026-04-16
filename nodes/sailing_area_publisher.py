@@ -314,6 +314,13 @@ class SailingAreaPublisher(Node):
             marker.pose.position.z = (coords[2] if len(coords) > 2 else 0.0) + 2.0  # Center at 2m above ground
             # Color: green, semi-transparent (0.5 alpha) for better visibility
             marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.2)
+        elif name == 'middle':
+            # Crosser target — make obvious on map panels (default waypoints are easy to miss)
+            marker.type = Marker.SPHERE
+            marker.scale.x = 1.2
+            marker.scale.y = 1.2
+            marker.scale.z = 0.35
+            marker.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=1.0)
         else:
             marker.type = Marker.SPHERE
             # Scale: small sphere for other waypoints

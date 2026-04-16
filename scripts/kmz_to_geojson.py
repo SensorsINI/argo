@@ -86,7 +86,10 @@ def parse_kml_to_geojson(kml_content):
                     if coords_list[0] != coords_list[-1]:
                         coords_list.append(coords_list[0])
                     
-                    feature_type = "hazard" if "rock" in name.lower() else "sailing_area"
+                    nl = name.lower()
+                    feature_type = (
+                        "hazard" if ("rock" in nl or "hazard" in nl) else "sailing_area"
+                    )
                     
                     feature = {
                         "type": "Feature",

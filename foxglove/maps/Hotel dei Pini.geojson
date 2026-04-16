@@ -31,8 +31,8 @@
             0.0
           ],
           [
-            8.2550199,
-            40.5834245,
+            8.2550762,
+            40.5834367,
             0.0
           ],
           [
@@ -50,6 +50,105 @@
             40.5827752,
             0.0
           ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "sWim hazard",
+        "type": "hazard"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              8.2552281,
+              40.5836179,
+              0.0
+            ],
+            [
+              8.2552374,
+              40.5836035,
+              0.0
+            ],
+            [
+              8.2556908,
+              40.583845,
+              0.0
+            ],
+            [
+              8.2556894,
+              40.5838694,
+              0.0
+            ],
+            [
+              8.2552281,
+              40.5836179,
+              0.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "middle",
+        "type": "waypoint"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          8.2557792,
+          40.5833053,
+          0.0
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "approach_1",
+        "type": "waypoint"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          8.2555137,
+          40.5839239,
+          0.0
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "approach_2",
+        "type": "waypoint"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          8.255739,
+          40.58393,
+          0.0
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "approach_3",
+        "type": "waypoint"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          8.2558423,
+          40.5837834,
+          0.0
         ]
       }
     }

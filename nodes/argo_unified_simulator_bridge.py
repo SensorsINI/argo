@@ -602,7 +602,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         """Create a simulator instance (real or mock).
         
         Args:
-            boat_heading: Initial heading in degrees (0-360)
+            boat_heading: Initial heading in degrees (0-360), **simulator** convention
+                (0° = East, 90° = North, 180° = West, 270° = South; see Boat.py).
             force_mock: If True, force use of mock simulator even if real simulator is available
         
         Returns:
@@ -734,18 +735,29 @@ class ArgoUnifiedSimulatorBridge(Node):
         # Calculate initial boat position and heading
         # Start at home location, pointing toward center of geofence
         if self.test_heading is not None:
-            # Test mode: use specified heading
+            # Test mode: compass heading (same convention as /compass)
             boat_position = np.array([0.0, 0.0])
-            boat_heading = float(self.test_heading)
-            self.get_logger().info(f'TEST MODE: Using test heading {boat_heading:.1f}° instead of calculated heading')
+            boat_heading_compass = float(self.test_heading)
+            self._map_heading_from_geofence = True
+            self.get_logger().info(
+                f'TEST MODE: Using test compass heading {boat_heading_compass:.1f}° instead of map calculation'
+            )
         else:
-            boat_position, boat_heading = self._calculate_initial_boat_state()
-        
-        # Store initial heading for reset functionality
+            boat_position, boat_heading_compass = self._calculate_initial_boat_state()
+
+        # sailboat-playground uses simulator convention (Boat.py: 0°=E, 90°=N, 270°=S), not compass
+        boat_heading = self._compass_to_simulator_heading(boat_heading_compass)
+
+        # Store simulator heading for reset (recreates Manager/Mock with same convention)
         self.initial_boat_heading = boat_heading
-        self.get_logger().info(f'Stored initial_boat_heading = {self.initial_boat_heading:.1f}° for reset functionality')
-        self.get_logger().info(f'Initial boat state: position={boat_position}, heading={boat_heading:.1f}°')
-        
+        self.get_logger().info(
+            f'Stored initial_boat_heading = {self.initial_boat_heading:.1f}° (simulator) for reset functionality'
+        )
+        self.get_logger().info(
+            f'Initial boat state: position={boat_position}, '
+            f'compass={boat_heading_compass:.1f}° → simulator={boat_heading:.1f}°'
+        )
+
         # Create simulator using shared method
         self.simulator, self.use_mock = self._create_simulator(boat_heading, force_mock=self.force_mock)
         
@@ -1180,6 +1192,52 @@ class ArgoUnifiedSimulatorBridge(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to load map '{map_name}': {e}, using default location")
     
+    def _compass_to_simulator_heading(self, compass_deg: float) -> float:
+        """Convert compass heading to sailboat-playground simulator heading.
+
+        Compass (published on /compass): 0° = North, 90° = East, 180° = South, 270° = West.
+        Simulator (Boat.py): 0° = East, 90° = North, 180° = West, 270° = South.
+
+        Matches the inverse of the bridge publish step: compass = (90 - simulator) % 360.
+        """
+        return (90.0 - float(compass_deg)) % 360.0
+
+    def _get_sailing_target_xy_relative_to_home(self):
+        """Return (x, y) in meters from home for initial heading target.
+
+        Prefers GeoJSON waypoint ``middle`` (same as Crosser); otherwise uses sailing
+        boundary centroid (same logic as :meth:`_calculate_geofence_center`).
+        """
+        map_name = getattr(self, 'map_name', None)
+        if not map_name:
+            return None, None
+        try:
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[1]
+            geojson_path = argo_dir / "foxglove" / "maps" / f"{map_name}.geojson"
+            if not geojson_path.exists():
+                return None, None
+            with open(geojson_path, 'r') as f:
+                geojson_data = json.load(f)
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                if props.get('name') == 'middle' and props.get('type') == 'waypoint':
+                    geom = feature.get('geometry', {})
+                    if geom.get('type') != 'Point':
+                        continue
+                    coords = geom.get('coordinates', [])
+                    if len(coords) < 2:
+                        continue
+                    lon, lat = float(coords[0]), float(coords[1])
+                    x, y = self.lonlat_to_xy(lon, lat)
+                    self.get_logger().info(
+                        f"Initial heading target: 'middle' waypoint at ({x:.1f}, {y:.1f}) m E/N from home"
+                    )
+                    return x, y
+        except Exception as e:
+            self.get_logger().warn(f"Could not load 'middle' waypoint for initial heading: {e}")
+        return self._calculate_geofence_center()
+
     def _calculate_map_center(self, geojson_data):
         """Calculate the center of all coordinates in the map as fallback."""
         all_lons = []
@@ -1213,7 +1271,8 @@ class ArgoUnifiedSimulatorBridge(Node):
         Returns:
             tuple: (boat_position, boat_heading)
             - boat_position: numpy array [x, y] in meters (home location at origin = [0, 0])
-            - boat_heading: float, heading in degrees (0-360) pointing toward geofence center
+            - boat_heading: float, **compass** heading in degrees (0-360) pointing toward
+              the ``middle`` waypoint if present, else toward geofence centroid.
         """
         import numpy as np
         
@@ -1222,10 +1281,10 @@ class ArgoUnifiedSimulatorBridge(Node):
         home_x = 0.0
         home_y = 0.0
         
-        # Calculate center of geofence area (sailing area boundaries)
-        geofence_center_x, geofence_center_y = self._calculate_geofence_center()
+        # Target: prefer waypoint "middle", else boundary centroid
+        geofence_center_x, geofence_center_y = self._get_sailing_target_xy_relative_to_home()
         
-        self.get_logger().info(f"Geofence center calculation result: x={geofence_center_x}, y={geofence_center_y}")
+        self.get_logger().info(f"Initial heading target (E/N m): x={geofence_center_x}, y={geofence_center_y}")
         
         # Calculate heading from home toward geofence center
         if geofence_center_x is not None and geofence_center_y is not None and not (abs(geofence_center_x) < 0.1 and abs(geofence_center_y) < 0.1):
@@ -1261,10 +1320,12 @@ class ArgoUnifiedSimulatorBridge(Node):
                 self.get_logger().info(f"Geofence center: ({geofence_center_x:.1f}, {geofence_center_y:.1f}) m from home")
                 self.get_logger().info(f"Delta from home: dx={dx:.1f}m (East), dy={dy:.1f}m (North)")
                 self.get_logger().info(f"Calculated heading: {boat_heading:.1f}° (toward geofence center)")
+            self._map_heading_from_geofence = True
         else:
             # No geofence found, default to North (0°)
             boat_heading = 0.0
             self.get_logger().warn("No geofence found, using default heading 0° (North)")
+            self._map_heading_from_geofence = False
         
         # Boat starts at home location (origin)
         boat_position = np.array([home_x, home_y])
@@ -1298,7 +1359,8 @@ class ArgoUnifiedSimulatorBridge(Node):
             with open(geojson_path, 'r') as f:
                 geojson_data = json.load(f)
             
-            # Find all sailing area boundaries (Polygon features with type "sailing_area")
+            # Prefer LineString sailing_boundary (matches GeofenceManager) so hazard polygons
+            # mis-tagged as sailing_area do not replace the whole course for center/heading.
             all_coords = []
             feature_types_found = {}
             for feature in geojson_data.get('features', []):
@@ -1306,33 +1368,37 @@ class ArgoUnifiedSimulatorBridge(Node):
                 geom = feature.get('geometry', {})
                 geom_type = geom.get('type', 'unknown')
                 prop_type = props.get('type', 'unknown')
-                
-                # Track what we find
                 key = f"{geom_type} ({prop_type})"
                 feature_types_found[key] = feature_types_found.get(key, 0) + 1
-                
-                # Look for sailing area boundaries (Polygon type)
-                if geom_type == 'Polygon' and prop_type == 'sailing_area':
+
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                geom = feature.get('geometry', {})
+                if geom.get('type') == 'LineString' and props.get('type') == 'sailing_boundary':
+                    coords = geom.get('coordinates', [])
+                    for coord in coords:
+                        all_coords.append(coord)
+                    self.get_logger().info(f"Found sailing_boundary LineString with {len(coords)} coordinates")
+                    break
+
+            if not all_coords:
+                for feature in geojson_data.get('features', []):
+                    props = feature.get('properties', {})
+                    geom = feature.get('geometry', {})
+                    geom_type = geom.get('type', 'unknown')
+                    prop_type = props.get('type', 'unknown')
+                    name_l = (props.get('name') or '').lower()
+                    if geom_type != 'Polygon' or prop_type != 'sailing_area':
+                        continue
+                    if 'hazard' in name_l:
+                        continue
                     coords = geom.get('coordinates', [])
                     if coords:
-                        # Get outer ring (first ring in coordinates)
                         outer_ring = coords[0]
                         for coord in outer_ring:
                             all_coords.append(coord)
                         self.get_logger().info(f"Found sailing_area Polygon with {len(outer_ring)} coordinates")
-            
-            # If no sailing_area polygons found, try LineString boundaries
-            if not all_coords:
-                self.get_logger().info(f"No sailing_area Polygons found, trying LineString boundaries...")
-                for feature in geojson_data.get('features', []):
-                    props = feature.get('properties', {})
-                    geom = feature.get('geometry', {})
-                    
-                    if geom.get('type') == 'LineString' and props.get('type') == 'sailing_boundary':
-                        coords = geom.get('coordinates', [])
-                        for coord in coords:
-                            all_coords.append(coord)
-                        self.get_logger().info(f"Found sailing_boundary LineString with {len(coords)} coordinates")
+                        break
             
             # Log what we found
             if feature_types_found:
@@ -1423,24 +1489,26 @@ class ArgoUnifiedSimulatorBridge(Node):
         try:
             self.get_logger().info("Resetting simulation to initial state (recreating simulator)...")
             
-            # Get initial heading (calculated at startup, pointing toward geofence center)
+            # Simulator heading stored at startup (sailboat-playground convention)
             initial_heading = getattr(self, 'initial_boat_heading', 0.0)
-            
-            # If heading is 0.0, try to recalculate it (may have failed during initialization)
-            if initial_heading == 0.0 or abs(initial_heading) < 0.1:
-                self.get_logger().warn(f"⚠️ Initial heading is {initial_heading:.1f}° - attempting to recalculate from geofence...")
+
+            # If map-based heading was not available at startup, retry after parameters/map may be ready
+            if not getattr(self, '_map_heading_from_geofence', True):
+                self.get_logger().warn(
+                    "⚠️ Initial heading was not derived from map — attempting to recalculate from geofence..."
+                )
                 try:
-                    _, recalculated_heading = self._calculate_initial_boat_state()
-                    if recalculated_heading != 0.0 and abs(recalculated_heading) > 0.1:
-                        initial_heading = recalculated_heading
-                        self.initial_boat_heading = recalculated_heading
-                        self.get_logger().info(f"✅ Recalculated initial heading: {initial_heading:.1f}°")
-                    else:
-                        self.get_logger().error(f"⚠️ Recalculation also returned 0.0° - geofence calculation may have failed")
+                    _, recalculated_compass = self._calculate_initial_boat_state()
+                    initial_heading = self._compass_to_simulator_heading(recalculated_compass)
+                    self.initial_boat_heading = initial_heading
+                    self.get_logger().info(
+                        f"✅ Recalculated initial heading: compass={recalculated_compass:.1f}° → "
+                        f"simulator={initial_heading:.1f}°"
+                    )
                 except Exception as e:
                     self.get_logger().error(f"⚠️ Failed to recalculate initial heading: {e}")
-            
-            self.get_logger().info(f"Recreating simulator with initial heading: {initial_heading:.1f}°")
+
+            self.get_logger().info(f"Recreating simulator with initial heading (simulator): {initial_heading:.1f}°")
             
             # Preserve wind settings from current simulator before recreation
             wind_speed = 8.0
@@ -2504,7 +2572,7 @@ def main(args=None):
     parser.add_argument('--map', type=str,
                        help='Map name (without .geojson extension) - overrides map from argo_nodes.yaml')
     parser.add_argument('--test-heading', type=float,
-                       help='Test mode: override initial heading calculation with specified heading in degrees (0-360)')
+                       help='Test mode: override initial heading with compass degrees (0-360, 0=North), same as /compass')
     parser.add_argument('--force-mock', action='store_true',
                        help='Use mock simulator (default behavior - can be omitted). Overrides real simulator if available.')
     parser.add_argument('--debug', action='store_true',

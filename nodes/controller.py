@@ -531,6 +531,7 @@ class ControllerNode(ArgoBaseNode):
             arrival_m = self.get_parameter('arrival_distance_m').get_parameter_value().double_value
             config['arrival_distance_m'] = arrival_m
             config['resume_navigation_distance_m'] = max(arrival_m * 1.5, arrival_m + 8.0)
+            config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
             self.controller = ReturnToHomeController(config, logger=logger, parent_node=parent_node)
         elif controller_type == 'patrol':
             config['sail_wind_gain'] = 0.5
@@ -1164,6 +1165,7 @@ class ControllerNode(ArgoBaseNode):
                             'shore_connection_timeout': 120.0,
                             'arrival_distance_m': rth_arrival_m,
                             'resume_navigation_distance_m': max(rth_arrival_m * 1.5, rth_arrival_m + 8.0),
+                            'geofence_map_name': self.get_parameter('geofence_map_name').get_parameter_value().string_value,
                         }
                         temp_rth = ReturnToHomeController(rth_config, logger=self.get_logger(), parent_node=self)
                         if temp_rth.should_activate(self.boat_state):

@@ -6,8 +6,9 @@ import sys
 import time
 import math
 import json
+import re
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 # 2) Third-party
 import numpy as np
@@ -130,7 +131,8 @@ class CrosserController(BaseController):
         self.min_rudder_near_boundary = config.get('min_rudder_near_boundary', 0.3)  # minimum rudder command when close to boundary
         self.boundary_emergency_threshold = config.get('boundary_emergency_threshold', 5.0)  # meters - emergency turn threshold
         self.turn_rudder_gain_multiplier = config.get('turn_rudder_gain_multiplier', 2.0)  # multiplier for rudder gain during turns
-        self.crossing_state = 'toward_middle'  # 'toward_middle', 'crossing_through', 'turning_around', 'tacking_upwind'
+        # 'launching' = follow GeoJSON approach_* waypoints then toward_middle; else standard Crosser states
+        self.crossing_state = 'toward_middle'
         
         self.geofence_manager = GeofenceManager()
         map_name = config.get('geofence_map_name', 'Argo Irchel pond sailing area')
@@ -178,6 +180,71 @@ class CrosserController(BaseController):
         self._last_state_log_time = 0.0  # For throttling periodic state logs
         # Simulation: set from /simulator/true_wind_direction (absolute compass, where wind comes from)
         self.true_wind_direction_from_bridge = None
+
+        self._approach_waypoints: List[Tuple[float, float]] = []  # (lon, lat) in order approach_1, approach_2, ...
+        self._approach_index = 0
+        self._distance_to_launch_leg: Optional[float] = None
+        self._load_approach_waypoints(map_name)
+        if self._approach_waypoints:
+            self.crossing_state = 'launching'
+            self._approach_index = 0
+            if self.logger:
+                self.logger.info(
+                    f"Launch sequence: {len(self._approach_waypoints)} approach waypoint(s) before toward middle"
+                )
+
+    def _load_approach_waypoints(self, map_name: str) -> None:
+        """Load waypoints named approach_1, approach_2, ... from GeoJSON (numeric order)."""
+        try:
+            script_path = Path(__file__).resolve()
+            argo_dir = script_path.parents[2]
+            geojson_path = argo_dir / "foxglove" / "maps" / f"{map_name}.geojson"
+            if not geojson_path.exists():
+                return
+            with open(geojson_path, 'r') as f:
+                data = json.load(f)
+            found: List[Tuple[int, float, float]] = []
+            pat = re.compile(r'^approach_(\d+)$', re.I)
+            for feature in data.get('features', []):
+                props = feature.get('properties', {})
+                if props.get('type') != 'waypoint':
+                    continue
+                name = props.get('name') or ''
+                m = pat.match(name.strip())
+                if not m:
+                    continue
+                geom = feature.get('geometry', {})
+                if geom.get('type') != 'Point':
+                    continue
+                coords = geom.get('coordinates', [])
+                if len(coords) < 2:
+                    continue
+                found.append((int(m.group(1)), float(coords[0]), float(coords[1])))
+            found.sort(key=lambda t: t[0])
+            self._approach_waypoints = [(lon, lat) for _, lon, lat in found]
+        except Exception as e:
+            if self.logger:
+                self.logger.warn(f"Could not load approach waypoints: {e}")
+            self._approach_waypoints = []
+
+    def _bearing_and_distance_to_lonlat(
+        self, state: BoatState, lon: float, lat: float
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Haversine bearing (deg) and distance (m) from current GPS to a fixed lon/lat."""
+        if state.current_latitude is None or state.current_longitude is None:
+            return None, None
+        lat1 = math.radians(state.current_latitude)
+        lon1 = math.radians(state.current_longitude)
+        lat2 = math.radians(lat)
+        lon2 = math.radians(lon)
+        dlon = lon2 - lon1
+        y = math.sin(dlon) * math.cos(lat2)
+        x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+        bearing_deg = (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+        a = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+        c = 2 * math.asin(min(1.0, math.sqrt(a)))
+        distance_m = 6378137.0 * c
+        return bearing_deg, distance_m
 
     def _log_state_transition(self, old_state: str, new_state: str, reason: str, details: dict = None):
         """Log state transitions with detailed reasons immediately."""
@@ -441,7 +508,6 @@ class CrosserController(BaseController):
             )
 
     def reset(self):
-        self.crossing_state = 'toward_middle'
         self._arrival_logged = False
         self._crossing_heading = None
         self._turning_target_heading = None
@@ -453,14 +519,19 @@ class CrosserController(BaseController):
         self._tack_on_layline_since = None
         self._tack_start_heading = None
         self._tack_wind_direction = None
-        self.log_entry("Crosser controller activated - starting toward middle", level="INFO")
-        self.publish_state('toward_middle')
+        self._approach_index = 0
+        if self._approach_waypoints:
+            self.crossing_state = 'launching'
+            self.log_entry("Crosser controller activated - starting launch approach sequence", level="INFO")
+            self.publish_state('launching')
+        else:
+            self.crossing_state = 'toward_middle'
+            self.log_entry("Crosser controller activated - starting toward middle", level="INFO")
+            self.publish_state('toward_middle')
 
     def on_human_control_started(self, state: BoatState):
         # When autonomous control resumes after human control, always reset to clean state
         # Assume human has taken action (emergency avoidance or repositioning)
-        # Goal: head toward middle from current position
-        self.crossing_state = 'toward_middle'
         self._arrival_logged = False
         self._crossing_heading = None
         self._turning_target_heading = None
@@ -472,8 +543,15 @@ class CrosserController(BaseController):
         self._tack_on_layline_since = None
         self._tack_start_heading = None
         self._tack_wind_direction = None
-        self.log_entry("Autonomous control resumed - resetting crosser to head toward middle", level="INFO")
-        self.publish_state('toward_middle')
+        self._approach_index = 0
+        if self._approach_waypoints:
+            self.crossing_state = 'launching'
+            self.log_entry("Autonomous control resumed - launch approach sequence from current position", level="INFO")
+            self.publish_state('launching')
+        else:
+            self.crossing_state = 'toward_middle'
+            self.log_entry("Autonomous control resumed - resetting crosser to head toward middle", level="INFO")
+            self.publish_state('toward_middle')
 
     def generate_control(self, state: BoatState) -> ControlCommand:
         if not state.is_valid_for_control():
@@ -543,7 +621,39 @@ class CrosserController(BaseController):
                 self.logger.debug(f"Status: state={self.crossing_state}, dist_to_middle={distance_to_middle:.1f}m, dist_to_boundary={abs_distance_to_boundary:.1f}m, {crossing_info}")
             self._last_state_log_time = current_time
         
-        if distance_to_middle < self.arrival_distance_m:
+        self._distance_to_launch_leg = None
+        target_bearing: Optional[float] = None
+
+        # Launching: follow approach_1 → approach_2 → … then hand off to toward_middle
+        if self.crossing_state == 'launching' and self._approach_waypoints:
+            lon_a, lat_a = self._approach_waypoints[self._approach_index]
+            brg_a, dist_a = self._bearing_and_distance_to_lonlat(state, lon_a, lat_a)
+            self._distance_to_launch_leg = dist_a
+            if dist_a is not None and dist_a < self.arrival_distance_m:
+                self._approach_index += 1
+                if self._approach_index >= len(self._approach_waypoints):
+                    old_state = self.crossing_state
+                    self.crossing_state = 'toward_middle'
+                    self._log_state_transition(
+                        old_state,
+                        self.crossing_state,
+                        "Launch approach complete — toward middle",
+                        {"completed_legs": len(self._approach_waypoints)},
+                    )
+                    self.publish_state('toward_middle')
+                    brg_a, dist_a = self._calculate_bearing_to_middle(state)
+                    self._distance_to_launch_leg = None
+                else:
+                    lon_a, lat_a = self._approach_waypoints[self._approach_index]
+                    brg_a, dist_a = self._bearing_and_distance_to_lonlat(state, lon_a, lat_a)
+                    self._distance_to_launch_leg = dist_a
+            target_bearing = (
+                brg_a
+                if brg_a is not None
+                else (bearing_to_middle if bearing_to_middle is not None else 0.0)
+            )
+
+        if self.crossing_state != 'launching' and distance_to_middle < self.arrival_distance_m:
             if not self._arrival_logged:
                 self.log_entry(f"Arrived at middle waypoint (distance: {distance_to_middle:.1f}m < {self.arrival_distance_m:.1f}m)", level="INFO")
                 self._arrival_logged = True
@@ -968,8 +1078,8 @@ class CrosserController(BaseController):
                 
                 target_bearing = self._tacking_target_heading if self._tacking_target_heading is not None else bearing_to_middle
         
-        # Crossing through (after middle, before boundary)
-        else:  # crossing_through
+        # Crossing through (after middle, before boundary) — not launching (handled above)
+        elif self.crossing_state == 'crossing_through':
             # Continue on stored crossing heading
             if self._crossing_heading is not None:
                 target_bearing = self._crossing_heading
@@ -977,6 +1087,9 @@ class CrosserController(BaseController):
                 target_bearing = state.compass_heading
             else:
                 target_bearing = bearing_to_middle if bearing_to_middle is not None else 0.0
+        
+        if target_bearing is None:
+            target_bearing = bearing_to_middle if bearing_to_middle is not None else 0.0
         
         state.target_heading = target_bearing
         

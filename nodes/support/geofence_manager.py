@@ -32,6 +32,8 @@ class GeofenceManager:
         self.origin_lat = origin_lat
         self.polygon_xy: Optional[List[Tuple[float, float]]] = None  # Polygon in local x/y coordinates
         self.polygon_lonlat: Optional[List[Tuple[float, float]]] = None  # Polygon in lon/lat
+        # Exclusion zones (rocks, swim areas): must stay outside these while inside polygon_xy
+        self.hazard_polygons_xy: List[List[Tuple[float, float]]] = []
     
     def lonlat_to_xy(self, lon: float, lat: float) -> Tuple[float, float]:
         """
@@ -112,143 +114,159 @@ class GeofenceManager:
                 self.origin_lon = 8.5448386  # Default fallback
                 self.origin_lat = 47.3981555
             
-            # Find sailing area polygon
+            # Sailing boundary: prefer explicit LineString (Hotel dei Pini style) so a mis-tagged
+            # hazard Polygon with type "sailing_area" cannot replace the whole course.
             polygon_found = False
-            for feature in geojson_data.get('features', []):
+            self.hazard_polygons_xy = []
+            features = geojson_data.get('features', [])
+
+            for feature in features:
                 props = feature.get('properties', {})
                 geom = feature.get('geometry', {})
-                
-                # Look for Polygon with type "sailing_area"
-                if geom.get('type') == 'Polygon' and props.get('type') == 'sailing_area':
+                if geom.get('type') == 'LineString' and props.get('type') == 'sailing_boundary':
                     coords = geom.get('coordinates', [])
-                    if coords:
-                        # Get outer ring (first ring in coordinates)
-                        outer_ring = coords[0]
-                        self.polygon_lonlat = [(coord[0], coord[1]) for coord in outer_ring]
-                        # Convert to local x/y coordinates
-                        self.polygon_xy = [self.lonlat_to_xy(coord[0], coord[1]) for coord in outer_ring]
-                        polygon_found = True
-                        break
-            
-            # If no Polygon found, try LineString boundaries
+                    self.polygon_lonlat = [(coord[0], coord[1]) for coord in coords]
+                    self.polygon_xy = [self.lonlat_to_xy(coord[0], coord[1]) for coord in coords]
+                    polygon_found = True
+                    break
+
             if not polygon_found:
-                for feature in geojson_data.get('features', []):
+                for feature in features:
                     props = feature.get('properties', {})
                     geom = feature.get('geometry', {})
-                    
-                    if geom.get('type') == 'LineString' and props.get('type') == 'sailing_boundary':
-                        coords = geom.get('coordinates', [])
-                        self.polygon_lonlat = [(coord[0], coord[1]) for coord in coords]
-                        self.polygon_xy = [self.lonlat_to_xy(coord[0], coord[1]) for coord in coords]
-                        polygon_found = True
-                        break
-            
+                    if geom.get('type') != 'Polygon':
+                        continue
+                    prop_type = props.get('type', '')
+                    name_l = (props.get('name') or '').lower()
+                    if prop_type == 'hazard' or 'hazard' in name_l:
+                        continue
+                    if prop_type != 'sailing_area':
+                        continue
+                    coords = geom.get('coordinates', [])
+                    if not coords:
+                        continue
+                    outer_ring = coords[0]
+                    self.polygon_lonlat = [(coord[0], coord[1]) for coord in outer_ring]
+                    self.polygon_xy = [self.lonlat_to_xy(coord[0], coord[1]) for coord in outer_ring]
+                    polygon_found = True
+                    break
+
+            for feature in features:
+                props = feature.get('properties', {})
+                geom = feature.get('geometry', {})
+                if geom.get('type') != 'Polygon':
+                    continue
+                prop_type = props.get('type', '')
+                name_l = (props.get('name') or '').lower()
+                is_hazard = prop_type == 'hazard' or 'hazard' in name_l
+                if not is_hazard:
+                    continue
+                coords = geom.get('coordinates', [])
+                if not coords or len(coords[0]) < 3:
+                    continue
+                outer_ring = coords[0]
+                hz_xy = [self.lonlat_to_xy(c[0], c[1]) for c in outer_ring]
+                self.hazard_polygons_xy.append(hz_xy)
+
             return polygon_found
             
         except Exception as e:
             print(f"Error loading geofence: {e}")
             return False
-    
-    def is_point_inside_polygon(self, x: float, y: float) -> bool:
-        """
-        Check if a point is inside the polygon using ray casting algorithm.
-        
-        Args:
-            x: X coordinate in meters (local coordinates)
-            y: Y coordinate in meters (local coordinates)
-            
-        Returns:
-            True if point is inside polygon, False otherwise
-        """
-        if self.polygon_xy is None or len(self.polygon_xy) < 3:
+
+    @staticmethod
+    def _is_xy_inside_ring(ring: List[Tuple[float, float]], x: float, y: float) -> bool:
+        """Ray casting: True if (x,y) is inside closed ring (>=3 vertices)."""
+        if ring is None or len(ring) < 3:
             return False
-        
-        # Ray casting algorithm: count intersections of horizontal ray from point
-        n = len(self.polygon_xy)
+        n = len(ring)
         inside = False
-        
-        p1x, p1y = self.polygon_xy[0]
+        p1x, p1y = ring[0]
         for i in range(1, n + 1):
-            p2x, p2y = self.polygon_xy[i % n]
+            p2x, p2y = ring[i % n]
             if y > min(p1y, p2y):
                 if y <= max(p1y, p2y):
                     if x <= max(p1x, p2x):
                         if p1y != p2y:
                             xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                        if p1x == p2x or x <= xinters:
-                            inside = not inside
+                            if p1x == p2x or x <= xinters:
+                                inside = not inside
             p1x, p1y = p2x, p2y
-        
         return inside
+
+    @staticmethod
+    def _min_distance_to_ring_edges(ring: List[Tuple[float, float]], x: float, y: float) -> float:
+        """Minimum Euclidean distance from point to edges of closed ring."""
+        if ring is None or len(ring) < 2:
+            return float('inf')
+        min_distance = float('inf')
+        n = len(ring)
+        for i in range(n):
+            p1x, p1y = ring[i]
+            p2x, p2y = ring[(i + 1) % n]
+            dx = p2x - p1x
+            dy = p2y - p1y
+            px = x - p1x
+            py = y - p1y
+            dot = px * dx + py * dy
+            len_sq = dx * dx + dy * dy
+            if len_sq == 0:
+                dist = math.sqrt(px * px + py * py)
+            else:
+                t = max(0, min(1, dot / len_sq))
+                proj_x = p1x + t * dx
+                proj_y = p1y + t * dy
+                dist = math.sqrt((x - proj_x) ** 2 + (y - proj_y) ** 2)
+            min_distance = min(min_distance, dist)
+        return min_distance
+
+    def _signed_distance_inclusive_polygon(self, ring: List[Tuple[float, float]], x: float, y: float) -> float:
+        """Negative when inside ring (sailing area), positive when outside."""
+        min_d = self._min_distance_to_ring_edges(ring, x, y)
+        inside = self._is_xy_inside_ring(ring, x, y)
+        return -min_d if inside else min_d
+
+    def _signed_distance_exclusion_polygon(self, ring: List[Tuple[float, float]], x: float, y: float) -> float:
+        """Hazard / no-go: positive when inside forbidden polygon, negative clearance when outside."""
+        min_d = self._min_distance_to_ring_edges(ring, x, y)
+        inside = self._is_xy_inside_ring(ring, x, y)
+        return min_d if inside else -min_d
+    
+    def is_point_inside_polygon(self, x: float, y: float) -> bool:
+        """
+        True if the point is in navigable water: inside the sailing boundary and
+        outside all hazard polygons.
+        """
+        if self.polygon_xy is None or len(self.polygon_xy) < 3:
+            return False
+        if not self._is_xy_inside_ring(self.polygon_xy, x, y):
+            return False
+        for haz in self.hazard_polygons_xy:
+            if self._is_xy_inside_ring(haz, x, y):
+                return False
+        return True
     
     def is_point_inside_polygon_lonlat(self, lon: float, lat: float) -> bool:
         """
-        Check if a point (in lon/lat) is inside the polygon.
-        
-        Args:
-            lon: Longitude in degrees
-            lat: Latitude in degrees
-            
-        Returns:
-            True if point is inside polygon, False otherwise
+        True if lon/lat is in navigable water (inside sailing boundary, outside hazards).
         """
         x, y = self.lonlat_to_xy(lon, lat)
         return self.is_point_inside_polygon(x, y)
     
     def distance_to_boundary(self, x: float, y: float) -> float:
         """
-        Calculate minimum distance from point to polygon boundary.
-        
-        Args:
-            x: X coordinate in meters (local coordinates)
-            y: Y coordinate in meters (local coordinates)
-            
-        Returns:
-            Distance in meters to nearest edge. Negative if inside, positive if outside.
+        Signed distance to the safe-sailing boundary (outer fence + hazard perimeters).
+
+        Negative: safely inside navigable water (including clearance to nearest constraint).
+        Positive: outside sailing area or inside a hazard (violation).
         """
         if self.polygon_xy is None or len(self.polygon_xy) < 2:
             return float('inf')
-        
-        min_distance = float('inf')
-        n = len(self.polygon_xy)
-        
-        # Check distance to each edge
-        for i in range(n):
-            p1x, p1y = self.polygon_xy[i]
-            p2x, p2y = self.polygon_xy[(i + 1) % n]
-            
-            # Calculate distance from point to line segment
-            # Vector from p1 to p2
-            dx = p2x - p1x
-            dy = p2y - p1y
-            
-            # Vector from p1 to point
-            px = x - p1x
-            py = y - p1y
-            
-            # Project point onto line segment
-            dot = px * dx + py * dy
-            len_sq = dx * dx + dy * dy
-            
-            if len_sq == 0:
-                # Degenerate edge (p1 == p2)
-                dist = math.sqrt(px * px + py * py)
-            else:
-                # Parameter t: 0 = p1, 1 = p2
-                t = max(0, min(1, dot / len_sq))
-                
-                # Closest point on line segment
-                proj_x = p1x + t * dx
-                proj_y = p1y + t * dy
-                
-                # Distance from point to closest point on edge
-                dist = math.sqrt((x - proj_x) ** 2 + (y - proj_y) ** 2)
-            
-            min_distance = min(min_distance, dist)
-        
-        # Determine sign: negative if inside, positive if outside
-        is_inside = self.is_point_inside_polygon(x, y)
-        return -min_distance if is_inside else min_distance
+
+        d = self._signed_distance_inclusive_polygon(self.polygon_xy, x, y)
+        for haz in self.hazard_polygons_xy:
+            d = max(d, self._signed_distance_exclusion_polygon(haz, x, y))
+        return d
     
     def distance_to_boundary_lonlat(self, lon: float, lat: float) -> float:
         """
