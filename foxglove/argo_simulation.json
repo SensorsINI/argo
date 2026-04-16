@@ -11,7 +11,7 @@
           "visible": true,
           "namespaces": {
             "argo_boat_labels": {
-              "visible": true
+              "visible": false
             },
             "argo_boat": {
               "visible": true
@@ -47,18 +47,14 @@
         "c0a2586b-a751-45e2-aa33-b2624a1acd9c": {
           "layerId": "foxglove.Grid",
           "instanceId": "c0a2586b-a751-45e2-aa33-b2624a1acd9c",
-          "visible": true,
-          "frameId": "map",
-          "size": 230.729,
-          "divisions": 85
+          "visible": false
         }
       },
       "cameraState": {
         "perspective": false,
-        "distance": 72.10076346743637,
-        "phi": 0,
-        "theta": 0,
-        "thetaOffset": 0,
+        "distance": 55.790196350324656,
+        "phi": 17.03302097771284,
+        "thetaOffset": 8.124571886107649,
         "targetOffset": [
           0,
           0,
@@ -85,10 +81,7 @@
         "transforms": {
           "visible": true
         },
-        "backgroundColor": "#e1f0ff",
-        "enableStats": false,
-        "labelScaleFactor": 1.06,
-        "ignoreColladaUpAxis": false
+        "backgroundColor": "#d1f3fc"
       },
       "transforms": {
         "frame:map": {
@@ -111,20 +104,12 @@
         "poseEstimateThetaDeviation": 0.26179939
       },
       "imageMode": {},
-      "followTf": "base_link",
+      "followTf": "map",
       "enuFrameId": "map"
-    },
-    "RawMessages!2ctwmt1": {
-      "diffEnabled": false,
-      "diffMethod": "custom",
-      "diffTopicPath": "",
-      "showFullMessageForDiff": false,
-      "topicPath": "/controller/captains_log",
-      "fontSize": 12
     },
     "map!4aioxrg": {
       "topic": "/fix",
-      "zoomLevel": 19,
+      "zoomLevel": 20,
       "center": {
         "lat": 47.398154808892414,
         "lon": 8.544838600000308
@@ -154,19 +139,13 @@
           "title": "Overview",
           "layout": {
             "direction": "column",
-            "first": {
-              "first": "3D!1ldu0mf",
-              "second": "RawMessages!2ctwmt1",
-              "direction": "column",
-              "splitPercentage": 73.53383458646616
-            },
+            "first": "3D!1ldu0mf",
             "second": {
               "first": "map!4aioxrg",
               "second": "Parameters!1f5pa9",
-              "direction": "row",
-              "splitPercentage": 36.3031914893617
+              "direction": "row"
             },
-            "splitPercentage": 78.69822485207101
+            "splitPercentage": 44.2468263227576
           }
         }
       ]
