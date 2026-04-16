@@ -20,7 +20,7 @@
     simulation:
       publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz)
       simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics
-      heading_trail_limit: 20  # Number (roughly) of historical heading markers to display in visualization
+      heading_trail_limit: 200  # Number (roughly) of historical heading markers to display in visualization
       grounding_behavior: reset # Behavior on grounding in local simulation: reset|terminate|continue
       # Sensor noise modeling for sim-to-real gap reduction
       # Set all noise parameters to 0.0 to disable noise (perfect sensors)
@@ -80,7 +80,7 @@
       wind:
         wind_min_speed: 4.0         # Minimum wind speed in m/s (used for mock simulator). 1m/s is about 2 knots.
         wind_max_speed: 10.0        # Maximum wind speed in m/s (placeholder for variable wind)
-        wind_direction: 200.0      # Degrees CW from North (compass, 0°=North), where wind COMES FROM
+        wind_direction: 100.0      # Degrees CW from North (compass, 0°=North), where wind COMES FROM
         # Placeholder parameters for future wind variability features:
         wind_max_delta_percent: 0.0        # Max wind speed variation percent (placeholder)
         wind_gust_probability: 0.0         # Probability of gusts (0.0-1.0, placeholder)

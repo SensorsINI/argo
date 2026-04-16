@@ -2,7 +2,7 @@
 
 This directory contains the **source map files** drawn in [Google Maps MyMaps](https://www.google.com/maps/d/) and exported as KMZ files.
 
-Maps are originally draWn in Google Maps MyMpas. Here are samples
+Maps are originally drawn in Google Maps My Maps. Here are samples
 
 <img src="images/google%20mymaps.png" alt="MyMaps Example" width="500"/>
 
@@ -30,16 +30,17 @@ Maps are originally draWn in Google Maps MyMpas. Here are samples
 1. Draw your sailing area in [Google Maps (My Maps)](https://www.google.com/maps/d/)
 2. Include a **"home" waypoint** - this will be the boat's start location
 3. Include a **"middle"** waypoint if you want to customize the point for crosser controller.
-4. Include hazard markers/lines for Argo to avoid (rocks, sWimming lines, bouys)
-5. Export as KMZ file
-6. Save the `.kmz` file to this directory (`maps/`)
+4. Optionally add **`approach_1`**, **`approach_2`**, … placemarks for a launch path into the sailing area (see [Approach waypoints](#approach-waypoints-entering-the-sailing-area) below).
+5. Include hazard markers/lines for Argo to avoid (rocks, swimming lines, buoys)
+6. Export as KMZ file
+7. Save the `.kmz` file to this directory (`maps/`)
 
 ### Step 2: Convert KMZ to GeoJSON
 
 Run the conversion script to generate GeoJSON files for Foxglove visualization:
 
 ```bash
-cd /home/tobi/argo
+cd /path/to/argo
 python3 scripts/kmz_to_geojson.py
 ```
 
@@ -49,14 +50,9 @@ This will:
 - Convert to GeoJSON format
 - Save to `foxglove/maps/*.geojson`
 
-### Step 3: Configure Simulation
+### Step 3: Configure Argo
 
-Edit `launch/argo_nodes.yaml` to specify which map to use:
-
-```yaml
-simulation_config:
-  map_name: "Hotel dei Pini"  # Map name without .geojson extension
-```
+Set the map name in `nodes/argo.yaml` (parameter `geofence_map_name`). Use the base name of the GeoJSON file under `foxglove/maps/` (no `.geojson` extension), for example `Hotel dei Pini`.
 
 ### Step 4: Start Simulation
 
@@ -86,6 +82,38 @@ For proper simulation setup, your KMZ file should include:
 3. **Hazards** (optional):
    - Polygon features with "rock" or "hazard" in the name
    - Will be displayed as hazard markers
+
+4. **Middle waypoint** (optional but recommended for crosser / sim):
+   - Name: `middle`
+   - Same placemark style as `home` (a Point)
+   - Used as the main navigation target for the crosser controller and as the preferred initial heading target in local simulation
+
+5. **Approach waypoints** (optional):
+   - Names `approach_1`, `approach_2`, … as Points; see the section below for launch and RTH behavior.
+
+## Approach waypoints (entering the sailing area)
+
+Use these when the boat should follow a **fixed path from `home` into the course** before normal crosser behavior (sailing toward `middle` and across the pond). They are optional; if none are present, the crosser goes straight to `middle`.
+
+### Naming and order
+
+- Add points named **`approach_1`**, **`approach_2`**, **`approach_3`**, … with consecutive integers (gaps are fine as long as names sort correctly by number: `approach_10` after `approach_9`).
+- In My Maps, set the placemark **name** exactly to `approach_1`, etc. After KMZ → GeoJSON conversion, each feature must have:
+  - `properties.name`: `approach_<number>`
+  - `properties.type`: `waypoint`
+- **Execution order** is by the numeric suffix: `approach_1` first, then `approach_2`, and so on.
+
+### Behavior on the boat
+
+- **Crosser (launch):** While autonomous, the controller enters a **launching** phase and steers toward each approach point in order. After the last one is reached (within the controller arrival distance), it continues in **toward_middle** toward the `middle` waypoint.
+- **Return to home (RTH):** When returning, the controller steers **`approach_N` → … → `approach_2` → `approach_1`** (reverse of the outbound path), then navigates to the GPS **`home`** position and holds there when close enough.
+
+### Workflow
+
+1. In My Maps, place the approach points along the intended channel from beach/dock toward the sailing area, in the order the boat should follow.
+2. Export KMZ into `maps/` and run `python3 scripts/kmz_to_geojson.py` so `foxglove/maps/<Your Map>.geojson` is updated.
+3. Confirm in GeoJSON that each approach point is a `Point` with `type: waypoint` (the conversion script maps KML names into these properties).
+4. Set `geofence_map_name` in `nodes/argo.yaml` to match your map file name.
 
 ## Notes
 

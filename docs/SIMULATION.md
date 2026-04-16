@@ -65,7 +65,7 @@ python3 nodes/argo_keyboard_control.py
 - **r** : Reset simulation
 - **h** : Toggle Return-to-Home controller
 - **m** : Toggle controller pause (manual/autonomous)
-- **q** : Quit simulation
+- **q** : Quit simulation (SIGTERM to simulator bridge, controller, visualization, sailing-area publisher, and Foxglove bridge). If you paused with **SPACE** (process SIGSTOP), quit sends SIGCONT first so those processes can exit; otherwise SIGTERM would not take effect until something resumed them.
 - **x** : Quit keyboard control (keep simulation running)
 - **ENTER** : Refresh display
 

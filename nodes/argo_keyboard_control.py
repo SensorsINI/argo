@@ -557,7 +557,9 @@ class KeyboardControlNode(Node):
             'argo_boat_visualization.py',
             'argo_transform_publisher.py',
             'controller.py',
-            # Add other simulation nodes as needed
+            'sailing_area_publisher.py',
+            # ros2 run foxglove_bridge foxglove_bridge (no .py in argv)
+            'foxglove_bridge',
         ]
         
         try:
@@ -632,6 +634,12 @@ class KeyboardControlNode(Node):
         terminated_count = 0
         for pid in sim_pids:
             try:
+                # If SPACE froze the sim (SIGSTOP), SIGTERM is deferred until the process
+                # receives SIGCONT. Resume first so quit always takes effect.
+                try:
+                    os.kill(pid, signal.SIGCONT)
+                except (ProcessLookupError, PermissionError):
+                    pass
                 os.kill(pid, signal.SIGTERM)
                 terminated_count += 1
             except (ProcessLookupError, PermissionError) as e:
@@ -961,6 +969,10 @@ class KeyboardControlNode(Node):
         if not success:
             message = "⚠️  No simulation processes found to quit"
             self._notify(message, level="warn")
+        else:
+            # Clear pause bookkeeping so UI matches (SIGSTOP targets may overlap sim_pids)
+            self.simulation_pids = []
+            self.simulation_paused = False
     
     def clear_and_refresh_display(self):
         """Clear and refresh the display to fix corruption from logging messages."""
