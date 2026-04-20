@@ -67,9 +67,9 @@ groups:
     - argo_unified_simulator_bridge
     - controller_node
     - sailing_area_publisher
-    - foxglove_bridge
     - argo_transform_publisher
     - argo_boat_visualization
+    - foxglove_bridge
 
 
 nodes:
@@ -214,11 +214,6 @@ simulation_nodes:
     executable: nodes/sailing_area_publisher.py
     description: "Sailing area visualization markers"
     
-  - name: foxglove_bridge
-    executable: ros2 run foxglove_bridge foxglove_bridge
-    description: "Foxglove Studio bridge"
-    special: true
-  
   - name: argo_transform_publisher
     executable: nodes/argo_transform_publisher.py
     description: "TF transform publisher for visualization"
@@ -226,3 +221,8 @@ simulation_nodes:
   - name: argo_boat_visualization
     executable: nodes/argo_boat_visualization.py
     description: "Boat state visualization node"
+
+  - name: foxglove_bridge
+    executable: ros2 run foxglove_bridge foxglove_bridge
+    description: "Foxglove Studio bridge"
+    special: true
