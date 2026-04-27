@@ -104,7 +104,11 @@ class ArgoTransformPublisher(ArgoBaseNode):
         
         # Publish static transforms at startup
         self.publish_static_transforms()
-        
+        # foxglove_bridge often attaches to /tf_static only after a Studio client connects, so a
+        # single startup publish can be missed (Foxglove: missing map→base_link). Republish like
+        # sailing_area_publisher does for markers.
+        self.create_timer(5.0, self.publish_static_transforms)
+
         # Read publish rate from shared simulation parameters (argo.yaml)
         self.declare_parameter('simulation.publish_rate', 10.0)
         self.publish_rate = self.get_parameter('simulation.publish_rate').get_parameter_value().double_value
