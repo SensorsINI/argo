@@ -2,6 +2,18 @@
 
 This directory contains shore-side ROS2 nodes for communicating with the Argo sailboat via LoRa radio.
 
+### Argo on local WiFi (host lookup)
+
+- **Argo WiFi MAC (frozen / fixed)** is stored in `network/ARGO_MAC_ID.txt` (single source of truth):
+  - **Linux format**: `c8:26:e2:6c:58:ba`
+  - **Windows neighbor table format**: `C8-26-E2-6C-58-BA`
+
+On Windows, find Argo’s current IP by matching that MAC:
+
+- `Get-NetNeighbor -AddressFamily IPv4 | Select-Object IPAddress, LinkLayerAddress, State`
+
+Then connect with `ssh orangepi@THE_IP`, or run **`windows/argo-ssh-lan.cmd`** (wrapper) / **`windows/argo-ssh-lan.ps1`** (resolves IP from `Get-NetNeighbor`, then runs `ssh`).
+
 ## 📋 Quick Start
 
 ### Prerequisites

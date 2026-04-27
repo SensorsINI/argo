@@ -2,7 +2,7 @@
 
 # Argo WiFi Reconnection Script
 # Forces connection to preferred networks when they become available
-# Priority: tobi-s24 (15) > tobi-wlan (10) > uzh-iot (5)
+# Priority: tobi-s24 (phone) > tobi-matebook (laptop hotspot) > CapoCacciaWorkshop2026 (workshop LAN) > tobi-wlan (travel router)
 # 
 # SAFETY FEATURES:
 # - Only runs when called by systemd timer (every 1 minute)
@@ -11,7 +11,7 @@
 # - Logs all actions for debugging
 
 # Configuration
-PREFERRED_NETWORKS=("tobi-s24" "tobi-wlan")
+PREFERRED_NETWORKS=("tobi-s24" "tobi-matebook" "CapoCacciaWorkshop2026" "tobi-wlan")
 LOG_FILE="/var/log.hdd/persistent/wifi-reconnect-$(date +%Y%m%d).log"
 MAX_LOG_SIZE=1048576  # 1MB
 LOCK_FILE="/tmp/wifi_reconnect.lock"
