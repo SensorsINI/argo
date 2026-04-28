@@ -224,3 +224,4 @@ pcb/WindSensor/WindSensor-rev1b/lp5814.pdf
 pcb/WindSensor/WindSensor-rev1b/sym-lib-table
 pcb/WindSensor/WindSensor-rev1b/PCA9632DP2_118.zip
 pcb/WindSensor/WindSensor-rev1b/fp-lib-table
+network/config/extra_preferred_networks.txt

@@ -36,6 +36,11 @@ body {
     gap: 10px;
 }
 
+/* Header meta line (MAC/IP) lives as 2nd direct child div in header */
+.header > div:nth-child(2) {
+    color: #6c757d !important; /* override older inline styles */
+}
+
 .header h1 {
     font-size: 24px;
     color: #1e3c72;
@@ -83,6 +88,104 @@ body {
     margin-bottom: 15px;
     border-bottom: 2px solid #e9ecef;
     padding-bottom: 10px;
+}
+
+/* WiFi Networks card */
+.wifi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+}
+
+.wifi-section {
+    background: #f8f9fa;
+    border-radius: 10px;
+    padding: 12px;
+    border: 1px solid #e9ecef;
+}
+
+.wifi-section-title {
+    font-weight: 700;
+    color: #1e3c72;
+    margin-bottom: 10px;
+}
+
+.wifi-row {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.wifi-row.wifi-actions {
+    grid-template-columns: 1fr 1fr;
+}
+
+.wifi-label {
+    font-weight: 600;
+    color: #495057;
+    font-size: 14px;
+}
+
+.wifi-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #ced4da;
+    border-radius: 8px;
+    font-size: 14px;
+}
+
+.wifi-btn {
+    min-height: 44px;
+    padding: 10px 12px;
+    font-size: 14px;
+}
+
+.wifi-hint {
+    font-size: 12px;
+    color: #6c757d;
+}
+
+.wifi-status {
+    margin-top: 10px;
+    font-weight: 700;
+    font-size: 13px;
+    color: #212529;
+}
+
+.wifi-warning {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #856404;
+}
+
+.wifi-saved {
+    display: grid;
+    gap: 6px;
+}
+
+.wifi-saved-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: white;
+    border: 1px solid #e9ecef;
+}
+
+.wifi-saved-item.active {
+    border-left: 4px solid #28a745;
+}
+
+.wifi-saved-name {
+    font-weight: 700;
+}
+
+.wifi-saved-meta {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 12px;
+    color: #6c757d;
 }
 
 /* Status Grid */

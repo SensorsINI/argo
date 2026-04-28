@@ -25,6 +25,7 @@ import threading
 import argparse
 import logging
 import signal
+import re
 import yaml
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +64,7 @@ class ArgoWebDashboard(ArgoBaseNode):
     def __init__(self, debug_mode=False):
         super().__init__('argo_web_dashboard', enable_health_service=True, enable_health_publisher=True)
         self.debug_mode = debug_mode
+        self.mac_id = self._load_argo_mac_id()
         
         # Enable DEBUG logging if requested
         if self.debug_mode:
@@ -1775,6 +1777,334 @@ class ArgoWebDashboard(ArgoBaseNode):
         finally:
             with self.restart_progress_lock:
                 self.restart_in_progress = False
+
+    def _load_argo_mac_id(self) -> str:
+        """Load Argo's frozen WiFi MAC ID from repo file (fallback to wlan0 MAC)."""
+        try:
+            repo_root = Path(os.path.dirname(os.path.dirname(__file__)))
+            mac_file = repo_root / "network" / "ARGO_MAC_ID.txt"
+            if mac_file.exists():
+                for line in mac_file.read_text(encoding="utf-8").splitlines():
+                    s = line.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    return s.lower()
+        except Exception:
+            pass
+
+        try:
+            return (
+                Path("/sys/class/net/wlan0/address")
+                .read_text(encoding="utf-8")
+                .strip()
+                .lower()
+            )
+        except Exception:
+            return "unknown"
+
+    def _get_current_ip_address(self) -> Optional[str]:
+        """Best-effort current IPv4 on wlan0 (computed per request)."""
+        try:
+            result = subprocess.run(
+                ["ip", "-4", "addr", "show", "dev", "wlan0"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+            m = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)\b", result.stdout or "")
+            return m.group(1) if m else None
+        except Exception:
+            return None
+
+    # ==================== WiFi Management Helpers ====================
+
+    def _extra_wifi_config_path(self) -> Path:
+        # Keep this under the repo so both the dashboard (orangepi) and wifi_reconnect.sh (root) can read it.
+        repo_root = Path(os.path.dirname(os.path.dirname(__file__)))
+        return repo_root / "network" / "config" / "extra_preferred_networks.txt"
+
+    def _run_nmcli(self, args, timeout_s: float = 8.0) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["nmcli", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+
+    def _get_active_wifi_connection(self) -> Optional[str]:
+        try:
+            p = self._run_nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"], timeout_s=3.0)
+            for line in (p.stdout or "").splitlines():
+                parts = line.split(":")
+                if len(parts) >= 3 and parts[1] == "802-11-wireless":
+                    return parts[0].strip()
+        except Exception:
+            pass
+        return None
+
+    def _wifi_scan(self) -> Dict[str, Any]:
+        # Rescan + list (does not switch connections)
+        try:
+            self.get_logger().info("📡 WiFi scan requested (rescan + list)")
+        except Exception:
+            pass
+        rescan = self._run_nmcli(["dev", "wifi", "rescan"], timeout_s=8.0)
+        if rescan.returncode != 0:
+            try:
+                self.get_logger().warning(
+                    f"📡 WiFi rescan failed rc={rescan.returncode}: {(rescan.stderr or rescan.stdout or '').strip()}"
+                )
+            except Exception:
+                pass
+            return {"success": False, "message": (rescan.stderr or rescan.stdout or "rescan failed").strip()}
+
+        p = self._run_nmcli(["-t", "-f", "SSID,SIGNAL,SECURITY", "dev", "wifi", "list"], timeout_s=10.0)
+        if p.returncode != 0:
+            try:
+                self.get_logger().warning(
+                    f"📡 WiFi list failed rc={p.returncode}: {(p.stderr or p.stdout or '').strip()}"
+                )
+            except Exception:
+                pass
+            return {"success": False, "message": (p.stderr or p.stdout or "scan failed").strip()}
+
+        seen = {}
+        for line in (p.stdout or "").splitlines():
+            # format: SSID:SIGNAL:SECURITY ; SSID can be empty (hidden)
+            parts = line.split(":", 2)
+            if not parts:
+                continue
+            ssid = (parts[0] or "").strip()
+            if not ssid:
+                continue
+            signal = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            security = (parts[2] if len(parts) > 2 else "").strip()
+            # de-dupe by SSID, keep best signal
+            prev = seen.get(ssid)
+            if prev is None or signal > prev["signal"]:
+                seen[ssid] = {"ssid": ssid, "signal": signal, "security": security}
+
+        networks = sorted(seen.values(), key=lambda x: (-x["signal"], x["ssid"].lower()))
+        try:
+            self.get_logger().info(f"📡 WiFi scan complete: {len(networks)} networks")
+        except Exception:
+            pass
+        return {"success": True, "networks": networks}
+
+    def _wifi_saved(self) -> Dict[str, Any]:
+        active = self._get_active_wifi_connection()
+        try:
+            self.get_logger().info(f"📋 WiFi saved connections requested (active={active or 'none'})")
+        except Exception:
+            pass
+        p = self._run_nmcli(["-t", "-f", "NAME,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY", "connection", "show"], timeout_s=6.0)
+        if p.returncode != 0:
+            try:
+                self.get_logger().warning(
+                    f"📋 WiFi saved list failed rc={p.returncode}: {(p.stderr or p.stdout or '').strip()}"
+                )
+            except Exception:
+                pass
+            return {"success": False, "message": (p.stderr or p.stdout or "nmcli failed").strip()}
+
+        conns = []
+        for line in (p.stdout or "").splitlines():
+            parts = line.split(":")
+            if len(parts) < 4:
+                continue
+            name, ctype, ac, pr = parts[0], parts[1], parts[2], parts[3]
+            if ctype != "802-11-wireless":
+                continue
+            try:
+                pr_i = int(pr) if pr != "" else 0
+            except Exception:
+                pr_i = 0
+            conns.append({
+                "name": name,
+                "autoconnect": (ac.strip().lower() == "yes"),
+                "autoconnect_priority": pr_i,
+                "active": (active == name),
+            })
+
+        conns.sort(key=lambda c: (-int(c.get("autoconnect_priority") or 0), c["name"].lower()))
+        return {"success": True, "connections": conns}
+
+    def _append_extra_preferred_network(self, ssid: str) -> None:
+        ssid = ssid.strip()
+        if not ssid:
+            return
+        path = self._extra_wifi_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = set()
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                existing.add(s)
+        if ssid not in existing:
+            with path.open("a", encoding="utf-8") as f:
+                if path.stat().st_size == 0:
+                    f.write("# Extra preferred WiFi networks (appended after core list)\n")
+                f.write(ssid + "\n")
+            try:
+                self.get_logger().info(f"📝 Added SSID to extra preferred list: {ssid} ({path})")
+            except Exception:
+                pass
+
+    def _wifi_add(self, ssid: str, password: str, priority: int) -> Dict[str, Any]:
+        ssid = (ssid or "").strip()
+        if not ssid:
+            return {"success": False, "message": "SSID is required"}
+
+        # Enforce safety: never outrank hotspots
+        # matebook 20, s24 15 are reserved top tiers
+        if priority >= 15:
+            priority = 5
+        try:
+            pw_info = "with password" if bool(password) else "open/empty password"
+            self.get_logger().info(f"➕ WiFi add/update requested: ssid='{ssid}', priority={priority} ({pw_info})")
+        except Exception:
+            pass
+
+        # Create or modify a connection profile named the same as SSID
+        # We do NOT bring it up here.
+        exists = self._run_nmcli(["connection", "show", ssid], timeout_s=3.0)
+        if exists.returncode == 0:
+            try:
+                self.get_logger().info(f"➕ WiFi connection exists, modifying: {ssid}")
+            except Exception:
+                pass
+            cmds = [
+                ["connection", "modify", ssid, "connection.autoconnect", "yes"],
+                ["connection", "modify", ssid, "connection.autoconnect-priority", str(priority)],
+            ]
+            if password:
+                cmds += [
+                    ["connection", "modify", ssid, "wifi-sec.key-mgmt", "wpa-psk"],
+                    ["connection", "modify", ssid, "wifi-sec.psk", password],
+                ]
+            else:
+                # open network: clear key-mgmt/psk if previously set (best effort)
+                cmds += [
+                    ["connection", "modify", ssid, "wifi-sec.key-mgmt", ""],
+                    ["connection", "modify", ssid, "wifi-sec.psk", ""],
+                ]
+            for c in cmds:
+                p = self._run_nmcli(c, timeout_s=6.0)
+                if p.returncode != 0:
+                    try:
+                        self.get_logger().warning(
+                            f"➕ nmcli failed rc={p.returncode} cmd={' '.join(c)} err={(p.stderr or p.stdout or '').strip()}"
+                        )
+                    except Exception:
+                        pass
+                    return {"success": False, "message": (p.stderr or p.stdout or "nmcli modify failed").strip()}
+        else:
+            # add new
+            try:
+                self.get_logger().info(f"➕ Creating new WiFi connection profile: {ssid}")
+            except Exception:
+                pass
+            base = ["connection", "add", "type", "wifi", "con-name", ssid, "ifname", "wlan0", "ssid", ssid]
+            if password:
+                base += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", password]
+            base += ["connection.autoconnect", "yes", "connection.autoconnect-priority", str(priority)]
+            p = self._run_nmcli(base, timeout_s=10.0)
+            if p.returncode != 0:
+                try:
+                    self.get_logger().warning(
+                        f"➕ nmcli add failed rc={p.returncode}: {(p.stderr or p.stdout or '').strip()}"
+                    )
+                except Exception:
+                    pass
+                return {"success": False, "message": (p.stderr or p.stdout or "nmcli add failed").strip()}
+
+        # Ensure it participates in reconnect preference (without editing script)
+        self._append_extra_preferred_network(ssid)
+        try:
+            self.get_logger().info(f"✅ WiFi add/update complete: {ssid} (priority {priority})")
+        except Exception:
+            pass
+        return {"success": True, "message": f"Added/updated connection '{ssid}'", "priority": priority}
+
+    def _wifi_switch_with_rollback(self, ssid: str, rollback_seconds: int = 60) -> Dict[str, Any]:
+        ssid = (ssid or "").strip()
+        if not ssid:
+            return {"success": False, "message": "SSID is required"}
+
+        current = self._get_active_wifi_connection()
+        try:
+            self.get_logger().warning(
+                f"📶 WiFi switch requested: from='{current or 'none'}' to='{ssid}' (rollback {rollback_seconds}s)"
+            )
+        except Exception:
+            pass
+
+        # Rollback target: always prefer matebook then s24
+        rollback_targets = ["tobi-matebook", "tobi-s24"]
+        if current and current not in rollback_targets:
+            rollback_targets.append(current)
+        try:
+            self.get_logger().info(f"📶 Rollback targets: {rollback_targets}")
+        except Exception:
+            pass
+
+        rollback_event = threading.Event()
+
+        def rollback_worker():
+            try:
+                if rollback_event.wait(timeout=rollback_seconds):
+                    return  # canceled
+                try:
+                    self.get_logger().warning(
+                        f"↩️ WiFi rollback triggered after {rollback_seconds}s (attempting {rollback_targets})"
+                    )
+                except Exception:
+                    pass
+                # Attempt rollback targets in order
+                for target in rollback_targets:
+                    p = self._run_nmcli(["connection", "up", target], timeout_s=30.0)
+                    if p.returncode == 0:
+                        try:
+                            self.get_logger().warning(f"↩️ WiFi rollback succeeded: {target}")
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        self.get_logger().warning(
+                            f"↩️ WiFi rollback failed rc={p.returncode} target={target}: {(p.stderr or p.stdout or '').strip()}"
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                return
+
+        t = threading.Thread(target=rollback_worker, daemon=True)
+        t.start()
+
+        # Attempt switch
+        p = self._run_nmcli(["connection", "up", ssid], timeout_s=45.0)
+        if p.returncode != 0:
+            try:
+                self.get_logger().warning(
+                    f"📶 WiFi switch failed rc={p.returncode} ssid={ssid}: {(p.stderr or p.stdout or '').strip()}"
+                )
+            except Exception:
+                pass
+            return {"success": False, "message": (p.stderr or p.stdout or "switch failed").strip()}
+
+        # Basic success: cancel rollback and return new IP (best effort)
+        rollback_event.set()
+        time.sleep(0.5)
+        new_ip = self._get_current_ip_address()
+        try:
+            self.get_logger().warning(f"✅ WiFi switch succeeded: now on '{ssid}', ip={new_ip or 'unknown'}")
+        except Exception:
+            pass
+        return {"success": True, "message": f"Switched to '{ssid}'", "new_ip": new_ip}
     
     # ==================== Flask Routes ====================
     
@@ -1795,7 +2125,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         @self.app.route('/')
         def index():
             """Main dashboard page."""
-            return render_template('dashboard.html')
+            return render_template(
+                'dashboard.html',
+                mac_id=self.mac_id,
+                ip_address=self._get_current_ip_address(),
+            )
         
         @self.app.route('/api/status')
         def get_status():
@@ -1824,6 +2158,46 @@ class ArgoWebDashboard(ArgoBaseNode):
                     'controller_paused': self.state.get('controller_paused'),
                     'i2c_failure': self.state.get('i2c_failure', False)
                 })
+
+        # ==================== WiFi Management API ====================
+
+        @self.app.route('/api/wifi/scan', methods=['GET'])
+        def wifi_scan():
+            try:
+                return jsonify(self._wifi_scan())
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e)})
+
+        @self.app.route('/api/wifi/saved', methods=['GET'])
+        def wifi_saved():
+            try:
+                return jsonify(self._wifi_saved())
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e)})
+
+        @self.app.route('/api/wifi/add', methods=['POST'])
+        def wifi_add():
+            try:
+                payload = request.get_json(force=True, silent=True) or {}
+                ssid = payload.get("ssid", "")
+                password = payload.get("password", "") or ""
+                try:
+                    priority = int(payload.get("priority", 5))
+                except Exception:
+                    priority = 5
+                return jsonify(self._wifi_add(ssid=ssid, password=password, priority=priority))
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e)})
+
+        @self.app.route('/api/wifi/switch', methods=['POST'])
+        def wifi_switch():
+            try:
+                payload = request.get_json(force=True, silent=True) or {}
+                ssid = payload.get("ssid", "")
+                # This can disconnect the client; rollback is scheduled locally.
+                return jsonify(self._wifi_switch_with_rollback(ssid=ssid, rollback_seconds=60))
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e)})
         
         @self.app.route('/api/toggle_pause', methods=['POST'])
         def toggle_pause():

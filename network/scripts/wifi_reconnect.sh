@@ -2,7 +2,7 @@
 
 # Argo WiFi Reconnection Script
 # Forces connection to preferred networks when they become available
-# Priority: tobi-s24 (phone) > tobi-matebook (laptop hotspot) > CapoCacciaWorkshop2026 (workshop LAN) > tobi-wlan (travel router)
+# Priority: tobi-matebook (laptop hotspot) > tobi-s24 (phone) > tobi-wlan (travel router) > CapoCacciaWorkshop2026 (workshop LAN)
 # 
 # SAFETY FEATURES:
 # - Only runs when called by systemd timer (every 1 minute)
@@ -11,11 +11,47 @@
 # - Logs all actions for debugging
 
 # Configuration
-PREFERRED_NETWORKS=("tobi-s24" "tobi-matebook" "CapoCacciaWorkshop2026" "tobi-wlan")
+PREFERRED_NETWORKS=("tobi-matebook" "tobi-s24" "tobi-wlan" "CapoCacciaWorkshop2026")
+# Extra preferred networks (added via dashboard) are listed here, one SSID per line:
+EXTRA_PREFERRED_NETWORKS_FILE="/home/orangepi/argo/network/config/extra_preferred_networks.txt"
+# Passwords are stored in NetworkManager system connections (e.g. /etc/NetworkManager/system-connections).
 LOG_FILE="/var/log.hdd/persistent/wifi-reconnect-$(date +%Y%m%d).log"
 MAX_LOG_SIZE=1048576  # 1MB
 LOCK_FILE="/tmp/wifi_reconnect.lock"
 MIN_CONNECTION_TIME=30  # Minimum seconds to stay on a connection before switching
+
+# When ZeroTier is unhealthy on a given SSID, we want enough info in logs to debug later.
+# Keep snapshots short and rate-limited so the 1-minute timer can't spam/hang.
+ZT_HEALTH_LOG_THROTTLE_SECONDS=300  # 5 minutes
+ZT_HEALTH_LASTLOG_FILE="/tmp/zt_health_lastlog_timestamp"
+
+# Load extra preferred networks from file (appended after core list)
+load_extra_preferred_networks() {
+    if [ ! -f "$EXTRA_PREFERRED_NETWORKS_FILE" ]; then
+        return 0
+    fi
+
+    while IFS= read -r line; do
+        line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -z "$line" ] || [[ "$line" == \#* ]]; then
+            continue
+        fi
+
+        # Extras are appended *after* core list and must never override core priority.
+        # If an "extra" duplicates a core SSID, skip it (core order wins).
+        local already=false
+        for n in "${PREFERRED_NETWORKS[@]}"; do
+            if [ "$n" = "$line" ]; then
+                already=true
+                break
+            fi
+        done
+
+        if [ "$already" = false ]; then
+            PREFERRED_NETWORKS+=("$line")
+        fi
+    done < "$EXTRA_PREFERRED_NETWORKS_FILE"
+}
 
 # Function to ensure log file has correct permissions
 ensure_log_permissions() {
@@ -108,6 +144,82 @@ record_connection_change() {
     echo "$(date +%s)" > "$timestamp_file"
 }
 
+run_cmd_short() {
+    local label="$1"
+    shift
+
+    # Ensure we never hang the timer. `timeout` exit 124 is fine; we log it.
+    local out
+    out="$(timeout 4 "$@" 2>&1)"
+    local rc=$?
+
+    if [ $rc -eq 0 ]; then
+        log_message "[health] $label: ${out//$'\n'/ | }"
+    else
+        # Truncate very long outputs (e.g. help text) to keep logs readable.
+        out="$(echo "$out" | head -n 6 | tr '\n' '|' | sed 's/|$//')"
+        log_message "[health] $label: (rc=$rc) $out"
+    fi
+}
+
+log_network_health_snapshot() {
+    local context="$1"
+
+    log_message "[health] ===== snapshot begin ($context) ====="
+    run_cmd_short "nm-active" nmcli -t -f ACTIVE,NAME,DEVICE,TYPE connection show --active
+    run_cmd_short "ip-addr" ip -br addr
+    run_cmd_short "ip-route-default" bash -c "ip route show default || true"
+    run_cmd_short "dns-resolvectl" bash -c "command -v resolvectl >/dev/null 2>&1 && resolvectl status | rg -n \"Current DNS Server|DNS Servers|Link\" | head -n 40 || echo \"resolvectl not found\""
+
+    # ZeroTier health
+    if command -v zerotier-cli >/dev/null 2>&1; then
+        run_cmd_short "zt-info" zerotier-cli info
+        run_cmd_short "zt-listnetworks" zerotier-cli listnetworks
+        run_cmd_short "zt-listpeers" bash -c "zerotier-cli listpeers | head -n 30"
+    else
+        log_message "[health] zerotier-cli not found on PATH"
+    fi
+
+    log_message "[health] ===== snapshot end ($context) ====="
+}
+
+zt_health_is_unhealthy() {
+    # Heuristic: if ZeroTier isn't ONLINE or no networks are OK, treat as unhealthy.
+    if ! command -v zerotier-cli >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local info
+    info="$(timeout 3 zerotier-cli info 2>/dev/null || true)"
+    echo "$info" | grep -q " ONLINE" || return 0
+
+    local nets
+    nets="$(timeout 3 zerotier-cli listnetworks 2>/dev/null || true)"
+    echo "$nets" | grep -q " OK " || return 0
+
+    return 1
+}
+
+maybe_log_zt_health_throttled() {
+    local reason="$1"
+
+    local now
+    now="$(date +%s)"
+
+    local last=0
+    if [ -f "$ZT_HEALTH_LASTLOG_FILE" ]; then
+        last="$(cat "$ZT_HEALTH_LASTLOG_FILE" 2>/dev/null || echo 0)"
+    fi
+
+    local diff=$((now - last))
+    if [ $diff -lt $ZT_HEALTH_LOG_THROTTLE_SECONDS ]; then
+        return 0
+    fi
+
+    echo "$now" > "$ZT_HEALTH_LASTLOG_FILE"
+    log_network_health_snapshot "$reason"
+}
+
 # Main logic
 main() {
     # Check for lock file to prevent multiple instances
@@ -124,6 +236,10 @@ main() {
     
     rotate_log
     log_message "WiFi reconnection check started"
+
+    # Extend preferred list with user-added networks (appended at end)
+    load_extra_preferred_networks
+    log_message "Preferred network priority order: ${PREFERRED_NETWORKS[*]}"
     
     # Get current connection
     CURRENT_CONNECTION=$(get_current_connection)
@@ -141,9 +257,17 @@ main() {
     if ! is_connection_stable "$CURRENT_CONNECTION"; then
         return 0
     fi
+
+    # If we're on a potentially problematic network and ZeroTier looks unhealthy,
+    # capture enough info to debug remotely later.
+    if [ "$CURRENT_CONNECTION" = "CapoCacciaWorkshop2026" ]; then
+        if zt_health_is_unhealthy; then
+            maybe_log_zt_health_throttled "zt-unhealthy-on-$CURRENT_CONNECTION"
+        fi
+    fi
     
     # Check if we're already on the highest-priority preferred network
-    # The array is ordered by priority (tobi-s24 first, then tobi-wlan)
+    # The array is ordered by priority (lower index = higher priority)
     IS_ON_PREFERRED=false
     CURRENT_PRIORITY_INDEX=-1
     
@@ -166,6 +290,7 @@ main() {
                     log_message "Higher-priority preferred network ${PREFERRED_NETWORKS[$i]} is available, switching"
                     if connect_to_network "${PREFERRED_NETWORKS[$i]}"; then
                         record_connection_change "${PREFERRED_NETWORKS[$i]}"
+                        log_network_health_snapshot "after-switch-to-${PREFERRED_NETWORKS[$i]}"
                         return 0
                     fi
                 fi
@@ -183,6 +308,7 @@ main() {
             log_message "Preferred network $preferred is available, attempting connection"
             if connect_to_network "$preferred"; then
                 record_connection_change "$preferred"
+                log_network_health_snapshot "after-switch-to-$preferred"
                 return 0
             fi
         else

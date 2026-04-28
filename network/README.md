@@ -1,5 +1,7 @@
 # Argo Network Improvements
 
+**Source of truth for dev** is this file in your working tree. The `Documentation` line in `config/argo_wifi_reconnect.service` and `config/argo_wifi_reconnect.timer` points at GitHub so `systemctl` and editor links work on every OS; that page can lag uncommitted or unpushed work. To open the local file in the editor, use **Go to File** (Ctrl+P) and type `network/README.md`.
+
 This directory contains system-level network improvements for the Argo sailboat control system, specifically addressing WiFi reconnection issues and NetworkManager optimizations.
 
 ## Problem Solved

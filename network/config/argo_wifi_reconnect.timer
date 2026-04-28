@@ -1,6 +1,7 @@
 [Unit]
 Description=Argo WiFi Reconnection Timer
-Documentation=file:///home/orangepi/argo/network/README.md
+# Authoritative doc on disk: network/README.md (repo root). file:// not used here — Windows + Remote SSH resolves it as a local path. GitHub URL is for systemctl and portable links.
+Documentation=https://github.com/SensorsINI/argo/blob/master/network/README.md
 Requires=argo_wifi_reconnect.service
 
 [Timer]

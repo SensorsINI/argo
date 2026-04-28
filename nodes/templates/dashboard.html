@@ -12,6 +12,11 @@
         <!-- Header -->
         <header class="header">
             <h1>⛵ ARGO CONTROL</h1>
+            <div style="margin-top: 4px; font-size: 0.85em; color: #6c757d;">
+                MAC: <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">{{ mac_id }}</span>
+                &nbsp;|&nbsp;
+                IP: <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">{{ ip_address or '—' }}</span>
+            </div>
             <div style="display: flex; align-items: center; gap: 5px;">
                 <div class="status-badge" id="connection-status">🟢 CONNECTED</div>
                 <span class="status-timer" id="connection-timer"></span>
@@ -182,6 +187,60 @@
                 <button class="btn btn-storage" id="storage-mode-btn" onclick="toggleStorageMode()">
                     🔋 Activate storage mode
                 </button>
+            </div>
+        </div>
+
+        <!-- WiFi Networks -->
+        <div class="card">
+            <h2>WiFi Networks</h2>
+            <div class="wifi-grid">
+                <div class="wifi-section">
+                    <div class="wifi-section-title">Visible Networks</div>
+                    <div class="wifi-row">
+                        <button class="btn btn-secondary wifi-btn" id="wifi-scan-btn" onclick="wifiScan()">🔄 Scan</button>
+                        <span class="wifi-hint">Does not switch networks</span>
+                    </div>
+                    <div class="wifi-row">
+                        <label class="wifi-label" for="wifi-ssid-select">SSID</label>
+                        <select id="wifi-ssid-select" class="wifi-input" onchange="wifiSelectChanged()">
+                            <option value="">(scan first)</option>
+                        </select>
+                    </div>
+                    <div class="wifi-row">
+                        <label class="wifi-label" for="wifi-ssid-manual">Or type SSID</label>
+                        <input id="wifi-ssid-manual" class="wifi-input" type="text" placeholder="SSID (optional)" />
+                    </div>
+                    <div class="wifi-row">
+                        <label class="wifi-label" for="wifi-password">Password</label>
+                        <!-- plain text for easier entry (per request) -->
+                        <input id="wifi-password" class="wifi-input" type="text" placeholder="Password (leave empty for open)" />
+                    </div>
+                    <div class="wifi-row">
+                        <label class="wifi-label" for="wifi-priority">Priority</label>
+                        <select id="wifi-priority" class="wifi-input">
+                            <option value="5">Normal (5)</option>
+                            <option value="10">Above normal (10)</option>
+                            <option value="0">Low (0)</option>
+                            <option value="-10">Very low (-10)</option>
+                        </select>
+                    </div>
+                    <div class="wifi-row wifi-actions">
+                        <button class="btn btn-success wifi-btn" id="wifi-add-btn" onclick="wifiAdd()">➕ Add (no switch)</button>
+                        <button class="btn btn-warning wifi-btn" id="wifi-switch-btn" onclick="wifiSwitch()">📶 Switch (rollback)</button>
+                    </div>
+                    <div class="wifi-status" id="wifi-status">—</div>
+                    <div class="wifi-warning">
+                        Switching WiFi changes Argo’s IP and may disconnect this page. A rollback will restore hotspot if the new WiFi fails.
+                    </div>
+                </div>
+                <div class="wifi-section">
+                    <div class="wifi-section-title">Saved Connections</div>
+                    <div class="wifi-row">
+                        <button class="btn btn-secondary wifi-btn" id="wifi-saved-btn" onclick="wifiLoadSaved()">📋 Refresh</button>
+                        <span class="wifi-hint">Autoconnect priorities</span>
+                    </div>
+                    <div class="wifi-saved" id="wifi-saved-list">Loading…</div>
+                </div>
             </div>
         </div>
 
@@ -1263,6 +1322,9 @@
         // Auto-update every 2 seconds
         // Initial status update
         updateStatus();
+
+        // Initial WiFi data (safe: does not switch)
+        wifiLoadSaved();
         
         // Regular full status polling (every 2 seconds)
         setInterval(updateStatus, 2000);
@@ -1272,6 +1334,123 @@
         updateCriticalStatus(); // Initial update
         if (isPageVisible) {
             criticalStatusInterval = setInterval(updateCriticalStatus, 1000);
+        }
+
+        // ==================== WiFi Management ====================
+        function getSelectedSsid() {
+            const manual = (document.getElementById('wifi-ssid-manual').value || '').trim();
+            if (manual) return manual;
+            const sel = document.getElementById('wifi-ssid-select').value;
+            return (sel || '').trim();
+        }
+
+        function wifiSetStatus(msg) {
+            const el = document.getElementById('wifi-status');
+            if (el) el.textContent = msg || '—';
+        }
+
+        function wifiSelectChanged() {
+            const ssid = document.getElementById('wifi-ssid-select').value;
+            if (ssid) {
+                // Clear manual SSID when a dropdown SSID is selected
+                document.getElementById('wifi-ssid-manual').value = '';
+            }
+        }
+
+        function wifiScan() {
+            wifiSetStatus('Scanning…');
+            fetch('/api/wifi/scan')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) throw new Error(data.message || 'Scan failed');
+                    const select = document.getElementById('wifi-ssid-select');
+                    select.innerHTML = '<option value=\"\">(select)</option>';
+                    (data.networks || []).forEach(n => {
+                        const opt = document.createElement('option');
+                        opt.value = n.ssid;
+                        opt.textContent = `${n.ssid} (${n.signal}%, ${n.security || '—'})`;
+                        select.appendChild(opt);
+                    });
+                    wifiSetStatus(`Scan complete: ${(data.networks || []).length} networks`);
+                })
+                .catch(err => wifiSetStatus(`❌ ${err.message || err}`));
+        }
+
+        function wifiLoadSaved() {
+            fetch('/api/wifi/saved')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) throw new Error(data.message || 'Failed to load saved connections');
+                    const list = document.getElementById('wifi-saved-list');
+                    const items = data.connections || [];
+                    if (items.length === 0) {
+                        list.textContent = 'No saved WiFi connections found.';
+                        return;
+                    }
+                    list.innerHTML = items.map(c => {
+                        const pr = (c.autoconnect_priority !== null && c.autoconnect_priority !== undefined) ? c.autoconnect_priority : 0;
+                        const ac = c.autoconnect ? 'yes' : 'no';
+                        const active = c.active ? 'active' : '';
+                        return `<div class=\"wifi-saved-item ${active}\"><span class=\"wifi-saved-name\">${c.name}</span><span class=\"wifi-saved-meta\">ac:${ac} pr:${pr}</span></div>`;
+                    }).join('');
+                })
+                .catch(err => {
+                    const list = document.getElementById('wifi-saved-list');
+                    list.textContent = `❌ ${err.message || err}`;
+                });
+        }
+
+        function wifiAdd() {
+            const ssid = getSelectedSsid();
+            const password = document.getElementById('wifi-password').value || '';
+            const priority = parseInt(document.getElementById('wifi-priority').value || '5', 10);
+            if (!ssid) {
+                wifiSetStatus('❌ Select or type an SSID');
+                return;
+            }
+            wifiSetStatus('Adding network (no switch)…');
+            fetch('/api/wifi/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ssid, password, priority })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) throw new Error(data.message || 'Add failed');
+                wifiSetStatus(`✅ Added: ${ssid} (priority ${priority})`);
+                wifiLoadSaved();
+            })
+            .catch(err => wifiSetStatus(`❌ ${err.message || err}`));
+        }
+
+        function wifiSwitch() {
+            const ssid = getSelectedSsid();
+            if (!ssid) {
+                wifiSetStatus('❌ Select or type an SSID');
+                return;
+            }
+            showModal(
+                '📶 Switch WiFi',
+                'This will switch Argo WiFi and change its IP.\n\n' +
+                'A rollback will restore hotspot if the connection fails.\n\n' +
+                `Switch to: ${ssid}?`,
+                () => {
+                    wifiSetStatus(`Switching to ${ssid}…`);
+                    fetch('/api/wifi/switch', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ssid })
+                    })
+                    .then(r => r.json())
+                    .then(data => {
+                        if (!data.success) throw new Error(data.message || 'Switch failed');
+                        const ip = data.new_ip ? ` New IP: ${data.new_ip}` : '';
+                        wifiSetStatus(`✅ Switched to ${ssid}.${ip}`);
+                        wifiLoadSaved();
+                    })
+                    .catch(err => wifiSetStatus(`❌ ${err.message || err}`));
+                }
+            );
         }
     </script>
 </body>
