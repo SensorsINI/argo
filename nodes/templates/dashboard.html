@@ -17,6 +17,11 @@
                 &nbsp;|&nbsp;
                 IP: <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">{{ ip_address or '—' }}</span>
             </div>
+            <div style="margin-top: 2px; font-size: 0.85em; color: #6c757d;">
+                Map: <span id="header-geofence-map" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">{{ geofence_map_name or '—' }}</span>
+                &nbsp;|&nbsp;
+                WiFi: <span id="header-wifi-ssid" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">{{ current_wifi_ssid or '—' }}</span>
+            </div>
             <div style="display: flex; align-items: center; gap: 5px;">
                 <div class="status-badge" id="connection-status">🟢 CONNECTED</div>
                 <span class="status-timer" id="connection-timer"></span>
@@ -117,6 +122,10 @@
                 <div class="status-item">
                     <span class="label">IMU Bearing:</span>
                     <span class="value" id="compass-heading">--- °</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">IMU Status:</span>
+                    <span class="value" id="imu-status">❓ UNKNOWN</span>
                 </div>
                 <div class="status-item">
                     <span class="label">Wind:</span>
@@ -240,6 +249,28 @@
                         <span class="wifi-hint">Autoconnect priorities</span>
                     </div>
                     <div class="wifi-saved" id="wifi-saved-list">Loading…</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Geofence Map</h2>
+            <div class="wifi-grid">
+                <div class="wifi-section">
+                    <div class="wifi-section-title">Select Active Map</div>
+                    <div class="wifi-row">
+                        <label class="wifi-label" for="geofence-map-select">Map</label>
+                        <select id="geofence-map-select" class="wifi-input">
+                            <option value="">(loading maps...)</option>
+                        </select>
+                    </div>
+                    <div class="wifi-row wifi-actions">
+                        <button class="btn btn-warning wifi-btn" id="geofence-map-apply-btn" onclick="applyGeofenceMap()">🗺️ Apply Map</button>
+                    </div>
+                    <div class="wifi-status" id="geofence-map-status">—</div>
+                    <div class="wifi-warning">
+                        Applying a new map updates <code>nodes/argo.yaml</code> and restarts Argo nodes to hot-reload map-dependent components.
+                    </div>
                 </div>
             </div>
         </div>
@@ -651,6 +682,22 @@
                 // Fallback to count if names not available
                 unhealthyNodes.push(`${data.nodes_unhealthy} unhealthy`);
             }
+
+            // Ensure BNO085 status is visible in summary even if health service does not name it.
+            // Treat unknown as degraded so hidden IMU failures don't disappear behind aggregate counts.
+            const imuStale = data.imu_health_age !== null && data.imu_health_age !== undefined && data.imu_health_age > 5.0;
+            const imuKnownUnhealthy = data.imu_healthy === false;
+            const imuUnknown = data.imu_healthy === null || data.imu_healthy === undefined;
+            if ((imuKnownUnhealthy || imuStale || imuUnknown) &&
+                !unhealthyNodes.some(n => n.toLowerCase().includes('imu') || n.toLowerCase().includes('bno085'))) {
+                if (imuStale) {
+                    unhealthyNodes.push('bno085 (stale)');
+                } else if (imuKnownUnhealthy) {
+                    unhealthyNodes.push('bno085 (unhealthy)');
+                } else {
+                    unhealthyNodes.push('bno085 (unknown)');
+                }
+            }
             
             const nodeSummaryEl = document.getElementById('node-summary');
             
@@ -677,6 +724,9 @@
                         const remainingCount = unhealthyNodes.length - maxDisplayNodes;
                         parts.push(`❌ ${unhealthyNodes.length} unhealthy nodes: ${displayedNodes.join(', ')} (+${remainingCount} more)`);
                     }
+                }
+                if (nodesUnknown > 0) {
+                    parts.push(`❓ ${nodesUnknown} node${nodesUnknown > 1 ? 's' : ''} unknown health`);
                 }
                 nodeSummaryText = parts.join(' | ');
                 nodeSummaryEl.textContent = nodeSummaryText;
@@ -750,6 +800,18 @@
             // IMU Bearing (Heading)
             document.getElementById('compass-heading').textContent = 
                 data.compass_heading ? `${Math.round(data.compass_heading)}°` : '--- °';
+
+            // IMU health status (explicitly show IMU failures even when system is otherwise healthy)
+            let imuStatusText = '❓ UNKNOWN';
+            if (data.imu_healthy === true) {
+                imuStatusText = '🟢 HEALTHY';
+            } else if (data.imu_healthy === false) {
+                imuStatusText = '🔴 UNHEALTHY';
+            }
+            if (data.imu_health_age !== null && data.imu_health_age !== undefined && data.imu_health_age > 5.0) {
+                imuStatusText = '🔴 STALE';
+            }
+            document.getElementById('imu-status').textContent = imuStatusText;
             
             // Wind
             if (data.wind_speed !== null && data.wind_angle !== null) {
@@ -1325,6 +1387,7 @@
 
         // Initial WiFi data (safe: does not switch)
         wifiLoadSaved();
+        loadGeofenceMaps();
         
         // Regular full status polling (every 2 seconds)
         setInterval(updateStatus, 2000);
@@ -1451,6 +1514,83 @@
                     .catch(err => wifiSetStatus(`❌ ${err.message || err}`));
                 }
             );
+        }
+
+        // ==================== Geofence Map Management ====================
+        function geofenceSetStatus(msg) {
+            const el = document.getElementById('geofence-map-status');
+            if (el) el.textContent = msg || '—';
+        }
+
+        function loadGeofenceMaps() {
+            fetch('/api/geofence/maps')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) throw new Error(data.message || 'Failed to load maps');
+                    const select = document.getElementById('geofence-map-select');
+                    const maps = data.maps || [];
+                    const currentMap = data.current_map || '';
+
+                    if (!select) return;
+                    select.innerHTML = '';
+                    if (maps.length === 0) {
+                        const opt = document.createElement('option');
+                        opt.value = '';
+                        opt.textContent = '(no maps found)';
+                        select.appendChild(opt);
+                    } else {
+                        maps.forEach(mapName => {
+                            const opt = document.createElement('option');
+                            opt.value = mapName;
+                            opt.textContent = mapName;
+                            if (mapName === currentMap) {
+                                opt.selected = true;
+                            }
+                            select.appendChild(opt);
+                        });
+                    }
+
+                    if (currentMap) {
+                        const hdrMap = document.getElementById('header-geofence-map');
+                        if (hdrMap) hdrMap.textContent = currentMap;
+                    }
+                    if (data.current_wifi_ssid) {
+                        const hdrWifi = document.getElementById('header-wifi-ssid');
+                        if (hdrWifi) hdrWifi.textContent = data.current_wifi_ssid;
+                    }
+                    geofenceSetStatus(currentMap ? `Current map: ${currentMap}` : 'No active map configured');
+                })
+                .catch(err => geofenceSetStatus(`❌ ${err.message || err}`));
+        }
+
+        function applyGeofenceMap() {
+            const select = document.getElementById('geofence-map-select');
+            const btn = document.getElementById('geofence-map-apply-btn');
+            const mapName = (select && select.value) ? select.value.trim() : '';
+            if (!mapName) {
+                geofenceSetStatus('❌ Select a map first');
+                return;
+            }
+
+            btn.disabled = true;
+            geofenceSetStatus(`Applying map '${mapName}' and restarting nodes...`);
+            fetch('/api/geofence/map', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ map_name: mapName })
+            })
+            .then(r => r.json().then(data => ({ ok: r.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok || !data.success) throw new Error(data.message || 'Map update failed');
+                geofenceSetStatus(`✅ ${data.message}`);
+                const hdrMap = document.getElementById('header-geofence-map');
+                if (hdrMap && data.current_map) hdrMap.textContent = data.current_map;
+            })
+            .catch(err => geofenceSetStatus(`❌ ${err.message || err}`))
+            .finally(() => {
+                btn.disabled = false;
+                loadGeofenceMaps();
+            });
         }
     </script>
 </body>

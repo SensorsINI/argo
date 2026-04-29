@@ -151,6 +151,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             
             # Navigation
             'compass_heading': None,
+            'imu_healthy': None,
+            'imu_health_age': None,
             
             # Wind
             'wind_speed': None,
@@ -222,6 +224,8 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Initialize ArgoNodeManager for system status
         self.argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.argo_yaml_path = os.path.join(self.argo_dir, 'nodes', 'argo.yaml')
+        self.available_geofence_maps = self._load_available_geofence_maps()
         self.node_manager = ArgoNodeManager(self.argo_dir)
         
         # ROS2 Service clients
@@ -485,6 +489,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Critical I2C failure monitoring
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/argo/critical/i2c_failure', self.i2c_failure_cb, 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/imu_health', self.imu_health_cb, self.volatile_qos)
         )
         
         # LoRa sources (fallback when WiFi unavailable)
@@ -940,6 +947,17 @@ class ArgoWebDashboard(ArgoBaseNode):
                 self.state['lora_data_age'] = time.time() - contact_time
             except:
                 pass
+
+    def imu_health_cb(self, msg):
+        """Track IMU health status and data freshness for dashboard visibility."""
+        if self.low_power_mode:
+            return
+
+        now = time.time()
+        with self.state_lock:
+            self.state['imu_healthy'] = bool(msg.data)
+            self.last_wifi_update['imu_health'] = now
+            self._update_data_age_indicators()
     
     def _update_data_age_indicators(self):
         """Update data age indicators for both WiFi and LoRa sources"""
@@ -956,6 +974,13 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.state['lora_data_age'] = now - max(self.last_lora_update.values())
         else:
             self.state['lora_data_age'] = None
+
+        # Calculate IMU health age from most recent /imu_health update
+        imu_health_ts = self.last_wifi_update.get('imu_health')
+        if imu_health_ts:
+            self.state['imu_health_age'] = now - imu_health_ts
+        else:
+            self.state['imu_health_age'] = None
         
         # Determine overall data source status
         if self.state['wifi_data_age'] is not None and self.state['wifi_data_age'] < 5.0:
@@ -1299,6 +1324,7 @@ class ArgoWebDashboard(ArgoBaseNode):
                         "⚠️ No human_controlled message received yet from /human_controlled topic, "
                         "checking if rudder_sail_radio_node is publishing"
                     )
+                self._update_data_age_indicators()
             
             # Get CPU temperature (file I/O - skip in low-power mode)
             self._update_cpu_temp()
@@ -1650,7 +1676,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         except Exception as e:
             return False, f'Service call error: {str(e)}'
     
-    def _run_restart_with_progress(self):
+    def _run_restart_with_progress(self, reason: str = "manual restart"):
         """Run restart via argo_lifecycle_manager.py and capture progress messages."""
         def add_progress_message(msg, level='info'):
             """Add a progress message with timestamp."""
@@ -1666,7 +1692,10 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.restart_progress_messages = self.restart_progress_messages[-100:]
         
         try:
-            add_progress_message("🔄 Starting Argo restart (consistent with CLI 'ars' alias)...", 'info')
+            add_progress_message(
+                f"🔄 Starting Argo restart ({reason}, consistent with CLI 'ars' alias)...",
+                'info'
+            )
             
             # Use same approach as CLI 'ars' alias: stop then start
             # But first check if recording is active and stop it (like lifecycle manager restart() does)
@@ -1778,6 +1807,27 @@ class ArgoWebDashboard(ArgoBaseNode):
             with self.restart_progress_lock:
                 self.restart_in_progress = False
 
+    def _start_background_restart(self, reason: str) -> Dict[str, Any]:
+        """Start restart thread if no restart is currently running."""
+        with self.restart_progress_lock:
+            if self.restart_in_progress:
+                return {'success': False, 'message': 'Restart already in progress', 'status_code': 409}
+            self.restart_in_progress = True
+            self.restart_progress_messages = []
+
+        self.get_logger().info(f"Starting Argo restart via web dashboard ({reason})")
+
+        restart_thread = threading.Thread(
+            target=self._run_restart_with_progress,
+            kwargs={'reason': reason},
+            daemon=True
+        )
+        restart_thread.start()
+        return {
+            'success': True,
+            'message': 'Restart started - use /api/lifecycle/restart/progress to monitor'
+        }
+
     def _load_argo_mac_id(self) -> str:
         """Load Argo's frozen WiFi MAC ID from repo file (fallback to wlan0 MAC)."""
         try:
@@ -1816,6 +1866,62 @@ class ArgoWebDashboard(ArgoBaseNode):
             return m.group(1) if m else None
         except Exception:
             return None
+
+    def _maps_dir(self) -> Path:
+        return Path(self.argo_dir) / "foxglove" / "maps"
+
+    def _load_available_geofence_maps(self) -> list:
+        """Load available geofence map names from foxglove/maps at dashboard startup."""
+        maps_dir = self._maps_dir()
+        if not maps_dir.exists():
+            return []
+        maps = [p.stem for p in maps_dir.glob("*.geojson")]
+        maps.sort(key=lambda x: x.lower())
+        return maps
+
+    def _get_current_geofence_map_name(self) -> Optional[str]:
+        """Read current geofence_map_name from nodes/argo.yaml."""
+        try:
+            with open(self.argo_yaml_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            root = (data.get("/**") or {}).get("ros__parameters") or {}
+            map_name = root.get("geofence_map_name")
+            if isinstance(map_name, str):
+                return map_name.strip() or None
+        except Exception:
+            pass
+
+        # Fallback: line-based parse preserving comments in malformed YAML cases
+        try:
+            text = Path(self.argo_yaml_path).read_text(encoding="utf-8")
+            match = re.search(r'^\s*geofence_map_name\s*:\s*([^#\n]+)', text, flags=re.MULTILINE)
+            if match:
+                return match.group(1).strip().strip("'\"")
+        except Exception:
+            pass
+        return None
+
+    def _set_geofence_map_name(self, new_map_name: str) -> Dict[str, Any]:
+        """Update geofence_map_name in nodes/argo.yaml while preserving file formatting."""
+        if not new_map_name:
+            return {"success": False, "message": "Map name is required"}
+
+        available = set(self.available_geofence_maps or [])
+        if new_map_name not in available:
+            return {"success": False, "message": f"Unknown map: '{new_map_name}'"}
+
+        try:
+            yaml_path = Path(self.argo_yaml_path)
+            original = yaml_path.read_text(encoding="utf-8")
+            pattern = r'^(\s*geofence_map_name\s*:\s*)([^#\n]*)(\s*(#.*)?)$'
+            replacement = r"\g<1>" + new_map_name + r"\3"
+            updated, count = re.subn(pattern, replacement, original, count=1, flags=re.MULTILINE)
+            if count == 0:
+                return {"success": False, "message": "Could not find geofence_map_name in argo.yaml"}
+            yaml_path.write_text(updated, encoding="utf-8")
+            return {"success": True, "message": f"Updated geofence map to '{new_map_name}'"}
+        except Exception as e:
+            return {"success": False, "message": f"Failed to update argo.yaml: {e}"}
 
     # ==================== WiFi Management Helpers ====================
 
@@ -2129,6 +2235,8 @@ class ArgoWebDashboard(ArgoBaseNode):
                 'dashboard.html',
                 mac_id=self.mac_id,
                 ip_address=self._get_current_ip_address(),
+                current_wifi_ssid=self._get_active_wifi_connection() or '—',
+                geofence_map_name=self._get_current_geofence_map_name() or '—',
             )
         
         @self.app.route('/api/status')
@@ -2198,6 +2306,49 @@ class ArgoWebDashboard(ArgoBaseNode):
                 return jsonify(self._wifi_switch_with_rollback(ssid=ssid, rollback_seconds=60))
             except Exception as e:
                 return jsonify({"success": False, "message": str(e)})
+
+        @self.app.route('/api/geofence/maps', methods=['GET'])
+        def geofence_maps():
+            try:
+                return jsonify({
+                    "success": True,
+                    "maps": self.available_geofence_maps,
+                    "current_map": self._get_current_geofence_map_name(),
+                    "current_wifi_ssid": self._get_active_wifi_connection(),
+                })
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e)})
+
+        @self.app.route('/api/geofence/map', methods=['POST'])
+        def geofence_set_map():
+            try:
+                payload = request.get_json(force=True, silent=True) or {}
+                map_name = (payload.get("map_name", "") or "").strip()
+                with self.restart_progress_lock:
+                    if self.restart_in_progress:
+                        return jsonify({
+                            "success": False,
+                            "message": "Cannot change map while restart is in progress"
+                        }), 409
+                result = self._set_geofence_map_name(map_name)
+                if not result.get("success"):
+                    return jsonify(result), 400
+
+                restart_result = self._start_background_restart(
+                    reason=f"map change to '{map_name}'"
+                )
+                status_code = restart_result.pop('status_code', 200)
+                return jsonify({
+                    "success": restart_result.get("success", False),
+                    "message": (
+                        f"{result.get('message')}. Restart triggered for map-dependent nodes."
+                        if restart_result.get("success", False)
+                        else f"{result.get('message')}. {restart_result.get('message', '')}"
+                    ),
+                    "current_map": map_name,
+                }), status_code
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e)}), 500
         
         @self.app.route('/api/toggle_pause', methods=['POST'])
         def toggle_pause():
@@ -2485,31 +2636,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         def lifecycle_restart():
             """Restart Argo nodes using argo_lifecycle_manager.py restart method (consistent with CLI 'ars' alias)."""
             try:
-                # Check if restart is already in progress
-                with self.restart_progress_lock:
-                    if self.restart_in_progress:
-                        return jsonify({
-                            'success': False, 
-                            'message': 'Restart already in progress'
-                        }), 409
-                    
-                    # Mark restart as in progress and clear previous messages
-                    self.restart_in_progress = True
-                    self.restart_progress_messages = []
-                
-                self.get_logger().info("Starting Argo restart via lifecycle manager (consistent with CLI 'ars')")
-                
-                # Start restart in background thread
-                restart_thread = threading.Thread(
-                    target=self._run_restart_with_progress,
-                    daemon=True
-                )
-                restart_thread.start()
-                
-                return jsonify({
-                    'success': True,
-                    'message': 'Restart started - use /api/lifecycle/restart/progress to monitor'
-                })
+                restart_result = self._start_background_restart(reason="manual dashboard request")
+                status_code = restart_result.pop('status_code', 200)
+                return jsonify(restart_result), status_code
                     
             except Exception as e:
                 with self.restart_progress_lock:
