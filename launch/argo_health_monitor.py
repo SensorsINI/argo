@@ -86,6 +86,10 @@ class ArgoHealthMonitor(ArgoBaseNode):
             node_name = node_cfg['name']
             # Always add to configs (may override normal config if both exist)
             self.node_configs[node_name] = node_cfg
+        for service_cfg in self.config.get('services', []):
+            node_name = service_cfg['name']
+            # Include service-managed ROS2 nodes (e.g., bno085) in health model
+            self.node_configs[node_name] = service_cfg
         
         # Build executable -> health topic mapping
         self._build_executable_mapping()
@@ -157,10 +161,9 @@ class ArgoHealthMonitor(ArgoBaseNode):
             if filename == os.path.basename(__file__):
                 continue
 
-            # Skip special nodes (like foxglove_bridge) which are launched via 'ros2 run'
-            # and may not have a standard health topic. Also skip nodes that explicitly
-            # have no health_topic defined in the YAML.
-            if node_cfg.get('special', False) or not node_cfg.get('health_topic'):
+            # Skip only nodes that explicitly have no health topic.
+            # Special nodes are allowed when they expose a health topic.
+            if not node_cfg.get('health_topic'):
                 continue
             
             # Find health topic mapping for this executable
@@ -169,31 +172,34 @@ class ArgoHealthMonitor(ArgoBaseNode):
                 ros2_node_name, health_topic = self.executable_to_health[mapping_key]
                 
                 try:
-                    # Create callback that captures the filename (key for health dict)
-                    def create_health_callback(exec_filename):
+                    # Regular nodes use filename keys; special/service nodes use YAML node name keys.
+                    health_key = ros2_node_name if node_cfg.get('special', False) else filename
+
+                    # Create callback that captures key for health dict
+                    def create_health_callback(captured_key):
                         def health_callback(msg):
                             # msg.data is bool: True = healthy, False = unhealthy
-                            if exec_filename not in self.node_health:
-                                self.node_health[exec_filename] = {
+                            if captured_key not in self.node_health:
+                                self.node_health[captured_key] = {
                                     'healthy': None,
                                     'last_seen': 0.0,
                                     'pid': None,
                                     'ros2_node_name': ros2_node_name
                                 }
-                            self.node_health[exec_filename]['healthy'] = msg.data
-                            self.node_health[exec_filename]['last_seen'] = time.time()
+                            self.node_health[captured_key]['healthy'] = msg.data
+                            self.node_health[captured_key]['last_seen'] = time.time()
                             # Always update ros2_node_name (may have been None initially)
-                            self.node_health[exec_filename]['ros2_node_name'] = ros2_node_name
+                            self.node_health[captured_key]['ros2_node_name'] = ros2_node_name
                         return health_callback
                     
-                    callback = create_health_callback(filename)
+                    callback = create_health_callback(health_key)
                     subscriber = self.create_subscription(
                         Bool, health_topic, callback, 10)
-                    self.health_subscribers[filename] = subscriber
+                    self.health_subscribers[health_key] = subscriber
                     
                     # Initialize health status as unknown
-                    if filename not in self.node_health:
-                        self.node_health[filename] = {
+                    if health_key not in self.node_health:
+                        self.node_health[health_key] = {
                             'healthy': None,
                             'last_seen': 0.0,
                             'pid': None,
@@ -262,29 +268,18 @@ class ArgoHealthMonitor(ArgoBaseNode):
                     del self.node_health[health_key]
                 continue
             
-            # Only update if we don't have a health topic subscription for this node
-            # (health topic subscriptions take precedence)
-            # Note: health_subscribers uses filename for regular nodes
-            # For special nodes, executable is a command string (e.g., "ros2 run package node")
-            # so we need to handle them differently
-            has_health_sub = False
-            if not is_special:
-                # Regular nodes: check if we have a health topic subscription
-                filename_for_sub = os.path.basename(executable)
-                has_health_sub = filename_for_sub in self.health_subscribers
-                if has_health_sub:
-                    # Node has health topic subscription - check if it's actually publishing
-                    # If health topic subscription exists but node isn't running and hasn't published,
-                    # we should still initialize the entry if it doesn't exist
-                    if health_key not in self.node_health:
-                        self.node_health[health_key] = {
-                            'healthy': None,
-                            'last_seen': 0.0,
-                            'pid': None,
-                            'ros2_node_name': ros2_node_name
-                        }
-                    # Don't update via polling - health topic will update it
-                    continue
+            # Only update via polling if there's no health-topic subscription.
+            # Subscriptions take precedence for both regular and special/service nodes.
+            has_health_sub = health_key in self.health_subscribers
+            if has_health_sub:
+                if health_key not in self.node_health:
+                    self.node_health[health_key] = {
+                        'healthy': None,
+                        'last_seen': 0.0,
+                        'pid': None,
+                        'ros2_node_name': ros2_node_name
+                    }
+                continue
             
             # For nodes without health topic subscriptions (or special nodes), use polling
             if health_key not in self.node_health:

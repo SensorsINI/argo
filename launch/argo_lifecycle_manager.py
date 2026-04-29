@@ -2364,7 +2364,7 @@ class ArgoLifecycleManager:
         services_status.append(f"🏥 Health: {'🟢' if health_monitor_running else '🔴'}")
         services_status.append(f"📋 Launch: {'🟢' if service_running else '🔴'}")
         
-        print(" | ".join(services_status))
+        print("Services: " + " | ".join(services_status))
         
         # Get FATAL messages for stopped nodes if service is running
         node_fatal_messages = {}
@@ -2372,7 +2372,16 @@ class ArgoLifecycleManager:
             node_fatal_messages = self._get_fatal_messages_for_nodes()
         
         # Individual node status - tabular format
+        # Start with launch-managed nodes, then add service-managed ROS components
+        # so the table matches aggregated health reporting.
         node_status = self._get_node_status()
+        service_node_status = {
+            'argo_power_control.py': "🟢 RUNNING" if power_control_running else "🔴 STOPPED",
+            'argo_battery_water.py': "🟢 RUNNING" if battery_service_running else "🔴 STOPPED",
+            'argo_health_monitor.py': "🟢 RUNNING" if health_monitor_running else "🔴 STOPPED",
+            'bno085': "🟢 RUNNING" if bno085_service_running else "🔴 STOPPED",
+        }
+        node_status.update(service_node_status)
         running_count = sum(
             1 for status in node_status.values() if "RUNNING" in status)
         total_count = len(node_status)

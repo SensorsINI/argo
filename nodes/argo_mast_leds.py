@@ -57,7 +57,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.logging import LoggingSeverity
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from std_msgs.msg import Float32, Float32MultiArray, String
+from std_msgs.msg import Bool, Float32, Float32MultiArray, String
 from geometry_msgs.msg import Vector3
 
 # I2C communication
@@ -117,6 +117,10 @@ TOPIC_RGBW = '/mastled_rgbw'
 # Power button LED mirroring topic
 TOPIC_POWER_BUTTON_RGB = '/argo/power_button/rgb'  # Legacy - kept for backward compatibility
 TOPIC_POWER_BUTTON_PATTERN = '/argo/power_button/pattern'  # New pattern-based topic
+
+# Battery / USB power topics (from argo_battery_water.py)
+TOPIC_BATTERY_REMAINING_PCT = '/battery_remaining_pct'  # Float32 (%)
+TOPIC_AC_POWER_PRESENT = '/ac_power_present'  # Bool (true when USB/AC present)
 
 # I2C Error Recovery
 I2C_RETRY_DELAY_S = 5.0  # Fast retry interval (startup + runtime) for the first window below
@@ -189,6 +193,8 @@ class MastLEDsNode(ArgoBaseNode):
         self._last_logged_mast_semantic_key = None  # category + pattern (or sos); not idle/playback mode
         self._last_mast_pattern_log_time = 0.0
         self._trace_last_pwm_frame = None  # last (R,G,B,W) hw tuple logged when TRACE_I2C_LED_PWM_OUTPUT
+        self._usb_power_present = False
+        self._battery_remaining_pct = None
 
         # I2C bus and device state
         self.i2c_bus = resolve_twi2_linux_bus()
@@ -889,10 +895,88 @@ class MastLEDsNode(ArgoBaseNode):
         self.sub_power_button_pattern = self.create_subscription(
             String, TOPIC_POWER_BUTTON_PATTERN, self._power_button_pattern_callback, QOS_POWER_BUTTON_MIRROR)
 
-        self.get_logger().info(f'Subscribed to {TOPIC_RED}, {TOPIC_GREEN}, {TOPIC_BLUE}, {TOPIC_WHITE}, {TOPIC_RGBW}, {TOPIC_POWER_BUTTON_RGB}, {TOPIC_POWER_BUTTON_PATTERN}')
+        # Battery / USB power state subscriptions
+        self.sub_battery_pct = self.create_subscription(
+            Float32, TOPIC_BATTERY_REMAINING_PCT, self._battery_remaining_pct_callback, 10
+        )
+        self.sub_ac_power_present = self.create_subscription(
+            Bool, TOPIC_AC_POWER_PRESENT, self._ac_power_present_callback, 10
+        )
+
+        self.get_logger().info(
+            f"Subscribed to {TOPIC_RED}, {TOPIC_GREEN}, {TOPIC_BLUE}, {TOPIC_WHITE}, {TOPIC_RGBW}, "
+            f"{TOPIC_POWER_BUTTON_RGB}, {TOPIC_POWER_BUTTON_PATTERN}, "
+            f"{TOPIC_BATTERY_REMAINING_PCT}, {TOPIC_AC_POWER_PRESENT}"
+        )
+
+    def _set_rgbw(self, r: float, g: float, b: float, w: float = 0.0) -> None:
+        self._red_brightness = self._normalize_brightness(r)
+        self._green_brightness = self._normalize_brightness(g)
+        self._blue_brightness = self._normalize_brightness(b)
+        self._white_brightness = self._normalize_brightness(w)
+        self._update_hardware()
+
+    def _apply_usb_battery_color_if_needed(self) -> bool:
+        """If USB/AC power is present, show solid battery level color and return True."""
+        if not self._usb_power_present:
+            return False
+        if self._battery_remaining_pct is None:
+            # Unknown battery percent while on USB: default to blue (neutral)
+            self._set_rgbw(0.0, 0.0, 1.0, 0.0)
+            return True
+
+        pct = float(self._battery_remaining_pct)
+        if pct < 30.0:
+            self._set_rgbw(1.0, 0.0, 0.0, 0.0)  # red
+        elif pct <= 80.0:
+            self._set_rgbw(0.0, 0.0, 1.0, 0.0)  # blue
+        else:
+            self._set_rgbw(0.0, 1.0, 0.0, 0.0)  # green
+        return True
+
+    def _battery_remaining_pct_callback(self, msg: Float32) -> None:
+        self._battery_remaining_pct = msg.data
+        self._apply_usb_battery_color_if_needed()
+
+    def _ac_power_present_callback(self, msg: Bool) -> None:
+        prev = self._usb_power_present
+        self._usb_power_present = bool(msg.data)
+
+        if self._usb_power_present:
+            # Override any active slot playback; keep last pattern state so it can resume when unplugged.
+            self._stop_power_button_pattern_thread()
+            self._pattern_active = False
+            self._sos_rgb_mirror_mode = False
+            self._apply_usb_battery_color_if_needed()
+            return
+
+        # Transition: unplugged. If we were previously in USB override, resume last known pattern (if any).
+        if prev and not self._usb_power_present:
+            # Restore SOS mirror if last category indicates it; otherwise restart pattern playback if available.
+            if self._pattern_category == 'sos':
+                self._sos_rgb_mirror_mode = True
+                self._pattern_active = False
+                # Wait for /argo/power_button/rgb updates to drive the LED; force a log now.
+                self._log_mast_led_pattern_throttled()
+                return
+            if self._pattern_string:
+                # Fake a "pattern message" re-apply by starting the thread with stored timings.
+                import threading
+                self._pattern_stop_event = threading.Event()
+                self._pattern_active = True
+                self._pattern_thread = threading.Thread(
+                    target=self._recreate_pattern,
+                    args=(self._pattern_string, self._pattern_slot_duration, self._pattern_on_period, self._pattern_off_period),
+                    daemon=True,
+                )
+                self._pattern_thread.start()
+                self._log_mast_led_pattern_throttled()
+                return
 
     def _red_callback(self, msg: Float32):
         """Callback for red channel subscription."""
+        if self._apply_usb_battery_color_if_needed():
+            return
         # Update internal state even if device unavailable (allows recovery)
         self._red_brightness = self._normalize_brightness(msg.data)
         # Hardware update will be ignored if device unavailable
@@ -900,6 +984,8 @@ class MastLEDsNode(ArgoBaseNode):
 
     def _green_callback(self, msg: Float32):
         """Callback for green channel subscription."""
+        if self._apply_usb_battery_color_if_needed():
+            return
         # Update internal state even if device unavailable (allows recovery)
         self._green_brightness = self._normalize_brightness(msg.data)
         # Hardware update will be ignored if device unavailable
@@ -907,6 +993,8 @@ class MastLEDsNode(ArgoBaseNode):
 
     def _blue_callback(self, msg: Float32):
         """Callback for blue channel subscription."""
+        if self._apply_usb_battery_color_if_needed():
+            return
         # Update internal state even if device unavailable (allows recovery)
         self._blue_brightness = self._normalize_brightness(msg.data)
         # Hardware update will be ignored if device unavailable
@@ -914,6 +1002,8 @@ class MastLEDsNode(ArgoBaseNode):
 
     def _white_callback(self, msg: Float32):
         """Callback for white channel subscription."""
+        if self._apply_usb_battery_color_if_needed():
+            return
         # Update internal state even if device unavailable (allows recovery)
         self._white_brightness = self._normalize_brightness(msg.data)
         # Hardware update will be ignored if device unavailable
@@ -921,6 +1011,8 @@ class MastLEDsNode(ArgoBaseNode):
 
     def _rgbw_callback(self, msg: Float32MultiArray):
         """Callback for combined RGBW subscription."""
+        if self._apply_usb_battery_color_if_needed():
+            return
         if len(msg.data) >= 4:
             # Update all channels from array [R, G, B, W]
             # Update internal state even if device unavailable (allows recovery)
@@ -947,6 +1039,8 @@ class MastLEDsNode(ArgoBaseNode):
         During low-battery / I2C SOS, power_control publishes RGB here (heartbeat is paused so
         /argo/power_button/pattern is not emitted). _sos_rgb_mirror_mode is set by pattern category sos.
         """
+        if self._apply_usb_battery_color_if_needed():
+            return
         if self._pattern_active and not self._sos_rgb_mirror_mode:
             return
         self._red_brightness = self._normalize_brightness(msg.x)
@@ -963,6 +1057,8 @@ class MastLEDsNode(ArgoBaseNode):
         Pattern format: JSON string with category, pattern, cycle_duration, etc.
         Recreates pattern with max 3s lag to stay synchronized.
         """
+        if self._apply_usb_battery_color_if_needed():
+            return
         try:
             import json
             import threading

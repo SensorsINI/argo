@@ -193,6 +193,7 @@ services:
     executable: nodes/bno085_driver_launcher.sh  # Shell script that launches C++ driver
     service_name: argo_bno085.service
     description: "BNO085 IMU driver (C++ ROS2 node)"
+    health_topic: "/imu_health"
     special: true  # Launched via shell script, not direct Python
 
 # Simulation Mode Configuration
