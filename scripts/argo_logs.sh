@@ -127,6 +127,12 @@ if [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ] && [ -z "$TIME_WINDOW" ]; t
     TIME_WINDOW="1m"
 fi
 
+# When filtering by PATTERN, default to a recent window so we don't spam with
+# historical restart-loop chatter (especially during IMU failures).
+if [ -n "$GREP_PATTERN" ] && [ "$ALL_LOGS" = false ] && [ -z "$TIME_WINDOW" ]; then
+    TIME_WINDOW="5m"
+fi
+
 # --- Main Execution ---
 
 echo "📋 Argo Multi-Service Logs"
@@ -146,7 +152,7 @@ elif [ "$ALL_LOGS" = true ]; then
         echo "🔍 Filter: $GREP_PATTERN"
     fi
 elif [ -n "$GREP_PATTERN" ]; then
-    echo "🔍 Filter: $GREP_PATTERN (last N lines of merged journal, then follow; use -n or -a for more)"
+    echo "🔍 Filter: $GREP_PATTERN (default: last ${TIME_WINDOW:-?} then follow; use -t/-a for more)"
 elif [ "$FOLLOW" = true ]; then
     echo "👁️  Follow Mode: Live tail (last $LINES lines + new)"
 else
@@ -198,20 +204,9 @@ else
         journalctl_cmd+=" --since \"${TIME_WINDOW} ago\""
     fi
 
-    # When filtering by pattern, need a deep enough merged buffer or grep shows nothing.
-    if [ -n "$GREP_PATTERN" ] && [ "$ALL_LOGS" = false ] && [ "$ERROR_CHECK" = false ]; then
-        if [ -z "$TIME_WINDOW" ]; then
-            PATTERN_INITIAL_LINES=$((LINES * 25))
-            if [ "$PATTERN_INITIAL_LINES" -lt 5000 ]; then
-                PATTERN_INITIAL_LINES=5000
-            fi
-            EFFECTIVE_LINES=$PATTERN_INITIAL_LINES
-        else
-            EFFECTIVE_LINES=$LINES
-        fi
-    else
-        EFFECTIVE_LINES=$LINES
-    fi
+    # EFFECTIVE_LINES: journalctl merges all units into one stream.
+    # In pattern mode we primarily rely on --since (TIME_WINDOW) to bound history.
+    EFFECTIVE_LINES=$LINES
 
     if [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ]; then
         journalctl_cmd+=" -f"

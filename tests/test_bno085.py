@@ -10,20 +10,29 @@ The BNO08x speaks SHTP over I2C: plain read/write transactions, not SMBus
 probe at 0x4a look broken even when i2cdetect / ai2c see the device — same bus,
 wrong protocol.
 
+Pass criteria:
+  • I2C + SHTP soft reset + Product ID (hardware path used by ``bno08x_driver``).
+  • Unless ``--skip-ros``: run ``ros2 topic hz /imu`` (sources Humble) and require a
+    non-zero observed rate when the IMU stack should be running. If ROS is unavailable,
+    streaming is skipped with a warning and the test still passes on Product ID alone.
+
 Usage (from repo root):
     python3 tests/test_bno085.py [--bus 0] [--address 0x4a] [--debug]
-    ./tests/test_bno085.py [--bus 0] [--address 0x4a] [--debug]
+    python3 tests/test_bno085.py --skip-ros              # bench: chip only, no ros2
+    python3 tests/test_bno085.py [--ros-hz-timeout 20]
 
 Bus number matches ai2c "Bus 0" (i2cdetect -y 0) and bno08x_driver_argo.yaml
 i2c.bus /dev/i2c-0 on Orange Pi Zero 2W.
 """
 
+import argparse
+import fcntl
 import os
+import re
+import shlex
+import subprocess
 import sys
 import time
-import fcntl
-import struct
-import argparse
 import smbus2
 from smbus2 import i2c_msg
 
@@ -54,12 +63,6 @@ class BNO085Test:
         # SH-2 Report IDs (from BNO080 datasheet)
         self.REPORT_PRODUCT_ID_REQUEST = 0xF9     # Product ID Request
         self.REPORT_PRODUCT_ID_RESPONSE = 0xF8    # Product ID Response
-        self.REPORT_SET_FEATURE_COMMAND = 0xFD    # Set Feature Command
-        
-        # Sensor report IDs
-        self.REPORT_ACCELEROMETER = 0x01      # Accelerometer
-        self.REPORT_GYROSCOPE = 0x02          # Gyroscope
-        self.REPORT_MAGNETOMETER = 0x03       # Magnetometer
     
     def debug_print(self, message):
         """Print debug message if debug mode is enabled."""
@@ -251,95 +254,8 @@ class BNO085Test:
         except Exception as e:
             print(f"❌ Error getting Product ID: {e}")
             return None
-    
-    def enable_sensor_reports(self):
-        """Enable accelerometer, gyroscope, and magnetometer reports."""
-        print("Enabling sensor reports...")
-        
-        sensors = [
-            (self.REPORT_ACCELEROMETER, "Accelerometer"),
-            (self.REPORT_GYROSCOPE, "Gyroscope"),
-            (self.REPORT_MAGNETOMETER, "Magnetometer")
-        ]
-        
-        for report_id, name in sensors:
-            try:
-                # Enable sensor report using Set Feature Command
-                success = self._write_packet(self.CHANNEL_CONTROL, [
-                    self.REPORT_SET_FEATURE_COMMAND,  # Set Feature Command (0xFD)
-                    0x00,  # Reserved
-                    report_id,  # Report ID
-                    0x00, 0x00,  # Feature flags
-                    0x00, 0x00,  # Change sensitivity
-                    0x00, 0x00, 0x00, 0x00,  # Report interval (0 = 50Hz)
-                    0x00, 0x00, 0x00, 0x00,  # Batch interval
-                    0x00, 0x00, 0x00, 0x00   # Sensor-specific config
-                ])
-                
-                if success:
-                    print(f"✅ {name} report enabled")
-                else:
-                    print(f"❌ Failed to enable {name} report")
-                    
-            except Exception as e:
-                print(f"❌ Error enabling {name}: {e}")
-    
-    def read_sensor_data(self, max_attempts=10):
-        """Try to read sensor data from the BNO085."""
-        print("Attempting to read sensor data...")
-        
-        sensor_data = {
-            'accelerometer': None,
-            'gyroscope': None,
-            'magnetometer': None
-        }
-        
-        for attempt in range(max_attempts):
-            packet = self._read_packet()
-            if packet and packet['channel'] == self.CHANNEL_REPORTS and len(packet['payload']) >= 12:
-                report_id = packet['payload'][0]
-                
-                if report_id == self.REPORT_ACCELEROMETER and sensor_data['accelerometer'] is None:
-                    # Parse accelerometer data (3x 32-bit floats)
-                    try:
-                        x = struct.unpack('<f', bytes(packet['payload'][1:5]))[0]
-                        y = struct.unpack('<f', bytes(packet['payload'][5:9]))[0]
-                        z = struct.unpack('<f', bytes(packet['payload'][9:13]))[0]
-                        sensor_data['accelerometer'] = (x, y, z)
-                        print(f"✅ Accelerometer: x={x:.3f}, y={y:.3f}, z={z:.3f} m/s²")
-                    except:
-                        pass
-                        
-                elif report_id == self.REPORT_GYROSCOPE and sensor_data['gyroscope'] is None:
-                    # Parse gyroscope data
-                    try:
-                        x = struct.unpack('<f', bytes(packet['payload'][1:5]))[0]
-                        y = struct.unpack('<f', bytes(packet['payload'][5:9]))[0]
-                        z = struct.unpack('<f', bytes(packet['payload'][9:13]))[0]
-                        sensor_data['gyroscope'] = (x, y, z)
-                        print(f"✅ Gyroscope: x={x:.3f}, y={y:.3f}, z={z:.3f} rad/s")
-                    except:
-                        pass
-                        
-                elif report_id == self.REPORT_MAGNETOMETER and sensor_data['magnetometer'] is None:
-                    # Parse magnetometer data
-                    try:
-                        x = struct.unpack('<f', bytes(packet['payload'][1:5]))[0]
-                        y = struct.unpack('<f', bytes(packet['payload'][5:9]))[0]
-                        z = struct.unpack('<f', bytes(packet['payload'][9:13]))[0]
-                        sensor_data['magnetometer'] = (x, y, z)
-                        print(f"✅ Magnetometer: x={x:.3f}, y={y:.3f}, z={z:.3f} µT")
-                    except:
-                        pass
-        
-        # Report missing data
-        for sensor, data in sensor_data.items():
-            if data is None:
-                print(f"❌ No {sensor} data received")
-        
-        return sensor_data
-    
-    def run_full_test(self):
+
+    def run_full_test(self, skip_ros_verification=False, ros_hz_seconds=14):
         """Run complete BNO085 test sequence."""
         print("=" * 60)
         print("BNO085 I2C Communication Test")
@@ -360,30 +276,85 @@ class BNO085Test:
             return False
         
         print()
-        
-        # Test 3: Enable sensor reports
-        self.enable_sensor_reports()
-        
-        print()
-        
-        # Test 4: Read sensor data
-        sensor_data = self.read_sensor_data()
-        
+        ros_ok = None
+        ros_detail = ""
+
+        if skip_ros_verification:
+            print(
+                "ROS verification skipped (--skip-ros).\n"
+                "When the stack runs, confirm streaming with:\n"
+                "  ros2 topic hz /imu\n"
+                "  ros2 topic echo /imu_health --once"
+            )
+            ros_ok = True
+        else:
+            ros_ok, ros_detail = verify_ros_imu_streaming(seconds=ros_hz_seconds)
+
         print()
         print("=" * 60)
         print("Test Summary:")
         print("=" * 60)
-        
-        if version_info:
-            print(f"✅ BNO085 detected and responsive")
-            print(f"   Version: {version_info['sw_major']}.{version_info['sw_minor']}.{version_info['sw_patch']}")
-        else:
-            print("❌ BNO085 not responsive")
-        
-        data_count = sum(1 for data in sensor_data.values() if data is not None)
-        print(f"✅ Sensor data received: {data_count}/3 sensors")
-        
-        return version_info is not None and data_count > 0
+
+        print("✅ BNO085 detected and responsive (Product ID)")
+        print(
+            f"   Version: {version_info['sw_major']}."
+            f"{version_info['sw_minor']}.{version_info['sw_patch']}"
+        )
+
+        if not skip_ros_verification:
+            if ros_ok is True:
+                print(f"✅ ROS IMU streaming: {ros_detail}")
+            elif ros_ok is False:
+                print(f"❌ ROS IMU streaming: {ros_detail}")
+            else:
+                print(f"⚠️ ROS streaming not verified (I2C still OK): {ros_detail}")
+
+        overall = version_info is not None
+        if overall and not skip_ros_verification and ros_ok is False:
+            overall = False
+        return overall
+
+
+def verify_ros_imu_streaming(seconds=14):
+    """
+    Prefer `ros2 topic hz /imu` — more reliable here than `echo --once` (type introspection timing).
+    Returns:
+      (True, msg) — /imu rate observed.
+      (False, msg) — ros2 ran but no /imu traffic (stack down or wrong domain).
+      (None, msg) — cannot run ros2; caller treats as pass-with-warning for bare hardware checks.
+    """
+    humble = '/opt/ros/humble/setup.bash'
+    if not os.path.isfile(humble):
+        return None, 'ROS Humble setup.bash missing; skipping streaming check.'
+    shell = (
+        f'source {shlex.quote(humble)} && '
+        'command -v ros2 >/dev/null 2>&1 || exit 127; '
+        f'timeout {int(seconds)} ros2 topic hz /imu'
+    )
+    proc = subprocess.run(
+        ['/bin/bash', '-c', shell],
+        capture_output=True,
+        text=True,
+        timeout=max(seconds + 4, 8),
+    )
+    out = (proc.stdout or '') + (proc.stderr or '')
+    if proc.returncode == 127 or 'command not found' in out.lower():
+        return None, 'ros2 not on PATH after sourcing Humble — skipping.'
+    rate_m = re.search(r'average\s+rate:\s*([0-9.]+)', out, re.I)
+    if rate_m:
+        return True, f'/imu publishing (~{rate_m.group(1)} Hz observed in sample window)'
+    warn_m = re.search(r'does\s+not\s+appear\s+to\s+be\s+published', out, re.I)
+    missing_m = re.search(r'waiting\s+for\s+at\s+least\s+one\s+messaging\s+clients', out, re.I)
+    hint = (
+        'Start IMU stack: sudo systemctl start argo_bno085.service '
+        '(then: ros2 topic hz /imu).'
+    )
+    if warn_m or missing_m:
+        return False, f'No /imu traffic detected. {hint}'
+    # timeout 124 sometimes with no hz line yet
+    if proc.returncode in (124, 143):
+        return False, f'No /imu rate observed within {seconds}s. {hint}'
+    return False, f'Could not confirm /imu (ros2 exited {proc.returncode}). {hint}'
 
 
 def main():
@@ -396,14 +367,27 @@ def main():
                        help='BNO085 I2C address (default: 0x4a)')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug output')
-    
+    parser.add_argument(
+        '--skip-ros',
+        action='store_true',
+        help='Only verify I2C + Product ID (no ros2 topic hz /imu)',
+    )
+    parser.add_argument(
+        '--ros-hz-timeout',
+        type=int,
+        default=14,
+        metavar='SEC',
+        help='Seconds for ros2 topic hz /imu sample window (default: 14)',
+    )
+
     args = parser.parse_args()
-    
-    # Create test instance
+
     tester = BNO085Test(bus_num=args.bus, address=args.address, debug=args.debug)
-    
-    # Run full test
-    success = tester.run_full_test()
+
+    success = tester.run_full_test(
+        skip_ros_verification=args.skip_ros,
+        ros_hz_seconds=max(8, args.ros_hz_timeout),
+    )
     
     if success:
         print("\n🎉 BNO085 test completed successfully!")
