@@ -62,6 +62,12 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.boat_heading = 0.0
         self.boat_roll = 0.0
         self.boat_pitch = 0.0
+
+        # Offsets in base_link frame (meters). These must match publish_static_transforms().
+        # We publish base_link at boat center, while /fix is at gps_link (antenna).
+        self._gps_offset_base_x = 0.1   # meters forward (+X in base_link)
+        self._gps_offset_base_y = 0.0
+        self._gps_offset_base_z = 0.05  # meters up (+Z in base_link) - unused for 2D translation
         
         # GPS timestamp tracking - store the timestamp of the GPS message that provided current position
         # This ensures transforms use the correct timestamp to match GPS data, preventing backwards movement
@@ -396,8 +402,16 @@ class ArgoTransformPublisher(ArgoBaseNode):
             
             # Convert current GPS coordinates to map coordinates
             x, y = self.lonlat_to_xy(self.current_lon, self.current_lat)
-            odom_to_base.transform.translation.x = x
-            odom_to_base.transform.translation.y = y
+            # /fix is the GPS antenna position (gps_link). base_link is boat center.
+            # Convert antenna position to boat-center position by subtracting the rotated
+            # base_link->gps_link offset in map/odom frame.
+            cos_yaw = math.cos(heading_rad)
+            sin_yaw = math.sin(heading_rad)
+            gps_off_map_x = cos_yaw * self._gps_offset_base_x - sin_yaw * self._gps_offset_base_y
+            gps_off_map_y = sin_yaw * self._gps_offset_base_x + cos_yaw * self._gps_offset_base_y
+
+            odom_to_base.transform.translation.x = x - gps_off_map_x
+            odom_to_base.transform.translation.y = y - gps_off_map_y
             odom_to_base.transform.translation.z = 0.0
             
             odom_to_base.transform.rotation.x = qx
