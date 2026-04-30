@@ -502,10 +502,10 @@ class ArgoBoatVisualization(ArgoBaseNode):
         if self.heading_trail_limit == 0:
             self.heading_trail_last_time_s = None
             return
-        if self.base_lat is None or self.base_lon is None:
-            return
-        pos_x = self.boat_pos_x
-        pos_y = self.boat_pos_y
+        # Use TF-derived boat center position when available so trail aligns with map-frame
+        # sailing markers and the rendered boat. Falls back to GPS-derived position if TF
+        # is unavailable (e.g., transform publisher not running).
+        pos_x, pos_y = self._get_boat_position_from_tf()
         if pos_x is None or pos_y is None:
             return
         if any(map(math.isnan, (pos_x, pos_y, self.boat_heading))):
