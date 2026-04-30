@@ -15,7 +15,7 @@ visualization-msgs       # ROS2 visualization message types (Marker, MarkerArray
 
 # ==================== HARDWARE COMMUNICATION ====================
 # I2C, Serial, GPIO, and other hardware interfaces
-smbus2                   # I2C communication for sensors (MAX11612, SHT45, ICM-20948)
+smbus2                   # I2C communication for sensors (MAX11612, SHT45, BNO085 test tooling)
 pyserial                 # Serial communication for GPS (u-blox NEO-M9N)
 pynmea2                  # NMEA sentence parsing for GPS NavSatFix messages
 gpiod                    # Modern GPIO control (libgpiod) for power management, battery monitoring, and LoRa SPI control

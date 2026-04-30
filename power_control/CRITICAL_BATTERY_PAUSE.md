@@ -39,7 +39,7 @@ Each sensor node must implement proper hardware shutdown when paused. The pause 
 
 ### Nodes That Need Hardware Shutdown Implementation
 
-#### 1. IMU Node (`nodes/imu.py`)
+#### 1. IMU Node (`nodes/bno085.py` / `argo_bno085.service`)
 
 **What needs to be done:**
 - When `is_paused()` returns True, put IMU hardware into shutdown/sleep mode
@@ -67,8 +67,7 @@ def timer_callback(self):
 def _shutdown_imu_hardware(self):
     """Put IMU hardware into low-power shutdown mode"""
     try:
-        # Send I2C commands to disable IMU sensors
-        # Example for ICM-20948 or similar:
+        # Send commands to disable IMU sensors (implementation depends on driver stack)
         # - Disable gyroscope
         # - Disable accelerometer  
         # - Disable magnetometer

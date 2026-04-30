@@ -374,7 +374,7 @@ Central control hub for the entire Argo system:
 
 ### `nodes/` - ROS2 Node Implementations
 Hardware interface and control nodes:
-- **Sensor Nodes**: `gps.py`, `imu.py`, `anem.py`, `argo_battery_water.py`, `temp_monitor.py`
+- **Sensor Nodes**: `gps.py`, `bno085.py`, `anem.py`, `argo_battery_water.py`, `temp_monitor.py`
 - **Control Nodes**: `rudder_sail_radio.py`, `controller.py`, `record.py`
 - **`pwm_capture_module/`** - Custom kernel module for radio control and servo interfaces
 - **Configuration files**: `argo.yaml`, calibration data, and support utilities

@@ -47,8 +47,7 @@ After adding argcomplete to a script:
 source ~/.bashrc
 
 # Test completion (press TAB after the script name)
-python3 imu.py --<TAB>         # Shows: --debug --calib_compass --plot_calib --help
-python3 imu.py --de<TAB>       # Completes to: --debug
+python3 nodes/bno085.py --<TAB>         # Shows: bridge, calibrate, verify, status, --help, ...
 ```
 
 ## Performance Notes
@@ -73,7 +72,7 @@ The current approach is the best balance of simplicity and performance.
 
 The following scripts have argcomplete enabled:
 - ✅ `launch/argo_lifecycle_manager.py` - Commands: run, start, stop, restart, status, monitor, simulate_local, simulate_remote
-- ✅ `nodes/imu.py` - Args: --debug, --calib_compass, --plot_calib
+- ✅ `nodes/bno085.py` - Commands: bridge, calibrate, verify, status
 
 ### To Enable on Other Scripts
 

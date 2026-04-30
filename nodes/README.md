@@ -263,11 +263,10 @@ Main configuration file for autonomous control parameters:
 /argo/rudder_gain: 2
 ```
 
-### `RTIMULib.ini`
-IMU library configuration for sensor fusion and calibration
-
-### `invensense-20948-compass-calibration.json`
-Magnetometer calibration data for compass accuracy
+### IMU calibration files (legacy)
+Argo previously used an ICM-20948 + RTIMULib-based IMU pipeline with local
+calibration files. The current IMU stack is BNO085 (`nodes/bno085.py` + C++
+driver) and calibration is handled on-chip.
 
 ## Launch and Deployment
 
@@ -275,9 +274,9 @@ Magnetometer calibration data for compass accuracy
 The system is designed for ROS2 but launch files are being migrated from ROS1. Current manual startup:
 
 ```bash
-# Start individual nodes
+# Start individual nodes (development only)
 ros2 run argo gps.py &
-ros2 run argo imu.py &
+python3 ~/argo/nodes/bno085.py bridge &   # IMU bridge (driver normally launched via systemd)
 ros2 run argo anem.py &
 ros2 run argo argo_battery_water.py &
 ros2 run argo pwm.py &
