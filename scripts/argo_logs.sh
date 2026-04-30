@@ -17,7 +17,10 @@
 #           Examples: "controller", "anem_node", "rudder", "(controller|dashboard)"
 
 # Default options
-LINES=20
+# Note: journalctl merges all -u units into one stream; a small -n mostly shows
+# the noisiest unit (often launch). Use a larger default so quieter units (IMU)
+# still appear in the initial batch.
+LINES=200
 FOLLOW=true
 GREP_PATTERN=""
 ERROR_CHECK=false
@@ -143,7 +146,7 @@ elif [ "$ALL_LOGS" = true ]; then
         echo "🔍 Filter: $GREP_PATTERN"
     fi
 elif [ -n "$GREP_PATTERN" ]; then
-    echo "🔍 Filter: $GREP_PATTERN (scanning ALL logs)"
+    echo "🔍 Filter: $GREP_PATTERN (last N lines of merged journal, then follow; use -n or -a for more)"
 elif [ "$FOLLOW" = true ]; then
     echo "👁️  Follow Mode: Live tail (last $LINES lines + new)"
 else
@@ -175,7 +178,7 @@ colorize_logs() {
             echo -e "${COLOR_BATTERY}${line}${RESET}"
         elif echo "$line" | grep -q "argo_power_control"; then
             echo -e "${COLOR_POWER}${line}${RESET}"
-        elif echo "$line" | grep -q "bno08x_driver\|argo_bno085"; then
+        elif echo "$line" | grep -qiE "bno08x|bno085|bno08x_ros|imu_health|/imu"; then
             echo -e "${COLOR_IMU}${line}${RESET}"
         else
             echo "$line" # No color
@@ -195,23 +198,38 @@ else
         journalctl_cmd+=" --since \"${TIME_WINDOW} ago\""
     fi
 
+    # When filtering by pattern, need a deep enough merged buffer or grep shows nothing.
+    if [ -n "$GREP_PATTERN" ] && [ "$ALL_LOGS" = false ] && [ "$ERROR_CHECK" = false ]; then
+        if [ -z "$TIME_WINDOW" ]; then
+            PATTERN_INITIAL_LINES=$((LINES * 25))
+            if [ "$PATTERN_INITIAL_LINES" -lt 5000 ]; then
+                PATTERN_INITIAL_LINES=5000
+            fi
+            EFFECTIVE_LINES=$PATTERN_INITIAL_LINES
+        else
+            EFFECTIVE_LINES=$LINES
+        fi
+    else
+        EFFECTIVE_LINES=$LINES
+    fi
+
     if [ "$ERROR_CHECK" = true ] && [ "$FOLLOW" = true ]; then
         journalctl_cmd+=" -f"
     elif [ "$FOLLOW" = true ]; then
         if [ -n "$TIME_WINDOW" ]; then
             journalctl_cmd+=" -f"
         else
-            journalctl_cmd+=" -n $LINES -f"
+            journalctl_cmd+=" -n $EFFECTIVE_LINES -f"
         fi
     elif [ -z "$GREP_PATTERN" ] && [ "$ERROR_CHECK" = false ] && [ -z "$TIME_WINDOW" ]; then
-        journalctl_cmd+=" -n $LINES"
+        journalctl_cmd+=" -n $EFFECTIVE_LINES"
     fi
 fi
 
 journalctl_cmd+=" --output=short-iso-precise"
 
-# Build the full command pipeline
-full_cmd="$journalctl_cmd 2>/dev/null"
+# Build the full command pipeline (do not hide journalctl errors — empty output was misleading)
+full_cmd="$journalctl_cmd"
 
 # Filter out foxglove bridge spam (Advertising/Removing channel messages)
 full_cmd+=" | grep --line-buffered -v -E 'foxglove_bridge.*(Advertising|Removing).*channel'"

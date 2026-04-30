@@ -5,20 +5,36 @@ BNO085 I2C Communication Test Script
 This script tests basic I2C communication with the BNO085 sensor
 and implements the SHTP protocol for debugging purposes.
 
-Usage:
-    python3 test_bno085.py [--address 0x4a] [--debug]
+The BNO08x speaks SHTP over I2C: plain read/write transactions, not SMBus
+"register + read block" (read_i2c_block_data). Using SMBus block APIs makes a
+probe at 0x4a look broken even when i2cdetect / ai2c see the device — same bus,
+wrong protocol.
+
+Usage (from repo root):
+    python3 tests/test_bno085.py [--bus 0] [--address 0x4a] [--debug]
+    ./tests/test_bno085.py [--bus 0] [--address 0x4a] [--debug]
+
+Bus number matches ai2c "Bus 0" (i2cdetect -y 0) and bno08x_driver_argo.yaml
+i2c.bus /dev/i2c-0 on Orange Pi Zero 2W.
 """
 
+import os
 import sys
 import time
+import fcntl
 import struct
 import argparse
 import smbus2
+from smbus2 import i2c_msg
+
+# linux/i2c-dev.h — select slave before POSIX read() on /dev/i2c-* (matches vendor I2CInterface)
+I2C_SLAVE = 0x0703
 
 class BNO085Test:
     """Simple BNO085 test class for debugging I2C communication."""
     
     def __init__(self, bus_num=0, address=0x4a, debug=False):
+        self.bus_num = bus_num
         self.bus = smbus2.SMBus(bus_num)
         self.addr = address
         self.debug = debug
@@ -26,7 +42,8 @@ class BNO085Test:
         
         # SHTP constants
         self.SHTP_HEADER_SIZE = 4
-        self.MAX_PACKET_SIZE = 128
+        # Must accept full SHTP frames (e.g. advertisements ~272B per sh2_hal.h)
+        self.MAX_PACKET_SIZE = 384  # SH2_HAL_MAX_TRANSFER_IN in nodes/vendor/.../sh2/sh2_hal.h
         
         # SHTP Channel numbers (from BNO080 datasheet)
         self.CHANNEL_COMMAND = 0x00      # SHTP command channel
@@ -48,51 +65,78 @@ class BNO085Test:
         """Print debug message if debug mode is enabled."""
         if self.debug:
             print(f"BNO085 DEBUG: {message}")
-    
+
+    def _i2c_write_raw(self, buf):
+        """Single I2C write transaction (SHTP); matches bno08x I2CInterface::write."""
+        w = i2c_msg.write(self.addr, bytes(buf))
+        self.bus.i2c_rdwr(w)
+
+    def _ensure_slave(self):
+        fcntl.ioctl(self.bus.fd, I2C_SLAVE, self.addr)
+
+    def _i2c_read_raw(self, n):
+        """Raw I2C read(s) via SMBus i2c_msg — OK for short probes; full SHTP frames use _read_packet."""
+        if n <= 0:
+            return []
+        self._ensure_slave()
+        out = []
+        remaining = n
+        while remaining > 0:
+            chunk = min(32, remaining)
+            r = i2c_msg.read(self.addr, chunk)
+            self.bus.i2c_rdwr(r)
+            out.extend(list(r))
+            remaining -= chunk
+        return out
+
+    def _shtp_soft_reset(self):
+        """Same 5-byte soft reset packet as vendor i2c_interface.hpp."""
+        self._i2c_write_raw([5, 0, 1, 0, 1])
+        time.sleep(1.0)
+
     def test_basic_i2c(self):
-        """Test basic I2C communication with the BNO085."""
-        print(f"Testing basic I2C communication with BNO085 at address 0x{self.addr:02x}...")
-        
+        """Test raw I2C + SHTP path used by the ROS driver (not SMBus register reads)."""
+        print(f"I2C bus {self.bus_num} → /dev/i2c-{self.bus_num}")
+        print(
+            "  Align with: ai2c \"Bus 0\" = i2cdetect -y 0; "
+            "nodes/vendor/bno08x_driver_argo.yaml → i2c.bus /dev/i2c-0"
+        )
+        print(f"Probing BNO085 at 0x{self.addr:02x} (SHTP soft reset + drain first packet)...")
+
         try:
-            # Try to read a single byte
-            test_data = self.bus.read_i2c_block_data(self.addr, 0, 1)
-            print(f"✅ Basic I2C read successful: {test_data}")
-            return True
-        except Exception as e:
-            print(f"❌ Basic I2C read failed: {e}")
-            
-            # Try to wake up the device
-            print("Attempting to wake up BNO085...")
-            try:
-                self.bus.write_i2c_block_data(self.addr, 0, [0x00])
-                time.sleep(0.1)
-                
-                test_data = self.bus.read_i2c_block_data(self.addr, 0, 1)
-                print(f"✅ Wake-up successful: {test_data}")
-                return True
-            except Exception as e2:
-                print(f"❌ Wake-up failed: {e2}")
+            self._shtp_soft_reset()
+            pkt = self._read_packet()
+            if not pkt:
+                print("❌ No SHTP packet after reset")
                 return False
+            print(
+                f"✅ First SHTP packet: length={pkt['length']} "
+                f"channel={pkt['channel']} seq={pkt['sequence']}"
+            )
+            return True
+        except OSError as e:
+            print(f"❌ Basic I2C failed: {e}")
+            return False
     
     def _read_packet(self):
-        """Read a complete SHTP packet from the BNO085 using proper I2C protocol."""
+        """Read one SHTP packet — must match nodes/vendor/bno08x_driver/.../i2c_interface.hpp::read (POSIX read + chunk/skip)."""
         try:
-            # Read header first (4 bytes: length_low, length_high, channel, sequence)
-            header = self.bus.read_i2c_block_data(self.addr, 0, self.SHTP_HEADER_SIZE)
-            
-            # Parse header according to SHTP specification from datasheet
-            packet_length = (header[1] << 8) | header[0]  # Little-endian length
+            self._ensure_slave()
+            hdr = os.read(self.bus.fd, self.SHTP_HEADER_SIZE)
+            if len(hdr) != self.SHTP_HEADER_SIZE:
+                return None
+            header = list(hdr)
+
+            packet_length = ((header[1] << 8) | header[0]) & 0x7FFF
             channel = header[2]
             sequence_number = header[3]
-            
+
             self.debug_print(f"Header: length={packet_length}, channel={channel}, seq={sequence_number}, raw={header}")
-            
-            # Validate packet length
-            if packet_length > self.MAX_PACKET_SIZE or packet_length < 0:
+
+            if packet_length > self.MAX_PACKET_SIZE:
                 self.debug_print(f"Invalid packet length: {packet_length}")
                 return None
-                
-            # If packet length is 0, return header-only packet
+
             if packet_length == 0:
                 self.debug_print("Zero-length packet received")
                 return {
@@ -101,14 +145,19 @@ class BNO085Test:
                     'channel': channel,
                     'payload': []
                 }
-                
-            # Read payload in separate transaction
-            payload_length = packet_length - self.SHTP_HEADER_SIZE
-            if payload_length > 0:
-                payload = self.bus.read_i2c_block_data(self.addr, 0, payload_length)
-                self.debug_print(f"Payload: {payload}")
-            else:
-                payload = []
+
+            # After SHTP header, one read for (packet_length - 4) bytes (Wire.requestFrom style)
+            remainder = packet_length - self.SHTP_HEADER_SIZE
+            buf = bytearray(header)
+            if remainder > 0:
+                chunk = os.read(self.bus.fd, remainder)
+                if len(chunk) != remainder:
+                    self.debug_print(f"short read: wanted {remainder}, got {len(chunk)}")
+                    return None
+                buf.extend(chunk)
+
+            payload = list(buf[self.SHTP_HEADER_SIZE :])
+            self.debug_print(f"Payload len={len(payload)}")
             
             return {
                 'length': packet_length,
@@ -116,7 +165,7 @@ class BNO085Test:
                 'channel': channel,
                 'payload': payload
             }
-        except Exception as e:
+        except OSError as e:
             self.debug_print(f"Error reading packet: {e}")
             return None
     
@@ -133,13 +182,11 @@ class BNO085Test:
             ]
             
             self.debug_print(f"Writing packet: channel={channel}, length={packet_length}, seq={self._sequence_number}, data={data}")
-            
-            # Write header
-            self.bus.write_i2c_block_data(self.addr, 0, header)
-            
-            # Write payload if any
-            if data:
-                self.bus.write_i2c_block_data(self.addr, 0, data)
+
+            frame = bytes(header + list(data))
+            # Chunk writes to 32 bytes like vendor I2CInterface::write
+            for i in range(0, len(frame), 32):
+                self._i2c_write_raw(frame[i : i + 32])
             
             self._sequence_number = (self._sequence_number + 1) % 256
             return True
@@ -158,42 +205,45 @@ class BNO085Test:
                 0x00  # Reserved
             ])
             
-            # Wait for response
-            time.sleep(0.1)
+            # Wait for response (hub may need time after control-channel write)
+            time.sleep(0.25)
             
-            # Read response packets
-            for _ in range(10):  # Try up to 10 packets
+            # Drain SHTP; Product ID (0xF8) is often embedded in ch.0 advertisement, not a bare ch.2 frame.
+            for _ in range(40):
                 packet = self._read_packet()
-                if packet and packet['channel'] == self.CHANNEL_CONTROL:
-                    self.debug_print(f"Received packet: length={packet['length']}, channel={packet['channel']}, payload={packet['payload']}")
-                    
-                    if (len(packet['payload']) > 0 and 
-                        packet['payload'][0] == self.REPORT_PRODUCT_ID_RESPONSE and
-                        len(packet['payload']) >= 16):
-                        
-                        # Parse Product ID response
-                        reset_cause = packet['payload'][1]
-                        sw_major = packet['payload'][2]
-                        sw_minor = packet['payload'][3]
-                        sw_part = (packet['payload'][7] << 24) | (packet['payload'][6] << 16) | (packet['payload'][5] << 8) | packet['payload'][4]
-                        sw_build = (packet['payload'][11] << 24) | (packet['payload'][10] << 16) | (packet['payload'][9] << 8) | packet['payload'][8]
-                        sw_patch = (packet['payload'][13] << 8) | packet['payload'][12]
-                        
-                        version_info = {
-                            'reset_cause': reset_cause,
-                            'sw_major': sw_major,
-                            'sw_minor': sw_minor,
-                            'sw_patch': sw_patch,
-                            'sw_part': sw_part,
-                            'sw_build': sw_build
-                        }
-                        
-                        print(f"✅ Product ID Response:")
-                        print(f"   Reset Cause: {reset_cause}")
-                        print(f"   Version: {sw_major}.{sw_minor}.{sw_patch}")
-                        print(f"   Part Number: 0x{sw_part:08X}")
-                        print(f"   Build Number: {sw_build}")
-                        return version_info
+                if not packet:
+                    continue
+                pp = packet['payload']
+                head = pp[:24] if len(pp) > 24 else pp
+                self.debug_print(f"Received packet: length={packet['length']}, channel={packet['channel']}, payload[:24]={head}")
+                pl = packet['payload']
+                off = next((i for i, b in enumerate(pl) if b == self.REPORT_PRODUCT_ID_RESPONSE), None)
+                if off is None or len(pl) - off < 16:
+                    continue
+                pl = pl[off:]
+
+                reset_cause = pl[1]
+                sw_major = pl[2]
+                sw_minor = pl[3]
+                sw_part = (pl[7] << 24) | (pl[6] << 16) | (pl[5] << 8) | pl[4]
+                sw_build = (pl[11] << 24) | (pl[10] << 16) | (pl[9] << 8) | pl[8]
+                sw_patch = (pl[13] << 8) | pl[12]
+
+                version_info = {
+                    'reset_cause': reset_cause,
+                    'sw_major': sw_major,
+                    'sw_minor': sw_minor,
+                    'sw_patch': sw_patch,
+                    'sw_part': sw_part,
+                    'sw_build': sw_build
+                }
+
+                print(f"✅ Product ID Response:")
+                print(f"   Reset Cause: {reset_cause}")
+                print(f"   Version: {sw_major}.{sw_minor}.{sw_patch}")
+                print(f"   Part Number: 0x{sw_part:08X}")
+                print(f"   Build Number: {sw_build}")
+                return version_info
                         
             print("❌ No Product ID response received")
             return None
@@ -293,6 +343,7 @@ class BNO085Test:
         """Run complete BNO085 test sequence."""
         print("=" * 60)
         print("BNO085 I2C Communication Test")
+        print(f"I2C bus: {self.bus_num} (/dev/i2c-{self.bus_num})")
         print("=" * 60)
         
         # Test 1: Basic I2C communication
@@ -337,6 +388,10 @@ class BNO085Test:
 
 def main():
     parser = argparse.ArgumentParser(description='Test BNO085 I2C communication')
+    parser.add_argument(
+        '--bus', type=int, default=0,
+        help='Linux I2C bus number (default: 0). Same as ai2c "Bus 0" / i2cdetect -y 0',
+    )
     parser.add_argument('--address', type=lambda x: int(x, 0), default=0x4a,
                        help='BNO085 I2C address (default: 0x4a)')
     parser.add_argument('--debug', action='store_true',
@@ -345,7 +400,7 @@ def main():
     args = parser.parse_args()
     
     # Create test instance
-    tester = BNO085Test(address=args.address, debug=args.debug)
+    tester = BNO085Test(bus_num=args.bus, address=args.address, debug=args.debug)
     
     # Run full test
     success = tester.run_full_test()
