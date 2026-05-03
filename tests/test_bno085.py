@@ -11,7 +11,9 @@ probe at 0x4a look broken even when i2cdetect / ai2c see the device — same bus
 wrong protocol.
 
 Pass criteria:
-  • I2C + SHTP soft reset + Product ID (hardware path used by ``bno08x_driver``).
+  • I2C + SHTP soft reset + Product ID (hardware path used by ``bno08x_driver``):
+    reads follow ``i2c_interface.hpp::read`` chunking; payloads are reassembled with
+    ``shtp.c``-style ``rxAssemble`` (continuations, sequence).
   • Unless ``--skip-ros``: run ``ros2 topic hz /imu`` (sources Humble) and require a
     non-zero observed rate when the IMU stack should be running. If ROS is unavailable,
     streaming is skipped with a warning and the test still passes on Product ID alone.
@@ -35,6 +37,11 @@ import sys
 import time
 import smbus2
 from smbus2 import i2c_msg
+from typing import List, Optional, Tuple
+
+# Match include/sh2/shtp.c (SH2_MAX_CHANS)
+SHTP_HDR_LEN = 4
+SH2_MAX_CHANS = 8
 
 # linux/i2c-dev.h — select slave before POSIX read() on /dev/i2c-* (matches vendor I2CInterface)
 I2C_SLAVE = 0x0703
@@ -50,10 +57,13 @@ class BNO085Test:
         self._sequence_number = 0
         
         # SHTP constants
-        self.SHTP_HEADER_SIZE = 4
+        self.SHTP_HEADER_SIZE = SHTP_HDR_LEN
         # Must accept full SHTP frames (e.g. advertisements ~272B per sh2_hal.h)
         self.MAX_PACKET_SIZE = 384  # SH2_HAL_MAX_TRANSFER_IN in nodes/vendor/.../sh2/sh2_hal.h
-        
+
+        # rxAssemble state (include/sh2/shtp.c rxAssemble)
+        self._rx_init_state()
+
         # SHTP Channel numbers (from BNO080 datasheet)
         self.CHANNEL_COMMAND = 0x00      # SHTP command channel
         self.CHANNEL_EXECUTABLE = 0x01   # Executable channel
@@ -69,6 +79,133 @@ class BNO085Test:
         if self.debug:
             print(f"BNO085 DEBUG: {message}")
 
+    def _rx_init_state(self) -> None:
+        """Reset SHTP assembly state (new session / after soft reset)."""
+        self._asm_remain = 0
+        self._asm_cursor = 0
+        self._asm_chan = 0
+        self._asm_payload = bytearray(self.MAX_PACKET_SIZE)
+        self._next_in_seq = [0] * SH2_MAX_CHANS
+
+    def _hal_read_full_transfer(self) -> Optional[bytes]:
+        """
+        One logical I2C read as implemented by bno08x_driver i2c_interface.hpp::read():
+        4-byte header, then chunk reads (32 B max) with continuation strips (+4 rule).
+        Returns buffer of length packet_size (full SHTP packet including header bytes).
+        """
+        try:
+            self._ensure_slave()
+            header = os.read(self.bus.fd, SHTP_HDR_LEN)
+            if len(header) != SHTP_HDR_LEN:
+                return None
+
+            packet_size = (header[0] | (header[1] << 8)) & ~0x8000
+            self.debug_print(
+                f"HAL read: declared packet_size={packet_size} raw_hdr={list(header)}"
+            )
+
+            if packet_size > self.MAX_PACKET_SIZE:
+                self.debug_print("HAL read: packet_size too large")
+                return None
+            # Match HAL return when len==0 (shtp.c); idle bus often reads [0,0,0,0] → 0 length.
+            if packet_size == 0:
+                return None
+
+            buf = bytearray(packet_size)
+            cargo_remaining = packet_size
+            first_read = True
+            offset = 0
+
+            while cargo_remaining > 0:
+                if first_read:
+                    read_size = min(32, cargo_remaining)
+                    chunk = os.read(self.bus.fd, read_size)
+                    if len(chunk) != read_size:
+                        self.debug_print(
+                            f"HAL read: short first chunk wanted {read_size} got {len(chunk)}"
+                        )
+                        return None
+                    buf[offset : offset + read_size] = chunk
+                    offset += read_size
+                    cargo_remaining -= read_size
+                    first_read = False
+                else:
+                    read_size = min(32, cargo_remaining + 4)
+                    chunk = os.read(self.bus.fd, read_size)
+                    if len(chunk) != read_size:
+                        self.debug_print(
+                            f"HAL read: short cont chunk wanted {read_size} got {len(chunk)}"
+                        )
+                        return None
+                    cargo_amt = read_size - 4
+                    buf[offset : offset + cargo_amt] = chunk[4 : 4 + cargo_amt]
+                    offset += cargo_amt
+                    cargo_remaining -= cargo_amt
+
+            return bytes(buf)
+        except OSError as e:
+            self.debug_print(f"HAL read OSError: {e}")
+            return None
+
+    def _rx_assemble(self, wire: bytes) -> List[Tuple[int, bytes]]:
+        """
+        Port of sh2 shtp.c rxAssemble for one HAL transfer buffer `wire`.
+        Returns list of (channel, cargo_payload) for completed assemblies (cargo only).
+        """
+        delivered: List[Tuple[int, bytes]] = []
+        ln = len(wire)
+        if ln < SHTP_HDR_LEN:
+            return delivered
+
+        payload_len = (wire[0] | (wire[1] << 8)) & (~0x8000)
+        continuation = (wire[1] & 0x80) != 0
+        chan = wire[2]
+        seq = wire[3]
+
+        self.debug_print(
+            f"rxAssemble: len={ln} payloadLen={payload_len} cont={continuation} "
+            f"chan={chan} seq={seq}"
+        )
+
+        if payload_len < SHTP_HDR_LEN:
+            return delivered
+
+        if chan >= SH2_MAX_CHANS:
+            return delivered
+
+        # Discard stale assembly if this fragment does not continue correctly
+        if self._asm_remain:
+            if (
+                not continuation
+                or (chan != self._asm_chan)
+                or (seq != self._next_in_seq[chan])
+            ):
+                self._asm_remain = 0
+
+        if self._asm_remain == 0:
+            if payload_len > len(self._asm_payload):
+                return delivered
+            self._asm_cursor = 0
+            self._asm_chan = chan
+
+        frag_len = ln
+        if frag_len > payload_len:
+            frag_len = payload_len
+
+        cargo_copy_len = frag_len - SHTP_HDR_LEN
+        self._asm_payload[
+            self._asm_cursor : self._asm_cursor + cargo_copy_len
+        ] = wire[SHTP_HDR_LEN : frag_len]
+        self._asm_cursor += cargo_copy_len
+        self._asm_remain = payload_len - frag_len
+
+        if self._asm_remain == 0:
+            cargo = bytes(self._asm_payload[: self._asm_cursor])
+            delivered.append((chan, cargo))
+
+        self._next_in_seq[chan] = seq + 1
+        return delivered
+
     def _i2c_write_raw(self, buf):
         """Single I2C write transaction (SHTP); matches bno08x I2CInterface::write."""
         w = i2c_msg.write(self.addr, bytes(buf))
@@ -78,7 +215,7 @@ class BNO085Test:
         fcntl.ioctl(self.bus.fd, I2C_SLAVE, self.addr)
 
     def _i2c_read_raw(self, n):
-        """Raw I2C read(s) via SMBus i2c_msg — OK for short probes; full SHTP frames use _read_packet."""
+        """Raw I2C read(s) via SMBus i2c_msg — short probes only; SHTP uses _hal_read_full_transfer."""
         if n <= 0:
             return []
         self._ensure_slave()
@@ -107,70 +244,35 @@ class BNO085Test:
         print(f"Probing BNO085 at 0x{self.addr:02x} (SHTP soft reset + drain first packet)...")
 
         try:
+            self._rx_init_state()
             self._shtp_soft_reset()
-            pkt = self._read_packet()
-            if not pkt:
-                print("❌ No SHTP packet after reset")
+            # First read can be [0,0,0,0] briefly (FIFO not ready). Another common cause
+            # of all-zero headers is a second process holding /dev/i2c-* (e.g. ros2 bno08x_driver).
+            raw: Optional[bytes] = None
+            for attempt in range(40):
+                raw = self._hal_read_full_transfer()
+                if raw:
+                    break
+                time.sleep(0.05)
+            if not raw:
+                print(
+                    "❌ No SHTP packet after reset (FIFO idle / zeros). "
+                    "Stop other I²C users: pgrep -af bno08x_driver; "
+                    "sudo systemctl stop argo_bno085.service"
+                )
                 return False
+            h = raw[:4]
+            length_field = (h[0] | (h[1] << 8)) & 0x7FFF
+            ch, sq = h[2], h[3]
+            self._rx_assemble(raw)
             print(
-                f"✅ First SHTP packet: length={pkt['length']} "
-                f"channel={pkt['channel']} seq={pkt['sequence']}"
+                f"✅ First SHTP packet (HAL): length={length_field} "
+                f"channel={ch} seq={sq} bytes={len(raw)}"
             )
             return True
         except OSError as e:
             print(f"❌ Basic I2C failed: {e}")
             return False
-    
-    def _read_packet(self):
-        """Read one SHTP packet — must match nodes/vendor/bno08x_driver/.../i2c_interface.hpp::read (POSIX read + chunk/skip)."""
-        try:
-            self._ensure_slave()
-            hdr = os.read(self.bus.fd, self.SHTP_HEADER_SIZE)
-            if len(hdr) != self.SHTP_HEADER_SIZE:
-                return None
-            header = list(hdr)
-
-            packet_length = ((header[1] << 8) | header[0]) & 0x7FFF
-            channel = header[2]
-            sequence_number = header[3]
-
-            self.debug_print(f"Header: length={packet_length}, channel={channel}, seq={sequence_number}, raw={header}")
-
-            if packet_length > self.MAX_PACKET_SIZE:
-                self.debug_print(f"Invalid packet length: {packet_length}")
-                return None
-
-            if packet_length == 0:
-                self.debug_print("Zero-length packet received")
-                return {
-                    'length': 0,
-                    'sequence': sequence_number,
-                    'channel': channel,
-                    'payload': []
-                }
-
-            # After SHTP header, one read for (packet_length - 4) bytes (Wire.requestFrom style)
-            remainder = packet_length - self.SHTP_HEADER_SIZE
-            buf = bytearray(header)
-            if remainder > 0:
-                chunk = os.read(self.bus.fd, remainder)
-                if len(chunk) != remainder:
-                    self.debug_print(f"short read: wanted {remainder}, got {len(chunk)}")
-                    return None
-                buf.extend(chunk)
-
-            payload = list(buf[self.SHTP_HEADER_SIZE :])
-            self.debug_print(f"Payload len={len(payload)}")
-            
-            return {
-                'length': packet_length,
-                'sequence': sequence_number,
-                'channel': channel,
-                'payload': payload
-            }
-        except OSError as e:
-            self.debug_print(f"Error reading packet: {e}")
-            return None
     
     def _write_packet(self, channel, data):
         """Write a SHTP packet to the BNO085."""
@@ -196,7 +298,30 @@ class BNO085Test:
         except Exception as e:
             self.debug_print(f"Error writing packet: {e}")
             return False
-    
+
+    def _parse_product_id_cargo(self, pl: bytes):
+        """If SH-2 cargo contains Product ID Response (0xF8), return fields dict else None."""
+        off = next((i for i, b in enumerate(pl) if b == self.REPORT_PRODUCT_ID_RESPONSE), None)
+        if off is None or len(pl) - off < 16:
+            return None
+        pl = pl[off:]
+
+        reset_cause = pl[1]
+        sw_major = pl[2]
+        sw_minor = pl[3]
+        sw_part = (pl[7] << 24) | (pl[6] << 16) | (pl[5] << 8) | pl[4]
+        sw_build = (pl[11] << 24) | (pl[10] << 16) | (pl[9] << 8) | pl[8]
+        sw_patch = (pl[13] << 8) | pl[12]
+
+        return {
+            'reset_cause': reset_cause,
+            'sw_major': sw_major,
+            'sw_minor': sw_minor,
+            'sw_patch': sw_patch,
+            'sw_part': sw_part,
+            'sw_build': sw_build,
+        }
+
     def get_product_id(self):
         """Get BNO085 product ID and version information."""
         print("Requesting Product ID...")
@@ -211,43 +336,31 @@ class BNO085Test:
             # Wait for response (hub may need time after control-channel write)
             time.sleep(0.25)
             
-            # Drain SHTP; Product ID (0xF8) is often embedded in ch.0 advertisement, not a bare ch.2 frame.
-            for _ in range(40):
-                packet = self._read_packet()
-                if not packet:
+            # Drain: HAL read matches i2c_interface.hpp; rx_assemble matches shtp.c rxAssemble.
+            for _ in range(120):
+                raw = self._hal_read_full_transfer()
+                if not raw:
+                    time.sleep(0.01)
                     continue
-                pp = packet['payload']
-                head = pp[:24] if len(pp) > 24 else pp
-                self.debug_print(f"Received packet: length={packet['length']}, channel={packet['channel']}, payload[:24]={head}")
-                pl = packet['payload']
-                off = next((i for i, b in enumerate(pl) if b == self.REPORT_PRODUCT_ID_RESPONSE), None)
-                if off is None or len(pl) - off < 16:
-                    continue
-                pl = pl[off:]
+                delivered = self._rx_assemble(raw)
+                for ch, cargo in delivered:
+                    head = cargo[:24] if len(cargo) > 24 else cargo
+                    self.debug_print(
+                        f"assembled ch={ch} cargo_len={len(cargo)} cargo[:24]={list(head)}"
+                    )
+                    info = self._parse_product_id_cargo(cargo)
+                    if info:
+                        print("✅ Product ID Response:")
+                        print(f"   Reset Cause: {info['reset_cause']}")
+                        print(
+                            f"   Version: {info['sw_major']}."
+                            f"{info['sw_minor']}.{info['sw_patch']}"
+                        )
+                        print(f"   Part Number: 0x{info['sw_part']:08X}")
+                        print(f"   Build Number: {info['sw_build']}")
+                        return info
+                time.sleep(0.01)
 
-                reset_cause = pl[1]
-                sw_major = pl[2]
-                sw_minor = pl[3]
-                sw_part = (pl[7] << 24) | (pl[6] << 16) | (pl[5] << 8) | pl[4]
-                sw_build = (pl[11] << 24) | (pl[10] << 16) | (pl[9] << 8) | pl[8]
-                sw_patch = (pl[13] << 8) | pl[12]
-
-                version_info = {
-                    'reset_cause': reset_cause,
-                    'sw_major': sw_major,
-                    'sw_minor': sw_minor,
-                    'sw_patch': sw_patch,
-                    'sw_part': sw_part,
-                    'sw_build': sw_build
-                }
-
-                print(f"✅ Product ID Response:")
-                print(f"   Reset Cause: {reset_cause}")
-                print(f"   Version: {sw_major}.{sw_minor}.{sw_patch}")
-                print(f"   Part Number: 0x{sw_part:08X}")
-                print(f"   Build Number: {sw_build}")
-                return version_info
-                        
             print("❌ No Product ID response received")
             return None
             
