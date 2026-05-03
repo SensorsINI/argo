@@ -54,6 +54,8 @@ TOTAL_FOUND=0
 TOTAL_EXPECTED=0
 TOTAL_MISSING=0
 FAILED_BUSES=0
+# Set in check_bus when bus 0 lists 0x4a (BNO085).
+BUS0_IMU_FOUND=0
 
 parse_detected_addresses() {
     local i2c_output="$1"
@@ -148,6 +150,9 @@ check_bus() {
         if [ "$found" = true ]; then
             echo "🟢 ${addr}: ${device_name}"
             found_count=$((found_count + 1))
+            if [ "$bus" = "0" ] && [[ "${addr,,}" == "0x4a" ]]; then
+                BUS0_IMU_FOUND=1
+            fi
         else
             echo "🔴 ${addr}: ${device_name} - MISSING"
             missing_count=$((missing_count + 1))
@@ -163,11 +168,84 @@ check_bus() {
     echo ""
 }
 
+# When I2C sees the IMU, optionally verify the ROS bridge is publishing real health + IMU data.
+check_imu_ros_live() {
+    echo "--- IMU (BNO085) live stack (ROS) ---"
+    if [ "$BUS0_IMU_FOUND" -eq 0 ]; then
+        echo "⚠️  Skipping live IMU check: 0x4a not seen on bus 0 (I2C probe)."
+        echo ""
+        return 0
+    fi
+    echo "🟢 I2C: BNO085 present at 0x4a on bus 0"
+
+    local humble=/opt/ros/humble/setup.bash
+    if [ ! -f "$humble" ]; then
+        echo "⚠️  ROS Humble not at ${humble} — cannot verify /imu_health or /imu."
+        echo ""
+        return 0
+    fi
+
+    local svc_active
+    svc_active="$(systemctl is-active argo_bno085.service 2>/dev/null || echo unknown)"
+    echo "   argo_bno085.service: ${svc_active}"
+
+    local health_out health_ec imu_out imu_ec
+    set +e
+    health_out="$(timeout 10 bash -c "source ${humble} && command -v ros2 >/dev/null && ros2 topic echo /imu_health --once" 2>&1)"
+    health_ec=$?
+    imu_out="$(timeout 10 bash -c "source ${humble} && command -v ros2 >/dev/null && ros2 topic echo /imu --once" 2>&1)"
+    imu_ec=$?
+    set -e
+
+    if [ "$health_ec" -eq 127 ] || echo "$health_out" | grep -qi 'command not found'; then
+        echo "⚠️  ros2 not available after sourcing Humble — install ros-humble-* CLI or skip this check."
+        echo ""
+        return 0
+    fi
+
+    if echo "$health_out" | grep -qiE 'does not exist|not found|Unable to find|no topic|Waiting for'; then
+        echo "🔴 /imu_health: no message (topic missing or no publisher)."
+        echo "   Start: sudo systemctl start argo_bno085.service"
+        echo ""
+        return 0
+    fi
+
+    if echo "$health_out" | grep -qiE '^data:\s*true\b'; then
+        echo "🟢 /imu_health: HEALTHY (bridge reports recent driver data)"
+    elif echo "$health_out" | grep -qiE '^data:\s*false\b'; then
+        echo "🔴 /imu_health: UNHEALTHY (no recent /imu from driver — see journalctl -u argo_bno085.service)"
+    else
+        if [ "$health_ec" -eq 124 ]; then
+            echo "🔴 /imu_health: timed out (no Bool within 10s)."
+        else
+            echo "⚠️  /imu_health: unexpected output (exit ${health_ec}):"
+            echo "$health_out" | head -n 5
+        fi
+    fi
+
+    if echo "$imu_out" | grep -qiE 'does not exist|not found|Unable to find|no topic|Waiting for'; then
+        echo "🔴 /imu: no message (driver not streaming)."
+    elif echo "$imu_out" | grep -qiE 'header:|linear_acceleration:|angular_velocity:'; then
+        echo "🟢 /imu: received sensor message (driver streaming)"
+    else
+        if [ "$imu_ec" -eq 124 ]; then
+            echo "🔴 /imu: timed out (no SensorMessage within 10s)."
+        else
+            echo "⚠️  /imu: no recognizable sensor fields (exit ${imu_ec})."
+        fi
+    fi
+    echo ""
+}
+
 echo "Resolved TWI2 runtime bus: i2c-${TWI2_BUS} (default fallback: i2c-${TWI2_DEFAULT_LINUX_BUS})"
 echo ""
 
 check_bus 0 EXPECTED_BUS0 "pi-i2c0"
 check_bus "$TWI2_BUS" EXPECTED_TWI2 "pi-i2c2"
+
+if [ "$FAILED_BUSES" -eq 0 ]; then
+    check_imu_ros_live
+fi
 
 echo "Overall summary: ${TOTAL_FOUND}/${TOTAL_EXPECTED} expected devices found"
 

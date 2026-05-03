@@ -55,7 +55,7 @@ alias vacuum='sudo journalctl --vacuum-size=10M ;sudo find /tmp -type f -atime +
 
 # I2C bus reset (requires sudo)
 alias ai2creset='sudo $ARGO_DIR/scripts/reset_i2c_bus.sh'  # Reset I2C bus (stops services, resets bus, restarts services)
-alias ai2c='$ARGO_DIR/scripts/ai2c.sh'  # Scan I2C buses 0 and 2, report sensor status
+alias ai2c='$ARGO_DIR/scripts/ai2c.sh'  # Scan I2C buses + IMU ROS live (/imu_health, /imu) when 0x4a present
 
 # buzzer/beep aliases
 alias abeep='bash $ARGO_DIR/scripts/abeep.sh'  # Pulse buzzer (default 0.5s)

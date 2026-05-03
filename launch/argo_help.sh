@@ -30,7 +30,7 @@ echo "Battery / Power:"
 echo "  astore  - Toggle storage rundown (enable/disable discharge to 7.6V then shut down; mode cleared on reboot)"
 echo ""
 echo "Hardware Diagnostics:"
-echo "  ai2c       - Scan I2C buses and report sensor status (with timing)"
+echo "  ai2c       - Scan I2C buses (timing) + IMU ROS live (/imu_health, /imu) when 0x4a present"
 echo "  ai2creset  - Reset I2C bus (stops services, resets bus, restarts services)"
 echo "  abeep      - Pulse buzzer (default 0.5s, optional duration argument)"
 
