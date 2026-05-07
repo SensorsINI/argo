@@ -185,10 +185,12 @@ check_imu_ros_live() {
         return 0
     fi
 
+    # is-active exits 3 for inactive — do not use || echo (that masks inactive as unknown).
     local svc_active
-    svc_active="$(systemctl is-active argo_bno085.service 2>/dev/null || echo unknown)"
+    svc_active="$(systemctl show -p ActiveState --value argo_bno085.service 2>/dev/null || echo unknown)"
     echo "   argo_bno085.service: ${svc_active}"
-
+    echo "checking for IMU topics, please wait..."
+    
     local health_out health_ec imu_out imu_ec
     set +e
     health_out="$(timeout 10 bash -c "source ${humble} && command -v ros2 >/dev/null && ros2 topic echo /imu_health --once" 2>&1)"

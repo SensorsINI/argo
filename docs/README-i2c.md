@@ -72,7 +72,9 @@ The `pi-i2c0` overlay enables I2C bus 0 on pins PI5/PI6.
 - **SHT45**: 3.3V power supply
 - **Pull-up resistors**: Provided by the two TXS0102 level-shifter sections on both sides of the bus path (3.3V OPi side and 5V sensor side)
 - **Level shifter**: TXS0102DCT used in the active I2C path
-- **Bus speed**: 100kHz (standard I2C)
+- **Bus speed**: 100kHz (standard I2C) from the `pi-i2c0` overlay by default
+- **Optional 400kHz (Fast mode)** on bus 0: build/install the Argo overlay with  
+  `make -C nodes bno085-i2c0-fast-install` (from the `nodes` Makefile: compiles `nodes/bno085_i2c0_fast/`, copies to `/boot/overlay-user`, appends `argo-bno085-i2c0-fast` to `user_overlays` in `/boot/orangepiEnv.txt`). **Reboot required.** All devices sharing **i2c-0** must support Fast mode.
 
 ### I2C Services
 

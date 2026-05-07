@@ -144,7 +144,9 @@ HEALTH MONITORING
 The bridge publishes /imu_health for lifecycle management:
   • Healthy (true):  Receiving data from C++ driver
   • Unhealthy (false): No data for 3+ seconds
-  • Auto-recovery when data resumes
+  • Auto-recovery: after ~15s without fresh /imu (and ~45s since bridge start),
+    the bridge runs ``sudo systemctl restart argo_bno085.service`` (throttled,
+    min interval ~45s). Requires passwordless sudo for that command under the service user.
 
 TROUBLESHOOTING
 ---------------
@@ -213,9 +215,15 @@ except ImportError as e:
 
 class BNO085Bridge(Node):
     """Bridge node that converts BNO08x driver topics to Argo format with I2C error recovery."""
-    
+
+    _HEALTH_STALE_S = 3.0
+    _STARTUP_GRACE_S = 45.0
+    _RESTART_IF_STALE_S = 15.0
+    _MIN_RESTART_INTERVAL_S = 45.0
+
     def __init__(self):
         super().__init__('bno085_bridge')
+        self._bridge_start_time = time.time()
         
         # Publishers (Argo format)
         self.pub_compass = self.create_publisher(Vector3, '/compass', 10)
@@ -393,6 +401,9 @@ class BNO085Bridge(Node):
         # Set health to true when we get driver data
         if not self.health_status:
             self._publish_health_status(True)
+        # Fresh /imu after recovery — reset so logs stay readable
+        self.recovery_attempt_count = 0
+        self.last_recovery_attempt_time = 0.0
         
         roll, pitch, yaw = self.quaternion_to_euler(
             msg.orientation.w, msg.orientation.x, 
@@ -430,11 +441,13 @@ class BNO085Bridge(Node):
         pass
     
     def _check_health(self):
-        """Simple health check - timeout if no driver data."""
+        """Simple health check - timeout if no driver data; restart unit if /imu dies long enough."""
         current_time = time.time()
         
-        # If we have no IMU data or it's stale (3+ seconds), mark unhealthy
-        if self.last_imu_time is None or (current_time - self.last_imu_time) > 3.0:
+        # If we have no IMU data or it's stale, mark unhealthy
+        if self.last_imu_time is None or (
+            current_time - self.last_imu_time
+        ) > self._HEALTH_STALE_S:
             if self.health_status:
                 self._publish_health_status(False)
         else:
@@ -448,6 +461,27 @@ class BNO085Bridge(Node):
         hb = Bool()
         hb.data = self.health_status
         self.pub_health.publish(hb)
+
+        # Automatic recovery was previously never invoked (dead code). Restart the full
+        # argo_bno085.service (launcher + C++ + bridge) when /imu has been gone/stale
+        # long enough; throttle to avoid flapping. Requires passwordless sudo for
+        # systemctl if the service user has no TTY.
+        if current_time - self._bridge_start_time < self._STARTUP_GRACE_S:
+            return
+        if self.last_imu_time is None:
+            imu_stale_s = None
+        else:
+            imu_stale_s = current_time - self.last_imu_time
+        if imu_stale_s is not None and imu_stale_s < self._RESTART_IF_STALE_S:
+            return
+        # Never received /imu: wait until (startup grace + settle) before restarting a wedged driver
+        if imu_stale_s is None:
+            min_uptime = self._STARTUP_GRACE_S + self._RESTART_IF_STALE_S
+            if current_time - self._bridge_start_time < min_uptime:
+                return
+            self._attempt_recovery(current_time)
+            return
+        self._attempt_recovery(current_time)
     
     def _publish_health_status(self, is_healthy: bool):
         """Publish health status update (logs on transitions; heartbeat uses _check_health)."""
@@ -494,27 +528,31 @@ class BNO085Bridge(Node):
             self.get_logger().info("Switched back to normal mode (1s check interval)")
     
     def _attempt_recovery(self, current_time):
-        """Attempt to recover from I2C failure by restarting the C++ driver."""
-        # Throttle recovery attempts (try every 5 seconds)
+        """Recover by restarting the whole argo_bno085 unit (systemd); kills this bridge too."""
         time_since_last_attempt = current_time - self.last_recovery_attempt_time
-        if time_since_last_attempt < 5.0:
+        if time_since_last_attempt < self._MIN_RESTART_INTERVAL_S:
             return
-        
+
         self.recovery_attempt_count += 1
         self.last_recovery_attempt_time = current_time
-        
-        # Log throttled unreachable sensor status (once per 60s)
+
+        if self.last_imu_time is None:
+            stale_msg = "never received /imu from driver"
+        else:
+            stale_msg = f"no /imu for {current_time - self.last_imu_time:.1f}s"
+
         time_since_last_log = current_time - self.last_unreachable_log_time
         if time_since_last_log >= 60.0 or self.last_unreachable_log_time == 0.0:
-            time_since_healthy = current_time - self.last_successful_read_time
             self.get_logger().error(
-                f"BNO085 sensor unreachable for {time_since_healthy:.1f}s "
-                f"(recovery attempts: {self.recovery_attempt_count}, "
-                f"failures: {self.total_errors_this_session})")
+                f"BNO085 IMU failing ({stale_msg}); "
+                f"recovery attempt #{self.recovery_attempt_count} — restarting argo_bno085.service"
+            )
             self.last_unreachable_log_time = current_time
-        
-        # Attempt to restart the C++ driver
-        self.get_logger().info(f"Attempting recovery #{self.recovery_attempt_count}: Restarting bno08x_driver...")
+
+        self.get_logger().info(
+            f"Recovery #{self.recovery_attempt_count}: "
+            f"sudo systemctl restart argo_bno085.service"
+        )
         
         try:
             # Try to restart the C++ driver service using systemctl
