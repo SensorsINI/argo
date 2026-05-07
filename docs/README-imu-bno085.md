@@ -79,6 +79,7 @@ The `argo_bno085.service` systemd service is **required for production use** and
 - **Topics Published**:
   - `/imu` (sensor_msgs/Imu) - Quaternion orientation, gyro, accel
   - `/magnetic_field` (sensor_msgs/MagneticField) - Magnetometer data
+- Launched by bno085_driver_launcher.sh shell script
 
 ### 2. Python Bridge (`bno085.py`)
 - **Location**: `nodes/bno085.py`

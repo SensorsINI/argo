@@ -26,6 +26,8 @@ import argparse
 import logging
 import signal
 import re
+import shutil
+import tempfile
 import yaml
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +46,7 @@ from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue, ParameterType
 
 # Flask web server
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, send_file, after_this_request
 from flask_cors import CORS
 from werkzeug.serving import ThreadedWSGIServer
 
@@ -1870,6 +1872,51 @@ class ArgoWebDashboard(ArgoBaseNode):
     def _maps_dir(self) -> Path:
         return Path(self.argo_dir) / "foxglove" / "maps"
 
+    # Recording bags live under <argo>/bags (one folder per recording); same layout as nodes/record.py
+    _BAG_FOLDER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+    def _bags_dir(self) -> Path:
+        return Path(self.argo_dir) / "bags"
+
+    def _resolve_safe_bag_folder(self, name: str) -> Optional[Path]:
+        """Return path to a recording folder under bags/, or None if invalid or not a directory."""
+        if not name or not self._BAG_FOLDER_NAME_RE.match(name.strip()):
+            return None
+        name = name.strip()
+        root = self._bags_dir().resolve()
+        candidate = (root / name).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return None
+        if not candidate.is_dir():
+            return None
+        return candidate
+
+    def _list_bag_recordings(self) -> Dict[str, Any]:
+        """Subdirectories of bags/, newest first by filesystem mtime."""
+        bags_root = self._bags_dir()
+        if not bags_root.is_dir():
+            return {"success": True, "recordings": []}
+        recordings = []
+        for p in bags_root.iterdir():
+            if not p.is_dir():
+                continue
+            if not self._BAG_FOLDER_NAME_RE.match(p.name):
+                continue
+            try:
+                st = p.stat()
+                mtime = st.st_mtime
+            except OSError:
+                continue
+            recordings.append({
+                "name": p.name,
+                "mtime": mtime,
+                "mtime_iso": datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
+            })
+        recordings.sort(key=lambda x: x["mtime"], reverse=True)
+        return {"success": True, "recordings": recordings}
+
     def _load_available_geofence_maps(self) -> list:
         """Load available geofence map names from foxglove/maps at dashboard startup."""
         maps_dir = self._maps_dir()
@@ -2349,7 +2396,56 @@ class ArgoWebDashboard(ArgoBaseNode):
                 }), status_code
             except Exception as e:
                 return jsonify({"success": False, "message": str(e)}), 500
-        
+
+        @self.app.route('/api/bags', methods=['GET'])
+        def bags_list():
+            """List recording folders under bags/ (newest first)."""
+            try:
+                return jsonify(self._list_bag_recordings())
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e), "recordings": []}), 500
+
+        @self.app.route('/api/bags/download', methods=['GET'])
+        def bags_download():
+            """Zip one recording folder and send as attachment."""
+            name = (request.args.get('name') or '').strip()
+            folder = self._resolve_safe_bag_folder(name)
+            if not folder:
+                return jsonify({"success": False, "message": "Invalid or unknown recording folder"}), 400
+
+            bags_root = self._bags_dir().resolve()
+            fd, tmp_zip = tempfile.mkstemp(suffix='.zip', prefix='argo_bag_dl_')
+            os.close(fd)
+            try:
+                os.unlink(tmp_zip)
+            except OSError:
+                pass
+            archive_base = tmp_zip[:-4]
+            try:
+                archive_path = shutil.make_archive(
+                    archive_base,
+                    'zip',
+                    root_dir=str(bags_root),
+                    base_dir=name,
+                )
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e)}), 500
+
+            @after_this_request
+            def _cleanup_zip(response):
+                try:
+                    os.unlink(archive_path)
+                except OSError:
+                    pass
+                return response
+
+            return send_file(
+                archive_path,
+                as_attachment=True,
+                download_name=f'{name}.zip',
+                mimetype='application/zip',
+            )
+
         @self.app.route('/api/toggle_pause', methods=['POST'])
         def toggle_pause():
             """Toggle controller pause state."""

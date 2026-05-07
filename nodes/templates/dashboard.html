@@ -275,6 +275,33 @@
             </div>
         </div>
 
+        <!-- Recording bag download -->
+        <div class="card">
+            <h2>Recording bags</h2>
+            <div class="wifi-grid">
+                <div class="wifi-section">
+                    <div class="wifi-section-title">Download a recording</div>
+                    <div class="wifi-row">
+                        <button class="btn btn-secondary wifi-btn" id="bags-refresh-btn" onclick="bagsRefresh()">🔄 Refresh</button>
+                        <span class="wifi-hint">Newest first</span>
+                    </div>
+                    <div class="wifi-row">
+                        <label class="wifi-label" for="bags-select">Recording folder</label>
+                        <select id="bags-select" class="wifi-input">
+                            <option value="">(click Refresh)</option>
+                        </select>
+                    </div>
+                    <div class="wifi-row wifi-actions">
+                        <button class="btn btn-success wifi-btn" id="bags-download-btn" onclick="bagsDownload()">⬇️ Download ZIP</button>
+                    </div>
+                    <div class="wifi-status" id="bags-status">—</div>
+                    <div class="wifi-warning">
+                        Each subdirectory of <code>bags/</code> is one recording. Zipping runs on the boat; your browser saves the file (use the save dialog or default Downloads folder). Large bags may take a while.
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Node Status Details (Collapsible) -->
         <div class="card">
             <h2 onclick="toggleNodeDetails()" style="cursor: pointer;">
@@ -1591,6 +1618,69 @@
                 btn.disabled = false;
                 loadGeofenceMaps();
             });
+        }
+
+        // ==================== Recording bags (zip download) ====================
+        function bagsSetStatus(msg) {
+            const el = document.getElementById('bags-status');
+            if (el) el.textContent = msg || '—';
+        }
+
+        function bagsRefresh() {
+            const btn = document.getElementById('bags-refresh-btn');
+            const select = document.getElementById('bags-select');
+            if (btn) btn.disabled = true;
+            bagsSetStatus('Loading…');
+            fetch('/api/bags')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) throw new Error(data.message || 'Failed to list bags');
+                    const rec = data.recordings || [];
+                    if (!select) return;
+                    select.innerHTML = '';
+                    if (rec.length === 0) {
+                        const opt = document.createElement('option');
+                        opt.value = '';
+                        opt.textContent = '(no recordings)';
+                        select.appendChild(opt);
+                        bagsSetStatus('No folders in bags/');
+                        return;
+                    }
+                    const placeholder = document.createElement('option');
+                    placeholder.value = '';
+                    placeholder.textContent = '(select recording)';
+                    select.appendChild(placeholder);
+                    rec.forEach(item => {
+                        const opt = document.createElement('option');
+                        opt.value = item.name;
+                        const label = item.mtime_iso ? `${item.name} — ${item.mtime_iso}` : item.name;
+                        opt.textContent = label;
+                        select.appendChild(opt);
+                    });
+                    bagsSetStatus(`${rec.length} recording(s), newest first`);
+                })
+                .catch(err => bagsSetStatus('❌ ' + (err.message || err)))
+                .finally(() => {
+                    if (btn) btn.disabled = false;
+                });
+        }
+
+        function bagsDownload() {
+            const select = document.getElementById('bags-select');
+            const name = select && select.value ? select.value.trim() : '';
+            if (!name) {
+                bagsSetStatus('❌ Select a recording first');
+                return;
+            }
+            bagsSetStatus('Zipping… then your browser should prompt to save.');
+            const url = `/api/bags/download?name=${encodeURIComponent(name)}`;
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = name + '.zip';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => bagsSetStatus('✅ Save dialog or Downloads folder — large bags take longer to zip.'), 800);
         }
     </script>
 </body>

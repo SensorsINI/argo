@@ -1,0 +1,25 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Argo BNO085 / I2C bus 0 fast mode (400 kHz)
+ *
+ * Default Allwinner I2C is often 100 kHz; this overlay sets clock-frequency on
+ * the i2c0 controller used for IMU (0x4a), battery/water ADC, etc. on PI5/PI6.
+ *
+ * Requires pi-i2c0 (or equivalent) so &i2c0 is present. Applies on top of it.
+ *
+ * Install: make -C nodes/bno085_i2c0_fast install  (from repo), then reboot.
+ */
+
+/ {
+	compatible = "xunlong,orangepi-zero2w", "allwinner,sun50i-h618";
+
+	fragment@0 {
+		target = <&i2c0>;
+		__overlay__ {
+			/* Fast-mode I2C: 400000 Hz (100 kHz default is 100000) */
+			clock-frequency = <400000>;
+		};
+	};
+};

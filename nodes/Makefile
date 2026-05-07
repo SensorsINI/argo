@@ -21,7 +21,9 @@ SYSTEMD_SYSTEM_DIR := /etc/systemd/system
 BATTERY_WATER_SERVICE_FILE := argo_battery_water.service
 BATTERY_WATER_SCRIPT_FILE := argo_battery_water.py
 
-.PHONY: help battery-water-install battery-water-uninstall battery-water-status battery-water-enable battery-water-disable battery-water-restart battery-water-start battery-water-stop battery-water-logs battery-water-logs-follow battery-water-check bno08x-help bno08x-init bno08x-build bno08x-test bno08x-launch bno08x-calibrate bno08x-clean bno085-service-install bno085-service-uninstall bno085-service-enable bno085-service-disable bno085-service-start bno085-service-stop bno085-service-restart bno085-service-status bno085-service-logs
+.PHONY: help battery-water-install battery-water-uninstall battery-water-status battery-water-enable battery-water-disable battery-water-restart battery-water-start battery-water-stop battery-water-logs battery-water-logs-follow battery-water-check bno08x-help bno08x-init bno08x-build bno08x-test bno08x-launch bno08x-calibrate bno08x-clean \
+	bno085-i2c0-fast-build bno085-i2c0-fast-install bno085-i2c0-fast-uninstall bno085-i2c0-fast-clean \
+	bno085-service-install bno085-service-uninstall bno085-service-enable bno085-service-disable bno085-service-start bno085-service-stop bno085-service-restart bno085-service-status bno085-service-logs
 
 # Default target - show help
 .DEFAULT_GOAL := help
@@ -53,6 +55,12 @@ help:
 	@echo "  bno08x-launch-full - Launch complete system (C++ driver + Python bridge)"
 	@echo "  bno08x-calibrate   - Run interactive calibration tool"
 	@echo "  bno08x-clean       - Clean build artifacts"
+	@echo ""
+	@echo "BNO085 I2C0 FAST MODE (400 kHz DT overlay, optional):"
+	@echo "  bno085-i2c0-fast-build    - Compile argo-bno085-i2c0-fast overlay (.dtbo)"
+	@echo "  bno085-i2c0-fast-install  - Install to /boot/overlay-user + user_overlays (sudo, reboot)"
+	@echo "  bno085-i2c0-fast-uninstall - Remove overlay from boot config"
+	@echo "  bno085-i2c0-fast-clean    - Remove local build artifacts"
 	@echo ""
 	@echo "BNO085 SERVICE (Systemd Integration):"
 	@echo "  bno085-service-install   - Install BNO085 systemd service"
@@ -309,6 +317,22 @@ bno08x-clean:
 	@echo "Cleaning BNO08x build artifacts..."
 	@rm -rf $(BNO08X_BUILD_DIR)
 	@echo "✅ Build artifacts cleaned"
+
+# ============================================================================
+# BNO085 I2C0 device tree overlay (400 kHz / Fast mode)
+# ============================================================================
+
+bno085-i2c0-fast-build:
+	@$(MAKE) -C bno085_i2c0_fast all
+
+bno085-i2c0-fast-install:
+	@$(MAKE) -C bno085_i2c0_fast install
+
+bno085-i2c0-fast-uninstall:
+	@$(MAKE) -C bno085_i2c0_fast uninstall
+
+bno085-i2c0-fast-clean:
+	@$(MAKE) -C bno085_i2c0_fast clean
 
 # ============================================================================
 # BNO085 Service Management (Systemd integration)
