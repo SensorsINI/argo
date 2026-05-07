@@ -1717,14 +1717,16 @@ class PowerController(ArgoBaseNode):
         if not os.path.isfile(script):
             self.get_logger().warning(f"abeep script missing: {script}")
             return
-        cmd = ['bash', script, f"{duration_s:.3f}"]
+        # --wait: blocking pulse in foreground so the shell does not exit while a
+        # background subshell is still driving GPIO (avoids truncated or silent beeps).
+        cmd = ['bash', script, '--wait', f"{duration_s:.3f}"]
         try:
             result = subprocess.run(
                 cmd,
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=max(15.0, duration_s + 5.0)
             )
             if result.returncode == 0:
                 if reason:

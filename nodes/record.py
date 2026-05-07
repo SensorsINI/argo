@@ -72,6 +72,9 @@ class ArgoRecordingNode(ArgoBaseNode):
         # Ensure bagfiles directory exists
         os.makedirs(self.bagfiles_dir, exist_ok=True)
 
+        self._abeep_script = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', 'scripts', 'abeep.sh'))
+
         # Using default QoS for all publishers
         # ROS2 Services
         self.start_service = self.create_service(
@@ -337,6 +340,49 @@ class ArgoRecordingNode(ArgoBaseNode):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"argo_{timestamp}"
 
+    def _run_recording_success_beep_async(self, reason: str) -> None:
+        """1s buzzer after recording start/stop succeeds (any client: dashboard, CLI, power button)."""
+        script = self._abeep_script
+        dur = 1.0
+
+        def worker():
+            if not os.path.isfile(script):
+                self._log_warn(f"abeep script missing: {script}")
+                return
+            cmd = ['bash', script, '--wait', f"{dur:.3f}"]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(15.0, dur + 5.0),
+                )
+                if result.returncode == 0:
+                    self.get_logger().info(
+                        f"Buzzer pulse complete ({reason})"
+                        if reason
+                        else "Buzzer pulse complete"
+                    )
+                else:
+                    detail = (
+                        (result.stderr or result.stdout or "").strip()
+                        or f"exit {result.returncode}"
+                    )
+                    self.get_logger().warning(
+                        f"Buzzer pulse failed ({reason}): {detail}"
+                        if reason
+                        else f"Buzzer pulse failed: {detail}"
+                    )
+            except Exception as e:
+                self.get_logger().warning(
+                    f"Buzzer pulse exception ({reason}): {e}"
+                    if reason
+                    else f"Buzzer pulse exception: {e}"
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def start_recording_callback(self, request, response):
         """Service callback to start recording"""
         self._log_info("🎬 Start recording service called")
@@ -496,6 +542,7 @@ class ArgoRecordingNode(ArgoBaseNode):
             self._log_debug("Monitoring thread started")
 
             self._log_debug("start_recording() returning True")
+            self._run_recording_success_beep_async("recording_started")
             return True
 
         except Exception as e:
@@ -625,6 +672,7 @@ class ArgoRecordingNode(ArgoBaseNode):
             else:
                 self.publish_info("Recording stopped")
 
+            self._run_recording_success_beep_async("recording_stopped")
             return True
 
         except Exception as e:

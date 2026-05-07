@@ -441,10 +441,16 @@ class BNO085Bridge(Node):
             # We have recent data, ensure we're healthy
             if not self.health_status:
                 self._publish_health_status(True)
+
+        # Heartbeat /imu_health every timer tick so volatile late subscribers get state.
+        # Heading streams on each /imu; health was only emitted on transitions, so nodes
+        # that start later (web dashboard, restarts) could show UNKNOWN with live bearing.
+        hb = Bool()
+        hb.data = self.health_status
+        self.pub_health.publish(hb)
     
     def _publish_health_status(self, is_healthy: bool):
-        """Publish health status update."""
-        # Always publish health status (not just when it changes)
+        """Publish health status update (logs on transitions; heartbeat uses _check_health)."""
         self.health_status = is_healthy
         health_msg = Bool()
         health_msg.data = is_healthy

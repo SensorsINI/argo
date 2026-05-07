@@ -44,7 +44,7 @@ Intelligent argument completion for all Argo Python scripts:
 
 **Scripts with completion enabled:**
 - ✅ `launch/argo_lifecycle_manager.py` - Commands: run, stop, restart, status, simulate_local, simulate_remote
-- ✅ `nodes/imu.py` - Args: --debug, --calib_compass, --plot_calib
+- ✅ `nodes/bno085.py` - Commands: bridge, calibrate, verify, status
 - ✅ `nodes/controller.py` - Full argument completion
 - ✅ `nodes/anem.py` - Full argument completion
 - ✅ `nodes/gps.py` - Full argument completion
@@ -58,8 +58,9 @@ Intelligent argument completion for all Argo Python scripts:
 ### Tmux Configuration (`dotfiles/.tmux.conf`)
 Custom tmux settings for terminal multiplexing.
 
-### Compass Calibration (`dotfiles/invensense-20948-compass-calibration.json`)
-Default compass calibration data for IMU sensor.
+### Compass calibration
+With BNO085, calibration is stored on the sensor itself (on-chip) and does not
+use a repo-managed JSON calibration file.
 
 ## Tab Completion Setup
 
@@ -109,17 +110,15 @@ Open a new terminal (or run `source ~/.bashrc`) and try:
 python3 launch/argo_lifecycle_manager.py <TAB>
 # Shows: run stop restart status simulate_local simulate_remote
 
-# IMU node arguments
-python3 nodes/imu.py --<TAB>
-# Shows: --help --debug --calib_compass --plot_calib
+# IMU node commands/args
+python3 nodes/bno085.py --<TAB>
 
 # Power control options
 python3 power_control/argo_power_control.py --sim<TAB>
 # Completes: --simulate-double-tap --simulate-triple-tap --simulate-critical-battery --simulate-low-battery
 
 # Direct invocation also works
-./nodes/imu.py --<TAB>
-# Shows: --help --debug --calib_compass --plot_calib
+./nodes/bno085.py --<TAB>
 ```
 
 ## Troubleshooting
@@ -144,7 +143,7 @@ python3 power_control/argo_power_control.py --sim<TAB>
 
 4. **Verify script has the marker:**
    ```bash
-   head -3 nodes/imu.py | grep PYTHON_ARGCOMPLETE_OK
+   head -3 nodes/bno085.py | grep PYTHON_ARGCOMPLETE_OK
    ```
 
 ### Performance
@@ -190,5 +189,5 @@ source ~/.bashrc
 - `.bash_completion_argo` - Tab completion setup
 - `.bashrc` - Main bash configuration (sources other files)
 - `.tmux.conf` - Tmux configuration
-- `invensense-20948-compass-calibration.json` - IMU compass calibration
+- (No repo-managed IMU calibration JSON with BNO085)
 - `README.md` - This file

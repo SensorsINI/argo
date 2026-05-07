@@ -20,7 +20,8 @@ alias mount1="mount | grep -E '^/'|grep -v snapd"
 alias akill='$ARGO_DIR/scripts/akill.sh'
 alias al='$ARGO_DIR/launch/argo_start_standard.sh'      # Start Argo nodes using standard launch
 alias aq='$ARGO_DIR/launch/argo_stop_standard.sh'       # Stop Argo nodes using standard launch
-alias ars='aq && al' # Restart Argo nodes
+alias ars='aq && al' # Restart standard (not service) Argo nodes
+alias arsall='echo "Restarting all Argo services and nodes..." && sudo systemctl restart argo_launch_standard.service && sudo systemctl restart argo_health_monitor.service' # Restart all Argo services and nodes
 alias as='python3 $ARGO_DIR/launch/argo_lifecycle_manager.py status'      # Show Argo status (restored rich output)
 alias asq='python3 $ARGO_DIR/launch/argo_lifecycle_manager.py quick_status --quiet'  # Quick status (restored rich output)
 alias am='$ARGO_DIR/launch/argo_monitor.sh'  # Monitor mode - continuous status display
@@ -54,7 +55,7 @@ alias vacuum='sudo journalctl --vacuum-size=10M ;sudo find /tmp -type f -atime +
 
 # I2C bus reset (requires sudo)
 alias ai2creset='sudo $ARGO_DIR/scripts/reset_i2c_bus.sh'  # Reset I2C bus (stops services, resets bus, restarts services)
-alias ai2c='$ARGO_DIR/scripts/ai2c.sh'  # Scan I2C buses 0 and 2, report sensor status
+alias ai2c='$ARGO_DIR/scripts/ai2c.sh'  # Scan I2C buses + IMU ROS live (/imu_health, /imu) when 0x4a present
 
 # buzzer/beep aliases
 alias abeep='bash $ARGO_DIR/scripts/abeep.sh'  # Pulse buzzer (default 0.5s)

@@ -7,7 +7,7 @@
 /**:
   ros__parameters:
     # Map configuration (used by sailing_area_publisher, argo_transform_publisher, controllers)
-    geofence_map_name: Hotel dei Pini # Argo Irchel North pond sailing area
+    geofence_map_name: Argo Pool Hotel dek Pini # Hotel dei Pini # Argo Irchel North pond sailing area
     # Controller parameters (used by controller.py and crosser controller)
     p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
     min_rudder_near_boundary: 0.5  # Minimum rudder command when close to boundary (0.0-1.0)
@@ -129,4 +129,4 @@ rudder_sail_radio_node:
     param_file_path: argo.yaml
 argo_boat_visualization:
   ros__parameters:
-    visualization_scale: 12.0        # Scale factor for boat visualization (1.0 realistic)
+    visualization_scale: 1.0        # Scale factor for boat visualization (1.0 realistic)

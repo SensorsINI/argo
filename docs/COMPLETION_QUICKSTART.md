@@ -16,9 +16,9 @@
    python3 launch/argo_lifecycle_manager.py --<TAB>
    # Shows: --help --debug --toggle_pause
    
-   # Tab completion for imu.py
-   python3 nodes/imu.py --<TAB>
-   # Shows: --help --debug --calib_compass --plot_calib
+   # Tab completion for bno085.py
+   python3 nodes/bno085.py <TAB>
+   python3 nodes/bno085.py --<TAB>
    ```
 
 ## How to Add to Other Scripts
@@ -41,7 +41,7 @@ def main():
 
 ✅ **Already enabled:**
 - `launch/argo_lifecycle_manager.py` 
-- `nodes/imu.py`
+- `nodes/bno085.py`
 
 📝 **Easy to enable** (just add 2 lines):
 - `nodes/controller.py`
