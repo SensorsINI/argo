@@ -94,8 +94,8 @@ class GpsNode(ArgoBaseNode):
        - Clears ALL data: ephemeris, almanac, position, and time
        - GPS must search entire time/frequency space and all satellite numbers
        - Time-To-First-Fix (TTFF): ~24-36 seconds under good conditions
-       - Used when GPS has been without fix for extended periods (10+ minutes)
-       - Automatic cold start reset after 10 minutes without fix (configurable)
+       - Used when GPS has been without fix for extended periods (4+ minutes)
+       - Automatic cold start reset after 4 minutes without fix (configurable)
     
     2. Warm Start (navBbrMask=0x0002):
        - Clears ephemeris and almanac, but keeps position and time
@@ -116,7 +116,7 @@ class GpsNode(ArgoBaseNode):
        - Useful for recovering from temporary GNSS task errors
     
     Automatic Reset:
-    - If GPS runs without a fix for 10 minutes, automatic cold start reset is triggered
+    - If GPS runs without a fix for 4 minutes, automatic cold start reset is triggered
     - Minimum 2 minutes between resets to prevent reset loops
     - Resets clear stale data that may prevent satellite acquisition
     - After reset, GPS reinitializes and should acquire satellites within 30-60 seconds
@@ -262,6 +262,11 @@ class GpsNode(ArgoBaseNode):
         self.pps_timeout_seconds = 2.5
         self._initialize_gpio_lines()
 
+        # Last known antenna status from diagnostics (UBX-MON-HW). Populated during setup.
+        self.antenna_status = None  # e.g. "OK", "Open", "Short", "Init", "Dont know"
+        self.antenna_power = None   # "ON" / "OFF"
+        self.last_antenna_status_time = None
+
         self.setup_gps()
 
         # Initialize data counter for debugging
@@ -285,7 +290,7 @@ class GpsNode(ArgoBaseNode):
 
         # GPS reset tracking for extended no-fix periods
         self.last_fix_time = time.time()  # Initialize to startup time (will be cleared when fix acquired)
-        self.no_fix_reset_timeout_seconds = 600.0  # Auto-reset after 10 minutes without fix
+        self.no_fix_reset_timeout_seconds = 240.0  # Auto-reset after 4 minutes without fix
         self.last_reset_time = None  # Track when we last reset to avoid reset loops
         self.min_reset_interval_seconds = 120.0  # Minimum 2 minutes between resets
 
@@ -1493,6 +1498,11 @@ class GpsNode(ArgoBaseNode):
                         ant_status_names = {0: "Init", 1: "Dont know", 2: "OK", 3: "Short", 4: "Open"}
                         ant_status = ant_status_names.get(a_status, f"Unknown({a_status})")
                         ant_power = "ON" if a_power == 1 else "OFF"
+
+                        # Store last known antenna status for consolidated "no fix" logging.
+                        self.antenna_status = ant_status
+                        self.antenna_power = ant_power
+                        self.last_antenna_status_time = time.time()
                         
                         self.get_logger().info(f"  Antenna Status: {ant_status} (0x{a_status:02X})")
                         self.get_logger().info(f"  Antenna Power: {ant_power}")
@@ -1853,9 +1863,55 @@ class GpsNode(ArgoBaseNode):
 
             # Check if enough time has passed since last log
             if current_time - self.last_no_fix_log_time >= log_interval:
-                self.get_logger().info("GPS: No fix - searching for satellites...")
+                self.get_logger().info(self._format_no_fix_status_line(current_time))
                 self.last_no_fix_log_time = current_time
                 self.no_fix_log_count += 1
+
+    @staticmethod
+    def _format_hms(seconds: float) -> str:
+        total = max(0, int(seconds))
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _format_no_fix_status_line(self, now: float) -> str:
+        time_without_fix_s = now - self.last_fix_time
+        reset_due_in_s = self.no_fix_reset_timeout_seconds - time_without_fix_s
+
+        if self.gps_pps_line is None:
+            pps_str = "PPS=unavailable"
+        else:
+            age = now - self.last_pps_pulse_time if self.last_pps_pulse_time > 0 else None
+            if self.pps_status:
+                pps_str = f"PPS=ACTIVE age={age:.1f}s" if age is not None else "PPS=ACTIVE"
+            else:
+                pps_str = f"PPS=INACTIVE age={age:.1f}s" if age is not None else "PPS=INACTIVE"
+
+        if self.antenna_status is None and self.antenna_power is None:
+            ant_str = "ANT=unknown"
+        else:
+            ant_parts = []
+            if self.antenna_status is not None:
+                ant_parts.append(f"ANT={self.antenna_status}")
+            if self.antenna_power is not None:
+                ant_parts.append(f"PWR={self.antenna_power}")
+            if self.last_antenna_status_time is not None:
+                ant_parts.append(f"age={self._format_hms(now - self.last_antenna_status_time)}")
+            ant_str = " ".join(ant_parts)
+
+        if self.last_reset_time is None:
+            reset_str = f"reset_due_in={self._format_hms(reset_due_in_s)}"
+        else:
+            reset_str = (
+                f"last_reset={self._format_hms(now - self.last_reset_time)} ago "
+                f"reset_due_in={self._format_hms(reset_due_in_s)}"
+            )
+
+        return (
+            "GPS: No fix - searching for satellites... "
+            f"(since_fix={self._format_hms(time_without_fix_s)}; {pps_str}; {ant_str}; {reset_str})"
+        )
 
     def publish_navigation_data(self):
         """Publish SOG and COG data to ROS topics."""
@@ -2127,7 +2183,7 @@ class GpsNode(ArgoBaseNode):
                                 else:
                                     self.get_logger().info(f"GPS Fix ({fix_quality_str}) obtained, waiting for navigation data, {accuracy_str}")
                             else:
-                                self.get_logger().info("No GPS fix - searching for satellites...")
+                                self.get_logger().info(self._format_no_fix_status_line(current_time))
                             self.last_data_log_time = current_time
 
                 # The original script performed manual parsing of NMEA sentences
