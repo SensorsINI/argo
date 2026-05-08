@@ -1200,27 +1200,25 @@ class ArgoBoatVisualization(ArgoBaseNode):
         return marker
     
     def create_wind_vector_marker(self):
-        """Create wind vector arrow showing absolute wind direction (where wind goes on the map)
+        """Create wind vector arrow in the boat frame (`base_link`).
         
-        Wind direction convention:
-        - wind_angle from sensor: "where wind comes from" relative to boat (0° = from front, 90° = from starboard)
-        - boat_heading: boat's heading in compass convention (0° = North, 90° = East, 180° = South, 270° = West)
-        - We want to show: "where wind goes" in absolute terms (on the map)
+        We intentionally publish this marker in `base_link` so it moves/rotates with the boat,
+        consistent with other direction markers (heading, velocity, rudder/sail overlays).
         
-        Calculation:
-        - Step 1: Calculate absolute wind direction (where wind comes from in compass frame)
-          absolute_wind_from_compass = (boat_heading + wind_angle) % 360
-        - Step 2: Convert "wind comes from" to "wind goes toward" (add 180°)
-          absolute_wind_to_compass = (absolute_wind_from_compass + 180) % 360
-        - Step 3: Convert back to relative direction for base_link frame visualization
-          relative_wind_to = (absolute_wind_to_compass - boat_heading) % 360
-          
-        Note: The wind_angle from sensor is already relative to boat and in the correct coordinate system
-        for this calculation (where 0° = from front of boat).
+        Conventions:
+        - `true_wind_direction` (if available): absolute "wind comes from" in *compass* degrees
+          (0°=North, 90°=East, increasing clockwise).
+        - `boat_heading`: boat heading in *compass* degrees (same convention).
+        - `wind_angle` fallback: relative "wind comes from" in degrees where 0°=from bow,
+          +90°=from starboard.
+        - Visualization arrow points where the wind *goes to* ("wind_to" = wind_from + 180°),
+          expressed relative to the boat and then converted to `base_link` yaw where:
+            - yaw 0° points along +X (forward)
+            - yaw +90° points along +Y (port/left)
         """
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"  # Use map frame so arrow shows absolute wind direction
+        marker.header.frame_id = "base_link"  # Boat-centric frame
         marker.header.stamp = self.get_current_time()
         
         marker.id = 5
@@ -1228,45 +1226,39 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.action = Marker.ADD
         marker.ns = "argo_boat"
         
-        # Position above boat in map frame - get from TF transforms (works during playback)
-        # Falls back to GPS-based position if TF not available
-        boat_x, boat_y = self._get_boat_position_from_tf()
-        marker.pose.position.x = boat_x
-        marker.pose.position.y = boat_y
+        # Position above the boat (in base_link)
+        marker.pose.position.x = 0.0
+        marker.pose.position.y = 0.0
         marker.pose.position.z = 1.0 * self.visualization_scale  # Just above mast
         
-        # Convert wind direction from "relative to boat, where wind comes from" 
-        # to "relative to boat, where wind goes" (for visualization)
-        # wind_angle: where wind comes from relative to boat (0° = from front/bow, 90° = from starboard)
-        # boat_heading: compass heading (0° = North, 90° = East)
-        
-        # Step 1: Calculate absolute wind direction (where wind comes from in compass frame)
-        # The relative wind_angle from sensor is in simulator convention, but boat_heading is now in compass convention.
-        # We can either convert wind_angle OR recalculate from true wind direction (more accurate).
+        # Compute wind direction relative to the boat ("wind_to", where the wind flows).
         if self.true_wind_direction is not None:
-            # Recalculate relative wind from true wind and boat heading (both in compass convention)
-            # Relative wind = (true_wind - boat_heading), normalized to -180 to +180
-            relative_wind_compass = (self.true_wind_direction - self.boat_heading) % 360.0
-            if relative_wind_compass > 180.0:
-                relative_wind_compass -= 360.0
-            absolute_wind_from = self.true_wind_direction
+            # Relative "wind from" in compass convention, normalized to [-180, +180].
+            # + means wind coming from starboard side (clockwise from bow).
+            relative_wind_from_deg = (self.true_wind_direction - self.boat_heading) % 360.0
+            if relative_wind_from_deg > 180.0:
+                relative_wind_from_deg -= 360.0
+            # For debugging, keep publishing absolute "wind from".
+            self.pub_debug_wind.publish(Float64(data=float(self.true_wind_direction)))
         else:
-            # Fallback: use relative wind angle from sensor (may have coordinate system mismatch)
-            # Note: This assumes wind_angle is in the same convention as boat_heading
-            absolute_wind_from = (self.boat_heading + self.wind_angle) % 360.0
-        
-        # Publish calculated absolute wind direction for debugging
-        debug_msg = Float64(data=absolute_wind_from)
-        self.pub_debug_wind.publish(debug_msg)
-        
-        # Step 2: Convert "wind comes from" to "wind goes toward" (add 180°)
-        # If wind comes from 0° (north), it goes toward 180° (south)
-        absolute_wind_to = (absolute_wind_from + 180.0) % 360.0
-        
-        # Step 3: Convert to map frame yaw (0° = East, increasing CCW)
-        # Compass 0° = North, so yaw = (90 - compass)
-        yaw_deg = (90.0 - absolute_wind_to) % 360.0
-        wind_angle_rad = math.radians(yaw_deg)
+            # Fallback: sensor already provides relative "wind from" where +90° = from starboard.
+            relative_wind_from_deg = float(self.wind_angle) % 360.0
+            if relative_wind_from_deg > 180.0:
+                relative_wind_from_deg -= 360.0
+            # Debug publisher expects an absolute-ish value; publish NaN-free best-effort.
+            # (Use boat_heading + relative as a proxy; only for diagnostics.)
+            absolute_wind_from_proxy = (self.boat_heading + relative_wind_from_deg) % 360.0
+            self.pub_debug_wind.publish(Float64(data=float(absolute_wind_from_proxy)))
+
+        # Convert "wind from" -> "wind to"
+        relative_wind_to_deg = relative_wind_from_deg + 180.0
+        if relative_wind_to_deg > 180.0:
+            relative_wind_to_deg -= 360.0
+        elif relative_wind_to_deg < -180.0:
+            relative_wind_to_deg += 360.0
+
+        # Convert compass-style clockwise-positive to base_link yaw (CCW-positive).
+        wind_angle_rad = math.radians(-relative_wind_to_deg)
         marker.pose.orientation.w = math.cos(wind_angle_rad * 0.5)
         marker.pose.orientation.x = 0.0
         marker.pose.orientation.y = 0.0
@@ -1469,7 +1461,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         """Create optional text label for wind vector, positioned at the middle of the wind arrow"""
         marker = Marker()
         marker.header = Header()
-        marker.header.frame_id = "map"  # Use same frame as wind arrow
+        marker.header.frame_id = "base_link"  # Use same frame as wind arrow
         marker.header.stamp = self.get_current_time()
         
         marker.id = 12
@@ -1477,32 +1469,34 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.action = Marker.ADD
         marker.ns = "argo_boat_labels"
         
-        # Calculate wind direction for positioning (same calculation as wind arrow)
+        # Calculate wind direction for positioning (same logic as wind arrow)
         if self.true_wind_direction is not None:
-            absolute_wind_from = self.true_wind_direction
+            relative_wind_from_deg = (self.true_wind_direction - self.boat_heading) % 360.0
+            if relative_wind_from_deg > 180.0:
+                relative_wind_from_deg -= 360.0
         else:
-            absolute_wind_from = (self.boat_heading + self.wind_angle) % 360.0
-        
-        # Convert "wind comes from" to "wind goes toward" (add 180°)
-        absolute_wind_to = (absolute_wind_from + 180.0) % 360.0
+            relative_wind_from_deg = float(self.wind_angle) % 360.0
+            if relative_wind_from_deg > 180.0:
+                relative_wind_from_deg -= 360.0
+
+        relative_wind_to_deg = relative_wind_from_deg + 180.0
+        if relative_wind_to_deg > 180.0:
+            relative_wind_to_deg -= 360.0
+        elif relative_wind_to_deg < -180.0:
+            relative_wind_to_deg += 360.0
         
         # Calculate arrow length (same as wind arrow marker)
         wind_scale = min(max(self.wind_speed * 0.5, 0.1), 2.0)
         arrow_length = wind_scale * self.visualization_scale
         
-        # Position at middle of wind arrow: start position + half arrow length in wind direction
-        # Wind arrow starts at boat position, points in absolute_wind_to direction
-        # Convert absolute_wind_to (compass: 0°=North) to map frame (0°=East, CCW)
-        wind_yaw_deg = (90.0 - absolute_wind_to) % 360.0
-        wind_yaw_rad = math.radians(wind_yaw_deg)
-        
-        # Get boat position from TF (works during playback)
-        boat_x, boat_y = self._get_boat_position_from_tf()
-        
-        # Calculate midpoint offset (half arrow length in wind direction)
+        # Position at middle of wind arrow in base_link.
+        # base_link yaw is CCW-positive, so negate compass-style relative angle.
+        wind_yaw_rad = math.radians(-relative_wind_to_deg)
+
+        # Calculate midpoint offset (half arrow length in wind direction), starting at boat center.
         midpoint_offset = arrow_length * 0.5
-        marker.pose.position.x = boat_x + midpoint_offset * math.cos(wind_yaw_rad)
-        marker.pose.position.y = boat_y + midpoint_offset * math.sin(wind_yaw_rad)
+        marker.pose.position.x = midpoint_offset * math.cos(wind_yaw_rad)
+        marker.pose.position.y = midpoint_offset * math.sin(wind_yaw_rad)
         marker.pose.position.z = 1.0 * self.visualization_scale  # Same height as wind arrow start
         
         # Text content with values
@@ -1538,7 +1532,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         marker.pose.position.z = 0.2 * self.visualization_scale  # Above heading arrow
         
         # Text content with value
-        marker.text = f"{self.boat_heading:.1f}° {self.boat_speed:.1f} m/s"
+        marker.text = f"{self.boat_heading:.1f}° mooox {self.boat_speed:.1f} m/s"
         
         # Scale - apply visualization scale
         marker.scale.z = self.TEXT_MARKER_SIZE * self.visualization_scale
