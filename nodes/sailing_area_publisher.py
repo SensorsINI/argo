@@ -30,7 +30,14 @@ MARKER_NS_HAZARDS = "argo_sailing_hazards"
 class SailingAreaPublisher(Node):
     def __init__(self, map_name=None):
         super().__init__('sailing_area_publisher')
-        self.map_name = map_name  # Specific map to use for origin (matches simulator bridge)
+        # Map selection:
+        # - Prefer explicit CLI `--map`
+        # - Otherwise use ROS param `geofence_map_name` (shared with transform publisher / simulator)
+        # - Never silently publish "all maps" because the coordinate origin is tied to one map's
+        #   home waypoint; mixing maps yields large offsets in Foxglove/RViz, especially on bag playback.
+        self.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
+        param_map_name = self.get_parameter('geofence_map_name').get_parameter_value().string_value
+        self.map_name = map_name or (param_map_name if param_map_name else None)
         
         # Initialize clock time for timestamp preservation (before any methods use it)
         self.sim_time = None
@@ -63,12 +70,25 @@ class SailingAreaPublisher(Node):
         # Debug: Log loaded maps and requested map
         self.get_logger().info(f"Requested map_name: '{self.map_name}'")
         self.get_logger().info(f"Loaded sailing areas keys: {list(self.sailing_areas.keys())}")
-        if self.map_name:
-            self.get_logger().info(f"Map name in sailing_areas: {self.map_name in self.sailing_areas}")
+        # Resolve case-insensitive map-name mismatches up-front.
+        if self.map_name and self.sailing_areas:
             if self.map_name not in self.sailing_areas:
-                self.get_logger().warn(f"⚠️ WARNING: Requested map '{self.map_name}' not found in loaded maps!")
-                self.get_logger().warn(f"   Available maps: {', '.join(self.sailing_areas.keys())}")
-                self.get_logger().warn(f"   Falling back to publishing all maps (may show wrong geofence)")
+                map_name_lower = self.map_name.lower()
+                matched_map = None
+                for loaded_map in self.sailing_areas.keys():
+                    if loaded_map.lower() == map_name_lower:
+                        matched_map = loaded_map
+                        break
+                if matched_map:
+                    self.get_logger().warn(
+                        f"⚠️ Map name case mismatch: requested '{self.map_name}', using '{matched_map}'"
+                    )
+                    self.map_name = matched_map
+                else:
+                    self.get_logger().error(f"❌ Requested map '{self.map_name}' not found in loaded maps.")
+                    self.get_logger().error(f"   Available maps: {', '.join(self.sailing_areas.keys())}")
+                    self.get_logger().error("   Not publishing sailing markers to avoid wrong-origin offsets.")
+                    # Keep map_name as-is (unknown); publish_all_markers() will no-op.
         
         # Find origin from 'home' waypoint in loaded maps (same as simulator bridge)
         self.origin_lon = 8.5448386  # Default fallback
@@ -451,36 +471,18 @@ class SailingAreaPublisher(Node):
         
         marker_id = 0
         
-        # If a specific map is requested, only publish markers from that map
-        # This ensures coordinates use the correct origin
-        maps_to_publish = []
-        if self.map_name:
-            # Try exact match first
-            if self.map_name in self.sailing_areas:
-                maps_to_publish = [self.map_name]
-                self.get_logger().debug(f"✅ Publishing markers ONLY from '{self.map_name}' map (to ensure correct coordinate origin)")
-            else:
-                # Try case-insensitive match
-                map_name_lower = self.map_name.lower()
-                matched_map = None
-                for loaded_map in self.sailing_areas.keys():
-                    if loaded_map.lower() == map_name_lower:
-                        matched_map = loaded_map
-                        break
-                
-                if matched_map:
-                    maps_to_publish = [matched_map]
-                    self.get_logger().warn(f"⚠️ Map name case mismatch: requested '{self.map_name}', using '{matched_map}'")
-                    self.get_logger().debug(f"✅ Publishing markers ONLY from '{matched_map}' map")
-                else:
-                    # No match found - fallback to all maps with warning
-                    maps_to_publish = list(self.sailing_areas.keys())
-                    self.get_logger().error(f"❌ ERROR: Requested map '{self.map_name}' not found in loaded maps!")
-                    self.get_logger().error(f"   Available maps: {', '.join(self.sailing_areas.keys())}")
-                    self.get_logger().error(f"   ⚠️ FALLING BACK: Publishing markers from ALL {len(maps_to_publish)} maps (WRONG GEOFENCE!)")
-        else:
-            maps_to_publish = list(self.sailing_areas.keys())
-            self.get_logger().warn(f"⚠️ No map_name specified - publishing markers from all {len(maps_to_publish)} maps")
+        # Always publish markers from exactly one map, because the coordinate origin is derived
+        # from that map's "home" waypoint. Publishing multiple maps with a single origin produces
+        # large, confusing offsets in Foxglove/RViz.
+        if not self.map_name:
+            self.get_logger().error(
+                "❌ No map selected (geofence_map_name param empty and no --map). Not publishing sailing markers."
+            )
+            return
+        if self.map_name not in self.sailing_areas:
+            # Map name unknown (already logged during init); refuse to publish.
+            return
+        maps_to_publish = [self.map_name]
         
         for area_name in maps_to_publish:
             geojson_data = self.sailing_areas[area_name]
@@ -525,27 +527,6 @@ class SailingAreaPublisher(Node):
                                   f"(total: {total_markers} markers)")
             self._logged_marker_publicaton = True
 
-def load_map_from_ros2_params():
-    """Load map name from ROS2 parameters (argo.yaml)."""
-    try:
-        import rclpy
-        from rclpy.node import Node
-        
-        # Initialize ROS2 if not already initialized
-        if not rclpy.ok():
-            rclpy.init()
-        
-        # Create a temporary node to read parameters
-        temp_node = Node('temp_map_loader')
-        temp_node.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
-        map_name = temp_node.get_parameter('geofence_map_name').get_parameter_value().string_value
-        temp_node.destroy_node()
-        
-        return map_name if map_name else None
-    except Exception as e:
-        # Silently fail - map_name will be None and defaults will be used
-        return None
-
 def main(args=None):
     parser = argparse.ArgumentParser(
         description='Publish sailing area data from GeoJSON files as ROS2 markers for Foxglove visualization',
@@ -562,22 +543,12 @@ Examples:
     # Parse known args (ROS2 will handle the rest)
     parsed_args, remaining_args = parser.parse_known_args(args)
     
-    # Load map name from ROS2 parameters if not provided via command line
-    map_name = parsed_args.map
-    if not map_name:
-        map_name = load_map_from_ros2_params()
-        if map_name:
-            print(f"📍 Using map from ROS2 parameters (argo.yaml): '{map_name}'")
-    
-    # Initialize ROS2 if not already initialized (load_map_from_ros2_params may have initialized it)
+    # Initialize ROS2 exactly once (passing through ROS args).
     if not rclpy.ok():
         rclpy.init(args=remaining_args)
-    elif remaining_args:
-        # If ROS2 is already initialized but we have args, we can't pass them now
-        # This is fine - args are typically handled during init
-        pass
-    
-    publisher = SailingAreaPublisher(map_name=map_name)
+
+    # CLI `--map` overrides ROS param `geofence_map_name`.
+    publisher = SailingAreaPublisher(map_name=parsed_args.map)
     
     try:
         rclpy.spin(publisher)

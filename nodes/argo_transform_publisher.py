@@ -49,8 +49,27 @@ class ArgoTransformPublisher(ArgoBaseNode):
         super().__init__('argo_transform_publisher')
         
         # Transform broadcasters
-        self.tf_broadcaster = TransformBroadcaster(self)
-        self.static_tf_broadcaster = StaticTransformBroadcaster(self)
+        # Use standard TF QoS so Foxglove/bridges receive transforms reliably.
+        # ROS2 TF conventions:
+        # - /tf: best-effort, volatile
+        # - /tf_static: reliable, transient-local
+        from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
+        tf_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=100,
+            # Some bridges (e.g., Foxglove / rosbridge stacks) request RELIABLE on `/tf`.
+            # RELIABLE publishers are broadly compatible in practice for our use-case.
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
+        tf_static_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.tf_broadcaster = TransformBroadcaster(self, qos=tf_qos)
+        self.static_tf_broadcaster = StaticTransformBroadcaster(self, qos=tf_static_qos)
         
         # Frame state
         self.map_origin_set = False
@@ -371,7 +390,13 @@ class ArgoTransformPublisher(ArgoBaseNode):
                 self.get_logger().debug(f"[TF_TRACE:{tf_id}] TF_PUBLISH_START")
             
             # map->odom is static (see publish_static_transforms). Only odom->base_link here.
-            stamp = self.get_current_time()
+            # Timestamping:
+            # - Prefer GPS message timestamp when available so TF aligns with /fix during bag playback.
+            # - Otherwise fall back to /clock (if present) or node time.
+            if self.last_gps_timestamp is not None:
+                stamp = self.last_gps_timestamp
+            else:
+                stamp = self.get_current_time()
 
             # Odom to base_link transform (boat position and orientation)
             # For now, assume boat is at map origin (0,0,0) and only rotates
