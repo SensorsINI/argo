@@ -260,6 +260,8 @@
                     <div class="wifi-section-title">Select Active Map</div>
                     <div class="wifi-row">
                         <label class="wifi-label" for="geofence-map-select">Map</label>
+                        <!-- If you add a new map file while this page is open: force-reload the page (Ctrl+Shift+R / pull-to-refresh).
+                             This select box is populated from /api/geofence/maps on page load and won't auto-repopulate by itself. -->
                         <select id="geofence-map-select" class="wifi-input">
                             <option value="">(loading maps...)</option>
                         </select>

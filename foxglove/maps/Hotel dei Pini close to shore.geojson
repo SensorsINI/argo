@@ -1,0 +1,103 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "home",
+        "type": "waypoint"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          8.2554556,
+          40.5839824,
+          0.0
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "boat lane hazard",
+        "type": "hazard"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              8.2557043,
+              40.5840695,
+              0.0
+            ],
+            [
+              8.2563815,
+              40.5830255,
+              0.0
+            ],
+            [
+              8.2566028,
+              40.5830978,
+              0.0
+            ],
+            [
+              8.2568482,
+              40.5831986,
+              0.0
+            ],
+            [
+              8.2562447,
+              40.584202,
+              0.0
+            ],
+            [
+              8.2557043,
+              40.5840695,
+              0.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "sailing_area",
+        "type": "sailing_area"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              8.2558499,
+              40.5837524,
+              0.0
+            ],
+            [
+              8.2556944,
+              40.5840091,
+              0.0
+            ],
+            [
+              8.2552277,
+              40.5838461,
+              0.0
+            ],
+            [
+              8.2553296,
+              40.5835446,
+              0.0
+            ],
+            [
+              8.2558499,
+              40.5837524,
+              0.0
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
