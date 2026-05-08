@@ -5,7 +5,7 @@ Sets `clock-frequency = <400000>` on `&i2c0` (PI5/PI6), on top of `pi-i2c0`.
 ## Build / install
 
 From repository `nodes/` directory:
-
+is 
 ```bash
 make bno085-i2c0-fast-build      # local .dtbo only
 sudo make bno085-i2c0-fast-install
