@@ -123,6 +123,18 @@ class ArgoRecordingNode(ArgoBaseNode):
             10
         )
 
+        # GPS fix-triggered automatic recording start
+        # gps.py publishes health on /gps_health (std_msgs/Bool) and flips to healthy when a fix is valid.
+        self._gps_fix_seen_since_boot = False
+        self._auto_start_blocked_by_user = False
+        self._gps_health_last = None
+        self.gps_health_sub = self.create_subscription(
+            Bool,
+            '/gps_health',
+            self._gps_health_cb,
+            10
+        )
+
         # Timer for periodic status updates
         self.status_timer = self.create_timer(5.0, self.publish_status)
 
@@ -150,6 +162,38 @@ class ArgoRecordingNode(ArgoBaseNode):
 
         # Publish initial status
         self.publish_status()
+
+    def _gps_health_cb(self, msg: Bool) -> None:
+        """Auto-start recording on first GPS fix after boot.
+
+        Recording must not auto-stop on transient GPS fix losses.
+        If the user explicitly stops recording, do not auto-start again until reboot.
+        """
+        try:
+            is_healthy = bool(msg.data)
+            if self._gps_health_last is None or self._gps_health_last != is_healthy:
+                self._log_info(
+                    f"GPS health changed: {'HEALTHY (fix)' if is_healthy else 'UNHEALTHY (no fix)'}"
+                )
+            self._gps_health_last = is_healthy
+
+            if is_healthy:
+                # Latch that we've seen a fix at least once since boot, regardless of recording state.
+                if not self._gps_fix_seen_since_boot:
+                    self._gps_fix_seen_since_boot = True
+
+                    if self._auto_start_blocked_by_user:
+                        self._log_info("GPS fix acquired, but auto-start is blocked (user stopped recording).")
+                        return
+
+                    if self.is_recording:
+                        self._log_info("GPS fix acquired, recording already active.")
+                        return
+
+                    self._log_info("GPS fix acquired: auto-starting recording.")
+                    self.start_recording()
+        except Exception as e:
+            self._log_warn(f"GPS health callback error: {e}")
 
     def get_status_callback(self, request, response):
         """Service callback to get current recording status."""
@@ -424,6 +468,9 @@ class ArgoRecordingNode(ArgoBaseNode):
             self._log_warn("⚠️  No recording in progress")
             return response
 
+        # User intent: once they stop, do not auto-start again until reboot
+        self._auto_start_blocked_by_user = True
+
         # Store bag name before stopping for response message
         success = self.stop_recording()
 
@@ -446,6 +493,8 @@ class ArgoRecordingNode(ArgoBaseNode):
             self.start_recording()
         elif msg.linear.x <= 0 and self.is_recording:
             self._log_info("🛑 Recording control: STOP")
+            # User intent: once they stop, do not auto-start again until reboot
+            self._auto_start_blocked_by_user = True
             self.stop_recording()
 
     def start_recording(self) -> bool:
