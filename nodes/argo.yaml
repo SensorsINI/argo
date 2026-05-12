@@ -7,7 +7,7 @@
 /**:
   ros__parameters:
     # Map configuration (used by sailing_area_publisher, argo_transform_publisher, controllers)
-    geofence_map_name: Hotel dei Pini close to shore# Hotel dei Pini # Argo Irchel North pond sailing area
+    geofence_map_name: Argo Irchel North pond sailing area # Hotel dei Pini close to shore# Hotel dei Pini # Argo Irchel North pond sailing area
     # Controller parameters (used by controller.py and crosser controller)
     p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
     min_rudder_near_boundary: 0.5  # Minimum rudder command when close to boundary (0.0-1.0)
@@ -102,7 +102,7 @@
       yaw_offset_deg: 59.25
 controller_node:
   ros__parameters:
-    controller_type: human  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
+    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
     controller_initially_paused: false  # Start controller in paused (manual) mode if true
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
