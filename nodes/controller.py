@@ -75,7 +75,7 @@
 #   Subscribed:
 #     /human_controlled (Bool) - Control authority from rudder_sail_radio.py
 #     /rudder_sail_radio (Vector3) - Radio input for reference
-#     /pose (Vector3) - Compass heading (z component)
+#     /pose (Vector3) - Mathematical yaw on z (0°=East, CCW); see pose_callback conversion
 #     /gps_cog, /gps_sog, /gps_velocity - GPS navigation data
 #     /accel, /gyro, /magnetometer - IMU sensor data
 #     /anem_speed_angle_temp (Vector3) - Wind sensor data
@@ -1354,7 +1354,7 @@ TOPICS:
     /human_controlled: Bool - Control authority status from rudder_sail_radio.py
     /control_authority: Vector3 - Detailed control status
     /rudder_sail_radio: Vector3 - Radio input reference
-    /pose: Vector3 - IMU data (compass heading in z)
+    /pose: Vector3 - Mathematical yaw on z (0°=East, CCW), same convention as simulator bridge
     /gps_*, /accel, /gyro, /compass, /anem_speed_angle_temp - Sensor data
 
 PARAMETERS:

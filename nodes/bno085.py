@@ -47,8 +47,9 @@ It can also be launched manually:
 
 TOPICS PUBLISHED
 ----------------
-  /compass      (Vector3) - Heading in degrees (z=0-360, 0=N, 90=E)
-  /pose         (Vector3) - Same as compass (z=heading)
+  /compass      (Vector3) - Heading in degrees (z=0-360, 0=N, 90=E, compass CW from North)
+  /pose         (Vector3) - Mathematical yaw in degrees on z (0°=East, CCW), matching
+                 argo_unified_simulator_bridge and argo_transform_publisher (ENU)
   /accel        (Vector3) - Acceleration in g (gravity units)
   /gyro         (Vector3) - Angular velocity in degrees/second
   /imu_health   (Bool)    - Health status (true=healthy, false=unhealthy)
@@ -413,10 +414,16 @@ class BNO085Bridge(Node):
         # Apply fixed yaw offset for mounting (rotate +90° about Z)
         yaw = (yaw + self.yaw_offset_deg) % 360.0
         
-        # Publish compass/pose (heading)
-        heading_msg = Vector3(x=0.0, y=0.0, z=yaw)
-        self.pub_compass.publish(heading_msg)
-        self.pub_pose.publish(heading_msg)
+        # /compass: compass convention (0=N, 90=E). /pose: math yaw for TF/controller (same as sim bridge).
+        heading_compass = yaw
+        compass_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
+        self.pub_compass.publish(compass_msg)
+        pose_msg = Vector3(
+            x=0.0,
+            y=0.0,
+            z=(450.0 - heading_compass) % 360.0,
+        )
+        self.pub_pose.publish(pose_msg)
         
         # Publish gyroscope (rad/s → deg/s)
         gx = math.degrees(msg.angular_velocity.x)

@@ -85,12 +85,7 @@ The `argo_bno085.service` systemd service is **required for production use** and
 - **Location**: `nodes/bno085.py`
 - **Function**: Converts C++ driver output to Argo format
 - **Topics Subscribed**: `/imu`, `/magnetic_field`
-- **Topics Published**:
-  - `/compass` (Vector3) - Heading in degrees (z component)
-  - `/pose` (Vector3) - Same as compass (for compatibility)
-  - `/accel` (Vector3) - Linear acceleration in m/s²
-  - `/gyro` (Vector3) - Angular velocity in rad/s
-  - `/imu_health` (Bool) - Health status for lifecycle management
+- **Topics Published**: See [Bridge published topics (Argo)](#bridge-published-topics-argo) for units, frames, and conventions.
 
 ## Quick Start
 
@@ -312,14 +307,37 @@ orientation:
 ```
 
 ### Compass Heading
-Converted to Euler angles for Argo compatibility:
+The bridge derives a yaw angle from the C++ driver’s `sensor_msgs/Imu` quaternion (Euler Z after the configured mount offset). That value is published as **compass heading** on `/compass` and, after a convention conversion, as **ENU math yaw** on `/pose` (see below).
 
 ```yaml
-# /compass topic (from bridge)
+# /compass topic (from bridge) — compass convention on z
 x: 0.0
 y: 0.0
-z: 127.93  # Heading in degrees (0-360°)
+z: 127.93  # degrees, clockwise from north, range [0, 360)
 ```
+
+## Bridge published topics (Argo)
+
+All Argo-facing topics below are published by `bno085.py` in **bridge** mode. They originate from the C++ driver’s `/imu` stream (rotation vector fusion on the BNO085), except `/imu_health`, which is generated in the bridge.
+
+| Topic | Message type | Source | `x` / `y` / `z` meaning | Range / convention |
+|-------|----------------|--------|-------------------------|--------------------|
+| `/compass` | `geometry_msgs/Vector3` | Quaternion → Euler yaw + `yaw_offset_deg` | **Heading (compass):** `z` only; `x`,`y` set to `0`. | `z ∈ [0, 360)` **degrees**, **clockwise from north**: 0° = north, 90° = east, 180° = south, 270° = west. |
+| `/pose` | `geometry_msgs/Vector3` | Same fused yaw as `/compass`, then converted for Argo TF/controller | **ENU yaw (mathematical):** `z` only; `x`,`y` set to `0`. | `z ∈ [0, 360)` **degrees**, **counter-clockwise from east** when viewed from above: 0° = east, 90° = north, 180° = west, 270° = south. Conversion: `pose.z = (450 - compass_z) % 360` (same as `argo_unified_simulator_bridge`). |
+| `/accel` | `geometry_msgs/Vector3` | `Imu.linear_acceleration` (m/s²) scaled by `1/9.81` | Approx. **g** in driver axes; `x`,`y` optionally rotated with `apply_axis_rotation` and mount offset. | Roughly -1 to 1 g per axis at rest (gravity on one axis); not SI m/s² on the wire. |
+| `/gyro` | `geometry_msgs/Vector3` | `Imu.angular_velocity` (rad/s) → degrees/s | **deg/s** about IMU X, Y, Z. | Magnitude depends on motion; signs follow right-hand rule around each axis. |
+| `/imu_health` | `std_msgs/Bool` | Bridge timer + IMU freshness | `data`: sensor path healthy. | `true` / `false`. |
+
+**Why `/compass` and `/pose` differ:** Controllers and dashboards consume **compass** heading (wind and navigation are stated in compass degrees). `argo_transform_publisher`, Foxglove ENU views, and the simulator bridge expect **`/pose.z` as ROS-style yaw in the horizontal plane** (east-referenced, CCW positive), so the bridge publishes the conversion on `/pose` only.
+
+**Legacy rosbag2 recordings:** Bags recorded before `/pose` carried math yaw may store compass values on `/pose.z`. That skews TF and 3D playback. Rewrite bags with:
+
+`python3 scripts/fix_rosbag_pose_legacy_compass.py INPUT_BAG_DIR OUTPUT_BAG_DIR`  
+(use `--dry-run` first; `--force` overwrites an existing output folder). That script **only** rewrites `/pose`; it does **not** change recorded `/tf` or recorded visualization markers (see script docstring).
+
+To **re-record** playback with live visualization and transforms into a new bag, the launch file lives under **`scripts/argo_bag_rerecord.py`** (not under `launch/`). Typical invocation from the Argo repo root with ROS 2 sourced:  
+`ros2 launch ./scripts/argo_bag_rerecord.py input_bag:=bags/your_bag output_bag:=your_bag_with_viz`  
+or run **`scripts/argo_rerecord_bag.sh`**, which calls that launch file for you.
 
 ## Health Monitoring
 
@@ -430,12 +448,12 @@ The tool provides live status with progress bars and guidance:
 The lifecycle manager automatically discovers `bno085.py` and launches it in bridge mode.
 
 ### Topic Compatibility
-The bridge maintains compatibility with existing Argo nodes:
-- `/compass` - Used by controller for heading control
-- `/pose` - Alternative heading source
-- `/accel` - Motion detection
-- `/gyro` - Angular velocity monitoring
-- `/imu_health` - System health monitoring
+The bridge feeds the same topic names the rest of Argo expects (see [Bridge published topics (Argo)](#bridge-published-topics-argo)):
+- `/compass` — compass heading (degrees, CW from north) for control, wind, and plots
+- `/pose` — ENU math yaw on `z` for `argo_transform_publisher`, simulator-aligned consumers, and any node that already treated `/pose` as mathematical yaw
+- `/accel` — gravity-scaled acceleration (approx. g) for roll/pitch-style consumers
+- `/gyro` — angular rates in deg/s
+- `/imu_health` — lifecycle and operator health
 
 ### Makefile Integration
 The `nodes/Makefile` provides convenient shortcuts and automatically uses the configuration file:

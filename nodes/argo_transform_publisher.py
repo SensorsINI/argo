@@ -21,7 +21,7 @@ Published Topics:
 
 Subscribed Topics:
 - /fix (sensor_msgs/NavSatFix): GPS position for map frame origin
-- /pose (geometry_msgs/Vector3): Boat heading (z-component)
+- /pose (geometry_msgs/Vector3): ENU yaw on z in degrees (0°=East, CCW), same as simulator bridge
 - /accel (geometry_msgs/Vector3): IMU accelerometer for roll/pitch estimation
 """
 
@@ -516,7 +516,7 @@ TOPICS:
 
   Subscribes:
     /fix (sensor_msgs/NavSatFix): GPS position for map frame origin
-    /pose (geometry_msgs/Vector3): Boat heading (z-component)
+    /pose (geometry_msgs/Vector3): ENU yaw on z (deg, 0°=East CCW), same as simulator
     /accel (geometry_msgs/Vector3): IMU accelerometer for roll/pitch estimation
 
 SERVICES:

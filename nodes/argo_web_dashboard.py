@@ -727,11 +727,14 @@ class ArgoWebDashboard(ArgoBaseNode):
             return
 
         now = time.time()
+        # /pose z is mathematical yaw (0°=East, CCW), same as simulator; convert for display.
+        heading_math = float(msg.z) % 360.0
+        compass_heading = (450.0 - heading_math) % 360.0
         
         with self.state_lock:
             if source == 'wifi':
                 self.last_wifi_update['compass_heading'] = now
-                self.state['compass_heading'] = msg.z
+                self.state['compass_heading'] = compass_heading
                 self.state['data_source'] = 'WiFi'
             
             self._update_data_age_indicators()

@@ -2,6 +2,17 @@
 
 This directory contains scripts for setting up, launching, and debugging the Argo simulation environment in both local and remote modes.
 
+## Bag recording and playback
+
+### `argo_rerecord_bag.sh`
+Interactive wrapper to **re-record** an existing rosbag2 with visualization nodes (markers, transforms, sailing area). It invokes `ros2 launch` on **`argo_bag_rerecord.py`** in this directory.
+
+### `argo_bag_rerecord.py`
+ROS 2 **launch** description (Python): play an input bag with sim time, run `argo_boat_visualization`, `argo_transform_publisher`, and related nodes, and record a new bag. Invoke with `ros2 launch ./scripts/argo_bag_rerecord.py ...` from the repo root (or pass an absolute path to this file).
+
+### `fix_rosbag_pose_legacy_compass.py`
+Offline bag copy that rewrites legacy **`/pose.z`** (compass duplicated on pose) to ENU math yaw. Does not regenerate markers or `/tf`.
+
 ## Simulation Launch Scripts
 
 ### `launch_simulator_local.sh`

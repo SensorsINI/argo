@@ -20,10 +20,12 @@ The script:
 Note: The --clock option and use_sim_time ensure that re-recorded bags maintain
 the original time scale, even when playback is accelerated for faster processing.
 
-Usage:
-    ros2 launch launch/argo_bag_rerecord.py input_bag:=/path/to/original/bag output_bag:=output_name
-    ros2 launch launch/argo_bag_rerecord.py input_bag:=bags/argo_20251105_141014/ output_bag:=argo_20251105_141014_with_viz
-    ros2 launch launch/argo_bag_rerecord.py input_bag:=bags/argo_20251105_141014/ output_bag:=argo_20251105_141014_with_viz use_sailing_area:=false
+Usage (from repo root, with ROS 2 sourced):
+    ros2 launch ./scripts/argo_bag_rerecord.py input_bag:=/path/to/original/bag output_bag:=output_name
+    ros2 launch ./scripts/argo_bag_rerecord.py input_bag:=bags/argo_20251105_141014/ output_bag:=argo_20251105_141014_with_viz
+    ros2 launch ./scripts/argo_bag_rerecord.py input_bag:=bags/argo_20251105_141014/ output_bag:=argo_20251105_141014_with_viz use_sailing_area:=false
+
+Or use an absolute path to scripts/argo_bag_rerecord.py. Convenience wrapper: scripts/argo_rerecord_bag.sh
 """
 
 import os

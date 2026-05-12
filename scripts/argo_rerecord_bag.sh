@@ -203,7 +203,7 @@ done
 
 # Build launch command with proper path handling
 # Use absolute path to handle spaces in bag file names
-LAUNCH_CMD="ros2 launch $ARGO_DIR/launch/argo_bag_rerecord.py"
+LAUNCH_CMD="ros2 launch $ARGO_DIR/scripts/argo_bag_rerecord.py"
 LAUNCH_CMD="$LAUNCH_CMD input_bag:=\"$SELECTED_BAG\""
 LAUNCH_CMD="$LAUNCH_CMD output_bag:=\"$OUTPUT_BAG\""
 LAUNCH_CMD="$LAUNCH_CMD use_sailing_area:=$USE_SAILING_AREA"
