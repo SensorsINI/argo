@@ -16,6 +16,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Header
 from rosgraph_msgs.msg import Clock
 import os
+import sys
 from pathlib import Path
 import math
 import argparse
@@ -70,8 +71,14 @@ class SailingAreaPublisher(Node):
         # Debug: Log loaded maps and requested map
         self.get_logger().info(f"Requested map_name: '{self.map_name}'")
         self.get_logger().info(f"Loaded sailing areas keys: {list(self.sailing_areas.keys())}")
-        # Resolve case-insensitive map-name mismatches up-front.
-        if self.map_name and self.sailing_areas:
+        # Resolve case-insensitive map-name mismatches; unknown name is a fatal error (typo / wrong file).
+        if self.map_name:
+            if not self.sailing_areas:
+                raise RuntimeError(
+                    f"No .geojson maps loaded from {self.maps_dir}. "
+                    f"Cannot use geofence_map_name '{self.map_name}' (from argo.yaml or --map). "
+                    f"Add GeoJSON files under foxglove/maps/."
+                )
             if self.map_name not in self.sailing_areas:
                 map_name_lower = self.map_name.lower()
                 matched_map = None
@@ -85,10 +92,16 @@ class SailingAreaPublisher(Node):
                     )
                     self.map_name = matched_map
                 else:
-                    self.get_logger().error(f"❌ Requested map '{self.map_name}' not found in loaded maps.")
-                    self.get_logger().error(f"   Available maps: {', '.join(self.sailing_areas.keys())}")
-                    self.get_logger().error("   Not publishing sailing markers to avoid wrong-origin offsets.")
-                    # Keep map_name as-is (unknown); publish_all_markers() will no-op.
+                    expected_path = self.maps_dir / f"{self.map_name}.geojson"
+                    avail = ", ".join(sorted(self.sailing_areas.keys()))
+                    raise RuntimeError(
+                        f"geofence_map_name '{self.map_name}' does not match any map. "
+                        f"Check spelling in nodes/argo.yaml (/** ros__parameters geofence_map_name) or --map. "
+                        f"Map keys are GeoJSON filenames without .geojson under {self.maps_dir}. "
+                        f"Example file for this name would be: {expected_path} "
+                        f"(file may be missing or the basename differs). "
+                        f"Loaded maps: {avail}"
+                    )
         
         # Find origin from 'home' waypoint in loaded maps (same as simulator bridge)
         self.origin_lon = 8.5448386  # Default fallback
@@ -480,7 +493,10 @@ class SailingAreaPublisher(Node):
             )
             return
         if self.map_name not in self.sailing_areas:
-            # Map name unknown (already logged during init); refuse to publish.
+            # Should not happen after __init__ validation when map_name is set.
+            self.get_logger().error(
+                f"Internal state: map_name {self.map_name!r} not in sailing_areas; skipping publish."
+            )
             return
         maps_to_publish = [self.map_name]
         
@@ -533,7 +549,7 @@ def main(args=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 sailing_area_publisher.py                              # Uses map from argo_nodes.yaml
+  python3 sailing_area_publisher.py                              # Uses geofence_map_name from ROS params / argo.yaml
   python3 sailing_area_publisher.py --map "Argo Irchel pond sailing area"  # Override map
         """
     )
@@ -548,7 +564,13 @@ Examples:
         rclpy.init(args=remaining_args)
 
     # CLI `--map` overrides ROS param `geofence_map_name`.
-    publisher = SailingAreaPublisher(map_name=parsed_args.map)
+    try:
+        publisher = SailingAreaPublisher(map_name=parsed_args.map)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        if rclpy.ok():
+            rclpy.shutdown()
+        sys.exit(1)
     
     try:
         rclpy.spin(publisher)
