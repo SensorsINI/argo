@@ -285,7 +285,7 @@ class GpsNode(ArgoBaseNode):
         self.last_data_received_time = time.time()
         # Increased timeout: GPS may take time to output NMEA, especially indoors without fix
         # But we need to detect actual communication failures
-        self.gps_timeout_seconds = 60.0  # Fail if no valid NMEA received for 60 seconds (when no satellites)
+        self.gps_timeout_seconds = 240.0  # Fail if no valid NMEA received for 60 seconds (when no satellites)
         self.last_satellites_seen_time = None  # Track when we last saw satellites (satellites_used > 0)
 
         # GPS reset tracking for extended no-fix periods
