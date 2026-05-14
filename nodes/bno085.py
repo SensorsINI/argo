@@ -280,6 +280,12 @@ class BNO085Bridge(Node):
         
         # Allow runtime updates via parameter callback (and persist to argo.yaml)
         self.add_on_set_parameters_callback(self._on_parameter_change)
+
+        # Some BNO08x / fusion frame conventions yield yaw that increases in the
+        # opposite direction to our compass heading convention (0=N, 90=E, CW-positive).
+        # If North/South look correct but East/West are swapped, enable this.
+        self.declare_parameter('imu.yaw_invert', False)
+        self.yaw_invert = bool(self.get_parameter('imu.yaw_invert').get_parameter_value().bool_value)
         
         # Apply XY rotation to accel/gyro to keep frames consistent with yaw
         self.apply_axis_rotation = True
@@ -409,6 +415,11 @@ class BNO085Bridge(Node):
             msg.orientation.w, msg.orientation.x, 
             msg.orientation.y, msg.orientation.z
         )
+
+        # Optional handedness fix: mirror yaw about the North-South axis.
+        # This preserves 0° (N) and 180° (S) but swaps 90° (E) and 270° (W).
+        if self.yaw_invert:
+            yaw = (-yaw) % 360.0
         
         # Apply fixed yaw offset for mounting (rotate +90° about Z)
         yaw = (yaw + self.yaw_offset_deg) % 360.0
