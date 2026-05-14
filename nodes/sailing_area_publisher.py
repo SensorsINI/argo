@@ -39,6 +39,20 @@ class SailingAreaPublisher(Node):
         self.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
         param_map_name = self.get_parameter('geofence_map_name').get_parameter_value().string_value
         self.map_name = map_name or (param_map_name if param_map_name else None)
+
+        # Some UIs annotate map names (e.g. "X# Y"). Our GeoJSON stems are the authoritative keys.
+        # Normalize early so we can still safely refuse truly-unknown maps.
+        if self.map_name:
+            original_map_name = self.map_name
+            # If a map selector appends metadata after '#', strip it.
+            if "#" in self.map_name:
+                self.map_name = self.map_name.split("#", 1)[0].strip()
+            # Normalize whitespace (avoid accidental double spaces causing mismatches).
+            self.map_name = " ".join(self.map_name.split())
+            if self.map_name != original_map_name:
+                self.get_logger().warn(
+                    f"⚠️ Normalized map name: requested '{original_map_name}', using '{self.map_name}'"
+                )
         
         # Initialize clock time for timestamp preservation (before any methods use it)
         self.sim_time = None
