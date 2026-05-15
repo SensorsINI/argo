@@ -133,11 +133,6 @@ from argo_base_node import ArgoBaseNode
 # Default update rate (Hz) - can be overridden by parameter
 DEFAULT_UPDATE_RATE = 10.0
 
-# Temporary: log sailing marker colors when copying into /visualization_marker_array (Foxglove path).
-# Set False after debugging. Prefix: [VIS_SAILING_MERGE_TRACE] — ROS logger (stderr)
-VIS_SAILING_MERGE_TRACE = True
-VIS_SAILING_MERGE_TRACE_PUBLISHES = 30  # first N publish cycles (~15s at 2 Hz)
-
 @dataclass
 class HeadingTrailEntry:
     """Snapshot of boat position and heading for trail visualization."""
@@ -1587,7 +1582,6 @@ class ArgoBoatVisualization(ArgoBaseNode):
             'proportional': 'PROP',
             'wind_aware': 'WIND',
             'return_to_home': 'RTH',
-            'patrol': 'PATROL',
             'crosser': 'CROSS',
             'human': 'HUMAN',
         }
@@ -1768,13 +1762,6 @@ class ArgoBoatVisualization(ArgoBaseNode):
             # Add sailing area markers (boundaries, waypoints, hazards) for 3D visualization
             # Note: These come from sailing_area_publisher and may be empty initially
             # Copy markers to avoid ID conflicts and ensure they're properly included
-            if not hasattr(self, '_vis_sailing_merge_pub_idx'):
-                self._vis_sailing_merge_pub_idx = 0
-            self._vis_sailing_merge_pub_idx += 1
-            _do_vis_sailing_trace = (
-                VIS_SAILING_MERGE_TRACE
-                and self._vis_sailing_merge_pub_idx <= VIS_SAILING_MERGE_TRACE_PUBLISHES
-            )
             # Draw order: waypoints and hazards first, sailing_boundary LINE_STRIP last so the
             # green perimeter stays visible in Foxglove/RViz (later markers render on top).
             if self.sailing_waypoints:
@@ -1790,13 +1777,6 @@ class ArgoBoatVisualization(ArgoBaseNode):
                     marker_copy.id += 300  # Offset hazard IDs
                     if not marker_copy.header.frame_id:
                         marker_copy.header.frame_id = "map"
-                    if _do_vis_sailing_trace:
-                        c = marker_copy.color
-                        self.get_logger().info(
-                            f"[VIS_SAILING_MERGE_TRACE] pub={self._vis_sailing_merge_pub_idx} "
-                            f"topic_in=/sailing_hazards ns={marker_copy.ns!r} "
-                            f"id={marker.id}->{marker_copy.id} rgba=({c.r:.3f},{c.g:.3f},{c.b:.3f},{c.a:.3f})"
-                        )
                     marker_array.markers.append(marker_copy)
             if self.sailing_boundaries:
                 for marker in self.sailing_boundaries:
@@ -1810,13 +1790,6 @@ class ArgoBoatVisualization(ArgoBaseNode):
                     # Ensure markers are visible - verify scale is set
                     if marker_copy.scale.x == 0.0:
                         marker_copy.scale.x = 1.0  # Ensure line has width
-                    if _do_vis_sailing_trace:
-                        c = marker_copy.color
-                        self.get_logger().info(
-                            f"[VIS_SAILING_MERGE_TRACE] pub={self._vis_sailing_merge_pub_idx} "
-                            f"topic_in=/sailing_boundaries ns={marker_copy.ns!r} "
-                            f"id={marker.id}->{marker_copy.id} rgba=({c.r:.3f},{c.g:.3f},{c.b:.3f},{c.a:.3f})"
-                        )
                     marker_array.markers.append(marker_copy)
             
             # Log marker counts periodically for debugging
