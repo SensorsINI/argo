@@ -1,8 +1,8 @@
 #!/bin/bash
 #
 # Argo Multi-Service Log Viewer
-# Tails logs from argo-launch, argo_battery_water, and argo_power_control services
-# with color-coded output for easy identification
+# Tails logs from argo-launch, argo_battery_water, argo_power_control, IMU, health monitor,
+# and argo_wifi_reconnect (journal) with color-coded output for easy identification
 #
 # Usage: argo_logs.sh [OPTIONS] [PATTERN]
 #   -n N    Show last N lines (default: 20, ignored when PATTERN provided)
@@ -32,6 +32,7 @@ COLOR_ARGO_LAUNCH='\e[0;96m'      # Cyan for argo-launch
 COLOR_BATTERY='\e[0;93m'           # Yellow for argo_battery_water
 COLOR_POWER='\e[0;92m'             # Green for power_control
 COLOR_IMU='\e[0;95m'               # Magenta for BNO085 IMU
+COLOR_WIFI='\e[0;94m'              # Bright blue for WiFi reconnect
 COLOR_TIMESTAMP='\e[0;90m'         # Gray for timestamps
 RESET='\e[0m'
 
@@ -45,6 +46,7 @@ SERVICE_BATTERY="argo_battery_water.service"
 SERVICE_POWER="argo_power_control.service"
 SERVICE_IMU="argo_bno085.service"
 SERVICE_HEALTH="argo_health_monitor.service"
+SERVICE_WIFI="argo_wifi_reconnect.service"
 
 # Parse command line options
 while getopts "n:fet:ha" opt; do
@@ -93,6 +95,7 @@ while getopts "n:fet:ha" opt; do
             echo "  - ${SERVICE_POWER} (green)"
             echo "  - ${SERVICE_IMU} (magenta)"
             echo "  - ${SERVICE_HEALTH} (cyan)"
+            echo "  - ${SERVICE_WIFI} (bright blue)"
             echo ""
             echo "Priority highlighting:"
             echo "  - ERROR lines              (bold bright red)"
@@ -164,6 +167,7 @@ echo -e "${COLOR_BATTERY}●${RESET} ${SERVICE_BATTERY} (yellow)"
 echo -e "${COLOR_POWER}●${RESET} ${SERVICE_POWER} (green)"
 echo -e "${COLOR_IMU}●${RESET} ${SERVICE_IMU} (magenta)"
 echo -e "${COLOR_ARGO_LAUNCH}●${RESET} ${SERVICE_HEALTH} (cyan)"
+echo -e "${COLOR_WIFI}●${RESET} ${SERVICE_WIFI} (bright blue)"
 echo -e "${COLOR_ERROR}●${RESET} ERROR lines (bold bright red)"
 echo -e "${COLOR_WARN}●${RESET} WARN lines (bold dark yellow)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -186,6 +190,8 @@ colorize_logs() {
             echo -e "${COLOR_POWER}${line}${RESET}"
         elif echo "$line" | grep -qiE "bno08x|bno085|bno08x_ros|imu_health|/imu"; then
             echo -e "${COLOR_IMU}${line}${RESET}"
+        elif echo "$line" | grep -qE "argo-wifi-reconnect|argo_wifi_reconnect"; then
+            echo -e "${COLOR_WIFI}${line}${RESET}"
         else
             echo "$line" # No color
         fi
@@ -194,7 +200,7 @@ colorize_logs() {
 
 # Construct the journalctl command
 journalctl_cmd="journalctl --no-pager"
-journalctl_cmd+=" -u $SERVICE_ARGO -u $SERVICE_BATTERY -u $SERVICE_POWER -u $SERVICE_IMU -u $SERVICE_HEALTH"
+journalctl_cmd+=" -u $SERVICE_ARGO -u $SERVICE_BATTERY -u $SERVICE_POWER -u $SERVICE_IMU -u $SERVICE_HEALTH -u $SERVICE_WIFI"
 
 # Add options based on flags
 if [ "$ALL_LOGS" = true ]; then

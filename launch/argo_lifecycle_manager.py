@@ -20,7 +20,6 @@ Commands:
     help             Show this help message.
 
 Options:
-    --toggle_pause   Toggle controller pause state (pauses autonomous navigation).
     --debug          Enable debug output for troubleshooting.
     --quiet          Suppress initialization messages.
 
@@ -70,7 +69,7 @@ class Colors:
 try:
     import rclpy
     from rclpy.node import Node
-    from std_srvs.srv import Trigger, SetBool
+    from std_srvs.srv import Trigger
     from std_msgs.msg import Bool, String
     ROS2_AVAILABLE = True
 except ImportError:
@@ -218,8 +217,6 @@ class ArgoLifecycleManager:
         # Initialize ROS2 for service client if available
         self.ros2_node = None
         self.battery_service_client = None
-        self.controller_pause_client = None
-        self.controller_pause_state = False
         self.status_publisher = None
         self.lifecycle_services_created = False
         
@@ -258,14 +255,6 @@ class ArgoLifecycleManager:
             self.battery_service_client = self.ros2_node.create_client(
                 Trigger, '/battery_status')
 
-            # Create controller pause service client
-            self.controller_pause_client = self.ros2_node.create_client(
-                SetBool, '/controller_node/pause')
-            
-            # Subscribe to controller pause state
-            self.controller_pause_sub = self.ros2_node.create_subscription(
-                Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
-            
             # Initialize health status monitoring (uses self.all_expected_nodes from YAML)
             self._setup_health_monitoring()
         except Exception as e:
@@ -273,17 +262,6 @@ class ArgoLifecycleManager:
                 print(f"Warning: Could not initialize ROS2 service client: {e}")
             self.ros2_node = None
             self.battery_service_client = None
-            self.controller_pause_client = None
-        
-        # Query initial controller pause state after a brief delay to allow ROS2 to initialize
-        if self.controller_pause_client:
-            import threading
-            def query_initial_pause_state():
-                time.sleep(2.0)  # Wait for ROS2 to initialize
-                self._query_controller_pause_state()
-            threading.Thread(target=query_initial_pause_state, daemon=True).start()
-        
-        
         # Setup signal handlers only from main thread (signal handlers can only be set from main thread)
         # Use threading.main_thread() to check if we're in the main thread
         if threading.current_thread() is threading.main_thread():
@@ -447,10 +425,6 @@ class ArgoLifecycleManager:
             except Exception as e:
                 # Silently fail - may already be shutdown
                 pass
-
-    def _controller_pause_state_callback(self, msg):
-        """Receive controller pause state updates."""
-        self.controller_pause_state = msg.data
 
     def _setup_health_monitoring(self):
         """Setup health status monitoring for nodes that publish health topics"""
@@ -665,96 +639,6 @@ class ArgoLifecycleManager:
         else:
             return "🔴"
 
-    def _query_controller_pause_state(self):
-        """Query the current controller pause state via service call."""
-        self._ensure_ros2_node()
-        try:
-            if not self.controller_pause_client:
-                return
-            
-            # Wait for service to be available
-            if not self.controller_pause_client.wait_for_service(timeout_sec=3.0):
-                return
-            
-            # Create request with None to get current state
-            request = SetBool.Request()
-            request.data = None  # None means return current state
-            
-            # Call service
-            future = self.controller_pause_client.call_async(request)
-            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=3.0)
-            
-            if future.done():
-                response = future.result()
-                if response.success:
-                    # Parse the message to determine current state
-                    message = response.message.lower()
-                    self.controller_pause_state = 'paused' in message
-                else:
-                    # Default to unpaused if we can't determine state
-                    self.controller_pause_state = False
-                    
-        except Exception as e:
-            # Default to unpaused if query fails
-            self.controller_pause_state = False
-
-    def _handle_toggle_pause(self, request, response):
-        """Handle toggle_pause service requests - now delegates to controller pause service."""
-        try:
-            # Check if controller is running
-            node_status = self._get_node_status()
-            if 'controller.py' not in node_status or "STOPPED" in node_status['controller.py']:
-                response.success = False
-                response.message = "Controller node is not running"
-                return response
-
-            # Toggle controller pause state
-            new_pause_state = not self.controller_pause_state
-            success, message = self._call_controller_pause_service(new_pause_state)
-            
-            if success:
-                response.success = True
-                response.message = f"Controller {'paused' if new_pause_state else 'unpaused'} successfully"
-            else:
-                response.success = False
-                response.message = f"Failed to toggle controller pause: {message}"
-
-        except Exception as e:
-            print(f"❌ Error in toggle_pause handler: {e}")
-            response.success = False
-            response.message = f"Error: {str(e)}"
-
-        return response
-
-    def _call_controller_pause_service(self, pause_state: bool) -> tuple[bool, str]:
-        """Call the controller pause service with the specified state."""
-        try:
-            if not self.controller_pause_client:
-                return False, "Controller pause service client not available"
-
-            # Wait for service to be available
-            if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
-                return False, "Controller pause service not available"
-
-            # Create request
-            request = SetBool.Request()
-            request.data = pause_state
-
-            # Call service
-            future = self.controller_pause_client.call_async(request)
-            rclpy.spin_until_future_complete(self.ros2_node, future, timeout_sec=5.0)
-
-            if future.done():
-                response = future.result()
-                return response.success, response.message
-            else:
-                return False, "Service call timed out"
-
-        except Exception as e:
-            return False, f"Error calling controller pause service: {e}"
-
-    # Removed old pause methods - now using centralized controller pause service
-    
     def _get_ros2_processes(self) -> List[psutil.Process]:
         """Get all ROS2 processes related to Argo using node manager"""
         try:
@@ -2708,7 +2592,7 @@ class ArgoLifecycleManager:
                               cpu_temp: str, battery_summary: str, charging_status: bool, 
                               usb_power_status: bool, time_to_full_hours: float = None, 
                               time_to_empty_hours: float = None, healthy_count: int = 0, 
-                              unhealthy_count: int = 0, controller_paused: bool = None,
+                              unhealthy_count: int = 0,
                               storage_rundown_active: bool = False) -> str:
         """
         Format a unified single-line status summary.
@@ -2728,7 +2612,6 @@ class ArgoLifecycleManager:
             time_to_empty_hours: Hours to empty (optional)
             healthy_count: Number of healthy nodes (optional)
             unhealthy_count: Number of unhealthy nodes (optional)
-            controller_paused: Controller pause state (optional)
         
         Returns:
             Formatted status line string with 🚢 ARGO: prefix
@@ -2752,11 +2635,6 @@ class ArgoLifecycleManager:
         # Add health summary if we have health data
         if healthy_count > 0 or unhealthy_count > 0:
             status_line += f" | 🏥 {healthy_count}H/{unhealthy_count}U"
-        
-        # Add controller pause state
-        if controller_paused is not None:
-            pause_indicator = "⏸️" if controller_paused else "▶️"
-            status_line += f" | 🎮 {pause_indicator}"
         
         # Always show battery status (use ??? if unavailable)
         battery_display = battery_summary if battery_summary else "???"
@@ -2916,15 +2794,6 @@ class ArgoLifecycleManager:
             if check_abort():
                 return
             
-            # Get controller pause state
-            controller_paused = None
-            if 'controller.py' in node_status and "RUNNING" in node_status['controller.py']:
-                # Query current pause state to ensure we have the latest
-                self._query_controller_pause_state()
-                controller_paused = self.controller_pause_state
-            if check_abort():
-                return
-            
             # Use unified formatting function
             status_line = self._format_status_summary(
                 running_count=running_count,
@@ -2941,7 +2810,6 @@ class ArgoLifecycleManager:
                 time_to_empty_hours=time_to_empty_hours,
                 healthy_count=healthy_count,
                 unhealthy_count=unhealthy_count,
-                controller_paused=controller_paused,
                 storage_rundown_active=storage_rundown_active
             )
             
@@ -3202,7 +3070,7 @@ class ArgoLifecycleManager:
         Centralized function for calling ROS2 Trigger services.
 
         Args:
-            service_name: Name of the service (e.g., '/toggle_pause', '/battery_status')
+            service_name: Name of the service (e.g., '/battery_status')
             timeout_sec: Timeout for service call
             debug: Enable debug output
 
@@ -3267,22 +3135,6 @@ class ArgoLifecycleManager:
                 import traceback
                 traceback.print_exc()
             return False, error_msg
-
-    def toggle_pause_nodes(self, debug: bool = False) -> bool:
-        """Toggle pause state of controller node via ROS2 service call."""
-        self._ensure_ros2_node()
-        print("🔄 Toggling controller pause state...")
-
-        # Toggle controller pause state
-        new_pause_state = not self.controller_pause_state
-        success, message = self._call_controller_pause_service(new_pause_state)
-
-        if success:
-            print(f"✅ Controller {'paused' if new_pause_state else 'unpaused'} successfully")
-            return True
-        else:
-            print(f"❌ Toggle pause failed: {message}")
-            return False
 
     def _get_battery_water_status_alerts(self) -> tuple[Optional[str], Optional[str], Optional[bool], Optional[bool], Optional[float], Optional[float], Optional[float], bool]:
         """Get battery info, alerts, charging status, USB power status, lifetime estimates, charging time remaining, and storage rundown flag using the battery Trigger service client"""
@@ -3795,8 +3647,6 @@ EXAMPLES:
                         help='Enable debug output for troubleshooting')
     parser.add_argument('--quiet', action='store_true',
                         help='Suppress initialization messages (useful for quick_status)')
-    parser.add_argument('--toggle_pause', action='store_true',
-                        help='Toggle controller pause state (pauses autonomous navigation)')
     parser.add_argument('--mock', action='store_true',
                         help='Force use of mock simulator (default behavior, can be omitted) (only for simulate_local)')
     parser.add_argument('--real', action='store_true',
@@ -3816,11 +3666,6 @@ EXAMPLES:
     if args.command == 'help':
         parser.print_help()
         sys.exit(0)
-    
-    # Validate that either a command or --toggle_pause is provided
-    if not args.command and not args.toggle_pause:
-        # Default to status if no command is given
-        args.command = 'status'
     
     manager = ArgoLifecycleManager(
         quiet=args.quiet,
@@ -3860,11 +3705,6 @@ EXAMPLES:
             # simulate handles its own cleanup
             sys.exit(0 if success else 1)
 
-        # Handle --toggle_pause option (after command execution or standalone)
-        if args.toggle_pause:
-            success = manager.toggle_pause_nodes(debug=args.debug)
-            manager._cleanup_ros2()
-            sys.exit(0 if success else 1)
     except KeyboardInterrupt:
         # Ctrl+C pressed - ensure all nodes are stopped
         print("\n🛑 Keyboard interrupt detected, stopping all nodes...")

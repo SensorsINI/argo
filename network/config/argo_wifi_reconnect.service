@@ -8,6 +8,9 @@ Requires=NetworkManager.service
 
 [Service]
 Type=oneshot
+# Default KillMode=control-group kills every process in the cgroup when this script exits.
+# Background abeep subshells (Wi-Fi link beeps) must keep running after the script returns.
+KillMode=process
 # Run as root to ensure log file permissions are handled correctly after rotation
 User=root
 Group=root

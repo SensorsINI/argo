@@ -93,10 +93,7 @@ ZeroTier uses its own virtual MAC address and doesn't depend on the WiFi MAC add
 
 - **Purpose**: Automatically switches to preferred networks when they become available
 - **Frequency**: Runs every 5 minutes via systemd timer (safer than 2 minutes)
-- **Priority Order**: 
-  - `tobi-s24` (priority 15) - highest
-  - `tobi-wlan` (priority 10) - medium
-  - `uzh-iot` (priority 5) - lowest (fallback)
+- **Priority Order**: Defined in wifi_reconnect.sh in PREFERRED_NETWORKS
 - **Safety Features**:
   - Connection stability checks (30-second minimum before switching)
   - Lock file protection against multiple instances

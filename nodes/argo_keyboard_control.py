@@ -41,8 +41,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Vector3
-from std_msgs.msg import Bool, Float64
-from std_srvs.srv import Trigger, SetBool
+from std_msgs.msg import Bool, Float64, String
+from std_srvs.srv import Trigger
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType, ParameterEvent
 import curses
@@ -92,20 +92,9 @@ class KeyboardControlNode(Node):
         self.current_controller_type = None  # Track current controller
         self.is_rth_mode = False  # Track if we're in RTH mode
         
-        # Controller pause service client
-        self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
-        self.controller_paused = False  # Track current pause state
-        self._controller_popup_open = False
-        self._controller_known_types = [
-            # Keep in sync with nodes/argo.yaml comment + nodes/controller.py
-            'crosser',
-            'patrol',
-            'wind_aware',
-            'proportional',
-            'human',
-            'return_to_home',
-        ]
-        
+        self._last_non_human_controller = None  # For M: toggle human vs last autonomous type
+        self._controller_runtime_name = ''
+
         # Control state
         self.rudder_position = 0.0  # -1.0 to +1.0
         self.sail_position = 0.0    # -1.0 to +1.0
@@ -136,12 +125,12 @@ class KeyboardControlNode(Node):
         self.create_subscription(Vector3, '/pose', self.pose_callback, 10)
         self.create_subscription(Vector3, '/gps_velocity', self.velocity_callback, 10)
         self.create_subscription(Bool, '/human_controlled', self.control_mode_callback, 10)
-        self.create_subscription(Bool, '/controller_pause_state', self.controller_pause_state_callback, 10)
+        self.create_subscription(String, '/controller_state', self._controller_state_name_callback, 10)
         
         # Log and block on ROS/sim until ready while TTY is still cooked. Curses (cbreak/noecho)
         # breaks Rcutils line-oriented logging; keep fullscreen mode only after this phase.
         self.get_logger().info('Keyboard control node ready')
-        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | T=Select Controller | SPACE=Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Toggle Manual | Q=Quit Sim | X=Quit Control | ENTER=Refresh')
+        self.get_logger().info('Controls: ←→ Rudder | ↑↓ Sail | C=Center | T=Select Controller | SPACE=Sim Pause | W/E=Wind ±10° | R=Reset | H=Toggle RTH | M=Human/Auton | Q=Quit Sim | X=Quit Control | ENTER=Refresh')
         
         self._curses_active = False
         self._curses_ever_initialized = False
@@ -166,7 +155,6 @@ class KeyboardControlNode(Node):
         self.publish_simulation_paused()
         self._initialize_wind_direction()
         self._initialize_controller_type()
-        self._initialize_controller_pause_state()
         
         self.get_logger().info('Simulator/controller handshake done; starting fullscreen UI')
         self.stdscr = curses.initscr()
@@ -308,6 +296,8 @@ class KeyboardControlNode(Node):
                     # Ignore controller_type updates from other nodes (rare, but possible)
                     continue
                 self.current_controller_type = new_controller
+                if new_controller != 'human':
+                    self._last_non_human_controller = new_controller
                 was_rth = self.is_rth_mode
                 self.is_rth_mode = (new_controller == 'return_to_home')
                 # If switching away from RTH to a non-RTH controller, update default
@@ -386,39 +376,17 @@ class KeyboardControlNode(Node):
                         # For now, default to 'crosser' (common default)
                         self.default_controller_type = 'crosser'
                     self.get_logger().info(f"Initial controller type: {self.current_controller_type} (default: {self.default_controller_type}, RTH mode: {self.is_rth_mode})")
+                    if initial_controller != 'human':
+                        self._last_non_human_controller = initial_controller
                     return
         self.get_logger().warn("Failed to fetch initial controller type; defaulting to 'crosser'")
         self.default_controller_type = 'crosser'  # Default from argo.yaml
         self.current_controller_type = self.default_controller_type
         self.is_rth_mode = False
     
-    def _initialize_controller_pause_state(self):
-        """Fetch current controller pause state by waiting for first topic message (best effort)."""
-        self.get_logger().info("Waiting for controller pause state...")
-        # Create a one-shot subscription to get the current state
-        state_received = {'value': None}
-        
-        def state_callback(msg):
-            state_received['value'] = bool(msg.data)
-        
-        # Subscribe temporarily to get current state
-        temp_sub = self.create_subscription(Bool, '/controller_pause_state', state_callback, 10)
-        
-        # Wait up to 3 seconds for first message
-        start_time = time.time()
-        while state_received['value'] is None and (time.time() - start_time) < 3.0:
-            rclpy.spin_once(self, timeout_sec=0.1)
-        
-        # Destroy temporary subscription (we already have the main one)
-        self.destroy_subscription(temp_sub)
-        
-        if state_received['value'] is not None:
-            self.controller_paused = state_received['value']
-            state_str = "PAUSED (Manual)" if self.controller_paused else "UNPAUSED (Autonomous)"
-            self.get_logger().info(f"Initial controller state: {state_str}")
-        else:
-            self.get_logger().warn("Could not fetch initial controller pause state; defaulting to False (unpaused)")
-            self.controller_paused = False
+    def _controller_state_name_callback(self, msg: String):
+        """Runtime controller class name (e.g. HumanController) for status display."""
+        self._controller_runtime_name = (msg.data or "").strip()
 
     def pose_callback(self, msg):
         """Receive heading/pose from simulator."""
@@ -434,10 +402,6 @@ class KeyboardControlNode(Node):
         """Receive control mode status."""
         self.simulator_mode = "HUMAN" if msg.data else "ROBOT"
     
-    def controller_pause_state_callback(self, msg):
-        """Receive controller pause state."""
-        self.controller_paused = bool(msg.data)
-
     def _true_wind_direction_callback(self, msg: Float64):
         """True wind direction from simulator (degrees, compass from N)."""
         try:
@@ -503,7 +467,7 @@ class KeyboardControlNode(Node):
             elif key == ord('t') or key == ord('T'):
                 self.select_controller_popup()
             elif key == ord('m') or key == ord('M'):
-                self.toggle_controller_pause()
+                self.toggle_controller_human_mode()
             elif key == ord('q') or key == ord('Q'):
                 self.quit_simulation()
             elif key == ord('\n') or key == ord('\r') or key == curses.KEY_ENTER:
@@ -922,46 +886,17 @@ class KeyboardControlNode(Node):
                 pass
             self._controller_popup_open = False
     
-    def toggle_controller_pause(self):
-        """Toggle controller pause state (manual/human control)."""
-        if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
-            message = "⚠️  Controller pause service not available"
-            self._notify(message, level="warn")
-            return
-        
-        # Toggle pause state
-        new_pause_state = not self.controller_paused
-        
-        # Create request
-        request = SetBool.Request()
-        request.data = new_pause_state
-        
-        # Call service
-        future = self.controller_pause_client.call_async(request)
-        
-        # Wait for result with manual timeout (avoid spin_until_future_complete in timer callback)
-        start_time = time.time()
-        timeout = 3.0
-        while not future.done() and (time.time() - start_time) < timeout:
-            time.sleep(0.05)  # Small sleep to avoid busy-waiting
-        
-        if future.done():
-            try:
-                response = future.result()
-                if response.success:
-                    self.controller_paused = new_pause_state
-                    mode = "PAUSED (Manual)" if new_pause_state else "UNPAUSED (Autonomous)"
-                    message = f"✅ Controller {mode}"
-                    self._notify(message)
-                else:
-                    message = f"⚠️  Failed to toggle controller pause: {response.message}"
-                    self._notify(message, level="warn")
-            except Exception as e:
-                message = f"❌ Error toggling controller pause: {e}"
-                self._notify(message, level="error")
+    def toggle_controller_human_mode(self):
+        """Toggle controller_type between human and last non-human type (replaces pause)."""
+        cur = (self.current_controller_type or '').strip().lower()
+        if cur == 'human':
+            restore = self._last_non_human_controller or self.default_controller_type or 'crosser'
+            if restore == 'human':
+                restore = 'crosser'
+            self._set_controller_type(restore)
         else:
-            message = "⚠️  Controller pause service call timed out"
-            self._notify(message, level="warn")
+            self._last_non_human_controller = cur
+            self._set_controller_type('human')
     
     def quit_simulation(self):
         """Quit simulation by sending SIGTERM to all simulation processes."""
@@ -1191,7 +1126,11 @@ class KeyboardControlNode(Node):
                 put_row("Simulation: RUNNING")
             
             controller_name = self.current_controller_type.upper() if self.current_controller_type else 'UNKNOWN'
-            pause_status = " [PAUSED]" if self.controller_paused else ""
+            human_mode = (
+                (self.current_controller_type or '').strip().lower() == 'human'
+                or getattr(self, '_controller_runtime_name', '') == 'HumanController'
+            )
+            pause_status = ' [HUMAN]' if human_mode else ''
             rth = self.is_rth_mode
             controller_status = f"Controller: {controller_name}{pause_status}"
             if rth:

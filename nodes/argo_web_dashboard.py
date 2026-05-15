@@ -8,7 +8,7 @@ Mobile-friendly web interface for monitoring and controlling Argo sailboat.
 Features:
 - Real-time status monitoring (nodes, battery, GPS, sensors)
 - Controller switching (Proportional, Wind-Aware, Return-to-Home)
-- System control (start/stop, pause, recording)
+- System control (start/stop, recording)
 - Optimized for phone screens with large touch targets
 
 # For complete usage, setup, and troubleshooting, see docs/WEB_DASHBOARD_README.md
@@ -41,7 +41,7 @@ from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, Float64, Float32, String, Int32, UInt8
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
-from std_srvs.srv import Trigger, SetBool
+from std_srvs.srv import Trigger
 from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue, ParameterType
 
@@ -57,6 +57,7 @@ from argo_node_utils import ArgoNodeManager
 # Add support directory to path for ArgoBaseNode
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
+from geofence_manager import GeofenceManager
 
 UPDATE_RATE = .2  # Hz
 
@@ -110,8 +111,6 @@ class ArgoWebDashboard(ArgoBaseNode):
             'nodes_total': 0,
             'nodes_list': {},
             'system_running': False,
-            'controller_paused': False,
-            
             # Battery status
             'battery_voltage': None,
             'battery_pct': None,
@@ -144,6 +143,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             # GPS
             'gps_locked': False,
             'gps_satellites': 0,
+            'gps_snr_avg': 0.0,
             'gps_latitude': None,
             'gps_longitude': None,
             'gps_cog': None,
@@ -231,7 +231,6 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.node_manager = ArgoNodeManager(self.argo_dir)
         
         # ROS2 Service clients
-        self.controller_pause_client = self.create_client(SetBool, '/controller_node/pause')
         self.recording_start_client = self.create_client(Trigger, '/argo/recording/start')
         self.recording_stop_client = self.create_client(Trigger, '/argo/recording/stop')
         self.recording_get_status_client = self.create_client(Trigger, '/argo/recording/get_status')
@@ -426,11 +425,6 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Clear existing subscriptions list
         self._topic_subscriptions = []
         
-        # Controller pause state subscription
-        self._topic_subscriptions.append(
-            self.create_subscription(Bool, '/controller_pause_state', self.controller_pause_state_cb, 10)
-        )
-        
         # ROS2 Subscriptions for real-time data (WiFi sources)
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/human_controlled', lambda msg: self.human_control_cb(msg, 'wifi'), 10)
@@ -468,6 +462,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
         self._topic_subscriptions.append(
             self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, '/gps_snr_avg', lambda msg: self.gps_snr_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
             self.create_subscription(Float32, '/temperature_pcb', self.pcb_temp_cb, self.volatile_qos)
@@ -517,6 +514,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
         self._topic_subscriptions.append(
             self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Float32, 'lora/gps_snr_avg', lambda msg: self.gps_snr_cb(msg, 'lora'), self.volatile_qos)
         )
         
         # LoRa-specific monitoring
@@ -930,6 +930,25 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Update health status - GPS satellite count is boat data
         self._update_boat_data_received(f"gps_satellites_{source}")
     
+    def gps_snr_cb(self, msg, source='wifi'):
+        """Callback for GPS average SNR updates."""
+        now = time.time()
+        
+        if source == 'wifi':
+            self.last_wifi_update['gps_snr'] = now
+            self.state['gps_snr_avg'] = msg.data
+            if self.debug_mode:
+                self.get_logger().debug(f"GPS SNR (WiFi): {msg.data:.1f} dBHz")
+        else:  # lora
+            self.last_lora_update['gps_snr'] = now
+            wifi_age = now - self.last_wifi_update.get('gps_snr', 0)
+            if wifi_age > self.lora_fallback_threshold:
+                self.state['gps_snr_avg'] = msg.data
+                if self.debug_mode:
+                    self.get_logger().debug(f"GPS SNR (LoRa): {msg.data:.1f} dBHz")
+        
+        self._update_boat_data_received(f"gps_snr_{source}")
+    
     def lora_rssi_cb(self, msg):
         """Receive LoRa signal strength"""
         # Skip processing in low-power mode (no viewers)
@@ -1160,16 +1179,6 @@ class ArgoWebDashboard(ArgoBaseNode):
         if controller_changed:
             self._trigger_critical_state_update()
     
-    def controller_pause_state_cb(self, msg):
-        with self.state_lock:
-            prev_paused = self.state.get('controller_paused')
-            self.state['controller_paused'] = msg.data
-            paused_changed = prev_paused != msg.data
-        
-        # Trigger immediate UI update for critical state change (no race condition - state already updated)
-        if paused_changed:
-            self._trigger_critical_state_update()
-    
     def recording_status_cb(self, msg):
         """Callback for recording status updates."""
         if self.low_power_mode:
@@ -1192,12 +1201,13 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.state['i2c_failure'] = msg.data
             i2c_failure_changed = prev_i2c_failure != msg.data
         
-        # Log critical failures with high visibility
-        if msg.data:
+        # Log only on state transitions (battery_water republishes True ~every 5s for late subscribers)
+        if msg.data and i2c_failure_changed:
             self.get_logger().error(
-                "🔴 CRITICAL I2C BUS FAILURE - Battery/wind sensors unavailable. "
-                "Controller should have automatically switched to RTH mode.")
-        elif i2c_failure_changed:
+                "🔴 CRITICAL I2C / ADC path failure (from /argo/critical/i2c_failure) — "
+                "battery ADC monitoring unavailable; other I2C devices may still work. "
+                "Controller should switch to RTH if configured.")
+        elif i2c_failure_changed and not msg.data:
             self.get_logger().info("✅ I2C BUS RECOVERY - Critical sensors restored")
         
         # Trigger immediate UI update for critical state change
@@ -1937,22 +1947,39 @@ class ArgoWebDashboard(ArgoBaseNode):
             root = (data.get("/**") or {}).get("ros__parameters") or {}
             map_name = root.get("geofence_map_name")
             if isinstance(map_name, str):
-                return map_name.strip() or None
+                normalized = GeofenceManager.normalize_map_name(map_name.strip())
+                return normalized or None
         except Exception:
             pass
 
-        # Fallback: line-based parse preserving comments in malformed YAML cases
+        # Fallback: line-based parse (handles malformed "name#" without space before comment)
         try:
             text = Path(self.argo_yaml_path).read_text(encoding="utf-8")
-            match = re.search(r'^\s*geofence_map_name\s*:\s*([^#\n]+)', text, flags=re.MULTILINE)
+            match = re.search(r'^\s*geofence_map_name\s*:\s*([^\n#]+)', text, flags=re.MULTILINE)
             if match:
-                return match.group(1).strip().strip("'\"")
+                normalized = GeofenceManager.normalize_map_name(
+                    match.group(1).strip().strip("'\""))
+                return normalized or None
         except Exception:
             pass
         return None
 
+    def _geofence_map_inline_comment(self, active_map: str) -> str:
+        """Build a YAML-safe inline comment listing other available maps."""
+        others = [m for m in (self.available_geofence_maps or []) if m != active_map]
+        if not others:
+            return "geofence map"
+        return " | ".join(others)
+
+    def _format_geofence_map_yaml_line(self, map_name: str, indent: str) -> str:
+        """Format geofence_map_name with required space before '#' (YAML comment)."""
+        map_name = GeofenceManager.normalize_map_name(map_name)
+        comment = self._geofence_map_inline_comment(map_name)
+        return f"{indent}geofence_map_name: {map_name}  # {comment}"
+
     def _set_geofence_map_name(self, new_map_name: str) -> Dict[str, Any]:
-        """Update geofence_map_name in nodes/argo.yaml while preserving file formatting."""
+        """Update geofence_map_name in nodes/argo.yaml with valid YAML comment spacing."""
+        new_map_name = GeofenceManager.normalize_map_name((new_map_name or "").strip())
         if not new_map_name:
             return {"success": False, "message": "Map name is required"}
 
@@ -1963,11 +1990,13 @@ class ArgoWebDashboard(ArgoBaseNode):
         try:
             yaml_path = Path(self.argo_yaml_path)
             original = yaml_path.read_text(encoding="utf-8")
-            pattern = r'^(\s*geofence_map_name\s*:\s*)([^#\n]*)(\s*(#.*)?)$'
-            replacement = r"\g<1>" + new_map_name + r"\3"
-            updated, count = re.subn(pattern, replacement, original, count=1, flags=re.MULTILINE)
-            if count == 0:
+            line_pattern = r'^(\s*)geofence_map_name\s*:.*$'
+            match = re.search(line_pattern, original, flags=re.MULTILINE)
+            if not match:
                 return {"success": False, "message": "Could not find geofence_map_name in argo.yaml"}
+            indent = match.group(1)
+            new_line = self._format_geofence_map_yaml_line(new_map_name, indent)
+            updated = re.sub(line_pattern, new_line, original, count=1, flags=re.MULTILINE)
             yaml_path.write_text(updated, encoding="utf-8")
             return {"success": True, "message": f"Updated geofence map to '{new_map_name}'"}
         except Exception as e:
@@ -2313,7 +2342,6 @@ class ArgoWebDashboard(ArgoBaseNode):
                     'human_controlled': self.state.get('human_controlled'),
                     'recording': self.state.get('recording'),
                     'controller_type': self.state.get('controller_type'),
-                    'controller_paused': self.state.get('controller_paused'),
                     'i2c_failure': self.state.get('i2c_failure', False)
                 })
 
@@ -2449,38 +2477,6 @@ class ArgoWebDashboard(ArgoBaseNode):
                 mimetype='application/zip',
             )
 
-        @self.app.route('/api/toggle_pause', methods=['POST'])
-        def toggle_pause():
-            """Toggle controller pause state."""
-            try:
-                # Get current pause state and toggle it
-                current_paused = self.state.get('controller_paused', False)
-                new_pause_state = not current_paused
-                
-                # Create request
-                request = SetBool.Request()
-                request.data = new_pause_state
-                
-                # Call service
-                if not self.controller_pause_client.wait_for_service(timeout_sec=2.0):
-                    return jsonify({'success': False, 'message': 'Controller pause service not available'})
-                
-                future = self.controller_pause_client.call_async(request)
-                rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-                
-                if future.done():
-                    response = future.result()
-                    return jsonify({
-                        'success': response.success,
-                        'message': response.message,
-                        'paused': new_pause_state
-                    })
-                else:
-                    return jsonify({'success': False, 'message': 'Service call timed out'})
-                    
-            except Exception as e:
-                return jsonify({'success': False, 'message': f'Error: {str(e)}'})
-        
         @self.app.route('/api/controllers', methods=['GET'])
         def get_controllers():
             """Get list of available controllers from controller.py."""
@@ -2489,31 +2485,25 @@ class ArgoWebDashboard(ArgoBaseNode):
                     'type': 'proportional',
                     'display_name': 'Proportional',
                     'icon': '🎯',
-                    'description': 'Simple proportional heading control'
+                    'description': 'Simple proportional heading control that maintains last human heading'
                 },
                 {
                     'type': 'wind_aware',
                     'display_name': 'Wind Aware',
                     'icon': '🌬️',
-                    'description': 'Enhanced control with wind-based sail adjustment'
+                    'description': 'Enhanced last-human heading control with wind-based sail adjustment'
                 },
                 {
                     'type': 'return_to_home',
                     'display_name': 'Return to Home',
                     'icon': '🏠',
-                    'description': 'GPS-based navigation to return to starting position'
-                },
-                {
-                    'type': 'patrol',
-                    'display_name': 'Patrol',
-                    'icon': '🛥️',
-                    'description': 'Autonomous patrol within geofence area'
+                    'description': 'GPS-based navigation to return to Home position'
                 },
                 {
                     'type': 'crosser',
                     'display_name': 'Crosser',
                     'icon': '↔️',
-                    'description': 'Crosses pond from side to side, targeting middle waypoint'
+                    'description': 'Crosses geofence area from side to side, targeting middle waypoint or center of sailing area'
                 },
                 {
                     'type': 'human',
@@ -2531,7 +2521,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             controller_type = data.get('type', '')
             
             # Valid controller types from controller.py _on_parameters_set callback
-            valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol', 'crosser', 'human']
+            valid_types = ['proportional', 'wind_aware', 'return_to_home', 'crosser', 'human']
             if controller_type not in valid_types:
                 return jsonify({'success': False, 'message': f'Invalid controller type. Valid types: {", ".join(valid_types)}'}), 400
             
@@ -2880,7 +2870,7 @@ Purpose:
 Features:
   - Real-time system monitoring (nodes, battery, GPS, sensors, wind)
   - Controller switching (Proportional, Wind-Aware, Return-to-Home)
-  - System control (start/stop, pause, recording)
+  - System control (start/stop, recording)
   - GPS tracking with satellite count and fix status
   - LoRa communication monitoring and fallback
   - Mobile-optimized interface for phone/tablet access

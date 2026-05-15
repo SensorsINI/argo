@@ -10,7 +10,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
 import rclpy
 from rclpy.executors import ExternalShutdownException
-from std_msgs.msg import String, Float64, UInt8, Bool
+from std_msgs.msg import String, Float64, Float32, UInt8, Bool
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 import serial
@@ -46,6 +46,7 @@ class GpsNode(ArgoBaseNode):
     - /gps_cog (std_msgs/Float64): Course over ground in degrees true (0-360°)
     - /gps_velocity (geometry_msgs/Vector3): Velocity vector (x=north, y=east, z=speed)
     - /gps_num_satellites (std_msgs/UInt8): Number of satellites used in GPS fix
+    - /gps_snr_avg (std_msgs/Float32): Average SNR of satellites in view (dBHz)
     - /fix (sensor_msgs/NavSatFix): Standard GPS fix for mapping applications
     - /gps_pps_status (std_msgs/Bool): True when PPS pulses are being received on GPS_PPS line
     - /gps_health (std_msgs/Bool): Node health status (true=healthy, false=failed)
@@ -166,6 +167,8 @@ class GpsNode(ArgoBaseNode):
         # u-blox NEO-M9N default baud rate (38400 is factory default after firmware update)
         self.declare_parameter('baud_rate', 38400)
         self.declare_parameter('gps_frame_id', 'argo_gps')
+        # GPIO line for GPS 1PPS input monitoring (-1 disables; default 229 = pin 24 / PH5)
+        self.declare_parameter('pps_gpio_line', 229)
 
         self.serial_port_name = self.get_parameter(
             'serial_port').get_parameter_value().string_value
@@ -173,6 +176,8 @@ class GpsNode(ArgoBaseNode):
             'baud_rate').get_parameter_value().integer_value
         self.gps_frame_id = self.get_parameter(
             'gps_frame_id').get_parameter_value().string_value
+        self.pps_gpio_line = self.get_parameter(
+            'pps_gpio_line').get_parameter_value().integer_value
 
         # Publisher for raw NMEA data
         self.pub_data = self.create_publisher(String, 'gps_data', 10)
@@ -186,6 +191,8 @@ class GpsNode(ArgoBaseNode):
             Vector3, 'gps_velocity', 10)  # Combined velocity vector
         self.pub_satellites = self.create_publisher(
             UInt8, 'gps_num_satellites', 10)  # Number of satellites used
+        self.pub_snr_avg = self.create_publisher(
+            Float32, 'gps_snr_avg', 10)  # Average SNR of satellites in view
 
         # Publisher for standard ROS NavSatFix messages (for mapping)
         self.pub_navsat = self.create_publisher(
@@ -204,6 +211,10 @@ class GpsNode(ArgoBaseNode):
         self.satellites_used = 0  # Number of satellites used in fix
         self.last_satellite_count = 0  # Track previous satellite count for change detection
         self.last_fix_status = False  # Track previous fix status for change detection
+        
+        # Satellite signal strength tracking (from GSV sentences)
+        self.satellites_in_view = []  # List of (prn, elevation, azimuth, snr) tuples
+        self.average_snr = 0.0  # Average SNR of satellites with valid signal
 
         # NavSatFix data storage
         self.current_altitude = None  # Altitude in meters above WGS84 ellipsoid
@@ -246,11 +257,9 @@ class GpsNode(ArgoBaseNode):
         # GPIO lines for GPS reset and PPS monitoring
         self.GPIO_CHIP = '/dev/gpiochip0'
         self.GPS_RESET_LINE = 225  # Pin 10 (RXD.0) - !GPS_RESET (active low)
-        # TODO(v4-spi-overlay): Pin 24 (line 229 / PH5) is SPI1_CS0 on current boot
-        # overlay (spi1-cs0-spidev) used by LoRa SPI access. Add a custom SPI1 overlay
-        # that keeps SPI1 data/clock available for LoRa while freeing CS0 as GPIO so
-        # GPS_PPS monitoring can be re-enabled on this pin.
-        self.GPS_PPS_LINE = 229    # Pin 24 (CE.0) - GPS_PPS input
+        # Pin 24 (line 229 / PH5) is SPI1_CS0 on the default boot overlay (LoRa SPI).
+        # PPS GPIO monitoring is skipped when the kernel already owns that line.
+        self.GPS_PPS_LINE = self.pps_gpio_line if self.pps_gpio_line >= 0 else None
         self.gpio_chip = None
         self.gps_reset_line = None
         self.gps_pps_line = None
@@ -315,6 +324,43 @@ class GpsNode(ArgoBaseNode):
         # Track pause state to manage power save transitions (PSMOO)
         self._prev_paused = False
 
+    def _request_gps_pps_line(self, req_in):
+        """Request GPS_PPS as GPIO input, or None if unavailable."""
+        if self.GPS_PPS_LINE is None:
+            self.get_logger().info(
+                "GPS_PPS GPIO monitoring disabled (pps_gpio_line=-1)"
+            )
+            return None
+
+        line = self.gpio_chip.get_line(self.GPS_PPS_LINE)
+        if line.is_used():
+            self.get_logger().info(
+                f"GPS_PPS GPIO line {self.GPS_PPS_LINE} is in use by the kernel "
+                f"on {self.GPIO_CHIP} (SPI1_CS0 / LoRa on this board). "
+                "Skipping PPS pin monitoring; module PPS output via UBX is unchanged."
+            )
+            return None
+
+        bias_disable = getattr(gpiod, "LINE_REQ_FLAG_BIAS_DISABLE", None)
+        try:
+            line.request(consumer="gps_node_pps", type=req_in)
+        except OSError as first_err:
+            if bias_disable is None:
+                raise
+            try:
+                line.request(
+                    consumer="gps_node_pps",
+                    type=req_in,
+                    flags=bias_disable,
+                )
+            except OSError:
+                raise first_err from None
+
+        self.get_logger().info(
+            f"GPS_PPS pulse monitoring enabled on GPIO line {self.GPS_PPS_LINE}"
+        )
+        return line
+
     def _initialize_gpio_lines(self):
         """Initialize GPIO lines for !GPS_RESET output and GPS_PPS input monitoring."""
         if not GPIO_AVAILABLE:
@@ -323,18 +369,20 @@ class GpsNode(ArgoBaseNode):
 
         req_out = getattr(gpiod, "LINE_REQ_DIR_OUT", None)
         req_in = getattr(gpiod, "LINE_REQ_DIR_IN", None)
-        bias_disable = getattr(gpiod, "LINE_REQ_FLAG_BIAS_DISABLE", None)
+        pps_line_desc = (
+            self.GPS_PPS_LINE if self.GPS_PPS_LINE is not None else "disabled"
+        )
 
         try:
             self.gpio_chip = gpiod.Chip(self.GPIO_CHIP)
             self.get_logger().info(
                 f"Opened GPIO chip {self.GPIO_CHIP} for GPS lines "
-                f"(reset={self.GPS_RESET_LINE}, pps={self.GPS_PPS_LINE})"
+                f"(reset={self.GPS_RESET_LINE}, pps={pps_line_desc})"
             )
         except Exception as e:
             self.get_logger().warn(
                 f"Failed to open GPIO chip {self.GPIO_CHIP} for GPS lines "
-                f"(reset={self.GPS_RESET_LINE}, pps={self.GPS_PPS_LINE}): "
+                f"(reset={self.GPS_RESET_LINE}, pps={pps_line_desc}): "
                 f"{type(e).__name__}: {e}"
             )
             self.gpio_chip = None
@@ -357,46 +405,31 @@ class GpsNode(ArgoBaseNode):
             self.gps_reset_line = None
 
         try:
-            # GPS_PPS is an input pulse line.
-            self.gps_pps_line = self.gpio_chip.get_line(self.GPS_PPS_LINE)
-            # First try with BIAS_DISABLE; some kernels/drivers may reject this with EINVAL.
-            try:
-                self.gps_pps_line.request(
-                    consumer="gps_node_pps",
-                    type=req_in,
-                    flags=bias_disable,
-                )
-                self.get_logger().info(
-                    f"Requested GPS_PPS line {self.GPS_PPS_LINE} with BIAS_DISABLE (flags={bias_disable})"
-                )
-            except Exception as pps_bias_e:
-                self.get_logger().warn(
-                    f"GPS_PPS request with BIAS_DISABLE failed on line {self.GPS_PPS_LINE} "
-                    f"(consumer=gps_node_pps, type={req_in}, flags={bias_disable}): "
-                    f"{type(pps_bias_e).__name__}: {pps_bias_e}. Retrying without flags."
-                )
-                self.gps_pps_line.request(
-                    consumer="gps_node_pps",
-                    type=req_in,
-                )
-                self.get_logger().info(
-                    f"Requested GPS_PPS line {self.GPS_PPS_LINE} without bias flags"
-                )
-            self._last_pps_line_value = self.gps_pps_line.get_value()
+            self.gps_pps_line = self._request_gps_pps_line(req_in)
+            if self.gps_pps_line is not None:
+                self._last_pps_line_value = self.gps_pps_line.get_value()
         except Exception as e:
             self.get_logger().warn(
-                f"Failed requesting GPS_PPS line {self.GPS_PPS_LINE} "
+                f"Failed requesting GPS_PPS GPIO line {self.GPS_PPS_LINE} "
                 f"on {self.GPIO_CHIP}: {type(e).__name__}: {e}"
             )
             self.gps_pps_line = None
 
         if self.gps_reset_line is not None or self.gps_pps_line is not None:
+            pps_status = (
+                f"ok (line {self.GPS_PPS_LINE})"
+                if self.gps_pps_line is not None
+                else (
+                    "disabled"
+                    if self.GPS_PPS_LINE is None
+                    else f"unavailable (line {self.GPS_PPS_LINE})"
+                )
+            )
             self.get_logger().info(
                 "Initialized GPS GPIO lines: "
                 f"!GPS_RESET={'ok' if self.gps_reset_line is not None else 'unavailable'} "
                 f"(line {self.GPS_RESET_LINE}), "
-                f"GPS_PPS={'ok' if self.gps_pps_line is not None else 'unavailable'} "
-                f"(line {self.GPS_PPS_LINE})"
+                f"GPS_PPS={pps_status}"
             )
         else:
             self.get_logger().warn(
@@ -1022,6 +1055,7 @@ class GpsNode(ArgoBaseNode):
         self.get_logger().info("Publishing COG (Course Over Ground) to /gps_cog topic")
         self.get_logger().info("Publishing combined velocity vector to /gps_velocity topic")
         self.get_logger().info("Publishing satellite count to /gps_num_satellites topic")
+        self.get_logger().info("Publishing average SNR (signal strength) to /gps_snr_avg topic")
         self.get_logger().info(
             "Publishing standard NavSatFix messages to /fix topic (for mapping)")
 
@@ -1351,6 +1385,9 @@ class GpsNode(ArgoBaseNode):
             time.sleep(0.1)
             self.get_logger().debug("✓ Power management configuration sent")
             
+            # Configure active antenna power
+            self.configure_antenna_power()
+            
             # Configure PPS (Pulse Per Second) output
             self.configure_pps_output()
             
@@ -1361,6 +1398,58 @@ class GpsNode(ArgoBaseNode):
             
         except Exception as e:
             self.get_logger().warn(f"Failed to configure GPS hot start: {e}")
+
+    def configure_antenna_power(self):
+        """Configure active antenna power on u-blox NEO-N9M GPS module."""
+        self.get_logger().info("Configuring active antenna power...")
+        
+        try:
+            # Configure antenna using UBX-CFG-ANT command
+            # u-blox M9-MDR Interface Description: CFG-ANT enables active antenna power
+            # Format: flags(2 bytes), pins(2 bytes)
+            # flags: bit 0 = svcs (antenna supervision enabled)
+            #        bit 1 = scd (short circuit detection enabled)
+            #        bit 2 = ocd (open circuit detection enabled)
+            #        bit 3 = pdwnOnSCD (power down on short circuit)
+            #        bit 4 = recovery (automatic recovery from short)
+            #        bit 5-15 = reserved
+            # pins: bit 0-4 = switch pin (reconfig=31 uses default)
+            #       bit 5-9 = scd pin (reconfig=31 uses default)
+            #       bit 10-14 = ocd pin (reconfig=31 uses default)
+            #       bit 15 = reconfig (1=use default pins)
+            
+            # Enable antenna with supervision, short/open circuit detection, and recovery
+            flags = 0x001F  # Enable all antenna supervision features (bits 0-4)
+            pins = 0x8000   # Use default antenna pins (bit 15 = reconfig)
+            
+            ant_cfg = bytearray([0xB5, 0x62,  # Sync chars
+                                0x06, 0x13,  # Class: CFG, ID: ANT
+                                0x04, 0x00,  # Length: 4 bytes
+                                flags & 0xFF, (flags >> 8) & 0xFF,  # Flags (little-endian)
+                                pins & 0xFF, (pins >> 8) & 0xFF])   # Pins (little-endian)
+            
+            # Calculate checksum
+            ant_cfg += self._ubx_checksum(ant_cfg[2:])
+            
+            # Send antenna configuration
+            self.serial_port.write(ant_cfg)
+            time.sleep(0.2)  # Give GPS time to process command
+            
+            # Wait for ACK
+            if self.serial_port.in_waiting > 0:
+                ack_resp = self.serial_port.read(self.serial_port.in_waiting)
+                # Check for ACK-ACK (0x05 0x01)
+                if b'\xB5\x62\x05\x01' in ack_resp:
+                    self.get_logger().info("✓ Active antenna power enabled with supervision")
+                    # Allow time for antenna power to stabilize before querying status
+                    time.sleep(0.5)
+                else:
+                    self.get_logger().warn("⚠ Antenna configuration sent but no ACK received")
+            else:
+                self.get_logger().warn("⚠ Antenna configuration sent but no response")
+            
+        except Exception as e:
+            self.get_logger().warn(f"Failed to configure antenna power: {e}")
 
     def configure_pps_output(self):
         """Configure PPS (Pulse Per Second) output on the GPS module."""
@@ -1480,7 +1569,7 @@ class GpsNode(ArgoBaseNode):
             if self.serial_port.in_waiting > 0:
                 self.serial_port.read(self.serial_port.in_waiting)
             hw_result = self._send_ubx(0x0A, 0x09, b'', expect_ack=False, timeout=1.5)
-            time.sleep(0.5)  # Give GPS time to respond
+            time.sleep(1.0)  # Give GPS more time to respond after antenna power config
             
             if self.serial_port.in_waiting > 0:
                 hw_resp = self.serial_port.read(self.serial_port.in_waiting)
@@ -1491,9 +1580,9 @@ class GpsNode(ArgoBaseNode):
                         hw_resp[i+2] == 0x0A and hw_resp[i+3] == 0x09):
                         # Parse MON-HW: pinSel(4), pinBank(4), pinDir(4), pinVal(4), noisePerMS(2), agcCnt(2), 
                         #              aStatus(1), aPower(1), flags(1), reserved1(1), usedMask(4), VP(25), jamInd(1), reserved2(2), pinIrq(4), pullH(4), pullL(4)
-                        # Skip sync(2) + class(1) + id(1) + length(2) + pinSel(4) + pinBank(4) + pinDir(4) + pinVal(4) + noisePerMS(2) + agcCnt(2) = 24 bytes
-                        a_status = hw_resp[i+24]  # aStatus byte (antenna status)
-                        a_power = hw_resp[i+25]   # aPower byte (antenna power status)
+                        # Skip sync(2) + class(1) + id(1) + length(2) + pinSel(4) + pinBank(4) + pinDir(4) + pinVal(4) + noisePerMS(2) + agcCnt(2) = 26 bytes
+                        a_status = hw_resp[i+26]  # aStatus byte (antenna status)
+                        a_power = hw_resp[i+27]   # aPower byte (antenna power status)
                     
                         ant_status_names = {0: "Init", 1: "Dont know", 2: "OK", 3: "Short", 4: "Open"}
                         ant_status = ant_status_names.get(a_status, f"Unknown({a_status})")
@@ -1744,6 +1833,80 @@ class GpsNode(ArgoBaseNode):
             self.get_logger().debug(f"Error parsing GGA sentence: {e}")
         return False
 
+    def parse_gsv_sentence(self, sentence):
+        """
+        Parse GSV (Satellites in View) sentence for signal strength information.
+        
+        GSV sentence format: $GPGSV,total_msgs,msg_num,sats_in_view,[prn,elev,azim,snr]*4*checksum
+        - Multiple GSV sentences may be sent to cover all satellites
+        - Each sentence contains up to 4 satellite entries
+        - SNR (Signal-to-Noise Ratio) is in dBHz (typically 0-99, higher is better)
+        - SNR may be empty if satellite is tracked but no signal yet
+        
+        Example: $GPGSV,3,1,12,01,45,123,42,03,12,045,38,06,78,234,45,09,23,187,*checksum
+        """
+        try:
+            parts = sentence.split(',')
+            if len(parts) < 4:
+                return False
+            
+            # Parse header
+            total_messages = int(parts[1]) if parts[1] else 0
+            message_number = int(parts[2]) if parts[2] else 0
+            sats_in_view_total = int(parts[3]) if parts[3] else 0
+            
+            # If this is the first message in a sequence, clear old data
+            if message_number == 1:
+                self.satellites_in_view = []
+            
+            # Parse up to 4 satellite entries (each is 4 fields: prn, elev, azim, snr)
+            for i in range(4):
+                base_idx = 4 + (i * 4)
+                if base_idx + 3 < len(parts):
+                    prn = parts[base_idx] if parts[base_idx] else None
+                    elevation = parts[base_idx + 1] if parts[base_idx + 1] else None
+                    azimuth = parts[base_idx + 2] if parts[base_idx + 2] else None
+                    snr_str = parts[base_idx + 3].split('*')[0] if parts[base_idx + 3] else None
+                    
+                    # Only add if we have a valid PRN
+                    if prn:
+                        try:
+                            snr = int(snr_str) if snr_str and snr_str.strip() else None
+                            self.satellites_in_view.append({
+                                'prn': int(prn),
+                                'elevation': int(elevation) if elevation else None,
+                                'azimuth': int(azimuth) if azimuth else None,
+                                'snr': snr
+                            })
+                        except ValueError:
+                            pass  # Skip satellites with invalid data
+            
+            # If this is the last message, calculate average SNR and publish
+            if message_number == total_messages:
+                # Calculate average SNR from satellites with valid signal
+                valid_snrs = [sat['snr'] for sat in self.satellites_in_view if sat['snr'] is not None and sat['snr'] > 0]
+                if valid_snrs:
+                    self.average_snr = sum(valid_snrs) / len(valid_snrs)
+                else:
+                    self.average_snr = 0.0
+                
+                # Publish average SNR
+                snr_msg = Float32()
+                snr_msg.data = self.average_snr
+                self.pub_snr_avg.publish(snr_msg)
+                
+                if self.debug_mode:
+                    self.get_logger().debug(
+                        f"GSV: {len(self.satellites_in_view)} sats in view, "
+                        f"{len(valid_snrs)} with signal, avg SNR: {self.average_snr:.1f} dBHz"
+                    )
+            
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to parse GSV sentence: {e}")
+            return False
+
     def get_fix_quality_description(self):
         """Get human-readable description of GPS fix quality."""
         if self.navsat_status == NavSatStatus.STATUS_NO_FIX:
@@ -1908,9 +2071,15 @@ class GpsNode(ArgoBaseNode):
                 f"reset_due_in={self._format_hms(reset_due_in_s)}"
             )
 
+        # Add satellite count and signal strength information
+        if self.average_snr > 0:
+            sat_str = f"sats={self.satellites_used} SNR={self.average_snr:.0f}dB"
+        else:
+            sat_str = f"sats={self.satellites_used}"
+        
         return (
             "GPS: No fix - searching for satellites... "
-            f"(since_fix={self._format_hms(time_without_fix_s)}; {pps_str}; {ant_str}; {reset_str})"
+            f"({sat_str}; since_fix={self._format_hms(time_without_fix_s)}; {pps_str}; {ant_str}; {reset_str})"
         )
 
     def publish_navigation_data(self):
@@ -2139,6 +2308,13 @@ class GpsNode(ArgoBaseNode):
                         self.parse_gga_sentence(data_str)
                         # Note: NavSatFix published by periodic timer (1 Hz) for consistent rate
                         # Note: satellite count published by periodic timer (1 Hz)
+                    elif (data_str.startswith('$GPGSV') or data_str.startswith('$GLGSV') or 
+                          data_str.startswith('$GAGSV') or data_str.startswith('$GBGSV') or
+                          data_str.startswith('$GNGSV')):
+                        # GSV: Satellites in view with signal strength (SNR) information
+                        # Multiple constellations: GP=GPS, GL=GLONASS, GA=Galileo, GB=BeiDou, GN=Combined
+                        # Parse to extract SNR data for signal quality monitoring
+                        self.parse_gsv_sentence(data_str)
 
                     # Handle periodic status logging for normal operation
                     self.periodic_status_logging()

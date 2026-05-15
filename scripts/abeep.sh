@@ -124,10 +124,11 @@ PY
 fi
 
 if command -v gpioset >/dev/null 2>&1; then
-    # Keep line HIGH for DURATION then release.
-    sec_part="${DURATION%.*}"
-    frac_part="${DURATION#*.}"
-    if [ "$sec_part" = "$DURATION" ]; then
+    # Keep line HIGH for pulse_duration then release (must use $1, not global DURATION,
+    # when run_beep_worker is called with a different length e.g. SOS dots).
+    sec_part="${pulse_duration%.*}"
+    frac_part="${pulse_duration#*.}"
+    if [ "$sec_part" = "$pulse_duration" ]; then
         frac_part="0"
     fi
     frac_part="$(printf '%-6s' "$frac_part" | tr ' ' '0' | cut -c1-6)"

@@ -7,7 +7,7 @@
 /**:
   ros__parameters:
     # Map configuration (used by sailing_area_publisher, argo_transform_publisher, controllers)
-    geofence_map_name: Hotel dei Pini close to shore # # Hotel dei Pini # Argo Irchel North pond sailing area
+    geofence_map_name: Argo Irchel North pond sailing area  # Hotel dei Pini | Argo Irchel pond sailing area
     # Controller parameters (used by controller.py and crosser controller)
     p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
     min_rudder_near_boundary: 0.5  # Minimum rudder command when close to boundary (0.0-1.0)
@@ -103,13 +103,12 @@
       yaw_invert: false
 controller_node:
   ros__parameters:
-    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, patrol, crosser, human
-    controller_initially_paused: false  # Start controller in paused (manual) mode if true
+    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, crosser, human
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
     rudder_full_scale_deg: 60.0  # Heading error (degrees) that produces full rudder deflection (-1.0 to +1.0)
     param_file_path: argo.yaml
-    patrol_lookahead_time: 15.0  # Seconds to predict ahead for boundary crossing (used by patrol/crosser controllers)
+    patrol_lookahead_time: 15.0  # Seconds to predict ahead for boundary crossing (crosser controller)
     boundary_turn_threshold: 4.0  # Distance to boundary (meters) to trigger turn maneuver
     tack_angle: 120.0  # Degrees to turn for jibe / compass-based turn candidates at boundary (NOT close-hauled laylines)
     upwind_layline_angle_deg: 50.0  # Crosser only: angle from true wind for upwind tacking headings (close-hauled; must be > no_go_zone_angle/2)
@@ -119,11 +118,15 @@ controller_node:
     arrival_distance_m: 3.0  # Distance to middle waypoint (meters) to consider "arrived" (used by crosser controller)
     tack_min_angle_from_wind: 50.0  # Minimum angle from wind during tack to avoid stays (degrees, used by crosser controller)
     no_go_zone_angle: 45.0  # Angle from wind where sailing is impossible (degrees, used by crosser controller)
-    broad_reach_angle: 110.0  # Preferred angle to wind (degrees) for patrol mode sailing
+
+gps_node:
+  ros__parameters:
+    # Line 229 (pin 24) is SPI1_CS0 on default overlay; node skips if kernel owns it. Use -1 to disable.
+    pps_gpio_line: 229
 
 rudder_sail_radio_node:
   ros__parameters:
-    human_override_timeout: 2.5      # Seconds after last human activity before robot can take control
+    human_override_timeout: 4.0      # Seconds after last human activity before robot can take control
     deadband_threshold: 0.1875        # Minimum change in radio input to count as human activity (5σ measured)
     safety_max_rudder: 1.0            # Maximum rudder command magnitude
     safety_max_sail: 1.0              # Maximum sail command magnitude

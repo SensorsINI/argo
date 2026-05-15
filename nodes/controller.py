@@ -17,13 +17,6 @@
 #   4. Commands published to /rudder_sail_cmd for execution by rudder_sail_radio.py
 #   5. Control arbitration in rudder_sail_radio.py decides human vs robot authority
 #
-# PAUSE MODE:
-#   - When paused (via /controller_node/pause service or single button tap):
-#     * No autonomous commands are published
-#     * rudder_sail_radio.py automatically defaults to human control (stale auto commands)
-#     * Controller resumes from current heading when unpaused
-#     * Pause state published to /controller_pause_state topic for monitoring
-#
 # AVAILABLE CONTROLLERS:
 #   1. ProportionalHeadingController (DEFAULT):
 #      - Simple proportional rudder control to maintain heading
@@ -68,7 +61,6 @@
 #   Published:
 #     /rudder_sail_cmd (Vector3) - Autonomous control commands (-1 to +1)
 #     /controller_state (String) - Current controller name for monitoring
-#     /controller_pause_state (Bool) - Current pause state for system monitoring
 #     /controller/captains_log (String) - Captain's log entries for analysis and visualization
 #     /controller/state (String) - Controller state (e.g., "broad_reach", "tacking") for visualization
 #
@@ -91,8 +83,7 @@
 #   enable_param_reload: Hot-reload parameter file changes (default: true)
 #
 # SERVICES:
-#   /controller_node/pause (SetBool) - Pause/unpause controller (True=pause, False=unpause, None=query)
-#   /controller_node/switch_controller (Trigger) - Switch to return-to-home controller
+#   /controller_node/switch_controller (Trigger) - Legacy; set controller_type parameter to switch
 #
 # CAPTAIN'S LOG SYSTEM:
 #   Controllers can publish log entries and state information:
@@ -136,7 +127,6 @@
 import sys
 import os
 
-# Remove old pause service import - implementing new boolean pause service directly
 import psutil
 
 # Import safe publishing utilities and ArgoBaseNode
@@ -164,7 +154,7 @@ import rclpy
 from std_msgs.msg import Bool, Float64, Float32, String
 from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import NavSatFix
-from std_srvs.srv import Trigger, SetBool
+from std_srvs.srv import Trigger
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
 
@@ -175,7 +165,6 @@ from controllers import (
     ProportionalHeadingController,
     WindAwareController,
     ReturnToHomeController,
-    PatrolController,
     CrosserController,
     HumanController,
     BoatState,
@@ -278,29 +267,10 @@ class ControllerNode(ArgoBaseNode):
         if debug_mode:
             self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
 
-        # Initialize boolean pause service
-        # Read initial pause state from parameter
-        self.declare_parameter('controller_initially_paused', False)
-        initial_pause_state = self.get_parameter('controller_initially_paused').get_parameter_value().bool_value
-        self._is_paused = initial_pause_state
-        
-        self.pause_service = self.create_service(
-            SetBool,
-            f'{self.get_name()}/pause',
-            self._handle_pause_service
-        )
-        
-        # Publish pause state for other nodes to monitor
-        self.pause_state_pub = self.create_publisher(
-            Bool, '/controller_pause_state', 10
-        )
-        
-        # Publish initial pause state
-        self._publish_pause_state()
-        if self._is_paused:
-            self.get_logger().info("Controller started in PAUSED state (manual control)")
-        else:
-            self.get_logger().info("Controller started in UNPAUSED state (autonomous control)")
+        # CrosserController: auto-fallback to human when GPS or IMU navigation is unhealthy
+        self._crosser_sensor_fallback_active = False
+        self._gps_navigation_healthy = True
+        self._imu_navigation_healthy = True
 
         # Service for controller switching (legacy - kept for backwards compatibility)
         # Controller switching now happens automatically via parameter change callback.
@@ -323,7 +293,7 @@ class ControllerNode(ArgoBaseNode):
         self.declare_parameter('p_heading_gain', 0.3)  # Proportional gain for heading control (P controller, can be extended to PID)
         # Allow disabling param file monitoring
         self.declare_parameter('enable_param_reload', True)
-        # Patrol controller parameters
+        # Crosser lookahead (seconds to predict boundary crossing)
         self.declare_parameter('patrol_lookahead_time', 15.0)
         self.declare_parameter('boundary_turn_threshold', 15.0)
         self.declare_parameter('arrival_distance_m', 10.0)  # Crosser: middle waypoint; RTH: distance to home to consider "arrived" (meters)
@@ -397,12 +367,6 @@ class ControllerNode(ArgoBaseNode):
         # Add parameter change callback to automatically switch controller when parameter changes
         self.add_on_set_parameters_callback(self._on_parameters_set)
         
-        # Publish initial pause state
-        self._publish_pause_state()
-        
-        # Create timer to publish pause state periodically (every 5 seconds)
-        self.pause_state_timer = self.create_timer(5.0, self._publish_pause_state)
-
         # --- Publishers ---
         # Real-time control commands (use default QoS)
         self.pub_rudder_sail_cmd = self.create_publisher(
@@ -425,6 +389,10 @@ class ControllerNode(ArgoBaseNode):
         # Control status from rudder_sail_radio.py (use default QoS)
         self.create_subscription(
             Bool, '/human_controlled', self.human_control_callback, 10)
+        self.create_subscription(
+            Bool, CrosserController.GPS_HEALTH_TOPIC, self._gps_node_health_callback, 10)
+        self.create_subscription(
+            Bool, CrosserController.IMU_HEALTH_TOPIC, self._imu_health_callback, 10)
         self.create_subscription(
             Vector3, '/control_authority', self.control_authority_callback, 10)
 
@@ -533,14 +501,6 @@ class ControllerNode(ArgoBaseNode):
             config['resume_navigation_distance_m'] = max(arrival_m * 1.5, arrival_m + 8.0)
             config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
             self.controller = ReturnToHomeController(config, logger=logger, parent_node=parent_node)
-        elif controller_type == 'patrol':
-            config['sail_wind_gain'] = 0.5
-            config['patrol_lookahead_time'] = self.get_parameter('patrol_lookahead_time').get_parameter_value().double_value
-            config['boundary_turn_threshold'] = self.get_parameter('boundary_turn_threshold').get_parameter_value().double_value
-            config['tack_angle'] = self.get_parameter('tack_angle').get_parameter_value().double_value
-            config['broad_reach_angle'] = self.get_parameter('broad_reach_angle').get_parameter_value().double_value
-            config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
-            self.controller = PatrolController(config, logger=logger, parent_node=parent_node)
         elif controller_type == 'crosser':
             config['sail_wind_gain'] = 0.5
             config['p_heading_gain'] = self.get_parameter('p_heading_gain').get_parameter_value().double_value if self.has_parameter('p_heading_gain') else 0.3
@@ -621,7 +581,7 @@ class ControllerNode(ArgoBaseNode):
                 self.get_logger().debug(f"Parameter callback: controller_type set to '{new_controller_type}' (current: {self.controller.name if self.controller else 'None'})")
                 
                 # Validate controller type
-                valid_types = ['proportional', 'wind_aware', 'return_to_home', 'patrol', 'crosser', 'human']
+                valid_types = ['proportional', 'wind_aware', 'return_to_home', 'crosser', 'human']
                 if new_controller_type not in valid_types:
                     result.successful = False
                     result.reason = f"Invalid controller type '{new_controller_type}'. Valid types: {', '.join(valid_types)}"
@@ -633,7 +593,6 @@ class ControllerNode(ArgoBaseNode):
                 if (new_controller_type == 'proportional' and current_controller_name == 'ProportionalHeadingController') or \
                    (new_controller_type == 'wind_aware' and current_controller_name == 'WindAwareController') or \
                    (new_controller_type == 'return_to_home' and current_controller_name == 'ReturnToHomeController') or \
-                   (new_controller_type == 'patrol' and current_controller_name == 'PatrolController') or \
                    (new_controller_type == 'crosser' and current_controller_name == 'CrosserController') or \
                    (new_controller_type == 'human' and current_controller_name == 'HumanController'):
                     self.get_logger().debug(f"Controller is already {current_controller_name} (requested: {new_controller_type}), no switch needed")
@@ -645,6 +604,7 @@ class ControllerNode(ArgoBaseNode):
                 try:
                     self.switch_controller(controller_type=new_controller_type)
                     self.get_logger().info(f"Controller automatically switched from {old_controller} to {self.controller.name} via parameter change (new type: {new_controller_type})")
+                    self._crosser_sensor_fallback_active = False
                 except Exception as e:
                     result.successful = False
                     result.reason = f"Error switching controller: {str(e)}"
@@ -676,70 +636,16 @@ class ControllerNode(ArgoBaseNode):
         
         return response
 
-    def _handle_pause_service(self, request, response):
-        """
-        Handle boolean pause service requests.
-        
-        Args:
-            request.data: True = pause, False = unpause, None = return current state
-            request.success: Not used in SetBool service
-        
-        Returns:
-            response.success: True if operation succeeded
-            response.message: Status message
-        """
-        try:
-            if request.data is True:
-                # Pause requested
-                if not self._is_paused:
-                    self._is_paused = True
-                    self.get_logger().info("Controller PAUSED - human control takes over")
-                    response.success = True
-                    response.message = "Controller paused successfully"
-                else:
-                    response.success = True
-                    response.message = "Controller already paused"
-            elif request.data is False:
-                # Unpause requested
-                if self._is_paused:
-                    self._is_paused = False
-                    self.get_logger().info("Controller UNPAUSED - autonomous control resumed")
-                    response.success = True
-                    response.message = "Controller unpaused successfully"
-                else:
-                    response.success = True
-                    response.message = "Controller already unpaused"
-            else:
-                # None - return current state
-                response.success = True
-                response.message = f"Controller is {'paused' if self._is_paused else 'unpaused'}"
-            
-            # Publish current pause state
-            self._publish_pause_state()
-            
-        except Exception as e:
-            self.get_logger().error(f"Error handling pause service: {e}")
-            response.success = False
-            response.message = f"Error: {str(e)}"
-        
-        return response
+    def _gps_node_health_callback(self, msg: Bool):
+        """GPS node health from gps_node (ArgoBaseNode /gps_node_health)."""
+        self._gps_navigation_healthy = bool(msg.data)
 
-    def _publish_pause_state(self, timer=None):
-        """Publish current pause state for other nodes to monitor."""
-        pause_msg = Bool()
-        pause_msg.data = self._is_paused
-        
-        if safe_publish(self.pause_state_pub, pause_msg, self):
-            safe_log(self, 'debug', f"Published pause state: {self._is_paused}")
+    def _imu_health_callback(self, msg: Bool):
+        """IMU/BNO085 bridge health (/imu_health)."""
+        self._imu_navigation_healthy = bool(msg.data)
 
-    def is_paused(self) -> bool:
-        """Check if the controller is currently paused."""
-        return self._is_paused
-
-    # --- Sensor Callbacks ---
     def human_control_callback(self, msg):
         """Receive control authority status from rudder_sail_radio.py."""
-        # Always process control authority changes, even when paused
         old_human_control = self.boat_state.human_controlled
         self.boat_state.human_controlled = msg.data
 
@@ -751,7 +657,7 @@ class ControllerNode(ArgoBaseNode):
                 self.data_collector.stop_session()
             
             # If human just took control, notify active controller if it supports
-            # takeover/reset handling (e.g. patrol, crosser, future stateful controllers).
+            # takeover/reset handling (e.g. crosser, future stateful controllers).
             if self.boat_state.human_controlled and self.controller is not None:
                 on_human_control_started = getattr(self.controller, 'on_human_control_started', None)
                 if callable(on_human_control_started):
@@ -778,12 +684,10 @@ class ControllerNode(ArgoBaseNode):
         """Receive true wind direction from bridge (compass convention, where wind comes from)."""
         self.true_wind_direction_from_bridge = msg.data
         # Pass true wind to controllers that interpret anem wind (sim: absolute; hardware: relative)
-        if isinstance(self.controller, (PatrolController, CrosserController)):
+        if isinstance(self.controller, CrosserController):
             self.controller.true_wind_direction_from_bridge = msg.data
     
     def pose_callback(self, msg):
-        if self.is_paused():
-            return
         # Convert from mathematical convention (0°=East, CCW) to compass convention (0°=North, CW)
         # Same conversion as visualization: compass = (450.0 - math) % 360.0
         heading_math = float(msg.z) % 360.0
@@ -796,8 +700,6 @@ class ControllerNode(ArgoBaseNode):
         self.boat_state.compass_heading = compass_heading
 
     def gps_cog_callback(self, msg):
-        if self.is_paused():
-            return
         self.boat_state.gps_cog = msg.data
         
         # Track GPS COG for sensor fusion
@@ -805,35 +707,23 @@ class ControllerNode(ArgoBaseNode):
         self._last_gps_cog_timestamp = time.time()
 
     def gps_sog_callback(self, msg):
-        if self.is_paused():
-            return
         self.boat_state.gps_sog = msg.data
         # Track timestamp of GPS SOG update (updates at ~0.2 Hz, so may be stale)
         self._last_gps_sog_timestamp = time.time()
 
     def gps_velocity_callback(self, msg):
-        if self.is_paused():
-            return
         self.boat_state.gps_velocity = msg
 
     def accel_callback(self, msg):
-        if self.is_paused():
-            return
         self.boat_state.accel = msg
 
     def gyro_callback(self, msg):
-        if self.is_paused():
-            return
         self.boat_state.gyro = msg
 
     def compass_callback(self, msg):
-        if self.is_paused():
-            return
         self.boat_state.compass_raw = msg
 
     def wind_callback(self, msg):
-        if self.is_paused():
-            return
         self.boat_state.wind_speed = msg.x
         # In simulation: bridge publishes ABSOLUTE wind direction (0-360, compass, where wind comes from)
         # On real boat: anemometer publishes RELATIVE wind angle (0-360, CW from front of boat)
@@ -962,9 +852,6 @@ class ControllerNode(ArgoBaseNode):
 
     def gps_position_callback(self, msg):
         """Receive GPS position from gps node"""
-        if self.is_paused():
-            return
-        
         # Track previous position for speed estimation (fallback when GPS SOG is stale)
         prev_lat = self.boat_state.current_latitude
         prev_lon = self.boat_state.current_longitude
@@ -1023,22 +910,39 @@ class ControllerNode(ArgoBaseNode):
             if not is_context_valid(self):
                 return
                 
-            # Publish controller state even when paused or in human mode (for dashboard display)
+            # Publish controller state for web dashboard and power button LED mode
             if self.controller:
                 state_msg = String(data=self.controller.name)
                 safe_publish(self.pub_controller_state, state_msg, self)
             
-            # Check if node is paused - when paused, skip all processing and logging
-            # EXCEPTION: HumanController must still run to publish release_servos=True
-            # This ensures servos stay in high impedance mode for human control
             is_human_controller = isinstance(self.controller, HumanController)
-            
-            if self.is_paused() and not is_human_controller:
-                # When paused, no autonomous commands are published, which causes
-                # rudder_sail_radio.py to default to human control due to stale auto commands.
-                # This effectively hands control back to the human operator immediately.
-                # Also prevents redundant logging (captain's log and terminal log) when paused.
-                return  # Skip all processing and logging when paused
+
+            nav_sensors_ok = self._gps_navigation_healthy and self._imu_navigation_healthy
+            if (
+                isinstance(self.controller, CrosserController)
+                and not self.boat_state.human_controlled
+                and not nav_sensors_ok
+            ):
+                if not self._crosser_sensor_fallback_active:
+                    self.get_logger().error(
+                        'Crosser requires healthy GPS and IMU — switching to HumanController until both recover.'
+                    )
+                self.switch_controller('human')
+                self._crosser_sensor_fallback_active = True
+            elif self._crosser_sensor_fallback_active and nav_sensors_ok:
+                if isinstance(self.controller, HumanController):
+                    ct = (
+                        self.get_parameter('controller_type')
+                        .get_parameter_value()
+                        .string_value.strip()
+                        .lower()
+                    )
+                    if ct == 'crosser':
+                        self.get_logger().info(
+                            'GPS and IMU healthy — resuming CrosserController.'
+                        )
+                        self.switch_controller('crosser')
+                self._crosser_sensor_fallback_active = False
 
             self.boat_state.timestamp = time.time()
             
@@ -1110,23 +1014,26 @@ class ControllerNode(ArgoBaseNode):
 
             else:
                 # Autonomous control mode
-                # For patrol controller, it sets target_heading internally, so allow it to run even if None initially
-                # For other controllers, target_heading must be set (from human control handoff)
+                # Crosser sets target_heading internally; initialize from compass if unset
                 if self.boat_state.target_heading is None:
-                    if isinstance(self.controller, PatrolController):
-                        # Patrol controller will set target_heading in generate_control()
-                        # Initialize to current heading as fallback
+                    if isinstance(self.controller, CrosserController):
                         if self.boat_state.compass_heading is not None:
                             self.boat_state.target_heading = self.boat_state.compass_heading
-                            self.get_logger().info(f"Patrol controller: Initializing target_heading to current heading {self.boat_state.target_heading:.1f}°")
+                            self.get_logger().info(
+                                f"Crosser: initializing target_heading to current heading {self.boat_state.target_heading:.1f}°"
+                            )
                         else:
-                            self.get_logger().warn("Patrol controller: No compass heading available yet, waiting...",
-                                                   throttle_duration_sec=5)
+                            self.get_logger().warn(
+                                'Crosser: no compass heading yet, waiting...',
+                                throttle_duration_sec=5,
+                            )
                             return
                     else:
                         # Other controllers need target_heading from human control handoff
-                        self.get_logger().warn("Robot control active, but no target heading. Waiting for human to set a course.",
-                                               throttle_duration_sec=5)
+                        self.get_logger().warn(
+                            'Robot control active, but no target heading. Waiting for human to set a course.',
+                            throttle_duration_sec=5,
+                        )
                         return
 
                 if self.controller is None:
@@ -1247,7 +1154,7 @@ class ControllerNode(ArgoBaseNode):
         # TODO: Absolute wind direction calculation
         # Some controllers calculate absolute wind from relative wind + heading
         # This should be centralized here and added to BoatState
-        # Current: Controllers calculate this individually (crosser.py, patrol.py)
+        # Current: Controllers calculate this individually (crosser.py)
         # Future: Calculate once here and add to BoatState.absolute_wind_direction
         
         pass

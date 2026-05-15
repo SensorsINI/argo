@@ -81,7 +81,7 @@ Legend:
 | 21 | PH8/SPI1_MISO | 232 | LoRa SPI MISO | `nodes/lora.py` | SPI1 MISO | peripheral | `ALT4` |
 | 22 | PI6/TWI0_SDA/UART2_RX | 262 | I2C0 SDA | battery/IMU nodes | I2C peripheral | pullups via TXS0102 (3.3V+5V sides) | `ALT5` |
 | 23 | PH6/SPI1_SCLK | 230 | LoRa SPI SCLK | `nodes/lora.py` | SPI1 clock | peripheral | `ALT4` |
-| 24 | PH5/SPI1_CS0 | 229 | `GPS_PPS` input | `nodes/gps.py` | GPIO input | `BIAS_DISABLE` | `ALT4` |
+| 24 | PH5/SPI1_CS0 | 229 | `GPS_PPS` input (v4: non-functional, see note below) | `nodes/gps.py` | GPIO input | `BIAS_DISABLE` | `ALT4` |
 | 25 | GND | - | ground | power | ground | - | GND |
 | 26 | PH9/SPI1_CS1 | 233 | `!ACOK` (charger AC-present signal) | `power_control/argo_power_control.py` | GPIO input | board-driven | `IN` |
 | 27 | PI10/TWI2_SDA/UART3_RX | 266 | I2C2 SDA (wind/mast bus) | `nodes/anem.py`, `nodes/argo_mast_leds.py` | I2C peripheral | pullups via TXS0102 (3.3V+5V sides) | `OFF` |
@@ -173,7 +173,7 @@ Behavior:
   - RX pin 13 (`PH3`)
 - Additional GPS control/status lines:
   - `!GPS_RESET` pin 10 (GPIO 225)
-  - `GPS_PPS` pin 24 (GPIO 229)
+  - `GPS_PPS` pin 24 (GPIO 229) - **v4 limitation:** Pin claimed by SPI1_CS0 for LoRa, PPS monitoring non-functional (see v4→v5 migration doc)
 
 ---
 

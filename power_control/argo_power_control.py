@@ -33,7 +33,7 @@
 #   Software shutdown sends HIGH pulse to POW_OFF → RESET coil deactivates relay
 #
 # POWER BUTTON BEHAVIOR (Rev3 PCB - Active HIGH):
-#   - Single tap: Toggle controller pause mode
+#   - Single tap: Toggle controller_type between human and last autonomous type (ros2 param)
 #   - Double tap: Toggle recording
 #   - Quadruple tap: Restart Argo launch service
 #   - Long press (>= threshold DEFAULT_SHUTDOWN_THRESHOLD_S): Initiate shutdown sequence
@@ -212,6 +212,7 @@ import time
 import signal
 import sys
 import subprocess
+import shlex
 import threading
 import logging
 import os
@@ -236,7 +237,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../node
 try:
     import rclpy
     from rclpy.logging import LoggingSeverity
-    from std_srvs.srv import Trigger, SetBool
+    from std_srvs.srv import Trigger
     from argo_base_node import ArgoBaseNode # Import the base node
     ROS2_AVAILABLE = True
 except ImportError:
@@ -249,7 +250,6 @@ except ImportError:
             return logging.getLogger(node_name)
 
     Trigger = None
-    SetBool = None
     ROS2_AVAILABLE = False
 
 # Conditional GPIO import - required for production, optional for test mode
@@ -267,7 +267,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import Bool, String
-from std_srvs.srv import Empty, Trigger, SetBool
+from std_srvs.srv import Empty, Trigger
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 # Removed QoS imports - using default QoS only
 
@@ -306,7 +306,8 @@ MULTI_TAP_MAX_DURATION_S = 3
 
 # LED Heartbeat Configuration
 LED_HEARTBEAT_HZ = 1.0                  # Green LED heartbeat frequency (1 Hz)
-LED_PAUSED_HEARTBEAT_HZ = 0.5           # Slower heartbeat when controller is paused (0.5 Hz)
+LED_PAUSED_HEARTBEAT_HZ = 0.5           # Slower heartbeat when HumanController is active (0.5 Hz)
+CONTROLLER_RESUME_TYPE_FILE = Path('/tmp/argo_power_controller_resume_type')
 
 # Button Press Pattern Configuration
 LED_PRESS_START_FREQUENCY_HZ = 2.0      # Starting flash frequency (2 Hz)
@@ -618,8 +619,8 @@ class PowerController(ArgoBaseNode):
         self.last_recording_check_time = 0.0
         self.last_logged_system_state = None
 
-        # Controller pause state tracking
-        self.controller_pause_state = False
+        # Controller runtime mode (HumanController = manual-friendly LED cadence)
+        self.controller_runtime_is_human = False
 
         # Check if Argo service is already running at startup
         self.get_logger().info("Checking if Argo service is already running...")
@@ -1164,7 +1165,7 @@ class PowerController(ArgoBaseNode):
                 self.get_logger().info(
                     f"Argo service status changed: {'RUNNING' if is_running else 'STOPPED'}")
                 # Update LED heartbeat when Argo service state changes
-                self._update_led_heartbeat_for_pause_state()
+                self._update_led_heartbeat_for_controller_mode()
 
                 # When Argo service stops, recording service is not available
                 if not is_running:
@@ -1193,7 +1194,7 @@ class PowerController(ArgoBaseNode):
                 # Set Argo service flag, but recording service needs time to initialize
                 self.argo_service_running = True
                 # Update LED heartbeat when Argo service starts
-                self._update_led_heartbeat_for_pause_state()
+                self._update_led_heartbeat_for_controller_mode()
                 # pause to allow record.py to start
                 time.sleep(7)
                 # check recording service availability in loop until it is available
@@ -1232,7 +1233,7 @@ class PowerController(ArgoBaseNode):
                 self.argo_service_running = False
                 self.recording_service_available = False
                 # Update LED heartbeat when Argo service stops
-                self._update_led_heartbeat_for_pause_state()
+                self._update_led_heartbeat_for_controller_mode()
                 return True
             else:
                 self.get_logger().error(
@@ -1243,26 +1244,24 @@ class PowerController(ArgoBaseNode):
             return False
 
     def toggle_controller_pause(self):
-        """Toggle controller pause mode via ROS2 service call"""
+        """Toggle controller between human mode and last autonomous type (replaces pause service)."""
         try:
-            # Check if Argo service is running (required for controller node)
             if not self.check_argo_service_status():
                 self.get_logger().warning("Single tap detected but Argo service is not running")
                 self.send_desktop_notification(
-                    "Controller Pause Unavailable",
-                    "Argo service must be running to toggle pause mode",
+                    "Controller toggle unavailable",
+                    "Argo service must be running to switch controller mode",
                     "warning"
                 )
                 return
 
-            self.get_logger().info("Single tap detected - toggling controller pause mode")
+            self.get_logger().info("Single tap detected - toggling human vs autonomous controller")
             self.send_desktop_notification(
-                "Controller Pause Control",
-                "Toggling controller pause mode...",
+                "Controller mode",
+                "Toggling human vs autonomous controller...",
                 "normal"
             )
 
-            # Start service wait pattern for delayed service call
             self.service_wait_active = True
             service_wait_thread = threading.Thread(
                 target=self.service_wait_pattern,
@@ -1270,81 +1269,106 @@ class PowerController(ArgoBaseNode):
             )
             service_wait_thread.start()
 
-            # Get current pause state and toggle it
-            current_pause_state = self._get_controller_pause_state()
-            new_pause_state = not current_pause_state
-            success, message = self._call_controller_pause_service(new_pause_state)
+            success, message = self._toggle_controller_human_via_ros_param()
 
-            # Stop service wait pattern
             self.service_wait_active = False
 
             if success:
-                # The service response message should indicate the new state
-                self.get_logger().info(f"✅ Controller pause toggled: {message}")
-                self.send_desktop_notification(
-                    "Controller Pause Toggled",
-                    message,
-                    "normal"
-                )
-
-                # Update LED heartbeat frequency based on new pause state
-                self._update_led_heartbeat_for_pause_state()
+                self.get_logger().info(f"✅ {message}")
+                self.send_desktop_notification("Controller mode", message, "normal")
+                self._update_led_heartbeat_for_controller_mode()
             else:
-                self.get_logger().error(f"❌ Failed to toggle controller pause: {message}")
+                self.get_logger().error(f"❌ {message}")
                 self.send_desktop_notification(
-                    "Controller Pause Error",
-                    f"Failed to toggle pause mode: {message}",
+                    "Controller toggle error",
+                    message,
                     "critical"
                 )
         except Exception as e:
-            # Always stop service wait pattern on exception
             self.service_wait_active = False
-            self.get_logger().error(f"Error toggling controller pause: {e}")
+            self.get_logger().error(f"Error toggling controller mode: {e}")
             self.send_desktop_notification(
-                "Controller Pause Error",
-                f"Error toggling pause mode: {e}",
+                "Controller toggle error",
+                f"Error: {e}",
                 "critical"
             )
 
-    def _get_controller_pause_state(self) -> bool:
-        """Get current controller pause state from cached topic data."""
+    def _ros2_get_controller_type_param(self) -> Optional[str]:
+        """Read controller_type from controller_node (best effort)."""
         try:
-            # Use the cached pause state from the topic subscription
-            # This is more reliable than trying to query the service
-            return getattr(self, 'controller_pause_state', False)
+            setup_path = f"/opt/ros/{os.environ.get('ROS_DISTRO', 'humble')}/setup.bash"
+            cmd = [
+                'bash', '-c',
+                f'source {shlex.quote(setup_path)} && ros2 param get /controller_node controller_type',
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                return None
+            for line in (r.stdout or '').splitlines():
+                if 'String value is:' in line:
+                    return line.split('String value is:', 1)[1].strip().strip('\'"').lower()
+            return None
+        except Exception:
+            return None
 
+    def _ros2_set_controller_type_param(self, controller_type: str) -> tuple[bool, str]:
+        """Set controller_type on controller_node. Only allows known lowercase names."""
+        safe = (controller_type or '').strip().lower()
+        allowed = (
+            'proportional', 'wind_aware', 'return_to_home', 'crosser', 'human',
+        )
+        if safe not in allowed:
+            return False, f"Refusing to set invalid controller_type: {controller_type!r}"
+        try:
+            setup_path = f"/opt/ros/{os.environ.get('ROS_DISTRO', 'humble')}/setup.bash"
+            cmd = [
+                'bash', '-c',
+                f'source {shlex.quote(setup_path)} && ros2 param set /controller_node controller_type {shlex.quote(safe)}',
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            out = (r.stdout or r.stderr or '').strip()
+            if r.returncode == 0:
+                return True, out or f"controller_type set to {safe}"
+            return False, out or f"ros2 param set failed (exit {r.returncode})"
         except Exception as e:
-            self.get_logger().error(f"Error getting controller pause state: {e}")
-            return False
+            return False, str(e)
+
+    def _toggle_controller_human_via_ros_param(self) -> tuple[bool, str]:
+        """Switch to human when autonomous; restore from /tmp file when already human."""
+        cur = self._ros2_get_controller_type_param()
+        if cur is None:
+            return False, "Could not read controller_type (is controller_node running?)"
+
+        if cur == 'human':
+            restore = 'crosser'
+            try:
+                if CONTROLLER_RESUME_TYPE_FILE.is_file():
+                    txt = CONTROLLER_RESUME_TYPE_FILE.read_text().strip().lower()
+                    if txt in ('proportional', 'wind_aware', 'return_to_home', 'crosser'):
+                        restore = txt
+            except OSError:
+                pass
+            ok, msg = self._ros2_set_controller_type_param(restore)
+            if ok:
+                try:
+                    CONTROLLER_RESUME_TYPE_FILE.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return ok, msg if ok else msg
+
+        try:
+            CONTROLLER_RESUME_TYPE_FILE.write_text(cur)
+        except OSError as e:
+            self.get_logger().warning(f"Could not persist resume controller type: {e}")
+        return self._ros2_set_controller_type_param('human')
+
+    def _get_controller_pause_state(self) -> bool:
+        """Deprecated: pause removed; kept for API compatibility."""
+        return False
 
     def _call_controller_pause_service(self, pause_state: bool) -> tuple[bool, str]:
-        """Call the controller pause service with the specified state."""
-        try:
-            if not rclpy.ok():
-                return False, "ROS2 node not available"
-
-            # Create service client for controller pause service
-            pause_client = self.create_client(SetBool, '/controller_node/pause')
-
-            if not pause_client.wait_for_service(timeout_sec=2.0):
-                return False, "Controller pause service not available"
-
-            # Create request
-            request = SetBool.Request()
-            request.data = pause_state
-
-            # Call service
-            future = pause_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-
-            if future.done():
-                response = future.result()
-                return response.success, response.message
-            else:
-                return False, "Service call timed out"
-
-        except Exception as e:
-            return False, f"Error calling controller pause service: {e}"
+        """Deprecated: pause service removed."""
+        return False, "Controller pause service has been removed; use human controller mode"
 
     def restart_argo_service(self):
         """Restart the Argo launch service"""
@@ -2460,7 +2484,7 @@ class PowerController(ArgoBaseNode):
 
         # Define patterns for each action type
         patterns = {
-            'single': [  # Controller pause toggle - 1 quick flash
+            'single': [  # Single tap: human/autonomous controller toggle — 1 quick flash
                 (0.1, True),   # 100ms on
                 (0.1, False),  # 100ms off
                 (0.1, True),   # 100ms on
@@ -2816,7 +2840,7 @@ class PowerController(ArgoBaseNode):
                     ).start()
                     # Immediate desktop notification
                     self.send_desktop_notification(
-                        "Controller Pause", "Single tap detected - toggling controller pause...", "normal")
+                        "Controller mode", "Single tap — toggling human vs autonomous controller...", "normal")
                     self.toggle_controller_pause()
                 elif tap_count == 2:
                     self.get_logger().info(
@@ -3200,9 +3224,9 @@ class PowerController(ArgoBaseNode):
             self.power_button_rgb_publisher = self.create_publisher(
                 Vector3, '/argo/power_button/rgb', 10)
 
-            # Create subscription to controller pause state
-            self.controller_pause_sub = self.create_subscription(
-                Bool, '/controller_pause_state', self._controller_pause_state_callback, 10)
+            # Runtime controller class name from controller_node (HumanController = manual)
+            self.controller_state_sub = self.create_subscription(
+                String, '/controller_state', self._controller_runtime_state_callback, 10)
 
             # Create subscriptions for system status monitoring
             
@@ -3241,7 +3265,7 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("  - /argo/power/button_events (topic)")
             self.get_logger().info("  - /argo/power_button/pattern (mast slot patterns)")
             self.get_logger().info("  - /argo/power_button/rgb (mast mirrors SOS / instant RGB)")
-            self.get_logger().info("  - /controller_pause_state (subscription)")
+            self.get_logger().info("  - /controller_state (subscription)")
             self.get_logger().info("  - /ac_power_present (subscription - for fast charge state updates)")
             self.get_logger().info("  - /argo/critical/i2c_failure (subscription - for critical I2C failure detection)")
         except Exception as e:
@@ -3387,18 +3411,19 @@ class PowerController(ArgoBaseNode):
         except Exception as e:
             self.get_logger().debug(f"Failed to publish RGB mirror: {e}")
 
-    def _controller_pause_state_callback(self, msg):
-        """Receive controller pause state updates from topic"""
-        old_state = self.controller_pause_state
-        self.controller_pause_state = msg.data
-
-        # Log state change
-        if old_state != msg.data:
-            self.get_logger().info(f"Controller pause state changed: {'PAUSED' if msg.data else 'UNPAUSED'}")
-            # Update LED heartbeat frequency when pause state changes
-            self._update_led_heartbeat_for_pause_state()
+    def _controller_runtime_state_callback(self, msg):
+        """Track active controller class name for LED cadence (HumanController = human mode)."""
+        name = (msg.data or '').strip()
+        is_human = name == 'HumanController'
+        old = getattr(self, 'controller_runtime_is_human', False)
+        self.controller_runtime_is_human = is_human
+        if old != is_human:
+            self.get_logger().info(
+                f"Controller runtime state: {'HumanController (manual)' if is_human else (name or 'unknown')}"
+            )
+            self._update_led_heartbeat_for_controller_mode()
         else:
-            self.get_logger().debug(f"Controller pause state: {'PAUSED' if msg.data else 'UNPAUSED'}")
+            self.get_logger().debug(f"Controller runtime state: {name or 'unknown'}")
 
     def _anem_health_callback(self, msg):
         """Receive anemometer health status updates"""
@@ -3650,7 +3675,7 @@ class PowerController(ArgoBaseNode):
         heartbeat_thread.start()
 
         # Set initial LED heartbeat frequency based on current state
-        self._update_led_heartbeat_for_pause_state()
+        self._update_led_heartbeat_for_controller_mode()
 
         # Start critical battery monitoring in separate thread
         self.get_logger().info("Starting critical battery monitoring thread")
@@ -4900,24 +4925,15 @@ class PowerController(ArgoBaseNode):
             return False  # False = proceed with halt
 
     def _pause_argo_system_for_power_conservation(self):
-        """Pause all sensor nodes to put hardware in low-power shutdown state"""
+        """Best-effort quieting before halt; legacy /toggle_pause path removed."""
         if not self.check_argo_service_status():
             self.get_logger().info(
-                "Argo service not running - skipping pause for power conservation")
+                "Argo service not running - skipping pre-halt coordination")
             return False
 
         self.get_logger().info(
-            "Pausing Argo system for power conservation via service call...")
-        success, message = self._call_trigger_service(
-            '/toggle_pause', timeout_sec=10.0)
-
-        if success:
-            self.get_logger().info(
-                f"✅ Argo system pause command successful: {message}")
-            return True
-        else:
-            self.get_logger().error(f"❌ Failed to pause Argo system: {message}")
-            return False
+            "Pre-halt: /toggle_pause removed from Argo; proceeding without remote pause service")
+        return True
 
     def initiate_critical_battery_halt(self, battery_voltage, reason=None):
         """Initiate critical battery halt sequence with timeout-based confirmation
@@ -5301,8 +5317,8 @@ If you take no action within 30 seconds, the system will automatically
         else:
             self.get_logger().info(f"LED heartbeat paused (reason: {reason})")
 
-    def _update_led_heartbeat_for_pause_state(self):
-        """Update LED heartbeat frequency based on controller pause state and Argo service state"""
+    def _update_led_heartbeat_for_controller_mode(self):
+        """Set LED heartbeat cadence from HumanController vs autonomous (Argo running)."""
         try:
             # Only update if Argo service is running (controller is available)
             if not self.argo_service_running:
@@ -5311,18 +5327,16 @@ If you take no action within 30 seconds, the system will automatically
                 self.get_logger().info("LED heartbeat: Normal (1Hz) - Argo service not running")
                 return
 
-            # Argo is running - check controller pause state
-            if self.controller_pause_state:
-                # Controller is paused - use slow heartbeat
+            # Argo is running - slow heartbeat when HumanController is active (manual / radio focus)
+            if self.controller_runtime_is_human:
                 self.set_heartbeat_frequency(LED_PAUSED_HEARTBEAT_HZ)
-                self.get_logger().info("LED heartbeat: Slow (0.5Hz) - Controller is PAUSED")
+                self.get_logger().info("LED heartbeat: Slow (0.5Hz) - HumanController active")
             else:
-                # Controller is running - use fast heartbeat
                 self.set_heartbeat_frequency(LED_HEARTBEAT_HZ * 2.0)
-                self.get_logger().info("LED heartbeat: Fast (2Hz) - Controller is RUNNING")
+                self.get_logger().info("LED heartbeat: Fast (2Hz) - Autonomous controller active")
 
         except Exception as e:
-            self.get_logger().error(f"Error updating LED heartbeat for pause state: {e}")
+            self.get_logger().error(f"Error updating LED heartbeat for controller mode: {e}")
 
     def _cleanup_ros2(self):
         """Clean up ROS2 resources"""
@@ -5454,7 +5468,7 @@ HARDWARE CONFIGURATION (Rev3 PCB):
   - LEDs: Active LOW control (GPIO LOW = ON, GPIO HIGH = OFF)
 
 POWER BUTTON BEHAVIOR (Active HIGH):
-  - Single tap: Toggle controller pause mode
+  - Single tap: Toggle human vs autonomous controller (ros2 param)
   - Double tap (2 quick taps): Toggle recording on/off
   - Quadruple tap (4 quick taps): Restart Argo launch service
   - Long press (>= threshold): Initiate shutdown sequence
@@ -5480,7 +5494,7 @@ OPTIONS:
   --test-wall-message, -w  Test wall message functionality and exit (safe for testing)
   --test-notification, -n  Test desktop notification functionality and exit (safe for testing)
   --test-led-patterns, -d  Test shutdown countdown LED pattern and exit (safe for testing)
-  --simulate-single-tap          Simulate a single tap to toggle controller pause mode
+  --simulate-single-tap          Simulate a single tap (human vs autonomous controller)
   --simulate-double-tap          Simulate a double tap to toggle recording
   --simulate-quadruple-tap       Simulate a quadruple tap to restart Argo service
   --simulate-critical-battery    Simulate critical battery condition for testing
@@ -5498,7 +5512,7 @@ EXAMPLES:
   ./argo_power_control.py -n                      # Test desktop notification (short form)
   ./argo_power_control.py --test-led-patterns # Test countdown LED pattern (safe)
   ./argo_power_control.py -d                      # Test countdown LED pattern (short form)
-  ./argo_power_control.py --simulate-single-tap   # Simulate single tap (controller pause toggle)
+  ./argo_power_control.py --simulate-single-tap   # Simulate single tap (controller human toggle)
   ./argo_power_control.py --simulate-double-tap   # Simulate double tap (recording toggle)
   ./argo_power_control.py --simulate-quadruple-tap # Simulate quadruple tap (restart Argo service)
   ./argo_power_control.py --simulate-critical-battery  # Test critical battery halt sequence
@@ -5556,7 +5570,7 @@ def main():
     parser.add_argument('--test-led-patterns',  action='store_true',
                         help='Test shutdown countdown LED pattern and exit (safe for testing)')
     parser.add_argument('--simulate-single-tap', action='store_true',
-                        help='Simulate a single tap to toggle controller pause mode')
+                        help='Simulate a single tap (toggle human vs autonomous controller)')
     parser.add_argument('--simulate-double-tap', action='store_true',
                         help='Simulate a double tap to toggle recording')
     parser.add_argument('--simulate-quadruple-tap', action='store_true',

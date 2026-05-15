@@ -19,6 +19,26 @@ Rationale:
 - That blocks GPIO request of pin 24 for PPS monitoring.
 - v5 routing above removes this overlap and simplifies runtime configuration.
 
+## Current v4 Limitation (Accepted)
+
+**GPS PPS monitoring is non-functional on v4 due to pin conflict:**
+
+- GPS module successfully outputs PPS pulses (configured via UBX-CFG-TP5)
+- Pin 24 (GPIO 229 / PH5) is hardwired to GPS PPS output
+- However, pin 24 is claimed by kernel as SPI1_CS0 for LoRa communication
+- GPIO monitoring cannot co-exist with SPI peripheral mode
+- Result: PPS pulses are generated but not monitored by software
+
+**Impact:** Cosmetic only. GPS fix status is determined by NMEA sentence parsing (RMC/GGA), not PPS monitoring. PPS monitoring was intended for timing validation and diagnostics only.
+
+**Software behavior:** `nodes/gps.py` detects the conflict at startup and logs:
+```
+GPS_PPS GPIO line 229 is in use by the kernel (SPI1_CS0 / LoRa on this board).
+Skipping PPS pin monitoring; module PPS output via UBX is unchanged.
+```
+
+Status messages show `PPS=unavailable` while the system operates normally.
+
 ## Overlay/Software Implications (Planned)
 
 - Update LoRa SPI/CS handling in `nodes/lora.py` to use hardware CS0 path.

@@ -39,7 +39,7 @@
             <!-- Critical I2C Failure Alert (shown when I2C bus fails) -->
             <div id="i2c-failure-alert" class="critical-alert" style="display: none; background-color: #ff4444; color: white; padding: 12px; border-radius: 8px; margin-bottom: 12px; font-weight: bold; text-align: center;">
                 🔴 CRITICAL I2C BUS FAILURE<br>
-                <span style="font-size: 0.9em; font-weight: normal;">Battery/wind sensors unavailable - Controller switched to RTH mode</span>
+                <span style="font-size: 0.9em; font-weight: normal;">Battery ADC / critical path failed (see <code>/argo/critical/i2c_failure</code>) — wind and IMU may still work; check RTH if armed</span>
             </div>
             <!-- Charging Fault Alert (shown when MP2672 charging fault detected) -->
             <div id="charging-fault-alert" class="critical-alert" style="display: none; background-color: #ff8800; color: white; padding: 12px; border-radius: 8px; margin-bottom: 12px; font-weight: bold; text-align: center;">
@@ -181,9 +181,6 @@
         <div class="card">
             <h2>System Control</h2>
             <div class="button-grid">
-                <button class="btn" id="pause-toggle-btn" onclick="togglePause()">
-                    ⏸️ Pause: Unknown
-                </button>
                 <button class="btn" id="recording-toggle-btn" onclick="toggleRecording()">
                     🔴 Recording: Unknown
                 </button>
@@ -346,8 +343,7 @@
             i2c_failure: false,
             human_controlled: null,
             recording: null,
-            controller_type: null,
-            controller_paused: null
+            controller_type: null
         };
 
         // Format elapsed time for display
@@ -434,10 +430,6 @@
                 needsUpdate = true;
                 lastCriticalState.controller_type = criticalData.controller_type;
             }
-            if (criticalData.controller_paused !== lastCriticalState.controller_paused) {
-                needsUpdate = true;
-                lastCriticalState.controller_paused = criticalData.controller_paused;
-            }
             
             // Update I2C failure alert
             if ((criticalData.i2c_failure || false) !== lastCriticalState.i2c_failure) {
@@ -517,7 +509,7 @@
                         statusData.human_controlled = data.human_controlled;
                         statusData.recording = data.recording;
                         statusData.controller_type = data.controller_type;
-                        statusData.controller_paused = data.controller_paused;
+                        statusData.i2c_failure = data.i2c_failure || false;
                     }
                 })
                 .catch(error => {
@@ -556,8 +548,11 @@
                     lastCriticalState.human_controlled = data.human_controlled;
                     lastCriticalState.recording = data.recording;
                     lastCriticalState.controller_type = data.controller_type;
-                    lastCriticalState.controller_paused = data.controller_paused;
                     lastCriticalState.i2c_failure = data.i2c_failure || false;
+                    // Full /api/status must drive the I2C banner too: otherwise if this poll sets
+                    // lastCriticalState.i2c_failure before /api/status/critical sees a transition,
+                    // updateCriticalUI() no-ops and the alert never appears (journal still logs).
+                    updateI2CFailureAlert(data.i2c_failure || false);
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);
@@ -791,12 +786,33 @@
                 data.saltwater_voltage !== null && data.saltwater_voltage !== undefined ? `${data.saltwater_voltage.toFixed(3)} V` : '-- V';
             
             // GPS
-            // Show "Last fix" when GPS is not locked but we have last valid coordinates
-            if (!data.gps_locked && data.gps_last_valid_latitude !== null && data.gps_last_valid_latitude !== undefined) {
-                document.getElementById('gps-lock').textContent = '🔴 Last fix';
+            // Show GPS lock status with satellite count and signal strength
+            const satCount = data.gps_satellites || 0;
+            const snrAvg = data.gps_snr_avg || 0;
+            const snrStr = snrAvg > 0 ? ` ${Math.round(snrAvg)}dB` : '';
+            
+            if (data.gps_locked) {
+                document.getElementById('gps-lock').textContent = `🟢 LOCKED (${satCount} sats${snrStr})`;
+            } else if (!data.gps_locked && data.gps_last_valid_latitude !== null && data.gps_last_valid_latitude !== undefined) {
+                document.getElementById('gps-lock').textContent = `🔴 Last fix (${satCount} sats${snrStr})`;
             } else {
-                document.getElementById('gps-lock').textContent = 
-                    data.gps_locked ? '🟢 LOCKED' : '🔴 NO LOCK';
+                // No lock - show satellite count and signal strength to indicate GPS health
+                if (satCount === 0) {
+                    if (snrAvg > 0) {
+                        // Satellites tracked but not yet used for fix
+                        document.getElementById('gps-lock').textContent = `🟡 SEARCHING (${snrAvg.toFixed(0)}dB signal)`;
+                    } else {
+                        document.getElementById('gps-lock').textContent = '🔴 NO LOCK (0 sats)';
+                    }
+                } else if (satCount < 4) {
+                    if (snrAvg < 30) {
+                        document.getElementById('gps-lock').textContent = `🔴 WEAK SIGNAL (${satCount} sats ${Math.round(snrAvg)}dB)`;
+                    } else {
+                        document.getElementById('gps-lock').textContent = `🟡 SEARCHING (${satCount} sats${snrStr} - need 4+)`;
+                    }
+                } else {
+                    document.getElementById('gps-lock').textContent = `🟡 WAITING (${satCount} sats${snrStr})`;
+                }
             }
             
             // Use current coordinates if available, otherwise use last valid coordinates
@@ -865,8 +881,7 @@
             updateCriticalUIElements({
                 human_controlled: data.human_controlled,
                 recording: data.recording,
-                controller_type: data.controller_type,
-                controller_paused: data.controller_paused
+                controller_type: data.controller_type
             });
             
             // Update controller button highlighting based on current controller type
@@ -889,10 +904,6 @@
                     buttonType: 'return_to_home',
                     // Special case: must contain both 'return' and 'home' to avoid false matches
                     matchAll: true
-                },
-                {
-                    patterns: ['patrol'],
-                    buttonType: 'patrol'
                 },
                 {
                     patterns: ['crosser'],
@@ -933,20 +944,6 @@
                     }
                 });
             }
-            
-            // Pause status - update toggle button
-            const pauseBtn = document.getElementById('pause-toggle-btn');
-            if (data.controller_paused === true) {
-                pauseBtn.textContent = '▶️ Resume Controller';
-                pauseBtn.className = 'btn btn-success';
-            } else if (data.controller_paused === false) {
-                pauseBtn.textContent = '⏸️ Pause Controller';
-                pauseBtn.className = 'btn btn-warning';
-            } else {
-                pauseBtn.textContent = '⏸️ Pause: Unknown';
-                pauseBtn.className = 'btn btn-secondary';
-            }
-            pauseBtn.disabled = false;
             
             // Recording status (updated reactively via updateCriticalUIElements, but also update here for consistency)
             // No need to duplicate - updateCriticalUIElements handles it
@@ -1004,33 +1001,6 @@
         }
 
         // API Actions
-        function togglePause() {
-            const btn = document.getElementById('pause-toggle-btn');
-            const originalText = btn.textContent;
-            
-            // Disable button during request
-            btn.disabled = true;
-            btn.textContent = '⏳ Processing...';
-            
-            fetch('/api/toggle_pause', { method: 'POST' })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert(`✅ ${data.message}`);
-                        updateStatus();
-                    } else {
-                        alert(`❌ ${data.message}`);
-                        btn.disabled = false;
-                        btn.textContent = originalText;
-                    }
-                })
-                .catch(error => {
-                    alert(`❌ Error: ${error}`);
-                    btn.disabled = false;
-                    btn.textContent = originalText;
-                });
-        }
-
         // Load available controllers and populate buttons
         let availableControllers = [];
         

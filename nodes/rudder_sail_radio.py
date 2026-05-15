@@ -531,6 +531,8 @@ class RudderSailRadioNode(ArgoBaseNode):
         # Adaptive read interval: faster when values changing, slower when stable
         self.SYSFS_READ_INTERVAL_ACTIVE = 0.05  # 20Hz when active (50ms)
         self.SYSFS_READ_INTERVAL_IDLE = 0.20    # 5Hz when idle (200ms) - reduces I/O by 75%
+        # Per-servo high-impedance tracking (avoids redundant sysfs writes + log spam at 20Hz)
+        self._servo_high_impedance_mode: dict[str, bool] = {}
 
         # --- QoS Profiles ---
 
@@ -660,8 +662,11 @@ class RudderSailRadioNode(ArgoBaseNode):
 
         # Special case: 0 means high impedance mode (no clamping)
         if value == 0:
+            if self._servo_high_impedance_mode.get(path.name):
+                return  # Already released — skip redundant sysfs write and logging
             try:
                 path.write_text(str(value))
+                self._servo_high_impedance_mode[path.name] = True
                 self.get_logger().info(
                     f"Set {path.name} to HIGH IMPEDANCE mode (radio control active)")
                 return
@@ -669,6 +674,9 @@ class RudderSailRadioNode(ArgoBaseNode):
                 self.get_logger().error(
                     f"Error setting high impedance mode for {path}: {e}")
                 return
+
+        # Leaving high impedance — allow next release to log again
+        self._servo_high_impedance_mode[path.name] = False
 
         # For non-zero values, apply normal clamping
         value = max(SERVO_MIN_PW_US, min(SERVO_MAX_PW_US, value))
@@ -718,7 +726,6 @@ class RudderSailRadioNode(ArgoBaseNode):
             self.write_sysfs_pw(SERVO_RUDDER_PATH, 0)
         if sail:
             self.write_sysfs_pw(SERVO_SAIL_PATH, 0)
-        self.get_logger().info("Servo outputs set to HIGH IMPEDANCE mode (radio control active)")
 
     def read_radio_inputs(self):
         """Read and process radio inputs from hardware with adaptive caching to reduce I/O overhead."""

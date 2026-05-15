@@ -26,10 +26,13 @@ from geofence_manager import GeofenceManager
 
 
 class CrosserController(BaseController):
-    """
-    Crosser controller that crosses from one side of the pond to the other,
+    """Crosser controller that crosses from one side of the pond to the other,
     targeting the middle waypoint or center of the sailing area.
-    
+
+    When ``/gps_node_health`` or ``/imu_health`` is false, ``controller.py``
+    switches to ``HumanController`` until both recover, because crosser
+    depends on GPS position and reliable heading from the BNO085 stack.
+
     State and Maneuver Hierarchy:
     =============================
     
@@ -104,6 +107,9 @@ class CrosserController(BaseController):
     - Wind-aware sail control based on apparent wind angle
     """
 
+    GPS_HEALTH_TOPIC = '/gps_node_health'
+    IMU_HEALTH_TOPIC = '/imu_health'
+
     def __init__(self, config, logger=None, parent_node=None):
         super().__init__(config, logger=logger, parent_node=parent_node)
         self.name = 'CrosserController'
@@ -135,7 +141,8 @@ class CrosserController(BaseController):
         self.crossing_state = 'toward_middle'
         
         self.geofence_manager = GeofenceManager()
-        map_name = config.get('geofence_map_name', 'Argo Irchel pond sailing area')
+        map_name = GeofenceManager.normalize_map_name(
+            config.get('geofence_map_name', 'Argo Irchel pond sailing area'))
         if not self.geofence_manager.load_geofence(map_name):
             self.log_entry(f"Failed to load geofence for map '{map_name}'", level="WARN")
         else:
@@ -373,7 +380,7 @@ class CrosserController(BaseController):
 
         In simulation, /anem_speed_angle_temp y is already absolute; the bridge also publishes
         /simulator/true_wind_direction which we prefer. On the real boat, anem y is relative to
-        the bow — same logic as PatrolController.
+        the bow — same logic as legacy geofence patrol-style avoidance.
         """
         if self.true_wind_direction_from_bridge is not None:
             return self.true_wind_direction_from_bridge
@@ -557,35 +564,35 @@ class CrosserController(BaseController):
         if not state.is_valid_for_control():
             return ControlCommand(timestamp=state.timestamp)
         
-        if self.geofence_manager.polygon_xy is not None:
+        if self.geofence_manager.is_ready:
             state.geofence_polygon = self.geofence_manager.polygon_xy
-        
-        if state.current_latitude is not None and state.current_longitude is not None:
-            state.distance_to_boundary = self.geofence_manager.distance_to_boundary_lonlat(
-                state.current_longitude, state.current_latitude)
-            
-            # Predict boundary crossing time in direction of travel (not just nearest distance)
-            # This prevents false triggers when close to side boundaries while heading toward middle
-            # NOTE: GPS SOG updates at ~0.2 Hz (every 5 seconds), so may be stale.
-            # Controller uses position-based speed estimation as fallback (updates at 1 Hz).
-            if (state.compass_heading is not None and state.gps_sog is not None and 
-                state.gps_sog > 0.1):  # Only predict if we have speed (gps_sog is in knots)
-                speed_ms = state.gps_sog * 0.514444  # Convert knots to m/s (1 knot = 0.514444 m/s)
-                state.predicted_boundary_crossing_time = self.geofence_manager.predict_boundary_crossing_time(
-                    state.current_latitude, state.current_longitude,
-                    state.compass_heading, speed_ms, self.patrol_lookahead_time)
-            else:
-                state.predicted_boundary_crossing_time = None
-            
-            if self.parent_node and hasattr(self.parent_node, 'pub_geofence_distance'):
-                distance_msg = Float64(data=state.distance_to_boundary if state.distance_to_boundary is not None else 0.0)
-                safe_publish(self.parent_node.pub_geofence_distance, distance_msg, self.parent_node)
-                is_violation = state.distance_to_boundary is not None and state.distance_to_boundary > 0
-                violation_msg = Bool(data=is_violation)
-                safe_publish(self.parent_node.pub_geofence_violation, violation_msg, self.parent_node)
-                is_grounded = state.distance_to_boundary is not None and state.distance_to_boundary >= 1.0
-                grounding_msg = Bool(data=is_grounded)
-                safe_publish(self.parent_node.pub_grounding, grounding_msg, self.parent_node)
+
+            if state.current_latitude is not None and state.current_longitude is not None:
+                state.distance_to_boundary = self.geofence_manager.distance_to_boundary_lonlat(
+                    state.current_longitude, state.current_latitude)
+
+                # Predict boundary crossing time in direction of travel (not just nearest distance)
+                # This prevents false triggers when close to side boundaries while heading toward middle
+                # NOTE: GPS SOG updates at ~0.2 Hz (every 5 seconds), so may be stale.
+                # Controller uses position-based speed estimation as fallback (updates at 1 Hz).
+                if (state.compass_heading is not None and state.gps_sog is not None and
+                        state.gps_sog > 0.1):  # Only predict if we have speed (gps_sog is in knots)
+                    speed_ms = state.gps_sog * 0.514444  # Convert knots to m/s (1 knot = 0.514444 m/s)
+                    state.predicted_boundary_crossing_time = self.geofence_manager.predict_boundary_crossing_time(
+                        state.current_latitude, state.current_longitude,
+                        state.compass_heading, speed_ms, self.patrol_lookahead_time)
+                else:
+                    state.predicted_boundary_crossing_time = None
+
+                if self.parent_node and hasattr(self.parent_node, 'pub_geofence_distance'):
+                    distance_msg = Float64(data=state.distance_to_boundary if state.distance_to_boundary is not None else 0.0)
+                    safe_publish(self.parent_node.pub_geofence_distance, distance_msg, self.parent_node)
+                    is_violation = state.distance_to_boundary is not None and state.distance_to_boundary > 0
+                    violation_msg = Bool(data=is_violation)
+                    safe_publish(self.parent_node.pub_geofence_violation, violation_msg, self.parent_node)
+                    is_grounded = state.distance_to_boundary is not None and state.distance_to_boundary >= 1.0
+                    grounding_msg = Bool(data=is_grounded)
+                    safe_publish(self.parent_node.pub_grounding, grounding_msg, self.parent_node)
         
         # Calculate bearing and distance to middle
         bearing_to_middle, distance_to_middle = self._calculate_bearing_to_middle(state)

@@ -18,7 +18,23 @@ from typing import List, Tuple, Optional, Dict, Any
 
 class GeofenceManager:
     """Manages geofence polygons and provides geometric operations."""
-    
+
+    @staticmethod
+    def normalize_map_name(map_name: str) -> str:
+        """Strip YAML comment artifacts (e.g. 'area#' when '#' has no preceding space)."""
+        if not map_name:
+            return map_name
+        return map_name.split('#', 1)[0].strip()
+
+    @property
+    def is_ready(self) -> bool:
+        """True when origin and sailing boundary polygon are loaded."""
+        return (
+            self.origin_lon is not None
+            and self.origin_lat is not None
+            and self.polygon_xy is not None
+        )
+
     def __init__(self, origin_lon: float = None, origin_lat: float = None):
         """
         Initialize geofence manager.
@@ -82,6 +98,9 @@ class GeofenceManager:
         Returns:
             True if successfully loaded, False otherwise
         """
+        map_name = self.normalize_map_name(map_name)
+        if not map_name:
+            return False
         if maps_dir is None:
             # Default to foxglove/maps directory relative to argo root
             script_path = Path(__file__).resolve()
