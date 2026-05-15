@@ -907,6 +907,75 @@ class GpsNode(ArgoBaseNode):
                 self.serial_port.timeout = original_timeout
         return None
 
+    def _query_firmware_version(self):
+        """Query and log GPS firmware version using UBX MON-VER command."""
+        self.get_logger().debug("Querying GPS firmware version...")
+        try:
+            # Send UBX MON-VER (version query) - no ACK expected for this query
+            self._send_ubx(0x0A, 0x04, b'', expect_ack=False, timeout=1.0)
+            time.sleep(0.5)
+            
+            if self.serial_port.in_waiting > 0:
+                ubx_resp = self.serial_port.read(self.serial_port.in_waiting)
+                if len(ubx_resp) >= 8 and ubx_resp[0:2] == b'\xB5\x62':
+                    # Parse MON-VER response if we got one
+                    if ubx_resp[2] == 0x0A and ubx_resp[3] == 0x04:  # MON-VER response
+                        # MON-VER format: sync(2) class(1) id(1) length(2) software_version(30) hardware_version(10) extension...
+                        length = ubx_resp[4] + (ubx_resp[5] << 8)
+                        if length >= 30 and len(ubx_resp) >= 8 + length:
+                            # Software version is null-terminated string starting at byte 6
+                            sw_version_end = ubx_resp.find(b'\x00', 6, 6 + 30)
+                            if sw_version_end > 6:
+                                sw_version = ubx_resp[6:sw_version_end].decode('ascii', errors='ignore')
+                                self.get_logger().info(f"GPS Software Version: {sw_version}")
+                                
+                                # Check for bootloader mode or firmware issues
+                                if "ROM BOOT" in sw_version.upper() or "BOOT" in sw_version.upper():
+                                    self.get_logger().error("✗ CRITICAL: GPS appears to be in BOOTLOADER mode!")
+                                    self.get_logger().error("✗ GPS firmware may be corrupted or GPS needs firmware update")
+                                    self.get_logger().error("✗ GPS will NOT acquire satellites or output NMEA in bootloader mode")
+                                    self.get_logger().error("✗ SOLUTION: Flash firmware to restore GPS functionality")
+                            
+                            # Hardware version
+                            hw_start = 6 + 30
+                            if len(ubx_resp) >= hw_start + 10:
+                                hw_version_end = ubx_resp.find(b'\x00', hw_start, hw_start + 10)
+                                if hw_version_end > hw_start:
+                                    hw_version = ubx_resp[hw_start:hw_version_end].decode('ascii', errors='ignore')
+                                    self.get_logger().info(f"GPS Hardware Version: {hw_version}")
+                            
+                            # Extension strings (firmware details, protocol version, etc.)
+                            ext_start = 6 + 30 + 10
+                            if len(ubx_resp) > ext_start:
+                                ext_data = ubx_resp[ext_start:]
+                                ext_strings = []
+                                i = 0
+                                while i < len(ext_data) and len(ext_strings) < 10:  # Limit to 10 extensions
+                                    if ext_data[i] == 0:
+                                        i += 1
+                                        continue
+                                    ext_end = ext_data.find(b'\x00', i)
+                                    if ext_end > i:
+                                        ext_str = ext_data[i:ext_end].decode('ascii', errors='ignore')
+                                        if ext_str:
+                                            ext_strings.append(ext_str)
+                                        i = ext_end + 1
+                                    else:
+                                        break
+                                if ext_strings:
+                                    for ext in ext_strings:
+                                        self.get_logger().info(f"GPS Info: {ext}")
+                        else:
+                            self.get_logger().debug(f"MON-VER response too short: length={length}, received={len(ubx_resp)}")
+                    else:
+                        self.get_logger().debug(f"Received non-MON-VER UBX response: class=0x{ubx_resp[2]:02X} id=0x{ubx_resp[3]:02X}")
+                else:
+                    self.get_logger().debug("Response not in UBX format")
+            else:
+                self.get_logger().debug("No response to MON-VER query")
+        except Exception as e:
+            self.get_logger().debug(f"Error querying firmware version: {e}")
+
     def setup_gps(self):
         """Sends initialization commands to the GPS and verifies communication."""
         self.get_logger().info("Setting up u-blox NEO-N9M GPS...")
@@ -916,6 +985,7 @@ class GpsNode(ArgoBaseNode):
         time.sleep(1.0)  # Brief pause to let any automatic data come through
 
         # Check if there's any data waiting
+        automatic_output_detected = False
         if self.serial_port.in_waiting > 0:
             try:
                 waiting_data = self.serial_port.read(
@@ -924,12 +994,18 @@ class GpsNode(ArgoBaseNode):
                     self.get_logger().info("✓ GPS is outputting data automatically!")
                     self.get_logger().debug(
                         f"Sample output: {waiting_data[:100]}...")
-                    # Still configure NMEA sentences and hot start even with automatic output
-                    self.enable_nmea_sentences()
-                    self.get_logger().info("GPS setup completed. Device is working correctly.")
-                    return
+                    automatic_output_detected = True
             except Exception as e:
                 self.get_logger().debug(f"Error reading automatic data: {e}")
+        
+        # Query firmware version (always do this for diagnostics)
+        self._query_firmware_version()
+        
+        # If automatic output was detected, configure and return
+        if automatic_output_detected:
+            self.enable_nmea_sentences()
+            self.get_logger().info("GPS setup completed. Device is working correctly.")
+            return
 
         # If no automatic data, try communication tests
         communication_ok = False
@@ -1321,47 +1397,62 @@ class GpsNode(ArgoBaseNode):
             time.sleep(0.1)
             self.get_logger().debug("✓ Backup battery configuration sent")
             
-            # Configure navigation engine settings for hot start (CFG-NAV5)
-            # This optimizes the GPS for faster acquisition using cached data
-            nav5_cfg = bytes([0xB5, 0x62,  # Sync chars
-                             0x06, 0x24,  # Class: CFG, ID: NAV5
-                             0x24, 0x00,  # Length: 36 bytes
-                             0xFF, 0xFF,  # Mask: apply all settings
-                             0x06,        # Dynamic model: automotive
-                             0x03,        # Fix mode: auto 2D/3D
-                             0x00, 0x00,  # Fixed altitude (not used)
-                             0x10, 0x27,  # Fixed altitude variance (not used)
-                             0x05,        # Minimum elevation: 5 degrees
-                             0x00,        # Reserved
-                             0xFA, 0x00,  # Position DOP mask: 250 (DOP = Dilution of Precision)
-                             0xFA, 0x00,  # Time DOP mask: 250 (DOP = Dilution of Precision)
-                             0x64, 0x00,  # Position accuracy mask: 100m
-                             0x2C, 0x01,  # Time accuracy mask: 300s
-                             0x00,        # Static hold threshold: 0 cm/s
-                             0x00,        # DGNSS timeout: 0s
-                             0x00,        # CNO threshold: 0 dBHz
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00,        # Reserved
-                             0x00])       # Reserved
+            # Configure navigation engine using CFG-VALSET (modern interface for NEO-M9N)
+            # CRITICAL: Use Sea dynamic model for sailboat, not Automotive!
+            # NEO-M9N uses the new configuration interface (CFG-VALSET), not legacy CFG-NAV5
+            self.get_logger().info("Configuring navigation engine (Sea dynamic model, relaxed filters)...")
             
-            # Calculate checksum
-            nav5_cfg += self._ubx_checksum(nav5_cfg[2:])
+            # CFG-VALSET payload format:
+            # Version (1): 0x01 = transaction mode
+            # Layers (1): 0x07 = RAM + BBR + Flash (persistent across resets)
+            # Reserved (2): 0x0000
+            # Key-Value pairs: each key is 4 bytes (little-endian), value follows
             
-            # Send navigation configuration
-            self.serial_port.write(nav5_cfg)
-            time.sleep(0.1)
-            self.get_logger().debug("✓ Navigation engine configuration sent")
+            # Configuration keys (all 1-byte values, U1 or I1 types)
+            # CFG-NAVSPG-DYNMODEL = 0x20110021 - Dynamic model
+            # CFG-NAVSPG-INFIL_MINELEV = 0x201100a4 - Minimum elevation (signed, degrees)
+            # CFG-NAVSPG-INFIL_MINCNO = 0x201100a3 - Minimum CNO/SNR (dBHz)
+            # CFG-NAVSPG-INFIL_NCNOTHRS = 0x201100aa - Number of sats required above CNO threshold
+            # CFG-NAVSPG-INFIL_CNOTHRS = 0x201100ab - CNO threshold for fix attempt (dBHz)
+            
+            def add_key_value_u1(payload, key, value):
+                """Helper to add a 1-byte unsigned key-value pair"""
+                payload.extend([
+                    key & 0xFF, (key >> 8) & 0xFF, 
+                    (key >> 16) & 0xFF, (key >> 24) & 0xFF,
+                    value & 0xFF
+                ])
+            
+            def add_key_value_i1(payload, key, value):
+                """Helper to add a 1-byte signed key-value pair"""
+                # Convert signed to unsigned byte representation
+                byte_val = value if value >= 0 else (256 + value)
+                payload.extend([
+                    key & 0xFF, (key >> 8) & 0xFF, 
+                    (key >> 16) & 0xFF, (key >> 24) & 0xFF,
+                    byte_val & 0xFF
+                ])
+            
+            valset_payload = bytearray([
+                0x01,        # Version: transaction mode
+                0x07,        # Layers: RAM + BBR + Flash (save persistently)
+                0x00, 0x00,  # Reserved
+            ])
+            
+            # Add configuration key-value pairs
+            add_key_value_u1(valset_payload, 0x20110021, 5)    # DYNMODEL: Sea (5)
+            add_key_value_i1(valset_payload, 0x201100a4, 0)    # INFIL_MINELEV: 0 degrees (accept low satellites)
+            add_key_value_u1(valset_payload, 0x201100a3, 6)    # INFIL_MINCNO: 6 dBHz (very permissive for weak signals)
+            add_key_value_u1(valset_payload, 0x201100aa, 3)    # INFIL_NCNOTHRS: 3 satellites minimum
+            add_key_value_u1(valset_payload, 0x201100ab, 20)   # INFIL_CNOTHRS: 20 dBHz threshold (permissive)
+            
+            # Send CFG-VALSET command
+            nav_result = self._send_ubx(0x06, 0x8A, valset_payload, expect_ack=True, timeout=2.0)
+            
+            if nav_result:
+                self.get_logger().info("✓ Navigation engine configured: Sea mode, min_elev=0°, min_cno=6dBHz (CFG-VALSET)")
+            else:
+                self.get_logger().warn("⚠ Navigation configuration (CFG-VALSET) not acknowledged - may use default settings")
             
             # Configure power management for hot start (CFG-PMS)
             # This ensures the GPS maintains satellite data during low power states
@@ -1394,10 +1485,50 @@ class GpsNode(ArgoBaseNode):
             # Query GPS status to diagnose hardware issues
             self.query_gps_status()
             
+            # Save configuration to non-volatile memory (CFG-CFG)
+            # This ensures settings persist across GPS resets and power cycles
+            self.save_gps_configuration()
+            
             self.get_logger().info("✓ GPS configured for hot start capability")
             
         except Exception as e:
             self.get_logger().warn(f"Failed to configure GPS hot start: {e}")
+
+    def save_gps_configuration(self):
+        """Save current GPS configuration to non-volatile memory using UBX-CFG-CFG."""
+        self.get_logger().info("Saving GPS configuration to non-volatile memory...")
+        try:
+            # UBX-CFG-CFG: Save configuration to non-volatile memory
+            # Format: clearMask (4 bytes), saveMask (4 bytes), loadMask (4 bytes), deviceMask (1 byte)
+            # saveMask bits: bit 0=ioPort, bit 1=msgConf, bit 2=infMsg, bit 3=navConf, bit 4=rxmConf,
+            #                bit 8=senConf, bit 9=rinvConf, bit 10=antConf, bit 11=logConf, bit 12=ftsConf
+            # We want to save: navConf (navigation), msgConf (messages), antConf (antenna), ioPort
+            # saveMask = 0x0000041F (bits 0,1,2,3,4,10 = ioPort,msgConf,infMsg,navConf,rxmConf,antConf)
+            # deviceMask = 0x01 (save to BBR - battery-backed RAM, 0x02=Flash is not supported on all modules)
+            cfg_cfg = bytearray([0xB5, 0x62,  # Sync chars
+                                0x06, 0x09,  # Class: CFG, ID: CFG (save configuration)
+                                0x0D, 0x00,  # Length: 13 bytes
+                                0x00, 0x00, 0x00, 0x00,  # clearMask: don't clear anything
+                                0x1F, 0x04, 0x00, 0x00,  # saveMask: save navigation, messages, antenna, I/O port
+                                0x00, 0x00, 0x00, 0x00,  # loadMask: don't load (not used for save)
+                                0x01])       # deviceMask: BBR (battery-backed RAM)
+            
+            cfg_cfg += self._ubx_checksum(cfg_cfg[2:])
+            self.serial_port.write(cfg_cfg)
+            time.sleep(0.5)  # Give GPS time to save to memory
+            
+            # Check for ACK
+            if self.serial_port.in_waiting > 0:
+                save_resp = self.serial_port.read(self.serial_port.in_waiting)
+                if b'\xB5\x62\x05\x01' in save_resp:
+                    self.get_logger().info("✓ GPS configuration saved to non-volatile memory")
+                else:
+                    self.get_logger().warn("⚠ Configuration save sent but no ACK received")
+            else:
+                self.get_logger().warn("⚠ Configuration save sent but no response")
+                
+        except Exception as e:
+            self.get_logger().warn(f"Failed to save GPS configuration: {e}")
 
     def configure_antenna_power(self):
         """Configure active antenna power on u-blox NEO-N9M GPS module."""
@@ -2371,11 +2502,23 @@ class GpsNode(ArgoBaseNode):
                 # This node's primary purpose is now to provide the raw data stream.
 
             except serial.SerialException as e:
-                self.get_logger().error(f'CRITICAL: Serial port error: {e}')
-                self.get_logger().error('CRITICAL: GPS device communication lost. Exiting.')
-                self.set_unhealthy("GPS device not accessible")
-                import sys
-                sys.exit(1)
+                error_msg = str(e)
+                # Check if this is a transient "device reports readiness" error
+                # This is a known pyserial issue with certain UART devices and should not cause exit
+                if "readiness to read but returned no data" in error_msg:
+                    self.get_logger().warn(
+                        f'Transient serial port error (recoverable): {e}',
+                        throttle_duration_sec=10.0)
+                    # Don't exit - this is a transient UART timing issue, not a hardware failure
+                    # The next read will likely succeed
+                    time.sleep(0.1)  # Brief delay before retrying
+                else:
+                    # This is a real hardware error (device disconnected, etc.)
+                    self.get_logger().error(f'CRITICAL: Serial port error: {e}')
+                    self.get_logger().error('CRITICAL: GPS device communication lost. Exiting.')
+                    self.set_unhealthy("GPS device not accessible")
+                    import sys
+                    sys.exit(1)
             except Exception as e:
                 # Log unexpected errors as warnings but don't exit the node
                 # This allows the node to recover from transient errors

@@ -33,8 +33,8 @@ fi
 echo "📊 Monitoring service status..."
 
 # Wait for service to start and nodes to initialize
-echo "⏳ Waiting 20s for nodes to initialize..."
-sleep 20
+echo "⏳ Waiting 40s for nodes to initialize..."
+sleep 40
 
 # Check if service is running
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
