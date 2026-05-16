@@ -35,9 +35,8 @@ groups:
     - anem_node
     - temp_monitor_node
     
-  communication:
-    - lora_node
-    
+  communication: []  # lora_node temporarily disabled — not in use
+
   visualization:
     - argo_transform_publisher
     - argo_boat_visualization
@@ -53,7 +52,7 @@ groups:
     - gps_node
     - anem_node
     - temp_monitor_node
-    - lora_node
+    # - lora_node  # temporarily disabled — not in use
     - record_node
     - mastleds_node
     - argo_web_dashboard
@@ -117,6 +116,7 @@ nodes:
     executable: nodes/lora.py
     description: "Long range radio communication"
     health_topic: "/lora_node_health"
+    excluded: true  # temporarily disabled — not in use; re-add to physical_robot group to launch
     
   - name: mastleds_node
     executable: nodes/argo_mast_leds.py
