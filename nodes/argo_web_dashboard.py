@@ -498,39 +498,43 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Bool, '/imu_health', self.imu_health_cb, self.volatile_qos)
         )
         
-        # LoRa sources (fallback when WiFi unavailable)
-        self._topic_subscriptions.append(
-            self.create_subscription(Bool, 'lora/human_controlled', lambda msg: self.human_control_cb(msg, 'lora'), 10)
-        )
-        self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), self.volatile_qos)
-        )
-        self._topic_subscriptions.append(
-            self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), self.volatile_qos)
-        )
-        self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), self.volatile_qos)
-        )
-        self._topic_subscriptions.append(
-            self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), self.volatile_qos)
-        )
-        self._topic_subscriptions.append(
-            self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), self.volatile_qos)
-        )
-        self._topic_subscriptions.append(
-            self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), self.volatile_qos)
-        )
-        self._topic_subscriptions.append(
-            self.create_subscription(Float32, 'lora/gps_snr_avg', lambda msg: self.gps_snr_cb(msg, 'lora'), self.volatile_qos)
-        )
-        
-        # LoRa-specific monitoring
-        self._topic_subscriptions.append(
-            self.create_subscription(Int32, 'lora/rssi', self.lora_rssi_cb, 10)
-        )
-        self._topic_subscriptions.append(
-            self.create_subscription(String, 'lora/last_contact', self.lora_contact_cb, 10)
-        )
+        # LoRa sources (fallback when WiFi unavailable) - only subscribe if lora_node is enabled
+        if 'lora_node' in self.physical_robot_nodes:
+            self.get_logger().info('📡 LoRa node enabled - subscribing to LoRa topics')
+            self._topic_subscriptions.append(
+                self.create_subscription(Bool, 'lora/human_controlled', lambda msg: self.human_control_cb(msg, 'lora'), 10)
+            )
+            self._topic_subscriptions.append(
+                self.create_subscription(Float64, 'lora/battery_voltage', lambda msg: self.battery_voltage_cb(msg, 'lora'), self.volatile_qos)
+            )
+            self._topic_subscriptions.append(
+                self.create_subscription(Vector3, 'lora/compass', lambda msg: self.compass_cb(msg, 'lora'), self.volatile_qos)
+            )
+            self._topic_subscriptions.append(
+                self.create_subscription(Float64, 'lora/gps_cog', lambda msg: self.gps_cog_cb(msg, 'lora'), self.volatile_qos)
+            )
+            self._topic_subscriptions.append(
+                self.create_subscription(Float64, 'lora/gps_sog', lambda msg: self.gps_sog_cb(msg, 'lora'), self.volatile_qos)
+            )
+            self._topic_subscriptions.append(
+                self.create_subscription(NavSatFix, 'lora/fix', lambda msg: self.gps_fix_cb(msg, 'lora'), self.volatile_qos)
+            )
+            self._topic_subscriptions.append(
+                self.create_subscription(UInt8, 'lora/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'lora'), self.volatile_qos)
+            )
+            self._topic_subscriptions.append(
+                self.create_subscription(Float32, 'lora/gps_snr_avg', lambda msg: self.gps_snr_cb(msg, 'lora'), self.volatile_qos)
+            )
+            
+            # LoRa-specific monitoring
+            self._topic_subscriptions.append(
+                self.create_subscription(Int32, 'lora/rssi', self.lora_rssi_cb, 10)
+            )
+            self._topic_subscriptions.append(
+                self.create_subscription(String, 'lora/last_contact', self.lora_contact_cb, 10)
+            )
+        else:
+            self.get_logger().info('📡 LoRa node disabled - skipping LoRa topic subscriptions')
     
     def _destroy_all_subscriptions(self):
         """Destroy all ROS2 subscriptions to stop receiving messages."""
