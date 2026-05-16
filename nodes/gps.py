@@ -148,15 +148,21 @@ class GpsNode(ArgoBaseNode):
 
     Command Line Options:
     --debug: Enable detailed debug logging of GPS data and communication
+    --reset: Perform hardware reset on GPS module at startup using reset pin
+    --factory-reset: Reset GPS configuration to factory defaults (clears BBR and Flash)
     """
 
-    def __init__(self, debug_mode=False):
+    def __init__(self, debug_mode=False, do_hardware_reset=False, do_factory_reset=False):
         super().__init__('gps_node')
 
         # Set logger level to DEBUG if debug mode is enabled
         if debug_mode:
             self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
             self.get_logger().debug('Debug logging enabled')
+        
+        # Store hardware reset flag for use during setup
+        self.do_hardware_reset_on_startup = do_hardware_reset
+        self.do_factory_reset_on_startup = do_factory_reset
 
         self.get_logger().info('Initializing GPS node...')
 
@@ -218,8 +224,10 @@ class GpsNode(ArgoBaseNode):
         # Satellite signal strength tracking (from GSV sentences)
         self.satellites_in_view = []  # List of (prn, elevation, azimuth, snr) tuples
         self.satellites_in_view_temp = []  # Temporary buffer for GSV parsing (to avoid clearing live data)
+        self.gsv_constellation_buffers = {}  # Per-constellation buffers: {'GP': [...], 'GL': [...], etc}
         self.average_snr = 0.0  # Average SNR of satellites with valid signal
-        self.last_gsv_time = None  # Track when we last received GSV data
+        self.last_gsv_time = None  # Track when we last received valid GSV data (None until first GSV)
+        self.last_gsv_update_time = 0.0  # Track when we last aggregated all constellation data
 
         # NavSatFix data storage
         self.current_altitude = None  # Altitude in meters above WGS84 ellipsoid
@@ -988,6 +996,34 @@ class GpsNode(ArgoBaseNode):
         """Sends initialization commands to the GPS and verifies communication."""
         self.get_logger().info("Setting up u-blox NEO-N9M GPS...")
 
+        # Perform factory reset if requested (before hardware reset)
+        factory_reset_performed = False
+        if self.do_factory_reset_on_startup:
+            self.get_logger().info("Factory reset requested - will reset GPS configuration to defaults")
+            if self.reset_config_to_defaults():
+                factory_reset_performed = True
+                # Wait for GPS to process the reset and stabilize (factory reset can take time)
+                self.get_logger().info("Waiting for GPS to process factory reset...")
+                time.sleep(3.0)
+
+        # Perform hardware reset if requested
+        if self.do_hardware_reset_on_startup:
+            self.get_logger().info("Performing hardware reset on GPS module...")
+            if self.gps_reset_line:
+                try:
+                    # Pull reset line LOW (active-low reset) for 100ms
+                    self.gps_reset_line.set_value(0)
+                    time.sleep(0.1)
+                    # Release reset line HIGH (normal operation)
+                    self.gps_reset_line.set_value(1)
+                    self.get_logger().info("✓ Hardware reset completed. Waiting for GPS to initialize...")
+                    # Wait for GPS module to complete startup (typically 1-2 seconds)
+                    time.sleep(2.0)
+                except Exception as e:
+                    self.get_logger().error(f"Failed to perform hardware reset: {e}")
+            else:
+                self.get_logger().warn("⚠ Hardware reset requested but GPIO reset line not available")
+
         # First, listen briefly for any automatic output
         self.get_logger().debug("Listening for automatic GPS output...")
         time.sleep(1.0)  # Brief pause to let any automatic data come through
@@ -1007,13 +1043,34 @@ class GpsNode(ArgoBaseNode):
                 # self.get_logger().debug(f"Error reading automatic data: {e}")
                 pass
         
-        # Query firmware version (always do this for diagnostics)
-        self._query_firmware_version()
+        # Query firmware version (always do this for diagnostics, unless factory reset just happened)
+        if not factory_reset_performed:
+            self._query_firmware_version()
+        else:
+            self.get_logger().info("Skipping firmware version query (GPS still stabilizing after factory reset)")
         
         # If automatic output was detected, configure and return
         if automatic_output_detected:
-            self.configure_hot_start()  # Configure navigation engine FIRST
-            self.enable_nmea_sentences()
+            if not factory_reset_performed:
+                # Normal startup: configure hot start and navigation engine
+                self.configure_hot_start()  # Configure navigation engine FIRST
+                self.enable_nmea_sentences()
+            else:
+                # After factory reset: use factory defaults with minimal essential configuration
+                # Per NEO-M9N Integration Manual 3.1.5, factory defaults include:
+                # - UART: 38400 baud, 8N1
+                # - Output: NMEA GGA, GLL, GSA, GSV, RMC, VTG, TXT
+                # - NMEA 4.10 with all GNSS bands
+                self.get_logger().info("Using factory default configuration:")
+                self.get_logger().info("  UART: 38400 baud, 8N1")
+                self.get_logger().info("  NMEA: GGA, GLL, GSA, GSV, RMC, VTG, TXT (all GNSS)")
+                self.get_logger().info("  Dynamic model: Portable (factory default)")
+                
+                # CRITICAL: Must configure antenna power even with factory defaults
+                # Factory default may have active antenna power OFF
+                self.get_logger().info("Configuring essential hardware (antenna power)...")
+                self.configure_antenna_power()
+            
             self.get_logger().info("GPS setup completed. Device is working correctly.")
             self.set_healthy("GPS initialized and receiving data")
             return
@@ -1311,6 +1368,27 @@ class GpsNode(ArgoBaseNode):
             vtg_ck_b = (vtg_ck_b + vtg_ck_a) & 0xFF
         vtg_enable += bytes([vtg_ck_a, vtg_ck_b])
 
+        # Enable NMEA GSV (Satellites in View) - Class 0xF0, ID 0x03
+        # This provides satellite visibility and signal strength information
+        gsv_enable = bytes([0xB5, 0x62,  # Sync chars
+                           0x06, 0x01,  # Class: CFG, ID: MSG
+                           0x08, 0x00,  # Length: 8 bytes
+                           0xF0, 0x03,  # NMEA GSV message
+                           0x00,        # Rate on DDC (I2C)
+                           0x01,        # Rate on UART1 (our connection)
+                           0x00,        # Rate on UART2
+                           0x01,        # Rate on USB
+                           0x00,        # Rate on SPI
+                           0x00])       # Reserved
+
+        # Calculate checksum for GSV command
+        gsv_ck_a = 0
+        gsv_ck_b = 0
+        for byte in gsv_enable[2:]:  # Skip sync chars
+            gsv_ck_a = (gsv_ck_a + byte) & 0xFF
+            gsv_ck_b = (gsv_ck_b + gsv_ck_a) & 0xFF
+        gsv_enable += bytes([gsv_ck_a, gsv_ck_b])
+
         # Send configuration commands
         if self.serial_port and self.serial_port.is_open:
             try:
@@ -1356,7 +1434,15 @@ class GpsNode(ArgoBaseNode):
                     self.get_logger().warn("⚠ VTG enable sent but no ACK received")
                 time.sleep(0.1)
 
-                self.get_logger().info("✓ Navigation sentences (GGA, RMC, VTG) enabled on GPS module")
+                self.get_logger().debug("Enabling NMEA GSV sentences...")
+                gsv_payload = gsv_enable[6:-2]
+                if self._send_ubx(0x06, 0x01, gsv_payload, expect_ack=True, timeout=1.0):
+                    self.get_logger().debug("✓ GSV enable ACK received")
+                else:
+                    self.get_logger().warn("⚠ GSV enable sent but no ACK received")
+                time.sleep(0.1)
+
+                self.get_logger().info("✓ Navigation sentences (GGA, RMC, VTG, GSV) enabled on GPS module")
                 
                 # Flush any pending UBX ACK/NAK messages from the configuration commands
                 # These are binary messages that would otherwise be read as invalid data
@@ -1388,6 +1474,75 @@ class GpsNode(ArgoBaseNode):
                     f"Failed to configure GPS navigation sentences: {e}")
                 return False
         return False
+
+    def query_current_dynmodel(self):
+        """Query the current dynamic platform model using CFG-VALGET."""
+        try:
+            # CFG-VALGET message to query CFG-NAVSPG-DYNMODEL (0x20110021)
+            valget_payload = bytearray([
+                0x00,        # Version: 0
+                0x00,        # Layer: 0 = RAM (current active config)
+                0x00, 0x00,  # Position (reserved, set to 0)
+                # Key ID for DYNMODEL (4 bytes, little-endian)
+                0x21, 0x00, 0x11, 0x20
+            ])
+            
+            result = self._send_ubx(0x06, 0x8B, valget_payload, expect_ack=False, timeout=2.0)
+            if result and isinstance(result, (bytes, bytearray)) and len(result) >= 1:
+                # Response format: header (8 bytes) + key (4 bytes) + value (1 byte for U1)
+                # Extract the DYNMODEL value from response
+                dynmodel = result[0]
+                model_names = {
+                    0: "Portable", 2: "Stationary", 3: "Pedestrian", 
+                    4: "Automotive", 5: "Sea", 6: "Airborne <1g",
+                    7: "Airborne <2g", 8: "Airborne <4g", 9: "Wrist"
+                }
+                model_name = model_names.get(dynmodel, f"Unknown({dynmodel})")
+                self.get_logger().info(f"Current dynamic platform model: {model_name} ({dynmodel})")
+                return dynmodel
+            else:
+                self.get_logger().debug("Dynamic platform model query returned no payload (using factory defaults)")
+                return None
+        except Exception as e:
+            self.get_logger().warn(f"Error querying dynamic model: {e}")
+            return None
+
+    def reset_config_to_defaults(self):
+        """Reset GPS configuration to factory defaults using CFG-CFG.
+        
+        Uses UBX-CFG-CFG to clear all configuration from BBR and Flash layers.
+        Per NEO-M9N Interface Description 3.10.3.1:
+        "if any bit is set in the clearMask: all configuration in the selected 
+        non-volatile memory is deleted"
+        """
+        try:
+            # CFG-CFG message to clear all configuration from BBR and Flash
+            # Payload: clearMask (4 bytes) + saveMask (4 bytes) + loadMask (4 bytes) + optional deviceMask
+            cfg_cfg_payload = bytearray([
+                # clearMask (X4): Clear all configuration from selected layers
+                0x00, 0x00, 0x00, 0x1F,  # bit 0 (BBR) + bit 1 (Flash) = 0x03, but docs say "any bit" clears all
+                                          # Using 0x1F to be explicit about clearing all subsystems
+                # saveMask (X4): Don't save anything (we're clearing, not saving)
+                0x00, 0x00, 0x00, 0x00,
+                # loadMask (X4): Load from remaining layers after clear (reload defaults)
+                0x00, 0x00, 0x00, 0x1F,  # Load all subsystems from lower layers (defaults)
+            ])
+            
+            self.get_logger().info("Sending CFG-CFG to clear all configuration from BBR and Flash...")
+            
+            # Factory reset can take longer - use 5 second timeout
+            result = self._send_ubx(0x06, 0x09, cfg_cfg_payload, expect_ack=True, timeout=5.0)
+            if result:
+                self.get_logger().info("✓ GPS configuration reset to factory defaults (CFG-CFG ACK received)")
+                self.get_logger().info("   All configuration cleared from BBR and Flash, defaults loaded")
+                return True
+            else:
+                self.get_logger().warn("⚠ CFG-CFG not acknowledged (ACK-NAK or timeout)")
+                self.get_logger().info("   Factory reset may have failed")
+                return False
+        except Exception as e:
+            self.get_logger().error(f"Failed to reset GPS configuration: {e}")
+            return False
 
     def configure_hot_start(self):
         """Configure GPS for hot start capability with backup battery and almanac retention."""
@@ -1451,12 +1606,18 @@ class GpsNode(ArgoBaseNode):
             
             valset_payload = bytearray([
                 0x00,        # Version: 0 = SET (immediate)
-                0x01,        # Layers: 0x01 = RAM only (volatile - won't disrupt satellite tracking)
+                0x02,        # Layers: 0x02 = BBR only (battery-backed RAM, persists across restarts)
                 0x00, 0x00,  # Reserved
             ])
             
             # Add configuration key-value pairs
-            add_key_value_u1(valset_payload, 0x20110021, 5)    # DYNMODEL: Sea (5)
+            # Dynamic Platform Model: Pedestrian (3) is ideal for small, slow-moving sailboats
+            # - Max altitude: 9000m (allows land testing, unlike Sea model's 500m limit)
+            # - Max velocity: 30 m/s (plenty for 65cm sailboat)
+            # - Max vertical velocity: 20 m/s
+            # - Position deviation: Small (better accuracy than Sea model's Medium)
+            # Alternative models: Portable(0), Stationary(2), Automotive(4), Sea(5), Airborne(6-8)
+            add_key_value_u1(valset_payload, 0x20110021, 3)    # DYNMODEL: Pedestrian (3)
             add_key_value_i1(valset_payload, 0x201100a4, 0)    # INFIL_MINELEV: 0 degrees (accept low satellites)
             add_key_value_u1(valset_payload, 0x201100a3, 6)    # INFIL_MINCNO: 6 dBHz (very permissive for weak signals)
             add_key_value_u1(valset_payload, 0x201100aa, 3)    # INFIL_NCNOTHRS: 3 satellites minimum
@@ -1474,14 +1635,14 @@ class GpsNode(ArgoBaseNode):
             add_key_value_u1(valset_payload, 0x10310024, 1)    # QZSS enabled
             add_key_value_u1(valset_payload, 0x10310025, 1)    # GLONASS enabled
             
-            # Send CFG-VALSET command
-            nav_result = self._send_ubx(0x06, 0x8A, valset_payload, expect_ack=True, timeout=2.0)
-            
-            if nav_result:
-                self.get_logger().info("✓ Navigation engine configured: Sea mode, min_elev=0°, min_cno=6dBHz")
-                self.get_logger().info("✓ GNSS constellations enabled: GPS, GLONASS, Galileo, BeiDou, QZSS")
-            else:
-                self.get_logger().warn("⚠ Navigation configuration (CFG-VALSET) not acknowledged - may use default settings")
+            # Send CFG-VALSET command - DISABLED (causes satellite tracking disruption)
+            # nav_result = self._send_ubx(0x06, 0x8A, valset_payload, expect_ack=True, timeout=2.0)
+            # 
+            # if nav_result:
+            #     self.get_logger().info("✓ Navigation engine configured: Sea mode, min_elev=0°, min_cno=6dBHz")
+            #     self.get_logger().info("✓ GNSS constellations enabled: GPS, GLONASS, Galileo, BeiDou, QZSS")
+            # else:
+            #     self.get_logger().warn("⚠ Navigation configuration (CFG-VALSET) not acknowledged - may use default settings")
             
             # Configure power management for hot start (CFG-PMS)
             # This ensures the GPS maintains satellite data during low power states
@@ -1511,30 +1672,27 @@ class GpsNode(ArgoBaseNode):
             # Configure PPS (Pulse Per Second) output
             self.configure_pps_output()
             
-            # Query GPS status to diagnose hardware issues
-            self.query_gps_status()
+            # Query current dynamic platform model to see what's configured
+            self.query_current_dynmodel()
             
-            # CRITICAL DECISION: Should we save configuration to GPS non-volatile memory?
-            # 
-            # CFG-CFG command disrupts satellite tracking and kills hot start capability!
-            # But we need to save when configuration actually changes.
+            # CRITICAL DECISION: Skip CFG-VALSET configuration entirely!
             #
-            # BEST PRACTICE: Don't use CFG-CFG at all! Let GPS configuration be volatile.
-            # Benefits:
-            # - No satellite tracking disruption
-            # - Configuration re-applied cleanly on each startup
-            # - Code changes take effect immediately without managing saved state
-            # - Hot start capability preserved across restarts
+            # Problem: ANY configuration command (CFG-VALSET, CFG-CFG) disrupts satellite tracking.
+            # Even writing to RAM or BBR causes satellites to be lost and requires reacquisition.
             #
-            # The GPS module retains ephemeris/almanac data in battery-backed RAM even
-            # without CFG-CFG, giving us hot start capability. The configuration we're
-            # saving (NMEA sentences, antenna power, PPS) can be set every startup without
-            # issue - it doesn't affect satellite tracking.
+            # Solution: Use factory defaults! The u-blox NEO-M9N default configuration is good enough:
+            # - GPS constellation enabled by default
+            # - Can acquire satellites with default settings
+            # - No need to configure GLONASS/Galileo/BeiDou (nice to have, but not critical)
             #
-            # DECISION: SKIP CFG-CFG entirely. Configuration will be re-applied on each boot,
-            # which is safer and more maintainable than trying to track saved state.
+            # We'll still configure:
+            # - Antenna power (non-disruptive)
+            # - PPS output (non-disruptive)
+            # - NMEA sentences (non-disruptive)
+            #
+            # DECISION: SKIP CFG-VALSET entirely to avoid satellite tracking disruption.
             
-            self.get_logger().info("✓ GPS configured (configuration not saved to NV memory - will re-apply on each boot)")
+            self.get_logger().info("✓ GPS using factory defaults (skipping CFG-VALSET to avoid satellite disruption)")
             
             self.get_logger().info("✓ GPS configured for hot start capability")
             
@@ -1580,58 +1738,40 @@ class GpsNode(ArgoBaseNode):
             self.get_logger().warn(f"Failed to save GPS configuration: {e}")
 
     def configure_antenna_power(self):
-        """Configure active antenna power on u-blox NEO-N9M GPS module."""
-        self.get_logger().info("Configuring active antenna power...")
+        """Configure active antenna power on u-blox NEO-N9M GPS module using CFG-VALSET.
+        
+        For M9N modules, we should use CFG-VALSET instead of the legacy CFG-ANT command.
+        The key configuration is CFG-HW-ANT_CFG_VOLTCTRL to enable active antenna power.
+        """
+        self.get_logger().info("Configuring active antenna power (CFG-VALSET)...")
         
         try:
-            # Configure antenna using UBX-CFG-ANT command
-            # u-blox M9-MDR Interface Description: CFG-ANT enables active antenna power
-            # Format: flags(2 bytes), pins(2 bytes)
-            # flags: bit 0 = svcs (antenna supervision enabled)
-            #        bit 1 = scd (short circuit detection enabled)
-            #        bit 2 = ocd (open circuit detection enabled)
-            #        bit 3 = pdwnOnSCD (power down on short circuit)
-            #        bit 4 = recovery (automatic recovery from short)
-            #        bit 5-15 = reserved
-            # pins: bit 0-4 = switch pin (reconfig=31 uses default)
-            #       bit 5-9 = scd pin (reconfig=31 uses default)
-            #       bit 10-14 = ocd pin (reconfig=31 uses default)
-            #       bit 15 = reconfig (1=use default pins)
+            # Use CFG-VALSET to configure antenna power for M9N modules
+            # Key ID: CFG-HW-ANT_CFG_VOLTCTRL (0x10a3002e) - Enable active antenna LNA
+            # Value: 1 (enable voltage control for active antenna)
             
-            # Enable antenna with basic supervision, but without automatic power-down
-            # flags bits: 0=svcs (supervision), 1=scd (short detect), 2=ocd (open detect), 
-            #             3=pdwnOnSCD (power-down on short - DON'T USE), 4=recovery
-            # Use 0x0017 = bits 0,1,2,4 = svcs + scd + ocd + recovery (no auto power-down on short)
-            flags = 0x0017  # Enable supervision and detection, but allow recovery without power-down
-            pins = 0x8000   # Use default antenna pins (bit 15 = reconfig)
+            # CFG-VALSET format:
+            # version (1), layers (1), reserved1 (2), cfgData (variable)
+            # cfgData: key (4 bytes), value (variable)
             
-            ant_cfg = bytearray([0xB5, 0x62,  # Sync chars
-                                0x06, 0x13,  # Class: CFG, ID: ANT
-                                0x04, 0x00,  # Length: 4 bytes
-                                flags & 0xFF, (flags >> 8) & 0xFF,  # Flags (little-endian)
-                                pins & 0xFF, (pins >> 8) & 0xFF])   # Pins (little-endian)
+            # For RAM-only configuration (Layer = 0x01)
+            cfg_valset_payload = bytearray([
+                0x00,  # version = 0
+                0x01,  # layers = RAM only (0x01)
+                0x00, 0x00,  # reserved
+                # Key: CFG-HW-ANT_CFG_VOLTCTRL (0x10a3002e) - 1 byte value
+                0x2e, 0x00, 0xa3, 0x10,  # Key ID (little-endian)
+                0x01,  # Value: 1 = enable active antenna power
+            ])
             
-            # Calculate checksum
-            ant_cfg += self._ubx_checksum(ant_cfg[2:])
+            # Send using _send_ubx helper for proper ACK handling
+            result = self._send_ubx(0x06, 0x8A, cfg_valset_payload, expect_ack=True, timeout=2.0)
             
-            # Send antenna configuration
-            # self.get_logger().debug(f"[SERIAL-TX] CFG-ANT: {ant_cfg[:20].hex()}...")
-            self.serial_port.write(ant_cfg)
-            time.sleep(0.2)  # Give GPS time to process command
-            
-            # Wait for ACK
-            if self.serial_port.in_waiting > 0:
-                ack_resp = self.serial_port.read(self.serial_port.in_waiting)
-                # self.get_logger().debug(f"[SERIAL-RX] CFG-ANT response: {len(ack_resp)} bytes")
-                # Check for ACK-ACK (0x05 0x01)
-                if b'\xB5\x62\x05\x01' in ack_resp:
-                    self.get_logger().info("✓ Active antenna power enabled with supervision")
-                    # Allow time for antenna power to stabilize before querying status
-                    time.sleep(0.5)
-                else:
-                    self.get_logger().warn("⚠ Antenna configuration sent but no ACK received")
+            if result:
+                self.get_logger().info("✓ Active antenna power enabled (CFG-VALSET)")
+                time.sleep(0.3)  # Allow antenna to power up
             else:
-                self.get_logger().warn("⚠ Antenna configuration sent but no response")
+                self.get_logger().warn("⚠ Antenna power command sent but not acknowledged")
             
         except Exception as e:
             self.get_logger().warn(f"Failed to configure antenna power: {e}")
@@ -2028,6 +2168,7 @@ class GpsNode(ArgoBaseNode):
         
         GSV sentence format: $GPGSV,total_msgs,msg_num,sats_in_view,[prn,elev,azim,snr]*4*checksum
         - Multiple GSV sentences may be sent to cover all satellites
+        - Each constellation (GP=GPS, GL=GLONASS, GA=Galileo, GB=BeiDou) sends separate bursts
         - Each sentence contains up to 4 satellite entries
         - SNR (Signal-to-Noise Ratio) is in dBHz (typically 0-99, higher is better)
         - SNR may be empty if satellite is tracked but no signal yet
@@ -2035,6 +2176,11 @@ class GpsNode(ArgoBaseNode):
         Example: $GPGSV,3,1,12,01,45,123,42,03,12,045,38,06,78,234,45,09,23,187,*checksum
         """
         try:
+            # Extract constellation ID from sentence ($GPGSV -> 'GP', $GLGSV -> 'GL', etc.)
+            if not sentence.startswith('$'):
+                return False
+            constellation_id = sentence[1:3]  # Extract 2-char constellation ID
+            
             parts = sentence.split(',')
             if len(parts) < 4:
                 return False
@@ -2044,11 +2190,15 @@ class GpsNode(ArgoBaseNode):
             message_number = int(parts[2]) if parts[2] else 0
             sats_in_view_total = int(parts[3]) if parts[3] else 0
             
-            # If this is the first message in a sequence, clear temporary buffer
+            # If this is the first message in a constellation burst, initialize that constellation's buffer
             if message_number == 1:
-                self.satellites_in_view_temp = []
+                self.gsv_constellation_buffers[constellation_id] = []
             
             # Parse up to 4 satellite entries (each is 4 fields: prn, elev, azim, snr)
+            # Add to this constellation's buffer
+            if constellation_id not in self.gsv_constellation_buffers:
+                self.gsv_constellation_buffers[constellation_id] = []
+                
             for i in range(4):
                 base_idx = 4 + (i * 4)
                 if base_idx + 3 < len(parts):
@@ -2061,7 +2211,7 @@ class GpsNode(ArgoBaseNode):
                     if prn:
                         try:
                             snr = int(snr_str) if snr_str and snr_str.strip() else None
-                            self.satellites_in_view_temp.append({
+                            self.gsv_constellation_buffers[constellation_id].append({
                                 'prn': int(prn),
                                 'elevation': int(elevation) if elevation else None,
                                 'azimuth': int(azimuth) if azimuth else None,
@@ -2070,41 +2220,48 @@ class GpsNode(ArgoBaseNode):
                         except ValueError:
                             pass  # Skip satellites with invalid data
             
-            # If this is the last message, swap buffers and calculate average SNR
+            # If this is the last message in this constellation's burst, aggregate all constellations
             if message_number == total_messages:
-                # Only update satellites_in_view if we have satellites OR it's explicitly reporting 0
-                # This prevents clearing the list on spurious empty GSV bursts
-                if len(self.satellites_in_view_temp) > 0:
-                    # Have satellites - update the list
-                    self.satellites_in_view = self.satellites_in_view_temp
-                elif sats_in_view_total == 0:
-                    # GPS explicitly reports 0 satellites - clear the list
-                    self.satellites_in_view = []
-                else:
-                    # Empty burst but GPS didn't explicitly say 0 - keep previous list
-                    pass
-                
-                # Calculate average SNR from satellites with valid signal
-                valid_snrs = [sat['snr'] for sat in self.satellites_in_view if sat['snr'] is not None and sat['snr'] > 0]
-                if valid_snrs:
-                    self.average_snr = sum(valid_snrs) / len(valid_snrs)
-                    # Only publish SNR when we have valid data (don't spam 0.0)
-                    snr_msg = Float32()
-                    snr_msg.data = self.average_snr
-                    self.pub_snr_avg.publish(snr_msg)
-                else:
-                    # Don't update average_snr or publish - keep last valid value
-                    # This prevents dashboard from flickering between valid SNR and 0.0
-                    pass
-                
-                # Track when we last received complete GSV data
-                self.last_gsv_time = time.time()
-                
-                if self.debug_mode:
-                    self.get_logger().debug(
-                        f"GSV: {len(self.satellites_in_view)} sats in view, "
-                        f"{len(valid_snrs)} with signal, avg SNR: {self.average_snr:.1f} dBHz"
-                    )
+                # Aggregate satellites from all constellation buffers
+                # Only update every 1 second to avoid rapid updates from multiple constellations
+                current_time = time.time()
+                if current_time - self.last_gsv_update_time >= 1.0:
+                    # Combine satellites from all constellations
+                    aggregated_sats = []
+                    for const_id, sats in self.gsv_constellation_buffers.items():
+                        aggregated_sats.extend(sats)
+                    
+                    # Only update if we have satellites OR explicitly reporting 0
+                    if len(aggregated_sats) > 0:
+                        self.satellites_in_view = aggregated_sats
+                        self.last_gsv_time = current_time
+                        self.last_gsv_update_time = current_time
+                    elif sats_in_view_total == 0 and len(self.satellites_in_view) == 0:
+                        # GPS reports 0 and we already have 0 - nothing to do
+                        pass
+                    elif sats_in_view_total == 0 and self.last_gsv_time is not None and (current_time - self.last_gsv_time) > 15.0:
+                        # GPS reports 0 for more than 15 seconds - truly lost satellites
+                        self.satellites_in_view = []
+                        self.last_gsv_update_time = current_time
+                    
+                    # Calculate average SNR from satellites with valid signal
+                    valid_snrs = [sat['snr'] for sat in self.satellites_in_view if sat['snr'] is not None and sat['snr'] > 0]
+                    if valid_snrs:
+                        self.average_snr = sum(valid_snrs) / len(valid_snrs)
+                        # Only publish SNR when we have valid data (don't spam 0.0)
+                        snr_msg = Float32()
+                        snr_msg.data = self.average_snr
+                        self.pub_snr_avg.publish(snr_msg)
+                    else:
+                        # Don't update average_snr or publish - keep last valid value
+                        pass
+                    
+                    if self.debug_mode:
+                        const_counts = {k: len(v) for k, v in self.gsv_constellation_buffers.items()}
+                        self.get_logger().debug(
+                            f"GSV: {len(self.satellites_in_view)} sats total ({const_counts}), "
+                            f"{len(valid_snrs)} with signal, avg SNR: {self.average_snr:.1f} dBHz"
+                        )
             
             return True
             
@@ -2287,7 +2444,7 @@ class GpsNode(ArgoBaseNode):
         
         # Build constellation string
         # Check if we have recent GSV data (within last 15 seconds)
-        gsv_age = (now - self.last_gsv_time) if self.last_gsv_time else 999.0
+        gsv_age = (now - self.last_gsv_time) if self.last_gsv_time is not None else 999.0
         
         if total_in_view > 0 or (gsv_age < 15.0):
             # We have satellites OR we recently had GSV data (just waiting for next burst)
@@ -2584,7 +2741,8 @@ class GpsNode(ArgoBaseNode):
                           data_str.startswith('$GNGSV')):
                         # GSV: Satellites in view with signal strength (SNR) information
                         # Multiple constellations: GP=GPS, GL=GLONASS, GA=Galileo, GB=BeiDou, GN=Combined
-                        # Parse to extract SNR data for signal quality monitoring
+                        # Each constellation sends its own multi-message burst
+                        # Parser aggregates across constellations to avoid overwriting data
                         self.parse_gsv_sentence(data_str)
 
                     # Handle periodic status logging for normal operation
@@ -2709,16 +2867,29 @@ Published Topics:
 - /gps_data (std_msgs/String): Raw NMEA sentences from GPS module
 - /gps_sog (std_msgs/Float64): Speed over ground in knots
 - /gps_cog (std_msgs/Float64): Course over ground in degrees true (0-360°)
-- /gps_velocity (geometry_msgs/Vector3): Velocity vector (x=north, y=east, z=speed)
-- /gps_num_satellites (std_msgs/UInt8): Number of satellites used in GPS fix
+- /gps_velocity (geometry_msgs/Vector3): Velocity vector (x=north, y=east, z=speed m/s)
+- /gps_num_satellites (std_msgs/UInt8): Number of satellites in view (from GSV sentences)
+- /gps_num_satellites_used (std_msgs/UInt8): Number of satellites used in fix (from GGA)
+- /gps_snr_avg (std_msgs/Float32): Average signal-to-noise ratio of satellites (dBHz)
 - /fix (sensor_msgs/NavSatFix): Standard GPS fix for mapping applications
 - /gps_pps_status (std_msgs/Bool): True when PPS pulses are actively received
 - /gps_health (std_msgs/Bool): Node health status (true=healthy, false=failed)
 
 Services:
 - /gps_node/health: Health status service endpoint
+
+Options:
+--debug: Enable detailed debug logging
+--reset: Perform hardware reset on GPS module at startup
+--factory-reset: Reset GPS configuration to factory defaults
         """
     )
+    
+    # Add GPS-specific command line arguments
+    parser.add_argument('--reset', action='store_true',
+                       help='Perform hardware reset on GPS module at startup using reset pin')
+    parser.add_argument('--factory-reset', action='store_true',
+                       help='Reset GPS configuration to factory defaults (clears BBR and Flash storage)')
     
     try:
         ArgoBaseNode.run_node(GpsNode, args, parser)

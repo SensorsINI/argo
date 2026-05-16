@@ -219,7 +219,16 @@ class ArgoBaseNode(Node):
             
             # Create node
             if parser:
-                node = node_class(debug_mode=getattr(parsed_args, 'debug', False))
+                # Pass standard arguments (debug) and any node-specific arguments
+                kwargs = {'debug_mode': getattr(parsed_args, 'debug', False)}
+                
+                # Add node-specific arguments if they exist
+                if hasattr(parsed_args, 'reset'):
+                    kwargs['do_hardware_reset'] = parsed_args.reset
+                if hasattr(parsed_args, 'factory_reset'):
+                    kwargs['do_factory_reset'] = parsed_args.factory_reset
+                
+                node = node_class(**kwargs)
             else:
                 node = node_class()
             
