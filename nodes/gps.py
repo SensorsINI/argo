@@ -1418,8 +1418,9 @@ class GpsNode(ArgoBaseNode):
             self.get_logger().info("Configuring navigation engine (Sea dynamic model, relaxed filters)...")
             
             # CFG-VALSET payload format:
-            # Version (1): 0x01 = transaction mode
-            # Layers (1): 0x07 = RAM + BBR + Flash (persistent across resets)
+            # Version (1): 0x00 = SET (immediate), 0x01 = transaction mode
+            # Layers (1): 0x01 = RAM only, 0x02 = BBR, 0x04 = Flash, 0x07 = all
+            # CRITICAL: Writing to BBR/Flash disrupts satellite tracking! Use RAM only.
             # Reserved (2): 0x0000
             # Key-Value pairs: each key is 4 bytes (little-endian), value follows
             
@@ -1449,8 +1450,8 @@ class GpsNode(ArgoBaseNode):
                 ])
             
             valset_payload = bytearray([
-                0x01,        # Version: transaction mode
-                0x07,        # Layers: RAM + BBR + Flash (save persistently)
+                0x00,        # Version: 0 = SET (immediate)
+                0x01,        # Layers: 0x01 = RAM only (volatile - won't disrupt satellite tracking)
                 0x00, 0x00,  # Reserved
             ])
             
