@@ -215,6 +215,7 @@ class GpsNode(ArgoBaseNode):
         # Satellite signal strength tracking (from GSV sentences)
         self.satellites_in_view = []  # List of (prn, elevation, azimuth, snr) tuples
         self.average_snr = 0.0  # Average SNR of satellites with valid signal
+        self.last_gsv_time = None  # Track when we last received GSV data
 
         # NavSatFix data storage
         self.current_altitude = None  # Altitude in meters above WGS84 ellipsoid
@@ -529,11 +530,11 @@ class GpsNode(ArgoBaseNode):
         try:
             # Flush input buffer before sending to avoid reading stale data
             if self.serial_port.in_waiting > 0:
-                self.serial_port.read(self.serial_port.in_waiting)
+                flushed = self.serial_port.read(self.serial_port.in_waiting)
+                self.get_logger().debug(f"[SERIAL-TX] Flushed {len(flushed)} bytes before UBX send")
             
             self.serial_port.write(frame)
-            if self.debug_mode:
-                self.get_logger().debug(f"Sent UBX: class=0x{ubx_class:02X} id=0x{ubx_id:02X} payload_len={length}")
+            self.get_logger().debug(f"[SERIAL-TX] UBX: class=0x{ubx_class:02X} id=0x{ubx_id:02X} len={length} frame={frame[:20].hex()}...")
             
             if not expect_ack:
                 return True
@@ -549,12 +550,13 @@ class GpsNode(ArgoBaseNode):
                 if self.serial_port.in_waiting > 0:
                     chunk = self.serial_port.read(self.serial_port.in_waiting)
                     resp.extend(chunk)
+                    self.get_logger().debug(f"[SERIAL-RX] Read {len(chunk)} bytes: {chunk[:40].hex()}...")
                 time.sleep(0.05)  # Small delay between reads
             
             self.serial_port.timeout = original_timeout
             
-            if self.debug_mode and len(resp) > 0:
-                self.get_logger().debug(f"UBX response ({len(resp)} bytes): {resp.hex()[:80]}")
+            if len(resp) > 0:
+                self.get_logger().debug(f"[SERIAL-RX] Total UBX response: {len(resp)} bytes")
             
             # Look for UBX-ACK-ACK (class 0x05, id 0x01) or ACK-NAK (class 0x05, id 0x00) matching our class/id
             # ACK frame: 0xB5 0x62 0x05 0x01/0x00 length(LSB,MSB) clsID msgID CK_A CK_B
@@ -575,9 +577,8 @@ class GpsNode(ArgoBaseNode):
                                 ck_a, ck_b = self._ubx_checksum(ack_payload)
                                 if resp_bytes[i+8] == ck_a and resp_bytes[i+9] == ck_b:
                                     is_ack = resp_bytes[i+3] == 0x01
-                                    if self.debug_mode:
-                                        ack_type = "ACK-ACK" if is_ack else "ACK-NAK"
-                                        self.get_logger().debug(f"Received UBX {ack_type} for class=0x{ubx_class:02X} id=0x{ubx_id:02X}")
+                                    ack_type = "ACK-ACK" if is_ack else "ACK-NAK"
+                                    self.get_logger().debug(f"[SERIAL-RX] {ack_type} for class=0x{ubx_class:02X} id=0x{ubx_id:02X}")
                                     return is_ack
                                 elif self.debug_mode:
                                     self.get_logger().debug(f"ACK checksum mismatch: expected {ck_a:02X}{ck_b:02X}, got {resp_bytes[i+8]:02X}{resp_bytes[i+9]:02X}")
@@ -1500,9 +1501,10 @@ class GpsNode(ArgoBaseNode):
             # Query GPS status to diagnose hardware issues
             self.query_gps_status()
             
-            # Save configuration to non-volatile memory (CFG-CFG)
-            # This ensures settings persist across GPS resets and power cycles
-            self.save_gps_configuration()
+            # DISABLED: Save configuration to non-volatile memory (CFG-CFG)
+            # Testing if CFG-CFG causes GPS to lose satellite tracking
+            # self.save_gps_configuration()
+            self.get_logger().info("⚠ Configuration save DISABLED for testing - settings will not persist across resets")
             
             self.get_logger().info("✓ GPS configured for hot start capability")
             
@@ -1529,12 +1531,14 @@ class GpsNode(ArgoBaseNode):
                                 0x01])       # deviceMask: BBR (battery-backed RAM)
             
             cfg_cfg += self._ubx_checksum(cfg_cfg[2:])
+            self.get_logger().debug(f"[SERIAL-TX] CFG-CFG (save config): {cfg_cfg[:20].hex()}...")
             self.serial_port.write(cfg_cfg)
             time.sleep(0.5)  # Give GPS time to save to memory
             
             # Check for ACK
             if self.serial_port.in_waiting > 0:
                 save_resp = self.serial_port.read(self.serial_port.in_waiting)
+                self.get_logger().debug(f"[SERIAL-RX] CFG-CFG response: {len(save_resp)} bytes")
                 if b'\xB5\x62\x05\x01' in save_resp:
                     self.get_logger().info("✓ GPS configuration saved to non-volatile memory")
                 else:
@@ -1564,8 +1568,11 @@ class GpsNode(ArgoBaseNode):
             #       bit 10-14 = ocd pin (reconfig=31 uses default)
             #       bit 15 = reconfig (1=use default pins)
             
-            # Enable antenna with supervision, short/open circuit detection, and recovery
-            flags = 0x001F  # Enable all antenna supervision features (bits 0-4)
+            # Enable antenna with basic supervision, but without automatic power-down
+            # flags bits: 0=svcs (supervision), 1=scd (short detect), 2=ocd (open detect), 
+            #             3=pdwnOnSCD (power-down on short - DON'T USE), 4=recovery
+            # Use 0x0017 = bits 0,1,2,4 = svcs + scd + ocd + recovery (no auto power-down on short)
+            flags = 0x0017  # Enable supervision and detection, but allow recovery without power-down
             pins = 0x8000   # Use default antenna pins (bit 15 = reconfig)
             
             ant_cfg = bytearray([0xB5, 0x62,  # Sync chars
@@ -1578,12 +1585,14 @@ class GpsNode(ArgoBaseNode):
             ant_cfg += self._ubx_checksum(ant_cfg[2:])
             
             # Send antenna configuration
+            self.get_logger().debug(f"[SERIAL-TX] CFG-ANT: {ant_cfg[:20].hex()}...")
             self.serial_port.write(ant_cfg)
             time.sleep(0.2)  # Give GPS time to process command
             
             # Wait for ACK
             if self.serial_port.in_waiting > 0:
                 ack_resp = self.serial_port.read(self.serial_port.in_waiting)
+                self.get_logger().debug(f"[SERIAL-RX] CFG-ANT response: {len(ack_resp)} bytes")
                 # Check for ACK-ACK (0x05 0x01)
                 if b'\xB5\x62\x05\x01' in ack_resp:
                     self.get_logger().info("✓ Active antenna power enabled with supervision")
@@ -1626,6 +1635,7 @@ class GpsNode(ArgoBaseNode):
             pps_cfg += self._ubx_checksum(pps_cfg[2:])
             
             # Send PPS configuration
+            self.get_logger().debug(f"[SERIAL-TX] CFG-TP5 (PPS): {pps_cfg[:20].hex()}...")
             self.serial_port.write(pps_cfg)
             time.sleep(0.1)
             self.get_logger().debug("✓ PPS output configuration sent")
@@ -2041,6 +2051,9 @@ class GpsNode(ArgoBaseNode):
                 snr_msg.data = self.average_snr
                 self.pub_snr_avg.publish(snr_msg)
                 
+                # Track when we last received complete GSV data
+                self.last_gsv_time = time.time()
+                
                 if self.debug_mode:
                     self.get_logger().debug(
                         f"GSV: {len(self.satellites_in_view)} sats in view, "
@@ -2159,16 +2172,12 @@ class GpsNode(ArgoBaseNode):
                 self.first_fix_logged = True
 
         else:
-            # Log no GPS fix every 5 seconds
-            # After startup, log "no fix" every 5s for the first 3 messages, then every 30s
+            # Log no GPS fix frequently to track satellite acquisition patterns
             if not hasattr(self, 'no_fix_log_count'):
                 self.no_fix_log_count = 0
 
-            # Determine log interval based on current count
-            if self.no_fix_log_count < 3:
-                log_interval = 5.0
-            else:
-                log_interval = 60.0
+            # Use 5 second interval to see detailed satellite count changes during debugging
+            log_interval = 5.0
 
             # Check if enough time has passed since last log
             if current_time - self.last_no_fix_log_time >= log_interval:
@@ -2229,25 +2238,33 @@ class GpsNode(ArgoBaseNode):
         sats_with_signal = len([s for s in self.satellites_in_view if s.get('snr') and s['snr'] > 0])
         
         # Build constellation string
-        if total_in_view > 0:
-            const_parts = []
-            if gps_sats > 0: const_parts.append(f"GPS:{gps_sats}")
-            if glonass_sats > 0: const_parts.append(f"GLO:{glonass_sats}")
-            if galileo_sats > 0: const_parts.append(f"GAL:{galileo_sats}")
-            if beidou_sats > 0: const_parts.append(f"BDS:{beidou_sats}")
-            const_str = " ".join(const_parts) if const_parts else f"total:{total_in_view}"
-            
-            if self.average_snr > 0:
-                sat_str = f"in_view={total_in_view}({const_str}) tracking={sats_with_signal} SNR={self.average_snr:.0f}dB used={self.satellites_used}"
+        # Check if we have recent GSV data (within last 15 seconds)
+        gsv_age = (now - self.last_gsv_time) if self.last_gsv_time else 999.0
+        
+        if total_in_view > 0 or (gsv_age < 15.0):
+            # We have satellites OR we recently had GSV data (just waiting for next burst)
+            if total_in_view > 0:
+                const_parts = []
+                if gps_sats > 0: const_parts.append(f"GPS:{gps_sats}")
+                if glonass_sats > 0: const_parts.append(f"GLO:{glonass_sats}")
+                if galileo_sats > 0: const_parts.append(f"GAL:{galileo_sats}")
+                if beidou_sats > 0: const_parts.append(f"BDS:{beidou_sats}")
+                const_str = " ".join(const_parts) if const_parts else f"total:{total_in_view}"
+                
+                if self.average_snr > 0:
+                    sat_str = f"in_view={total_in_view}({const_str}) tracking={sats_with_signal} SNR={self.average_snr:.0f}dB used={self.satellites_used}"
+                else:
+                    sat_str = f"in_view={total_in_view}({const_str}) tracking={sats_with_signal} used={self.satellites_used}"
             else:
-                sat_str = f"in_view={total_in_view}({const_str}) tracking={sats_with_signal} used={self.satellites_used}"
+                # Between GSV bursts - show last known status
+                sat_str = f"used={self.satellites_used} GSV_pending (last={self._format_hms(gsv_age)})"
         else:
-            # No satellites in view at all
+            # No satellites and no recent GSV data
             if self.satellites_used > 0:
                 # We're using satellites but GSV hasn't reported any (stale data)
                 sat_str = f"used={self.satellites_used} in_view=? (GSV pending)"
             else:
-                # Truly no satellites - critical hardware issue
+                # Truly no satellites for >15s - critical hardware issue
                 sat_str = f"in_view=0 (NO RF SIGNAL - check antenna!)"
         
         return (
@@ -2415,6 +2432,9 @@ class GpsNode(ArgoBaseNode):
                 data_str = data_bytes.decode('ascii', errors='ignore').strip()
 
                 if data_str:
+                    # Log every sentence received for debugging
+                    self.get_logger().debug(f"[SERIAL-RX] NMEA: {data_str[:80]}")
+                    
                     # Only process valid NMEA sentences (must start with $)
                     # Invalid/corrupted data might be UBX binary, partial reads, or noise
                     # UBX messages are binary and when decoded as ASCII appear as control characters or garbage
