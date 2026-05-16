@@ -37,6 +37,9 @@ class GpsNode(ArgoBaseNode):
 
     Interfaces with u-blox NEO-M9N GPS module via UART5 (/dev/ttyS5) and publishes
     comprehensive navigation data for both autonomous control and Foxglove 3D mapping.
+
+    Integration guide: https://content.u-blox.com/sites/default/files/NEO-M9N_Integrationmanual_UBX-19014286.pdf
+    UBX interfaced description: https://avionicsduino.com/wp-content/uploads/2023/04/NEO-M9N_Interface_description_UBX-19035940.pdf
     
     Protocol Reference: u-blox M9-MDR-2.16 Interface Description (UBX-22037308), Protocol version 35.16
 
@@ -312,7 +315,7 @@ class GpsNode(ArgoBaseNode):
 
         # GPS reset tracking for extended no-fix periods
         self.last_fix_time = time.time()  # Initialize to startup time (will be cleared when fix acquired)
-        self.no_fix_reset_timeout_seconds = 600.0  # Auto-reset after 8 minutes without fix
+        self.no_fix_reset_timeout_seconds = 0.0  # Auto-reset after this many seconds without fix if >0
         self.last_reset_time = None  # Track when we last reset to avoid reset loops
         self.min_reset_interval_seconds = 120.0  # Minimum 2 minutes between resets
 
@@ -803,8 +806,9 @@ class GpsNode(ArgoBaseNode):
             # Calculate time without fix (from last fix time or startup)
             time_without_fix = current_time - self.last_fix_time
             
-            # Check if we need to reset (only if enough time has passed since last reset)
-            if time_without_fix >= self.no_fix_reset_timeout_seconds:
+            # Check if we need to reset (only if timeout is enabled and enough time has passed since last reset)
+            # Skip reset if timeout is 0 (disabled) - allows cold start with weak signal
+            if self.no_fix_reset_timeout_seconds > 0 and time_without_fix >= self.no_fix_reset_timeout_seconds:
                 if (self.last_reset_time is None or 
                     (current_time - self.last_reset_time) >= self.min_reset_interval_seconds):
                     self.get_logger().warn(
@@ -2400,7 +2404,9 @@ class GpsNode(ArgoBaseNode):
 
     def _format_no_fix_status_line(self, now: float) -> str:
         time_without_fix_s = now - self.last_fix_time
-        reset_due_in_s = self.no_fix_reset_timeout_seconds - time_without_fix_s
+        # Only calculate reset countdown if reset timeout is enabled (> 0)
+        reset_due_in_s = (self.no_fix_reset_timeout_seconds - time_without_fix_s 
+                         if self.no_fix_reset_timeout_seconds > 0 else float('inf'))
 
         if self.gps_pps_line is None:
             pps_str = "PPS=unavailable"
@@ -2423,7 +2429,11 @@ class GpsNode(ArgoBaseNode):
                 ant_parts.append(f"age={self._format_hms(now - self.last_antenna_status_time)}")
             ant_str = " ".join(ant_parts)
 
-        if self.last_reset_time is None:
+        # Format reset status string
+        if self.no_fix_reset_timeout_seconds <= 0:
+            # Reset is disabled
+            reset_str = "reset=disabled"
+        elif self.last_reset_time is None:
             reset_str = f"reset_due_in={self._format_hms(reset_due_in_s)}"
         else:
             reset_str = (
@@ -2625,8 +2635,10 @@ class GpsNode(ArgoBaseNode):
                        time_since_last_reset < 120.0)
         
         # Don't exit if we're close to the reset timeout (within 1 minute) - let reset check run
+        # Only check if reset timeout is enabled (> 0)
         time_without_fix = current_time - self.last_fix_time
-        reset_pending = (time_without_fix >= (self.no_fix_reset_timeout_seconds - 60.0))
+        reset_pending = (self.no_fix_reset_timeout_seconds > 0 and 
+                        time_without_fix >= (self.no_fix_reset_timeout_seconds - 60.0))
         
         if (current_time - self.last_data_received_time > self.gps_timeout_seconds and 
             not has_satellites and
