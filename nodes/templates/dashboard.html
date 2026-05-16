@@ -590,10 +590,11 @@
                     lastCriticalState.recording = data.recording;
                     lastCriticalState.controller_type = data.controller_type;
                     lastCriticalState.i2c_failure = data.i2c_failure || false;
-                    // Full /api/status must drive the I2C banner too: otherwise if this poll sets
-                    // lastCriticalState.i2c_failure before /api/status/critical sees a transition,
-                    // updateCriticalUI() no-ops and the alert never appears (journal still logs).
+                    lastCriticalState.battery_low_alert = data.battery_low_alert || false;
+                    // Full /api/status must drive critical banners: updateUI() calls
+                    // updateCriticalUIElements() without these fields and would hide them.
                     updateI2CFailureAlert(data.i2c_failure || false);
+                    updateLowBatteryAlert(data.battery_low_alert || false);
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);
@@ -947,11 +948,13 @@
                 document.getElementById('home-card').style.display = 'none';
             }
             
-            // Controller (updated reactively via updateCriticalUIElements, but also update here for consistency)
+            // Controller + safety banners (include i2c/battery so partial updates do not hide alerts)
             updateCriticalUIElements({
                 human_controlled: data.human_controlled,
                 recording: data.recording,
-                controller_type: data.controller_type
+                controller_type: data.controller_type,
+                i2c_failure: data.i2c_failure || false,
+                battery_low_alert: data.battery_low_alert || false
             });
             
             // Update controller button highlighting based on current controller type

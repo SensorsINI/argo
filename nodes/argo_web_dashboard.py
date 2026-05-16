@@ -1434,10 +1434,10 @@ class ArgoWebDashboard(ArgoBaseNode):
 
             running_nodes = [node for node, info in filtered_status.items() if info.get('running', False)]
             
-            # Check GPS node health (already have data staleness from above)
             gps_node_running = filtered_status.get('gps_node', {}).get('running', False) or filtered_status.get('gps', {}).get('running', False)
-            
-            # Refine staleness: also mark stale if node is not running
+
+            gps_data_age = now - self.last_gps_data_time if self.last_gps_data_time > 0 else float('inf')
+            gps_data_stale = gps_data_age > self.gps_data_timeout
             if not gps_node_running:
                 gps_data_stale = True
             

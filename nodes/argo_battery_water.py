@@ -115,17 +115,18 @@ THRESHOLD_CHANGE_PCT = 0.1  # Reduced from 1.0 to 0.1% for more frequent publish
 
 # Battery monitoring thresholds
 BATTERY_LOW_THRESHOLD_V = 7.5       # V, ~20% for 2S LiPo, triggers warning, makes node unhealthy
-BATTERY_CRITICAL_THRESHOLD_V = 6.8  # V, ~10% for 2S LiPo, may trigger shutdown
+BATTERY_CRITICAL_THRESHOLD_V = 7.2  # V, pack empty / halt (matches power_control CRITICAL_BATTERY_THRESHOLD_V)
 BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with USB charging pluugged in under full laod (sans servos)
 
 # Battery lifetime estimation configuration
 # Quantization: 12-bit ADC, Vref=4.096V, 27k/18k divider (2.5x) -> ~2.5mV per count at battery.
 # Sampling every 5s; a single step over 5s gives ~1.8 V/h apparent slope. Use more samples and
 # cap discharge slope magnitude to avoid noise-dominated estimates.
-BATTERY_LIFETIME_SAMPLE_WINDOW = 360  # Number of samples for linear regression (5s interval -> 30 min window)
+BATTERY_LIFETIME_SAMPLE_WINDOW = 180  # Samples for linear regression (5s interval -> 15 min window)
 BATTERY_LIFETIME_MIN_SAMPLES = 15   # Minimum samples for slope (75s window); reduces quantization noise
 MAX_DISCHARGING_SLOPE_VPH = 2.0     # V/h; steeper magnitude is rejected (likely quantization/noise)
 MIN_DISCHARGING_SLOPE_VPH = 0.05    # V/h; discharge gentler than this is not "meaningful"
+MIN_DISCHARGING_SLOPE_LOW_V_VPH = 0.10  # V/h when V <= BATTERY_LOW_THRESHOLD_V (flat LiPo tail / ADC noise)
 BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
 # Storage rundown: flag file set by astore; discharge to 7.6V then shut down (cleared on reboot)
 STORAGE_RUNDOWN_FLAG_FILE = '/tmp/argo_battery_storage_rundown'
@@ -1094,15 +1095,16 @@ class BatteryWaterNode(ArgoBaseNode):
             
             # Validate that slopes are meaningful (not None, not zero, within reasonable range)
             MIN_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h minimum for charging
-            MIN_DISCHARGING_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
-            MAX_DISCHARGING_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0  # Reject steeper (quantization noise)
+            MAX_DISCHARGING_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0
             has_meaningful_charging = (self._charging_slope_v_per_s is not None and 
                                       self._charging_slope_v_per_s > MIN_SLOPE_V_PER_S and 
-                                      abs(self._charging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
-            has_meaningful_discharging = (self._discharging_slope_v_per_s is not None and 
-                                         self._discharging_slope_v_per_s < MIN_DISCHARGING_V_PER_S and  # At least -0.08 V/h
-                                         self._discharging_slope_v_per_s > MAX_DISCHARGING_V_PER_S and  # Cap magnitude
-                                         abs(self._discharging_slope_v_per_s) < 1.0)  # < 1 V/s is reasonable
+                                      abs(self._charging_slope_v_per_s) < 1.0)
+            has_meaningful_discharging = (
+                self._discharging_slope_v_per_s is not None and
+                self._discharge_slope_is_meaningful(
+                    self._discharging_slope_v_per_s,
+                    self._latest_battery_voltage if not math.isnan(self._latest_battery_voltage) else BATTERY_LOW_THRESHOLD_V) and
+                abs(self._discharging_slope_v_per_s) < 1.0)
             
             # Additional validation: slopes should only be saved if they represent
             # proper charging/discharging periods (not mixed or uncertain states)
@@ -1293,6 +1295,28 @@ class BatteryWaterNode(ArgoBaseNode):
         except Exception as e:
             self.get_logger().error(f"Linear least squares fit failed: {e}")
             return None
+
+    def _min_discharging_slope_vph(self, voltage: float) -> float:
+        """Minimum |discharge slope| (V/h) required for TTE and slope persistence."""
+        if voltage <= BATTERY_LOW_THRESHOLD_V:
+            return MIN_DISCHARGING_SLOPE_LOW_V_VPH
+        return MIN_DISCHARGING_SLOPE_VPH
+
+    def _discharge_target_voltage_v(self) -> float:
+        """Voltage target for time-to-empty (critical unless storage rundown)."""
+        if os.path.exists(STORAGE_RUNDOWN_FLAG_FILE):
+            return STORAGE_VOLTAGE_V
+        return BATTERY_CRITICAL_THRESHOLD_V
+
+    def _discharge_slope_is_meaningful(self, slope_v_per_s: float, voltage: float) -> bool:
+        if slope_v_per_s is None or slope_v_per_s >= -1e-6:
+            return False
+        slope_vph = abs(slope_v_per_s) * 3600.0
+        if slope_vph < self._min_discharging_slope_vph(voltage):
+            return False
+        if slope_v_per_s < -MAX_DISCHARGING_SLOPE_VPH / 3600.0:
+            return False
+        return True
     
     def _estimate_battery_lifetime(self, voltage: float, charging: bool) -> Optional[float]:
         """
@@ -1310,63 +1334,59 @@ class BatteryWaterNode(ArgoBaseNode):
             return None
         
         try:
-            # Priority 1: Use persistent slopes immediately if available (no need to wait for 5 samples)
-            # This allows estimates to be provided right after startup if we have saved slopes
             slope_v_per_s = None
-            if charging:
-                slope_v_per_s = self._charging_slope_v_per_s
-            else:
-                slope_v_per_s = self._discharging_slope_v_per_s
-            
-            # Priority 2: Try linear regression on recent samples to update persistent slopes
-            # This provides more accurate estimates when we have sufficient recent data
+            regression_slope_v_per_s = None
             fit_result = self._linear_least_squares(self._voltage_samples)
             
             if fit_result is not None:
                 regression_slope_v_per_s, intercept = fit_result
                 
-                # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
                 MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
-                MAX_DISCHARGING_SLOPE_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0  # Reject steeper (noise)
+                MIN_DISCHARGING_SLOPE_V_PER_S = -self._min_discharging_slope_vph(voltage) / 3600.0
+                MAX_DISCHARGING_SLOPE_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0
                 
-                # Also check that battery is not already fully charged to avoid capturing voltage float near full
-                # Note: voltage is already validated as not NaN above
-                is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)  # Within 0.1V of full
-                is_near_empty = voltage <= 6.5  # Within 0.5V of empty
+                is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)
+                is_near_empty = voltage <= BATTERY_CRITICAL_THRESHOLD_V
                 
-                # Update persistent slopes if we have good data, sufficient samples, and proper charging state
                 if (charging and 
-                    regression_slope_v_per_s > MIN_CHARGING_SLOPE_V_PER_S and  # Significant positive slope
+                    regression_slope_v_per_s > MIN_CHARGING_SLOPE_V_PER_S and
                     len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
                     self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
-                    not is_fully_charged):  # Don't update slope when already fully charged
+                    not is_fully_charged):
                     self._charging_slope_v_per_s = regression_slope_v_per_s
-                    self.get_logger().debug(f"Updated charging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
-                    self._save_battery_slopes()  # Persist so file timestamp reflects last slope update
-                    # Use the updated slope for this estimation
+                    self.get_logger().debug(
+                        f"Updated charging slope: {regression_slope_v_per_s:.6f} V/s "
+                        f"from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    self._save_battery_slopes()
                     slope_v_per_s = regression_slope_v_per_s
                 elif (not charging and 
-                      regression_slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and  # Significant negative slope
-                      regression_slope_v_per_s > MAX_DISCHARGING_SLOPE_V_PER_S and  # Not steeper than cap (noise)
+                      regression_slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and
+                      regression_slope_v_per_s > MAX_DISCHARGING_SLOPE_V_PER_S and
                       len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
                       self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
-                      not is_near_empty):  # Don't update slope when already near empty
+                      not is_near_empty):
                     self._discharging_slope_v_per_s = regression_slope_v_per_s
-                    self.get_logger().debug(f"Updated discharging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
-                    self._save_battery_slopes()  # Persist so file timestamp reflects last slope update
-                    # Use the updated slope for this estimation
+                    self.get_logger().debug(
+                        f"Updated discharging slope: {regression_slope_v_per_s:.6f} V/s "
+                        f"from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
+                    self._save_battery_slopes()
+            
+            # Prefer recent regression for discharge TTE; fall back to persisted slope at startup
+            if charging:
+                if (regression_slope_v_per_s is not None and regression_slope_v_per_s > 1e-6 and
+                        len(self._voltage_samples) >= self.battery_lifetime_min_samples):
                     slope_v_per_s = regression_slope_v_per_s
                 elif slope_v_per_s is None:
-                    # If we have regression result but no persistent slope, validate sign and cap
-                    if charging and regression_slope_v_per_s > 1e-6:
-                        slope_v_per_s = regression_slope_v_per_s
-                    elif not charging and regression_slope_v_per_s < -1e-6:
-                        # Clamp discharge slope to max magnitude to avoid noisy estimates
-                        slope_v_per_s = max(regression_slope_v_per_s, MAX_DISCHARGING_SLOPE_V_PER_S)
-                    # Otherwise, regression slope has wrong sign - don't use it
+                    slope_v_per_s = self._charging_slope_v_per_s
+            else:
+                max_discharge_v_per_s = -MAX_DISCHARGING_SLOPE_VPH / 3600.0
+                if (regression_slope_v_per_s is not None and
+                        len(self._voltage_samples) >= self.battery_lifetime_min_samples and
+                        self._discharge_slope_is_meaningful(regression_slope_v_per_s, voltage)):
+                    slope_v_per_s = max(regression_slope_v_per_s, max_discharge_v_per_s)
+                elif self._discharge_slope_is_meaningful(self._discharging_slope_v_per_s, voltage):
+                    slope_v_per_s = self._discharging_slope_v_per_s
             
-            # If no slope available at all, cannot estimate
             if slope_v_per_s is None:
                 return None
             
@@ -1387,8 +1407,7 @@ class BatteryWaterNode(ArgoBaseNode):
                     return 0.0  # Already at target - check this FIRST
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
             else:
-                # Time to target: 7.6V when storage rundown active (astore), else 6.0V (empty)
-                target_voltage = STORAGE_VOLTAGE_V if os.path.exists(STORAGE_RUNDOWN_FLAG_FILE) else 6.0
+                target_voltage = self._discharge_target_voltage_v()
                 if voltage <= target_voltage:
                     return 0.0  # Already at or below target - check this FIRST
                 time_seconds = (target_voltage - voltage) / slope_v_per_s
