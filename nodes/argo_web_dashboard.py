@@ -52,7 +52,7 @@ from werkzeug.serving import ThreadedWSGIServer
 
 # Add launch directory to path for ArgoNodeManager
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'launch'))
-from argo_node_utils import ArgoNodeManager
+from argo_node_utils import ArgoNodeManager, get_service_node_names, is_health_monitored_node
 
 # Add support directory to path for ArgoBaseNode
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'support'))
@@ -138,12 +138,14 @@ class ArgoWebDashboard(ArgoBaseNode):
             'nodes_unknown': 0,  # Nodes with unknown/TBD health status
             'nodes_unhealthy_list': [],  # List of unhealthy node names
             'health_data_received': False,  # Track if health data has been received from service
-            'nodes_expected_total': 0,  # Total from argo_nodes.yaml (includes excluded services)
+            'nodes_expected_total': 0,  # Total health-monitored nodes (argo_nodes.yaml + services)
             
             # GPS
             'gps_locked': False,
-            'gps_satellites': 0,
+            'gps_satellites': 0,  # Satellites in view (from gps.py publish_satellite_count)
+            'gps_satellites_used': 0,  # Satellites used in navigation solution (from NavSatFix or parsed separately)
             'gps_snr_avg': 0.0,
+            'gps_position_accuracy': None,  # Position accuracy in meters (from NavSatFix covariance)
             'gps_latitude': None,
             'gps_longitude': None,
             'gps_cog': None,
@@ -462,6 +464,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
         self._topic_subscriptions.append(
             self.create_subscription(UInt8, '/gps_num_satellites', lambda msg: self.gps_satellites_cb(msg, 'wifi'), self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(UInt8, '/gps_num_satellites_used', lambda msg: self.gps_satellites_used_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
             self.create_subscription(Float32, '/gps_snr_avg', lambda msg: self.gps_snr_cb(msg, 'wifi'), self.volatile_qos)
@@ -846,6 +851,18 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.state['gps_last_valid_longitude'] = msg.longitude
                 # Don't clear coordinates when fix is lost - keep showing last valid position
                 
+                # Extract position accuracy from covariance (if available)
+                if msg.position_covariance_type != 0:  # Not COVARIANCE_TYPE_UNKNOWN
+                    var_east = msg.position_covariance[0]  # East-East variance
+                    var_north = msg.position_covariance[4]  # North-North variance
+                    
+                    if var_east > 0 and var_north > 0:
+                        # Calculate 95% confidence circle radius (2-sigma)
+                        import math
+                        std_dev = math.sqrt((var_east + var_north) / 2)
+                        accuracy_95 = 2.0 * std_dev
+                        self.state['gps_position_accuracy'] = accuracy_95
+                
                 self.state['data_source'] = 'WiFi'
             elif source == 'lora':
                 self.last_lora_update['gps_fix'] = now
@@ -929,6 +946,26 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Update health status - GPS satellite count is boat data
         self._update_boat_data_received(f"gps_satellites_{source}")
+    
+    def gps_satellites_used_cb(self, msg, source='wifi'):
+        """Callback for GPS satellites used in navigation solution updates."""
+        now = time.time()
+        
+        with self.state_lock:
+            if source == 'wifi':
+                self.last_wifi_update['gps_satellites_used'] = now
+                self.state['gps_satellites_used'] = msg.data
+                if self.debug_mode:
+                    self.get_logger().debug(f"GPS satellites used (WiFi): {msg.data}")
+            elif source == 'lora':
+                self.last_lora_update['gps_satellites_used'] = now
+                wifi_age = now - self.last_wifi_update.get('gps_satellites_used', 0)
+                if wifi_age > 2.0:
+                    self.state['gps_satellites_used'] = msg.data
+                    if self.debug_mode:
+                        self.get_logger().debug(f"GPS satellites used (LoRa): {msg.data}")
+        
+        self._update_boat_data_received(f"gps_satellites_used_{source}")
     
     def gps_snr_cb(self, msg, source='wifi'):
         """Callback for GPS average SNR updates."""
@@ -1397,7 +1434,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             A tuple containing:
             - A list of regular nodes that are launched by the lifecycle manager.
             - A list of special nodes (e.g., foxglove_bridge) launched by the manager.
-            - A list of all nodes, including those that run as excluded services.
+            - A list of health-monitored nodes (excluded systemd services; not disabled nodes).
         """
         try:
             config_path = os.path.join(self.argo_dir, 'launch', 'argo_nodes.yaml')
@@ -1420,8 +1457,12 @@ class ArgoWebDashboard(ArgoBaseNode):
                         script_name = os.path.basename(node_cfg.get('executable', ''))
                         launched_nodes.append(script_name)
 
-            # Get the list of all nodes defined in the YAML, including excluded ones, for health checks
-            all_defined_nodes = list(all_node_configs.keys())
+            # Nodes tracked by health monitor (excluded systemd services yes; disabled nodes no)
+            service_node_names = get_service_node_names(config)
+            all_defined_nodes = [
+                name for name, node_cfg in all_node_configs.items()
+                if is_health_monitored_node(node_cfg, service_node_names)
+            ]
             
             # Also include services from the services section (they're ROS2 nodes too)
             services_config = config.get('services', [])

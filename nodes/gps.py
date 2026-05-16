@@ -45,9 +45,10 @@ class GpsNode(ArgoBaseNode):
     - /gps_sog (std_msgs/Float64): Speed over ground in knots
     - /gps_cog (std_msgs/Float64): Course over ground in degrees true (0-360°)
     - /gps_velocity (geometry_msgs/Vector3): Velocity vector (x=north, y=east, z=speed)
-    - /gps_num_satellites (std_msgs/UInt8): Number of satellites used in GPS fix
+    - /gps_num_satellites (std_msgs/UInt8): Number of satellites in view (from GSV)
+    - /gps_num_satellites_used (std_msgs/UInt8): Number of satellites used in navigation solution (from GGA)
     - /gps_snr_avg (std_msgs/Float32): Average SNR of satellites in view (dBHz)
-    - /fix (sensor_msgs/NavSatFix): Standard GPS fix for mapping applications
+    - /fix (sensor_msgs/NavSatFix): Standard GPS fix for mapping applications (includes position covariance)
     - /gps_pps_status (std_msgs/Bool): True when PPS pulses are being received on GPS_PPS line
     - /gps_health (std_msgs/Bool): Node health status (true=healthy, false=failed)
 
@@ -190,7 +191,9 @@ class GpsNode(ArgoBaseNode):
         self.pub_velocity = self.create_publisher(
             Vector3, 'gps_velocity', 10)  # Combined velocity vector
         self.pub_satellites = self.create_publisher(
-            UInt8, 'gps_num_satellites', 10)  # Number of satellites used
+            UInt8, 'gps_num_satellites', 10)  # Number of satellites in view (from GSV)
+        self.pub_satellites_used = self.create_publisher(
+            UInt8, 'gps_num_satellites_used', 10)  # Number of satellites used in fix (from GGA)
         self.pub_snr_avg = self.create_publisher(
             Float32, 'gps_snr_avg', 10)  # Average SNR of satellites in view
 
@@ -214,6 +217,7 @@ class GpsNode(ArgoBaseNode):
         
         # Satellite signal strength tracking (from GSV sentences)
         self.satellites_in_view = []  # List of (prn, elevation, azimuth, snr) tuples
+        self.satellites_in_view_temp = []  # Temporary buffer for GSV parsing (to avoid clearing live data)
         self.average_snr = 0.0  # Average SNR of satellites with valid signal
         self.last_gsv_time = None  # Track when we last received GSV data
 
@@ -531,10 +535,10 @@ class GpsNode(ArgoBaseNode):
             # Flush input buffer before sending to avoid reading stale data
             if self.serial_port.in_waiting > 0:
                 flushed = self.serial_port.read(self.serial_port.in_waiting)
-                self.get_logger().debug(f"[SERIAL-TX] Flushed {len(flushed)} bytes before UBX send")
+                # self.get_logger().debug(f"[SERIAL-TX] Flushed {len(flushed)} bytes before UBX send")
             
             self.serial_port.write(frame)
-            self.get_logger().debug(f"[SERIAL-TX] UBX: class=0x{ubx_class:02X} id=0x{ubx_id:02X} len={length} frame={frame[:20].hex()}...")
+            # self.get_logger().debug(f"[SERIAL-TX] UBX: class=0x{ubx_class:02X} id=0x{ubx_id:02X} len={length} frame={frame[:20].hex()}...")
             
             if not expect_ack:
                 return True
@@ -550,13 +554,13 @@ class GpsNode(ArgoBaseNode):
                 if self.serial_port.in_waiting > 0:
                     chunk = self.serial_port.read(self.serial_port.in_waiting)
                     resp.extend(chunk)
-                    self.get_logger().debug(f"[SERIAL-RX] Read {len(chunk)} bytes: {chunk[:40].hex()}...")
+                    # self.get_logger().debug(f"[SERIAL-RX] Read {len(chunk)} bytes: {chunk[:40].hex()}...")
                 time.sleep(0.05)  # Small delay between reads
             
             self.serial_port.timeout = original_timeout
             
-            if len(resp) > 0:
-                self.get_logger().debug(f"[SERIAL-RX] Total UBX response: {len(resp)} bytes")
+            # if len(resp) > 0:
+            #     self.get_logger().debug(f"[SERIAL-RX] Total UBX response: {len(resp)} bytes")
             
             # Look for UBX-ACK-ACK (class 0x05, id 0x01) or ACK-NAK (class 0x05, id 0x00) matching our class/id
             # ACK frame: 0xB5 0x62 0x05 0x01/0x00 length(LSB,MSB) clsID msgID CK_A CK_B
@@ -578,15 +582,15 @@ class GpsNode(ArgoBaseNode):
                                 if resp_bytes[i+8] == ck_a and resp_bytes[i+9] == ck_b:
                                     is_ack = resp_bytes[i+3] == 0x01
                                     ack_type = "ACK-ACK" if is_ack else "ACK-NAK"
-                                    self.get_logger().debug(f"[SERIAL-RX] {ack_type} for class=0x{ubx_class:02X} id=0x{ubx_id:02X}")
+                                    # self.get_logger().debug(f"[SERIAL-RX] {ack_type} for class=0x{ubx_class:02X} id=0x{ubx_id:02X}")
                                     return is_ack
-                                elif self.debug_mode:
-                                    self.get_logger().debug(f"ACK checksum mismatch: expected {ck_a:02X}{ck_b:02X}, got {resp_bytes[i+8]:02X}{resp_bytes[i+9]:02X}")
-                            elif self.debug_mode:
-                                self.get_logger().debug(f"ACK class/id mismatch: expected class=0x{ubx_class:02X} id=0x{ubx_id:02X}, got class=0x{resp_bytes[i+6]:02X} id=0x{resp_bytes[i+7]:02X}")
+                                # elif self.debug_mode:
+                                #     self.get_logger().debug(f"ACK checksum mismatch: expected {ck_a:02X}{ck_b:02X}, got {resp_bytes[i+8]:02X}{resp_bytes[i+9]:02X}")
+                            # elif self.debug_mode:
+                            #     self.get_logger().debug(f"ACK class/id mismatch: expected class=0x{ubx_class:02X} id=0x{ubx_id:02X}, got class=0x{resp_bytes[i+6]:02X} id=0x{resp_bytes[i+7]:02X}")
             
-            if self.debug_mode and len(resp) > 0:
-                self.get_logger().debug(f"No matching ACK found in response. Looking for class=0x{ubx_class:02X} id=0x{ubx_id:02X}")
+            # if self.debug_mode and len(resp) > 0:
+            #     self.get_logger().debug(f"No matching ACK found in response. Looking for class=0x{ubx_class:02X} id=0x{ubx_id:02X}")
             
             return False
         except Exception as e:
@@ -885,7 +889,7 @@ class GpsNode(ArgoBaseNode):
 
                 self.serial_port.reset_input_buffer()
                 self.serial_port.write(msg.encode('ascii'))
-                self.get_logger().debug(f"Sent command: {msg.strip()}")
+                # self.get_logger().debug(f"Sent command: {msg.strip()}")
 
                 # Try to read response with short timeout
                 reply_bytes = self.serial_port.readline()
@@ -895,7 +899,7 @@ class GpsNode(ArgoBaseNode):
                 self.serial_port.timeout = original_timeout
 
                 if reply:
-                    self.get_logger().debug(f"Received: {reply}")
+                    # self.get_logger().debug(f"Received: {reply}")
                     return reply
                 else:
                     self.get_logger().debug("No response received")
@@ -967,15 +971,18 @@ class GpsNode(ArgoBaseNode):
                                     for ext in ext_strings:
                                         self.get_logger().info(f"GPS Info: {ext}")
                         else:
-                            self.get_logger().debug(f"MON-VER response too short: length={length}, received={len(ubx_resp)}")
+                            # self.get_logger().debug(f"MON-VER response too short: length={length}, received={len(ubx_resp)}")
+                            pass
                     else:
-                        self.get_logger().debug(f"Received non-MON-VER UBX response: class=0x{ubx_resp[2]:02X} id=0x{ubx_resp[3]:02X}")
+                        # self.get_logger().debug(f"Received non-MON-VER UBX response: class=0x{ubx_resp[2]:02X} id=0x{ubx_resp[3]:02X}")
+                        pass
                 else:
                     self.get_logger().debug("Response not in UBX format")
             else:
                 self.get_logger().debug("No response to MON-VER query")
         except Exception as e:
-            self.get_logger().debug(f"Error querying firmware version: {e}")
+            # self.get_logger().debug(f"Error querying firmware version: {e}")
+            pass
 
     def setup_gps(self):
         """Sends initialization commands to the GPS and verifies communication."""
@@ -997,7 +1004,8 @@ class GpsNode(ArgoBaseNode):
                         f"Sample output: {waiting_data[:100]}...")
                     automatic_output_detected = True
             except Exception as e:
-                self.get_logger().debug(f"Error reading automatic data: {e}")
+                # self.get_logger().debug(f"Error reading automatic data: {e}")
+                pass
         
         # Query firmware version (always do this for diagnostics)
         self._query_firmware_version()
@@ -1007,6 +1015,7 @@ class GpsNode(ArgoBaseNode):
             self.configure_hot_start()  # Configure navigation engine FIRST
             self.enable_nmea_sentences()
             self.get_logger().info("GPS setup completed. Device is working correctly.")
+            self.set_healthy("GPS initialized and receiving data")
             return
 
         # If no automatic data, try communication tests
@@ -1110,9 +1119,11 @@ class GpsNode(ArgoBaseNode):
                                 if ext_strings:
                                     self.get_logger().info(f"✓ GPS Extension Info: {', '.join(ext_strings)}")
                         else:
-                            self.get_logger().debug(f"MON-VER response too short: length={length}, received={len(ubx_resp)}")
+                            # self.get_logger().debug(f"MON-VER response too short: length={length}, received={len(ubx_resp)}")
+                            pass
                     else:
-                        self.get_logger().debug(f"Received UBX response but not MON-VER: class=0x{ubx_resp[2]:02X} id=0x{ubx_resp[3]:02X}")
+                        # self.get_logger().debug(f"Received UBX response but not MON-VER: class=0x{ubx_resp[2]:02X} id=0x{ubx_resp[3]:02X}")
+                        pass
                 else:
                     self.get_logger().warn("⚠ GPS may not be accepting UBX commands - responses may not be UBX format")
             else:
@@ -1122,6 +1133,7 @@ class GpsNode(ArgoBaseNode):
             self.configure_hot_start()  # Configure navigation engine FIRST
             self.enable_nmea_sentences()
             self.get_logger().info("GPS setup completed. Waiting for NMEA data...")
+            self.set_healthy("GPS initialized and receiving data")
         else:
             self.get_logger().error("CRITICAL: GPS communication test failed - no responses received")
             self.get_logger().error("CRITICAL: GPS device is not communicating properly. Exiting.")
@@ -1531,14 +1543,14 @@ class GpsNode(ArgoBaseNode):
                                 0x01])       # deviceMask: BBR (battery-backed RAM)
             
             cfg_cfg += self._ubx_checksum(cfg_cfg[2:])
-            self.get_logger().debug(f"[SERIAL-TX] CFG-CFG (save config): {cfg_cfg[:20].hex()}...")
+            # self.get_logger().debug(f"[SERIAL-TX] CFG-CFG (save config): {cfg_cfg[:20].hex()}...")
             self.serial_port.write(cfg_cfg)
             time.sleep(0.5)  # Give GPS time to save to memory
             
             # Check for ACK
             if self.serial_port.in_waiting > 0:
                 save_resp = self.serial_port.read(self.serial_port.in_waiting)
-                self.get_logger().debug(f"[SERIAL-RX] CFG-CFG response: {len(save_resp)} bytes")
+                # self.get_logger().debug(f"[SERIAL-RX] CFG-CFG response: {len(save_resp)} bytes")
                 if b'\xB5\x62\x05\x01' in save_resp:
                     self.get_logger().info("✓ GPS configuration saved to non-volatile memory")
                 else:
@@ -1585,14 +1597,14 @@ class GpsNode(ArgoBaseNode):
             ant_cfg += self._ubx_checksum(ant_cfg[2:])
             
             # Send antenna configuration
-            self.get_logger().debug(f"[SERIAL-TX] CFG-ANT: {ant_cfg[:20].hex()}...")
+            # self.get_logger().debug(f"[SERIAL-TX] CFG-ANT: {ant_cfg[:20].hex()}...")
             self.serial_port.write(ant_cfg)
             time.sleep(0.2)  # Give GPS time to process command
             
             # Wait for ACK
             if self.serial_port.in_waiting > 0:
                 ack_resp = self.serial_port.read(self.serial_port.in_waiting)
-                self.get_logger().debug(f"[SERIAL-RX] CFG-ANT response: {len(ack_resp)} bytes")
+                # self.get_logger().debug(f"[SERIAL-RX] CFG-ANT response: {len(ack_resp)} bytes")
                 # Check for ACK-ACK (0x05 0x01)
                 if b'\xB5\x62\x05\x01' in ack_resp:
                     self.get_logger().info("✓ Active antenna power enabled with supervision")
@@ -1635,7 +1647,7 @@ class GpsNode(ArgoBaseNode):
             pps_cfg += self._ubx_checksum(pps_cfg[2:])
             
             # Send PPS configuration
-            self.get_logger().debug(f"[SERIAL-TX] CFG-TP5 (PPS): {pps_cfg[:20].hex()}...")
+            # self.get_logger().debug(f"[SERIAL-TX] CFG-TP5 (PPS): {pps_cfg[:20].hex()}...")
             self.serial_port.write(pps_cfg)
             time.sleep(0.1)
             self.get_logger().debug("✓ PPS output configuration sent")
@@ -1831,7 +1843,8 @@ class GpsNode(ArgoBaseNode):
                     self.current_sog = None
                     self.current_cog = None
         except (ValueError, IndexError) as e:
-            self.get_logger().debug(f"Error parsing RMC sentence: {e}")
+            # self.get_logger().debug(f"Error parsing RMC sentence: {e}")
+            pass
         return False
 
     def parse_vtg_sentence(self, sentence):
@@ -1869,7 +1882,8 @@ class GpsNode(ArgoBaseNode):
                                 f"VTG: SOG={self.current_sog:.2f} knots, COG=N/A (stationary)")
                     return True
         except (ValueError, IndexError) as e:
-            self.get_logger().debug(f"Error parsing VTG sentence: {e}")
+            # self.get_logger().debug(f"Error parsing VTG sentence: {e}")
+            pass
         return False
 
     def parse_gga_sentence(self, sentence):
@@ -1986,7 +2000,8 @@ class GpsNode(ArgoBaseNode):
                     self.current_altitude = None
 
         except (ValueError, IndexError) as e:
-            self.get_logger().debug(f"Error parsing GGA sentence: {e}")
+            # self.get_logger().debug(f"Error parsing GGA sentence: {e}")
+            pass
         return False
 
     def parse_gsv_sentence(self, sentence):
@@ -2011,9 +2026,9 @@ class GpsNode(ArgoBaseNode):
             message_number = int(parts[2]) if parts[2] else 0
             sats_in_view_total = int(parts[3]) if parts[3] else 0
             
-            # If this is the first message in a sequence, clear old data
+            # If this is the first message in a sequence, clear temporary buffer
             if message_number == 1:
-                self.satellites_in_view = []
+                self.satellites_in_view_temp = []
             
             # Parse up to 4 satellite entries (each is 4 fields: prn, elev, azim, snr)
             for i in range(4):
@@ -2028,7 +2043,7 @@ class GpsNode(ArgoBaseNode):
                     if prn:
                         try:
                             snr = int(snr_str) if snr_str and snr_str.strip() else None
-                            self.satellites_in_view.append({
+                            self.satellites_in_view_temp.append({
                                 'prn': int(prn),
                                 'elevation': int(elevation) if elevation else None,
                                 'azimuth': int(azimuth) if azimuth else None,
@@ -2037,8 +2052,11 @@ class GpsNode(ArgoBaseNode):
                         except ValueError:
                             pass  # Skip satellites with invalid data
             
-            # If this is the last message, calculate average SNR and publish
+            # If this is the last message, swap buffers and calculate average SNR
             if message_number == total_messages:
+                # Atomically swap the complete satellite list
+                self.satellites_in_view = self.satellites_in_view_temp
+                
                 # Calculate average SNR from satellites with valid signal
                 valid_snrs = [sat['snr'] for sat in self.satellites_in_view if sat['snr'] is not None and sat['snr'] > 0]
                 if valid_snrs:
@@ -2123,8 +2141,8 @@ class GpsNode(ArgoBaseNode):
             self.pub_satellites.publish(sat_msg)
             
             # Log in debug mode
-            if self.debug_mode:
-                self.get_logger().debug(f"Immediately published satellite count: {new_count}")
+            # if self.debug_mode:
+            #     self.get_logger().debug(f"Immediately published satellite count: {new_count}")
 
     def handle_fix_status_change(self, new_fix_status):
         """Handle immediate logging when GPS fix status changes (PPS indicator)."""
@@ -2138,8 +2156,8 @@ class GpsNode(ArgoBaseNode):
             self.last_fix_status = new_fix_status
             
             # Log in debug mode
-            if self.debug_mode:
-                self.get_logger().debug(f"Fix status changed: {not new_fix_status} → {new_fix_status}")
+            # if self.debug_mode:
+            #     self.get_logger().debug(f"Fix status changed: {not new_fix_status} → {new_fix_status}")
 
     def periodic_status_logging(self):
         """Handle periodic status logging for normal operation."""
@@ -2181,9 +2199,11 @@ class GpsNode(ArgoBaseNode):
 
             # Check if enough time has passed since last log
             if current_time - self.last_no_fix_log_time >= log_interval:
-                self.get_logger().info(self._format_no_fix_status_line(current_time))
-                self.last_no_fix_log_time = current_time
-                self.no_fix_log_count += 1
+                status_line = self._format_no_fix_status_line(current_time)
+                if status_line:  # Only log if we have meaningful status (not GSV_pending noise)
+                    self.get_logger().info(status_line)
+                    self.last_no_fix_log_time = current_time
+                    self.no_fix_log_count += 1
 
     @staticmethod
     def _format_hms(seconds: float) -> str:
@@ -2256,8 +2276,12 @@ class GpsNode(ArgoBaseNode):
                 else:
                     sat_str = f"in_view={total_in_view}({const_str}) tracking={sats_with_signal} used={self.satellites_used}"
             else:
-                # Between GSV bursts - show last known status
-                sat_str = f"used={self.satellites_used} GSV_pending (last={self._format_hms(gsv_age)})"
+                # Between GSV bursts - just show satellites used, don't log GSV_pending noise
+                if self.satellites_used > 0:
+                    sat_str = f"used={self.satellites_used}"
+                else:
+                    # No satellites, waiting for GSV - skip logging entirely by returning None
+                    return None
         else:
             # No satellites and no recent GSV data
             if self.satellites_used > 0:
@@ -2313,46 +2337,71 @@ class GpsNode(ArgoBaseNode):
 
     def publish_satellite_count(self):
         """Publish satellite count for GPS health monitoring (called at 1 Hz)."""
-        # Always publish satellite count, even if zero (valuable for GPS health monitoring)
-        sat_msg = UInt8()
-        sat_msg.data = self.satellites_used
-        self.pub_satellites.publish(sat_msg)
+        # Publish total satellites in view (from GSV) to gps_num_satellites
+        # This gives a more stable indication of GPS health, as satellites_used drops to 0
+        # during brief fix losses even when GPS is still tracking many satellites
+        total_sats_in_view = len(self.satellites_in_view)
+        
+        # Logical consistency check: can't use more satellites than we can see
+        # If satellites_used > satellites_in_view, it means GSV data is stale/incomplete
+        # In this case, assume at least satellites_used are in view to maintain consistency
+        if self.satellites_used > total_sats_in_view:
+            # GGA reports more satellites used than GSV reports in view
+            # This happens during startup or when GSV data is delayed
+            # Use satellites_used as the minimum to keep display logically consistent
+            total_sats_in_view = self.satellites_used
+        
+        sat_in_view_msg = UInt8()
+        sat_in_view_msg.data = total_sats_in_view
+        self.pub_satellites.publish(sat_in_view_msg)
+        
+        # Also publish satellites used in navigation solution (from GGA) to gps_num_satellites_used
+        sat_used_msg = UInt8()
+        sat_used_msg.data = self.satellites_used
+        self.pub_satellites_used.publish(sat_used_msg)
         
         # Log satellite count periodically in debug mode
-        if self.debug_mode:
-            self.get_logger().debug(f"Published satellite count: {self.satellites_used}")
+        # if self.debug_mode:
+        #     self.get_logger().debug(f"Published satellite count: in_view={sat_in_view_msg.data}, used={sat_used_msg.data}")
 
     def publish_navsat_fix(self):
         """Publish NavSatFix message for mapping applications."""
-        if (self.current_latitude is not None and
-            self.current_longitude is not None and
-                self.gps_fix_valid):
+        # Always publish NavSatFix to update dashboard with current status
+        # even when there's no fix (so dashboard knows GPS is not locked)
+        
+        # Create NavSatFix message
+        navsat_msg = NavSatFix()
 
-            # Create NavSatFix message
-            navsat_msg = NavSatFix()
+        # Header
+        navsat_msg.header.stamp = self.get_clock().now().to_msg()
+        navsat_msg.header.frame_id = self.gps_frame_id
 
-            # Header
-            navsat_msg.header.stamp = self.get_clock().now().to_msg()
-            navsat_msg.header.frame_id = self.gps_frame_id
+        # Status (always publish current status)
+        navsat_msg.status.status = self.navsat_status
+        navsat_msg.status.service = self.navsat_service
 
-            # Status
-            navsat_msg.status.status = self.navsat_status
-            navsat_msg.status.service = self.navsat_service
-
-            # Position
+        # Position (use current or zero if no fix)
+        if self.current_latitude is not None and self.current_longitude is not None:
             navsat_msg.latitude = self.current_latitude
             navsat_msg.longitude = self.current_longitude
             navsat_msg.altitude = self.current_altitude if self.current_altitude is not None else 0.0
-
-            # Covariance
+            
+            # Covariance (only valid when we have a fix)
             navsat_msg.position_covariance = self.position_covariance
             navsat_msg.position_covariance_type = self.position_covariance_type
+        else:
+            # No position data yet
+            navsat_msg.latitude = 0.0
+            navsat_msg.longitude = 0.0
+            navsat_msg.altitude = 0.0
+            navsat_msg.position_covariance = [0.0] * 9
+            navsat_msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
 
-            # Publish
-            self.pub_navsat.publish(navsat_msg)
-
-            self.get_logger().debug(
-                f"Published NavSatFix: {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt: {self.current_altitude}m")
+        # Publish
+        self.pub_navsat.publish(navsat_msg)
+        
+        # self.get_logger().debug(
+        #     f"Published NavSatFix: {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt: {self.current_altitude}m")
 
     def read_and_publish(self):
         """Reads data from the serial port and publishes it."""
@@ -2371,9 +2420,9 @@ class GpsNode(ArgoBaseNode):
             if self.last_satellites_seen_time is None:
                 self.get_logger().info(f"Satellites in view ({self.satellites_used}) - GPS is working, timeout disabled")
             self.last_satellites_seen_time = current_time
-        elif self.last_satellites_seen_time is not None:
-            # We previously had satellites but lost them - this is OK, they may come back
-            self.get_logger().debug(f"Lost satellite view (previously saw {self.last_satellite_count}), waiting for re-acquisition")
+        # elif self.last_satellites_seen_time is not None:
+        #     We previously had satellites but lost them - this is OK, they may come back
+        #     self.get_logger().debug(f"Lost satellite view (previously saw {self.last_satellite_count}), waiting for re-acquisition")
         
         # Only timeout if:
         # 1. No valid NMEA data received for timeout period
@@ -2433,7 +2482,7 @@ class GpsNode(ArgoBaseNode):
 
                 if data_str:
                     # Log every sentence received for debugging
-                    self.get_logger().debug(f"[SERIAL-RX] NMEA: {data_str[:80]}")
+                    # self.get_logger().debug(f"[SERIAL-RX] NMEA: {data_str[:80]}")
                     
                     # Only process valid NMEA sentences (must start with $)
                     # Invalid/corrupted data might be UBX binary, partial reads, or noise
@@ -2442,17 +2491,18 @@ class GpsNode(ArgoBaseNode):
                         # Check if this looks like UBX binary data (control characters, non-printable)
                         if any(ord(c) < 32 and c not in '\r\n\t' for c in data_str):
                             # This is likely UBX binary data - silently discard it
-                            self.get_logger().debug(f"GPS UBX binary data (discarded): {repr(data_str[:50])}")
-                        else:
+                            # self.get_logger().debug(f"GPS UBX binary data (discarded): {repr(data_str[:50])}")
+                            pass
+                        # else:
                             # Not NMEA and not clearly binary - log for investigation
-                            self.get_logger().debug(f"GPS invalid data (ignored): {repr(data_str[:100])}")
+                            # self.get_logger().debug(f"GPS invalid data (ignored): {repr(data_str[:100])}")
                         # Don't reset timeout for invalid data - only valid NMEA resets it
                         return  # Skip processing invalid data
                     
                     # Process valid NMEA sentence
                     self.data_count += 1
                     self.last_data_received_time = current_time  # Reset timeout only on valid NMEA
-                    self.get_logger().debug(f"GPS Raw: {data_str}")
+                    # self.get_logger().debug(f"GPS Raw: {data_str}")
                     
                     # Track sentence types seen
                     sentence_type = data_str.split(',')[0]
@@ -2516,7 +2566,7 @@ class GpsNode(ArgoBaseNode):
                     if current_time - self.last_sentence_type_log_time >= 15.0:
                         if self.sentence_types_seen:
                             sentence_list = sorted(list(self.sentence_types_seen))
-                            self.get_logger().debug(f"NMEA sentence types received: {', '.join(sentence_list)}")
+                            # self.get_logger().debug(f"NMEA sentence types received: {', '.join(sentence_list)}")
                             has_gga = any('GGA' in s for s in self.sentence_types_seen)
                             if not has_gga:
                                 self.get_logger().warn("No GGA sentences received - satellite count unavailable")
@@ -2552,7 +2602,9 @@ class GpsNode(ArgoBaseNode):
                                 else:
                                     self.get_logger().info(f"GPS Fix ({fix_quality_str}) obtained, waiting for navigation data, {accuracy_str}")
                             else:
-                                self.get_logger().info(self._format_no_fix_status_line(current_time))
+                                status_line = self._format_no_fix_status_line(current_time)
+                                if status_line:  # Only log if we have meaningful status (not GSV_pending noise)
+                                    self.get_logger().info(status_line)
                             self.last_data_log_time = current_time
 
                 # The original script performed manual parsing of NMEA sentences

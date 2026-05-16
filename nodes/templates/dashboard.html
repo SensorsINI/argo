@@ -105,7 +105,7 @@
         <div class="card">
             <h2>GPS & Navigation</h2>
             <div class="status-grid">
-                <!-- Row 1: GPS Lock, Position, Speed/Course -->
+                <!-- Row 1: GPS Lock, Position -->
                 <div class="status-item">
                     <span class="label">GPS Lock:</span>
                     <span class="value" id="gps-lock">🔴 NO LOCK</span>
@@ -115,10 +115,23 @@
                     <span class="value" id="gps-position">--</span>
                 </div>
                 <div class="status-item">
+                    <span class="label">Position Acc:</span>
+                    <span class="value" id="gps-accuracy">-- m</span>
+                </div>
+                <!-- Row 2: Satellites, SNR, Speed/Course -->
+                <div class="status-item">
+                    <span class="label">Sats:</span>
+                    <span class="value" id="gps-satellites">in view: 0, in use: 0</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">SNR:</span>
+                    <span class="value" id="gps-snr">-- dB</span>
+                </div>
+                <div class="status-item">
                     <span class="label">Speed/Course:</span>
                     <span class="value" id="gps-speed-course">-.-- kts @ ---°</span>
                 </div>
-                <!-- Row 2: IMU Bearing, Wind -->
+                <!-- Row 3: IMU Bearing, IMU Status, Wind -->
                 <div class="status-item">
                     <span class="label">IMU Bearing:</span>
                     <span class="value" id="compass-heading">--- °</span>
@@ -786,37 +799,42 @@
                 data.saltwater_voltage !== null && data.saltwater_voltage !== undefined ? `${data.saltwater_voltage.toFixed(3)} V` : '-- V';
             
             // GPS
-            // Show GPS lock status with satellite count and signal strength
+            // Show GPS lock status (simplified - details now in separate fields)
             const satCount = data.gps_satellites || 0;
+            const satUsed = data.gps_satellites_used || 0;
             const snrAvg = data.gps_snr_avg || 0;
-            const snrStr = snrAvg > 0 ? ` ${Math.round(snrAvg)}dB` : '';
             
             if (data.gps_locked) {
-                document.getElementById('gps-lock').textContent = `🟢 LOCKED (${satCount} sats${snrStr})`;
+                document.getElementById('gps-lock').textContent = `🟢 LOCKED`;
             } else if (!data.gps_locked && data.gps_last_valid_latitude !== null && data.gps_last_valid_latitude !== undefined) {
-                document.getElementById('gps-lock').textContent = `🔴 Last fix (${satCount} sats${snrStr})`;
+                document.getElementById('gps-lock').textContent = `🔴 Last fix`;
             } else {
-                // No lock - show satellite count and signal strength to indicate GPS health
+                // No lock - show simple status
                 if (satCount === 0 && snrAvg === 0) {
-                    // No satellites in view AND no signal - critical hardware issue
-                    document.getElementById('gps-lock').textContent = '🔴 NO RF SIGNAL - Check antenna!';
-                } else if (satCount === 0) {
-                    if (snrAvg > 0) {
-                        // Satellites tracked but not yet used for fix
-                        document.getElementById('gps-lock').textContent = `🟡 SEARCHING (${snrAvg.toFixed(0)}dB signal)`;
-                    } else {
-                        document.getElementById('gps-lock').textContent = '🔴 NO LOCK (0 sats)';
-                    }
+                    document.getElementById('gps-lock').textContent = '🔴 NO RF SIGNAL';
                 } else if (satCount < 4) {
-                    if (snrAvg < 30) {
-                        document.getElementById('gps-lock').textContent = `🔴 WEAK SIGNAL (${satCount} sats ${Math.round(snrAvg)}dB)`;
+                    if (snrAvg < 25) {
+                        document.getElementById('gps-lock').textContent = `🔴 WEAK SIGNAL`;
                     } else {
-                        document.getElementById('gps-lock').textContent = `🟡 SEARCHING (${satCount} sats${snrStr} - need 4+)`;
+                        document.getElementById('gps-lock').textContent = `🟡 SEARCHING`;
                     }
                 } else {
-                    document.getElementById('gps-lock').textContent = `🟡 WAITING (${satCount} sats${snrStr})`;
+                    document.getElementById('gps-lock').textContent = `🟡 WAITING`;
                 }
             }
+            
+            // Separate satellite count display
+            document.getElementById('gps-satellites').textContent = 
+                `in view: ${satCount}, in use: ${satUsed}`;
+            
+            // Separate SNR display
+            document.getElementById('gps-snr').textContent = 
+                snrAvg > 0 ? `${snrAvg.toFixed(0)} dB` : '-- dB';
+            
+            // Position accuracy display
+            document.getElementById('gps-accuracy').textContent = 
+                data.gps_position_accuracy !== null && data.gps_position_accuracy !== undefined ? 
+                `${data.gps_position_accuracy.toFixed(1)} m` : '-- m';
             
             // Use current coordinates if available, otherwise use last valid coordinates
             const displayLat = data.gps_latitude !== null && data.gps_latitude !== undefined 
