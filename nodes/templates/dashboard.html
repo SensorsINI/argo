@@ -804,12 +804,19 @@
             const satUsed = data.gps_satellites_used || 0;
             const snrAvg = data.gps_snr_avg || 0;
             
-            if (data.gps_locked) {
+            // Check if GPS data is stale (node dead or no data received)
+            if (data.gps_data_stale) {
+                document.getElementById('gps-lock').textContent = '⚠️ GPS DEAD (stale data)';
+                document.getElementById('gps-lock').style.color = '#ff6b6b';  // Red color for warning
+            } else if (data.gps_locked) {
                 document.getElementById('gps-lock').textContent = `🟢 LOCKED`;
+                document.getElementById('gps-lock').style.color = '';  // Reset to default
             } else if (!data.gps_locked && data.gps_last_valid_latitude !== null && data.gps_last_valid_latitude !== undefined) {
                 document.getElementById('gps-lock').textContent = `🔴 Last fix`;
+                document.getElementById('gps-lock').style.color = '';  // Reset to default
             } else {
                 // No lock - show simple status
+                document.getElementById('gps-lock').style.color = '';  // Reset to default
                 if (satCount === 0 && snrAvg === 0) {
                     document.getElementById('gps-lock').textContent = '🔴 NO RF SIGNAL';
                 } else if (satCount < 4) {
@@ -850,18 +857,32 @@
             
             if (displayLat !== null && displayLon !== null) {
                 const latDir = displayLat >= 0 ? 'N' : 'S';
+                const staleIndicator = data.gps_data_stale ? ' ⚠️ STALE' : '';
                 const lonDir = displayLon >= 0 ? 'E' : 'W';
                 document.getElementById('gps-position').textContent = 
-                    `${Math.abs(displayLat).toFixed(6)}° ${latDir}, ${Math.abs(displayLon).toFixed(6)}° ${lonDir}`;
+                    `${Math.abs(displayLat).toFixed(6)}° ${latDir}, ${Math.abs(displayLon).toFixed(6)}° ${lonDir}${staleIndicator}`;
+                // Apply color styling for stale data
+                if (data.gps_data_stale) {
+                    document.getElementById('gps-position').style.color = '#ff6b6b';
+                } else {
+                    document.getElementById('gps-position').style.color = '';
+                }
             } else {
                 document.getElementById('gps-position').textContent = '--';
+                document.getElementById('gps-position').style.color = '';
             }
             
             // Speed/Course combined
             const speed = data.gps_sog ? `${data.gps_sog.toFixed(2)} kts` : '-.-- kts';
             const course = data.gps_cog ? `${Math.round(data.gps_cog)}°` : '---°';
+            const staleIndicatorSC = data.gps_data_stale ? ' ⚠️ STALE' : '';
             document.getElementById('gps-speed-course').textContent = 
-                `${speed} @ ${course}`;
+                `${speed} @ ${course}${staleIndicatorSC}`;
+            if (data.gps_data_stale) {
+                document.getElementById('gps-speed-course').style.color = '#ff6b6b';
+            } else {
+                document.getElementById('gps-speed-course').style.color = '';
+            }
             
             // IMU Bearing (Heading)
             document.getElementById('compass-heading').textContent = 
