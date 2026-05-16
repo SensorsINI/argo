@@ -299,7 +299,7 @@ class GpsNode(ArgoBaseNode):
 
         # GPS reset tracking for extended no-fix periods
         self.last_fix_time = time.time()  # Initialize to startup time (will be cleared when fix acquired)
-        self.no_fix_reset_timeout_seconds = 240.0  # Auto-reset after 4 minutes without fix
+        self.no_fix_reset_timeout_seconds = 600.0  # Auto-reset after 8 minutes without fix
         self.last_reset_time = None  # Track when we last reset to avoid reset loops
         self.min_reset_interval_seconds = 120.0  # Minimum 2 minutes between resets
 
@@ -1003,6 +1003,7 @@ class GpsNode(ArgoBaseNode):
         
         # If automatic output was detected, configure and return
         if automatic_output_detected:
+            self.configure_hot_start()  # Configure navigation engine FIRST
             self.enable_nmea_sentences()
             self.get_logger().info("GPS setup completed. Device is working correctly.")
             return
@@ -1117,6 +1118,7 @@ class GpsNode(ArgoBaseNode):
                 self.get_logger().warn("⚠ No UBX response received - GPS may not accept UBX commands")
             
             # Enable SOG/COG sentences since we have communication
+            self.configure_hot_start()  # Configure navigation engine FIRST
             self.enable_nmea_sentences()
             self.get_logger().info("GPS setup completed. Waiting for NMEA data...")
         else:
