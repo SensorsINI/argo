@@ -1359,7 +1359,16 @@ class ArgoWebDashboard(ArgoBaseNode):
         """Periodically update system status (nodes, battery, CPU temp)."""
         self.get_logger().debug("Updating system status")
         try:
-            # In low-power mode, skip expensive operations
+            # CRITICAL: Always check GPS staleness even in low-power mode (safety-critical)
+            now = time.time()
+            gps_data_age = now - self.last_gps_data_time if self.last_gps_data_time > 0 else float('inf')
+            gps_data_stale = (gps_data_age > self.gps_data_timeout)
+            
+            # Update GPS staleness in state (lightweight operation, always do this)
+            with self.state_lock:
+                self.state['gps_data_stale'] = gps_data_stale
+            
+            # In low-power mode, skip expensive operations but keep GPS staleness updated above
             if self.low_power_mode:
                 # Only update timestamp, skip node queries and CPU temp
                 with self.state_lock:
@@ -1412,11 +1421,12 @@ class ArgoWebDashboard(ArgoBaseNode):
 
             running_nodes = [node for node, info in filtered_status.items() if info.get('running', False)]
             
-            # Check GPS node health and data staleness
-            now = time.time()
+            # Check GPS node health (already have data staleness from above)
             gps_node_running = filtered_status.get('gps_node', {}).get('running', False) or filtered_status.get('gps', {}).get('running', False)
-            gps_data_age = now - self.last_gps_data_time if self.last_gps_data_time > 0 else float('inf')
-            gps_data_stale = (not gps_node_running) or (gps_data_age > self.gps_data_timeout)
+            
+            # Refine staleness: also mark stale if node is not running
+            if not gps_node_running:
+                gps_data_stale = True
             
             with self.state_lock:
                 self.state['nodes_running'] = len(running_nodes)
@@ -1427,7 +1437,7 @@ class ArgoWebDashboard(ArgoBaseNode):
                 }
                 self.state['system_running'] = len(running_nodes) > 0
                 
-                # Update GPS staleness indicators
+                # Update GPS node health and refined staleness
                 self.state['gps_node_healthy'] = gps_node_running
                 self.state['gps_data_stale'] = gps_data_stale
             
