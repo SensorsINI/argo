@@ -1356,8 +1356,8 @@ class GpsNode(ArgoBaseNode):
                 except Exception:
                     pass
                 
-                # Configure GPS for hot start capability
-                self.configure_hot_start()
+                # NOTE: configure_hot_start() is called BEFORE enable_nmea_sentences() in setup sequence
+                # Do NOT call it again here or it will reconfigure and wipe out satellite acquisition
                 
                 # Final flush after all configuration
                 time.sleep(0.5)
