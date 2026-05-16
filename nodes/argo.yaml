@@ -123,6 +123,12 @@ gps_node:
   ros__parameters:
     # Line 229 (pin 24) is SPI1_CS0 on default overlay; node skips if kernel owns it. Use -1 to disable.
     pps_gpio_line: 229
+    # Hardware reset on startup (recommended: true)
+    # Performs a hardware reset of the GPS module on node startup to ensure clean state.
+    # This helps recover from GPS module state corruption that can occur during operation,
+    # which manifests as satellites visible but no fix acquisition. Without this, a manual
+    # node restart may be required to recover from this state.
+    hardware_reset_on_startup: true
 
 rudder_sail_radio_node:
   ros__parameters:

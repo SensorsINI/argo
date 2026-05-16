@@ -179,6 +179,8 @@ class GpsNode(ArgoBaseNode):
         self.declare_parameter('gps_frame_id', 'argo_gps')
         # GPIO line for GPS 1PPS input monitoring (-1 disables; default 229 = pin 24 / PH5)
         self.declare_parameter('pps_gpio_line', 229)
+        # Hardware reset on startup (helps recover from GPS module state corruption)
+        self.declare_parameter('hardware_reset_on_startup', False)
 
         self.serial_port_name = self.get_parameter(
             'serial_port').get_parameter_value().string_value
@@ -188,6 +190,12 @@ class GpsNode(ArgoBaseNode):
             'gps_frame_id').get_parameter_value().string_value
         self.pps_gpio_line = self.get_parameter(
             'pps_gpio_line').get_parameter_value().integer_value
+        hardware_reset_param = self.get_parameter(
+            'hardware_reset_on_startup').get_parameter_value().bool_value
+        
+        # Merge command-line flag with parameter (command-line takes precedence)
+        if not self.do_hardware_reset_on_startup:
+            self.do_hardware_reset_on_startup = hardware_reset_param
 
         # Publisher for raw NMEA data
         self.pub_data = self.create_publisher(String, 'gps_data', 10)
