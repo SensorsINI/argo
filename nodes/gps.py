@@ -1513,23 +1513,27 @@ class GpsNode(ArgoBaseNode):
             # Query GPS status to diagnose hardware issues
             self.query_gps_status()
             
-            # Save configuration to non-volatile memory (CFG-CFG) - ONCE per boot only
-            # Sending CFG-CFG multiple times (e.g., on node restart) kills hot start capability
-            # Use /tmp flag file to track if we've already saved config this boot
-            cfg_saved_flag = "/tmp/gps_config_saved"
-            import os
-            if not os.path.exists(cfg_saved_flag):
-                self.get_logger().info("First GPS configuration this boot - saving to non-volatile memory...")
-                self.save_gps_configuration()
-                # Create flag file to prevent re-saving on node restart
-                try:
-                    with open(cfg_saved_flag, 'w') as f:
-                        f.write(f"{time.time()}\n")
-                    self.get_logger().info("✓ Configuration saved to non-volatile memory (will not re-save until reboot)")
-                except Exception as e:
-                    self.get_logger().warn(f"Failed to create config flag file: {e}")
-            else:
-                self.get_logger().info("⚠ Configuration already saved this boot - skipping CFG-CFG to preserve hot start")
+            # CRITICAL DECISION: Should we save configuration to GPS non-volatile memory?
+            # 
+            # CFG-CFG command disrupts satellite tracking and kills hot start capability!
+            # But we need to save when configuration actually changes.
+            #
+            # BEST PRACTICE: Don't use CFG-CFG at all! Let GPS configuration be volatile.
+            # Benefits:
+            # - No satellite tracking disruption
+            # - Configuration re-applied cleanly on each startup
+            # - Code changes take effect immediately without managing saved state
+            # - Hot start capability preserved across restarts
+            #
+            # The GPS module retains ephemeris/almanac data in battery-backed RAM even
+            # without CFG-CFG, giving us hot start capability. The configuration we're
+            # saving (NMEA sentences, antenna power, PPS) can be set every startup without
+            # issue - it doesn't affect satellite tracking.
+            #
+            # DECISION: SKIP CFG-CFG entirely. Configuration will be re-applied on each boot,
+            # which is safer and more maintainable than trying to track saved state.
+            
+            self.get_logger().info("✓ GPS configured (configuration not saved to NV memory - will re-apply on each boot)")
             
             self.get_logger().info("✓ GPS configured for hot start capability")
             
