@@ -2074,13 +2074,14 @@ class GpsNode(ArgoBaseNode):
                 valid_snrs = [sat['snr'] for sat in self.satellites_in_view if sat['snr'] is not None and sat['snr'] > 0]
                 if valid_snrs:
                     self.average_snr = sum(valid_snrs) / len(valid_snrs)
+                    # Only publish SNR when we have valid data (don't spam 0.0)
+                    snr_msg = Float32()
+                    snr_msg.data = self.average_snr
+                    self.pub_snr_avg.publish(snr_msg)
                 else:
-                    self.average_snr = 0.0
-                
-                # Publish average SNR
-                snr_msg = Float32()
-                snr_msg.data = self.average_snr
-                self.pub_snr_avg.publish(snr_msg)
+                    # Don't update average_snr or publish - keep last valid value
+                    # This prevents dashboard from flickering between valid SNR and 0.0
+                    pass
                 
                 # Track when we last received complete GSV data
                 self.last_gsv_time = time.time()
