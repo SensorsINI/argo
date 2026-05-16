@@ -18,8 +18,9 @@ import os
 import sys
 import subprocess
 import signal
+import yaml
 import psutil
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set, Any
 
 # Handle KeyboardInterrupt gracefully
 def signal_handler(signum, frame):
@@ -29,6 +30,32 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 from pathlib import Path
+
+
+def load_argo_nodes_config(argo_root: str) -> Dict[str, Any]:
+    """Load launch/argo_nodes.yaml."""
+    config_path = os.path.join(argo_root, 'launch', 'argo_nodes.yaml')
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def get_service_node_names(config: Dict[str, Any]) -> Set[str]:
+    """ROS2 node names managed as independent systemd services."""
+    return {s['name'] for s in config.get('services', []) if s.get('name')}
+
+
+def is_health_monitored_node(node_cfg: Dict[str, Any], service_node_names: Set[str]) -> bool:
+    """Whether argo_health_monitor and dashboards should track this node.
+
+    Excluded nodes are omitted unless listed in services (e.g. argo_power_control).
+    Temporarily disabled nodes (excluded, not in services) are not monitored.
+    """
+    name = node_cfg.get('name')
+    if not name:
+        return False
+    if node_cfg.get('excluded', False) and name not in service_node_names:
+        return False
+    return True
 
 
 class ArgoNodeManager:

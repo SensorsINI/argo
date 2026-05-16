@@ -29,6 +29,7 @@ from ros2node.api import get_node_names
 argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.join(argo_dir, 'nodes'))
 from support.argo_base_node import ArgoBaseNode
+from argo_node_utils import get_service_node_names, is_health_monitored_node
 
 
 class ArgoHealthMonitor(ArgoBaseNode):
@@ -49,6 +50,7 @@ class ArgoHealthMonitor(ArgoBaseNode):
         
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
+        self.service_node_names = get_service_node_names(self.config)
         
         # Track node health status
         # Maps: executable filename (e.g., 'gps.py') -> {'healthy': bool/None, 'last_seen': float, 'pid': int, 'ros2_node_name': str}
@@ -80,6 +82,8 @@ class ArgoHealthMonitor(ArgoBaseNode):
         
         # Load node configs from both nodes and simulation_nodes sections
         for node_cfg in self.config.get('nodes', []):
+            if not is_health_monitored_node(node_cfg, self.service_node_names):
+                continue
             node_name = node_cfg['name']
             self.node_configs[node_name] = node_cfg
         for node_cfg in self.config.get('simulation_nodes', []):
@@ -93,6 +97,7 @@ class ArgoHealthMonitor(ArgoBaseNode):
         
         # Build executable -> health topic mapping
         self._build_executable_mapping()
+        self._purge_unmonitored_health_entries()
         
         # Subscribe to health topics for nodes that publish them
         self._subscribe_to_health_topics()
@@ -150,6 +155,17 @@ class ArgoHealthMonitor(ArgoBaseNode):
         # Set self as healthy after initialization
         self.set_healthy("Health monitor initialized successfully")
     
+    def _purge_unmonitored_health_entries(self):
+        """Remove health tracking for nodes disabled in YAML (e.g. excluded lora_node)."""
+        import os
+        for node_cfg in self.config.get('nodes', []):
+            if is_health_monitored_node(node_cfg, self.service_node_names):
+                continue
+            executable = node_cfg.get('executable', '')
+            for key in (os.path.basename(executable), node_cfg.get('name')):
+                if key and key in self.node_health:
+                    del self.node_health[key]
+
     def _subscribe_to_health_topics(self):
         """Subscribe to health topics published by ArgoBaseNode nodes"""
         import os
@@ -241,6 +257,8 @@ class ArgoHealthMonitor(ArgoBaseNode):
         
         # Check each configured node
         for node_cfg in self.node_configs.values():
+            if not is_health_monitored_node(node_cfg, self.service_node_names):
+                continue
             ros2_node_name = node_cfg['name']
             executable = node_cfg.get('executable', '')
             is_special = node_cfg.get('special', False)
@@ -484,8 +502,10 @@ class ArgoHealthMonitor(ArgoBaseNode):
                     continue
                 
                 if node_cfg is None:
-                    # Use defaults if config not found
-                    node_cfg = {}
+                    continue
+
+                if not is_health_monitored_node(node_cfg, self.service_node_names):
+                    continue
                 
                 status_dict['nodes'][health_key] = {
                     'healthy': health['healthy'],

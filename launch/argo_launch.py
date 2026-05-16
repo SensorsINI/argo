@@ -67,7 +67,7 @@ def generate_launch_description():
         # It monitors all nodes automatically, so we don't launch it here
         
         for node_cfg in node_configs:
-            # Skip excluded nodes (monitored but not launched)
+            # Skip excluded nodes (systemd services and temporarily disabled nodes)
             if node_cfg.get('excluded', False):
                 continue
             
