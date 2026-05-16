@@ -1490,12 +1490,45 @@ class GpsNode(ArgoBaseNode):
         """
         try:
             # Poll UBX-NAV-SAT (0x01 0x35) for satellite information
-            # No payload needed for poll
+            # Send poll command (empty payload)
             self.get_logger().info(f"Polling UBX-NAV-SAT for satellite status...")
-            result = self._send_ubx(0x01, 0x35, bytearray(), expect_ack=False, timeout=2.0)
             
-            if not result or not isinstance(result, (bytes, bytearray)):
-                self.get_logger().warn("No UBX-NAV-SAT response received")
+            # Build UBX poll frame
+            ubx_class = 0x01
+            ubx_id = 0x35
+            payload = bytearray()
+            length = 0
+            header = bytes([0xB5, 0x62, ubx_class, ubx_id, length & 0xFF, (length >> 8) & 0xFF])
+            ck = self._ubx_checksum(bytes([ubx_class, ubx_id, 0, 0]))
+            frame = header + ck
+            
+            # Flush input before sending
+            if self.serial_port.in_waiting > 0:
+                self.serial_port.read(self.serial_port.in_waiting)
+            
+            # Send poll request
+            self.serial_port.write(frame)
+            time.sleep(0.5)  # Wait for GPS to respond
+            
+            # Read response
+            if self.serial_port.in_waiting == 0:
+                self.get_logger().warn("No response to UBX-NAV-SAT poll")
+                return None
+            
+            resp = self.serial_port.read(self.serial_port.in_waiting)
+            
+            # Find UBX-NAV-SAT response (0xB5 0x62 0x01 0x35)
+            result = None
+            for i in range(len(resp) - 8):
+                if resp[i:i+4] == b'\xB5\x62\x01\x35':
+                    # Found NAV-SAT response
+                    payload_len = resp[i+4] | (resp[i+5] << 8)
+                    if i + 8 + payload_len <= len(resp):
+                        result = resp[i+6:i+6+payload_len]  # Extract payload only
+                        break
+            
+            if not result:
+                self.get_logger().warn(f"No valid UBX-NAV-SAT response found ({len(resp)} bytes received)")
                 return None
             
             # Parse UBX-NAV-SAT response
