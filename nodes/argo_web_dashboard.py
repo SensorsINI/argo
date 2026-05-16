@@ -1355,18 +1355,21 @@ class ArgoWebDashboard(ArgoBaseNode):
         bearing = math.atan2(y, x)
         return (math.degrees(bearing) + 360) % 360
     
+    def _update_gps_staleness(self):
+        """Check GPS data staleness - runs frequently even in low-power mode (safety-critical)."""
+        now = time.time()
+        gps_data_age = now - self.last_gps_data_time if self.last_gps_data_time > 0 else float('inf')
+        gps_data_stale = (gps_data_age > self.gps_data_timeout)
+        
+        # Update GPS staleness in state (lightweight operation)
+        with self.state_lock:
+            self.state['gps_data_stale'] = gps_data_stale
+    
     def update_system_status(self):
         """Periodically update system status (nodes, battery, CPU temp)."""
         self.get_logger().debug("Updating system status")
         try:
-            # CRITICAL: Always check GPS staleness even in low-power mode (safety-critical)
-            now = time.time()
-            gps_data_age = now - self.last_gps_data_time if self.last_gps_data_time > 0 else float('inf')
-            gps_data_stale = (gps_data_age > self.gps_data_timeout)
-            
-            # Update GPS staleness in state (lightweight operation, always do this)
-            with self.state_lock:
-                self.state['gps_data_stale'] = gps_data_stale
+            # GPS staleness is now handled by _update_gps_staleness() in main loop
             
             # In low-power mode, skip expensive operations but keep GPS staleness updated above
             if self.low_power_mode:
@@ -3011,6 +3014,7 @@ Troubleshooting:
         last_viewer_check = time.time()
         last_health_service_query = time.time()
         last_battery_service_query = time.time()
+        last_gps_staleness_check = time.time()
         
         while rclpy.ok() and not node.signal_received:
             # Spin once with a short timeout to handle ROS callbacks
@@ -3026,8 +3030,14 @@ Troubleshooting:
             status_interval = node.status_timer_period_idle if node.low_power_mode else node.status_timer_period_active
             health_interval = node.health_timer_period_idle if node.low_power_mode else node.health_timer_period_active
             viewer_check_interval = 5.0 # Constant 5s check
+            gps_staleness_interval = 1.0  # Check GPS staleness every 1 second (safety-critical)
             
             # --- Manually trigger periodic tasks ---
+            # GPS staleness check (ALWAYS runs at 1Hz regardless of power mode - safety critical!)
+            if now - last_gps_staleness_check > gps_staleness_interval:
+                node._update_gps_staleness()
+                last_gps_staleness_check = now
+            
             if now - last_status_update > status_interval:
                 node.update_system_status()
                 last_status_update = now
