@@ -1070,10 +1070,10 @@ class GpsNode(ArgoBaseNode):
                 self.get_logger().info("  NMEA: GGA, GLL, GSA, GSV, RMC, VTG, TXT (all GNSS)")
                 self.get_logger().info("  Dynamic model: Portable (factory default)")
                 
-                # CRITICAL: Must configure antenna power even with factory defaults
-                # Factory default may have active antenna power OFF
-                self.get_logger().info("Configuring essential hardware (antenna power)...")
-                self.configure_antenna_power()
+                # NOTE: SparkFun NEO-M9N breakout board has hardware antenna power circuit
+                # (VCC_RF with FB1 ferrite bead, R14 10Ω resistor, C1 47pF capacitor)
+                # No software configuration needed - antenna power is always on
+                # self.configure_antenna_power()  # DISABLED - not needed with SparkFun board
             
             self.get_logger().info("GPS setup completed. Device is working correctly.")
             self.set_healthy("GPS initialized and receiving data")
@@ -1670,8 +1670,10 @@ class GpsNode(ArgoBaseNode):
             time.sleep(0.1)
             self.get_logger().debug("✓ Power management configuration sent")
             
-            # Configure active antenna power
-            self.configure_antenna_power()
+            # NOTE: SparkFun NEO-M9N breakout board has hardware antenna power circuit
+            # (VCC_RF with FB1 ferrite bead, R14 10Ω resistor, C1 47pF capacitor)
+            # No software configuration needed - antenna power is always on
+            # self.configure_antenna_power()  # DISABLED - not needed with SparkFun board
             
             # Configure PPS (Pulse Per Second) output
             self.configure_pps_output()
