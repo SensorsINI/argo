@@ -1506,20 +1506,31 @@ class GpsNode(ArgoBaseNode):
             ck = self._ubx_checksum(bytes([ubx_class, ubx_id, 0, 0]))
             frame = header + ck
             
-            # Flush input before sending
-            if self.serial_port.in_waiting > 0:
-                self.serial_port.read(self.serial_port.in_waiting)
-            
+            # Don't flush - we want to accumulate data
             # Send poll request
             self.serial_port.write(frame)
-            time.sleep(0.5)  # Wait for GPS to respond
+            self.get_logger().debug(f"UBX-NAV-SAT poll sent, waiting for response...")
             
-            # Read response
-            if self.serial_port.in_waiting == 0:
-                self.get_logger().warn("No response to UBX-NAV-SAT poll")
+            # Read response - try multiple times over 2 seconds to handle NMEA traffic
+            resp = bytearray()
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                time.sleep(0.2)  # Short sleep between reads
+                if self.serial_port.in_waiting > 0:
+                    chunk = self.serial_port.read(self.serial_port.in_waiting)
+                    resp.extend(chunk)
+                    self.get_logger().debug(f"Attempt {attempt+1}: read {len(chunk)} bytes (total {len(resp)} bytes)")
+                    
+                    # Check if we have UBX-NAV-SAT response
+                    if b'\xB5\x62\x01\x35' in resp:
+                        self.get_logger().debug(f"Found UBX-NAV-SAT marker in buffer after {attempt+1} attempts")
+                        break
+            
+            if len(resp) == 0:
+                self.get_logger().warn("No data received after UBX-NAV-SAT poll")
                 return None
             
-            resp = self.serial_port.read(self.serial_port.in_waiting)
+            self.get_logger().debug(f"Total received: {len(resp)} bytes")
             
             # Find UBX-NAV-SAT response (0xB5 0x62 0x01 0x35)
             result = None
@@ -1527,12 +1538,18 @@ class GpsNode(ArgoBaseNode):
                 if resp[i:i+4] == b'\xB5\x62\x01\x35':
                     # Found NAV-SAT response
                     payload_len = resp[i+4] | (resp[i+5] << 8)
-                    if i + 8 + payload_len <= len(resp):
+                    self.get_logger().debug(f"Found UBX-NAV-SAT at offset {i}, payload length: {payload_len}")
+                    if i + 6 + payload_len <= len(resp):
                         result = resp[i+6:i+6+payload_len]  # Extract payload only
+                        self.get_logger().debug(f"Successfully extracted {len(result)} byte payload")
                         break
+                    else:
+                        self.get_logger().debug(f"Incomplete UBX-NAV-SAT frame (need {i+6+payload_len} bytes, have {len(resp)})")
             
             if not result:
-                self.get_logger().warn(f"No valid UBX-NAV-SAT response found ({len(resp)} bytes received)")
+                # Debug: show first 100 bytes of what we received
+                sample = resp[:100].hex(' ')
+                self.get_logger().warn(f"No valid UBX-NAV-SAT response found ({len(resp)} bytes received). First 100 bytes: {sample}")
                 return None
             
             # Parse UBX-NAV-SAT response
@@ -2360,18 +2377,23 @@ class GpsNode(ArgoBaseNode):
                     for const_id, sats in self.gsv_constellation_buffers.items():
                         aggregated_sats.extend(sats)
                     
+                    # Track if we actually changed anything (to avoid spammy debug logs)
+                    changed = False
+                    
                     # Only update if we have satellites OR explicitly reporting 0
                     if len(aggregated_sats) > 0:
                         self.satellites_in_view = aggregated_sats
                         self.last_gsv_time = current_time
                         self.last_gsv_update_time = current_time
+                        changed = True
                     elif sats_in_view_total == 0 and len(self.satellites_in_view) == 0:
-                        # GPS reports 0 and we already have 0 - nothing to do
-                        pass
+                        # GPS reports 0 and we already have 0 - nothing to do, but update timestamp to avoid spam
+                        self.last_gsv_update_time = current_time
                     elif sats_in_view_total == 0 and self.last_gsv_time is not None and (current_time - self.last_gsv_time) > 15.0:
                         # GPS reports 0 for more than 15 seconds - truly lost satellites
                         self.satellites_in_view = []
                         self.last_gsv_update_time = current_time
+                        changed = True
                     
                     # Calculate average SNR from satellites with valid signal
                     valid_snrs = [sat['snr'] for sat in self.satellites_in_view if sat['snr'] is not None and sat['snr'] > 0]
@@ -2385,7 +2407,8 @@ class GpsNode(ArgoBaseNode):
                         # Don't update average_snr or publish - keep last valid value
                         pass
                     
-                    if self.debug_mode:
+                    # Only log in debug mode AND when something actually changed
+                    if self.debug_mode and changed:
                         const_counts = {k: len(v) for k, v in self.gsv_constellation_buffers.items()}
                         self.get_logger().debug(
                             f"GSV: {len(self.satellites_in_view)} sats total ({const_counts}), "
