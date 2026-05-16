@@ -1480,79 +1480,83 @@ class GpsNode(ArgoBaseNode):
         return False
 
     def poll_pubx_svstatus(self):
-        """Poll PUBX-03 (Satellite Status) to diagnose why there's no fix.
+        """Poll UBX-NAV-SAT to diagnose why there's no fix.
         
-        Returns a dict with satellite status information:
-        - satellites: list of dicts with {svid, status, azimuth, elevation, cno, lck}
-        - status codes: '-'=not used, 'U'=used in solution, 'e'=ephemeris available but not used
+        UBX-NAV-SAT provides detailed satellite information including:
+        - Signal quality (C/N0)
+        - Satellite health status  
+        - Ephemeris and almanac availability flags
+        - Whether satellite is used in navigation solution
         """
         try:
-            # Send PUBX,03 poll command
-            # Format: $PUBX,03*<checksum>\r\n
-            poll_cmd = "$PUBX,03"
-            checksum = 0
-            for char in poll_cmd[1:]:  # Skip initial $
-                checksum ^= ord(char)
-            poll_msg = f"{poll_cmd}*{checksum:02X}\r\n"
+            # Poll UBX-NAV-SAT (0x01 0x35) for satellite information
+            # No payload needed for poll
+            self.get_logger().info(f"Polling UBX-NAV-SAT for satellite status...")
+            result = self._send_ubx(0x01, 0x35, bytearray(), expect_ack=False, timeout=2.0)
             
-            self.get_logger().debug(f"Polling PUBX-03 for satellite status...")
-            self.serial_port.write(poll_msg.encode('ascii'))
-            time.sleep(0.5)  # Wait for response
-            
-            # Read response (could be multiple PUBX,03 messages for all satellites)
-            if self.serial_port.in_waiting > 0:
-                response = self.serial_port.read(self.serial_port.in_waiting).decode('ascii', errors='ignore')
-                
-                # Parse PUBX,03 messages
-                satellites = []
-                for line in response.split('\n'):
-                    if line.startswith('$PUBX,03'):
-                        parts = line.split(',')
-                        if len(parts) >= 7:
-                            # PUBX,03 format: $PUBX,03,<msgId>,<n>,<sv>,<status>,<az>,<el>,<cno>,<lck>,...
-                            try:
-                                num_sats = int(parts[3])
-                                # Parse satellite entries (each is 6 fields)
-                                for i in range(num_sats):
-                                    base = 4 + (i * 6)
-                                    if base + 5 < len(parts):
-                                        sat_info = {
-                                            'svid': int(parts[base]),
-                                            'status': parts[base + 1],
-                                            'azimuth': int(parts[base + 2]) if parts[base + 2] else None,
-                                            'elevation': int(parts[base + 3]) if parts[base + 3] else None,
-                                            'cno': int(parts[base + 4]) if parts[base + 4] else None,
-                                            'lck': int(parts[base + 5]) if parts[base + 5] else None
-                                        }
-                                        satellites.append(sat_info)
-                            except (ValueError, IndexError) as e:
-                                self.get_logger().debug(f"Error parsing PUBX,03: {e}")
-                
-                if satellites:
-                    # Log summary
-                    used = [s for s in satellites if s['status'] == 'U']
-                    ephemeris_not_used = [s for s in satellites if s['status'] == 'e']
-                    not_used = [s for s in satellites if s['status'] == '-']
-                    
-                    self.get_logger().info(
-                        f"PUBX-03 Satellite Status: {len(satellites)} tracked, "
-                        f"{len(used)} used (U), {len(ephemeris_not_used)} with ephemeris but not used (e), "
-                        f"{len(not_used)} not used (-)")
-                    
-                    if ephemeris_not_used and self.debug_mode:
-                        self.get_logger().debug(f"Satellites with ephemeris but NOT USED: {[s['svid'] for s in ephemeris_not_used]}")
-                    
-                    return {
-                        'satellites': satellites,
-                        'used_count': len(used),
-                        'ephemeris_not_used_count': len(ephemeris_not_used)
-                    }
-                else:
-                    self.get_logger().debug("No PUBX-03 data received")
-                    return None
-            else:
-                self.get_logger().debug("No response to PUBX-03 poll")
+            if not result or not isinstance(result, (bytes, bytearray)):
+                self.get_logger().warn("No UBX-NAV-SAT response received")
                 return None
+            
+            # Parse UBX-NAV-SAT response
+            # Format: header(8) + iTOW(4) + version(1) + numSvs(1) + reserved(2) + repeated satellite blocks
+            # Each satellite block: gnssId(1) + svId(1) + cno(1) + elev(1) + azim(2) + prRes(2) + flags(4)
+            if len(result) < 8:
+                self.get_logger().warn(f"UBX-NAV-SAT response too short: {len(result)} bytes")
+                return None
+            
+            version = result[0]
+            num_svs = result[1]
+            
+            self.get_logger().info(f"UBX-NAV-SAT: {num_svs} satellites tracked")
+            
+            # Parse satellite data (each sat is 12 bytes)
+            satellites_used = 0
+            satellites_with_ephemeris = 0
+            satellites_healthy = 0
+            low_snr_sats = []
+            
+            for i in range(num_svs):
+                offset = 8 + (i * 12)
+                if offset + 12 > len(result):
+                    break
+                
+                gnss_id = result[offset]
+                sv_id = result[offset + 1]
+                cno = result[offset + 2]  # C/N0 (dBHz)
+                elev = result[offset + 3] if result[offset + 3] < 128 else result[offset + 3] - 256  # signed
+                azim = int.from_bytes(result[offset + 4:offset + 6], 'little')
+                flags = int.from_bytes(result[offset + 8:offset + 12], 'little')
+                
+                # Decode flags
+                quality_ind = (flags >> 0) & 0x07  # bits 0-2
+                sv_used = (flags >> 3) & 0x01      # bit 3
+                health = (flags >> 4) & 0x03        # bits 4-5
+                eph_avail = (flags >> 11) & 0x01    # bit 11
+                alm_avail = (flags >> 12) & 0x01    # bit 12
+                
+                if sv_used:
+                    satellites_used += 1
+                if health == 1:  # 1 = healthy
+                    satellites_healthy += 1
+                if eph_avail:
+                    satellites_with_ephemeris += 1
+                if cno > 0 and cno < 25:  # Low SNR
+                    low_snr_sats.append((sv_id, cno))
+            
+            self.get_logger().info(
+                f"Satellite analysis: {satellites_used} used in solution, "
+                f"{satellites_with_ephemeris} have ephemeris, {satellites_healthy} healthy")
+            
+            if low_snr_sats:
+                self.get_logger().info(f"Low SNR satellites (<25 dBHz): {low_snr_sats[:5]}")  # Show first 5
+            
+            return {
+                'used': satellites_used,
+                'ephemeris': satellites_with_ephemeris,
+                'healthy': satellites_healthy,
+                'low_snr': len(low_snr_sats)
+            }
                 
         except Exception as e:
             self.get_logger().warn(f"Error polling PUBX-03: {e}")
