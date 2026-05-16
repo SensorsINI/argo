@@ -121,6 +121,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             'battery_charging': None,
             'battery_usb_power': None,
             'battery_time_to_full': None,
+            'battery_low_alert': False,  # Low battery warning from argo_battery_water
             'battery_time_to_empty': None,
             'storage_rundown_active': False,  # astore: discharge to 7.6V then shut down
             'battery_charging_fault_detected': False,  # GPIO-based charging fault detection
@@ -445,6 +446,9 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Float32, '/battery_remaining_pct', lambda msg: self.battery_pct_cb(msg, 'wifi'), self.volatile_qos)
         )
         self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/battery_low_alert', self.battery_low_alert_cb, 10)
+        )
+        self._topic_subscriptions.append(
             self.create_subscription(Bool, '/charging_status', self.charging_status_cb, 10)
         )
         self._topic_subscriptions.append(
@@ -658,6 +662,12 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Update health status - battery percentage is boat data
         self._update_boat_data_received(f"battery_pct_{source}")
+    
+    def battery_low_alert_cb(self, msg):
+        """Callback for battery low alert."""
+        # CRITICAL: Don't skip in low-power mode - battery warnings are safety-critical
+        with self.state_lock:
+            self.state['battery_low_alert'] = msg.data
     
     def charging_status_cb(self, msg):
         """Callback for battery charging status."""
@@ -2413,13 +2423,14 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         @self.app.route('/api/status/critical')
         def get_critical_status():
-            """Get only critical status fields (human_controlled, recording, controller_type, i2c_failure) for fast polling."""
+            """Get only critical status fields (human_controlled, recording, controller_type, i2c_failure, battery_low_alert) for fast polling."""
             with self.state_lock:
                 return jsonify({
                     'human_controlled': self.state.get('human_controlled'),
                     'recording': self.state.get('recording'),
                     'controller_type': self.state.get('controller_type'),
-                    'i2c_failure': self.state.get('i2c_failure', False)
+                    'i2c_failure': self.state.get('i2c_failure', False),
+                    'battery_low_alert': self.state.get('battery_low_alert', False)
                 })
 
         # ==================== WiFi Management API ====================

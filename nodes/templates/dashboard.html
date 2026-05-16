@@ -46,6 +46,11 @@
                 🔴 CHARGING FAULT DETECTED<br>
                 <span id="charging-fault-details" style="font-size: 0.9em; font-weight: normal;"></span>
             </div>
+            <!-- Low Battery Alert (shown when battery is critically low) -->
+            <div id="low-battery-alert" class="critical-alert" style="display: none; background-color: #ff6b00; color: white; padding: 12px; border-radius: 8px; margin-bottom: 12px; font-weight: bold; text-align: center;">
+                ⚠️ LOW BATTERY WARNING<br>
+                <span style="font-size: 0.9em; font-weight: normal;">Battery critically low - Consider returning to shore immediately</span>
+            </div>
             <div class="status-grid">
                 <!-- Row 1: System, Nodes, Health -->
                 <div class="status-item">
@@ -354,6 +359,7 @@
         // Critical state tracking for reactive updates
         let lastCriticalState = {
             i2c_failure: false,
+            battery_low_alert: false,
             human_controlled: null,
             recording: null,
             controller_type: null
@@ -450,6 +456,12 @@
                 lastCriticalState.i2c_failure = criticalData.i2c_failure || false;
             }
             
+            // Update low battery alert
+            if ((criticalData.battery_low_alert || false) !== lastCriticalState.battery_low_alert) {
+                needsUpdate = true;
+                lastCriticalState.battery_low_alert = criticalData.battery_low_alert || false;
+            }
+            
             if (!needsUpdate) {
                 return; // No changes, skip UI update
             }
@@ -489,6 +501,9 @@
             
             // I2C failure alert
             updateI2CFailureAlert(data.i2c_failure || false);
+            
+            // Low battery alert
+            updateLowBatteryAlert(data.battery_low_alert || false);
         }
         
         // Update I2C failure alert visibility
@@ -496,6 +511,18 @@
             const alertElement = document.getElementById('i2c-failure-alert');
             if (alertElement) {
                 if (i2cFailed) {
+                    alertElement.style.display = 'block';
+                } else {
+                    alertElement.style.display = 'none';
+                }
+            }
+        }
+        
+        // Update low battery alert visibility
+        function updateLowBatteryAlert(batteryLow) {
+            const alertElement = document.getElementById('low-battery-alert');
+            if (alertElement) {
+                if (batteryLow) {
                     alertElement.style.display = 'block';
                 } else {
                     alertElement.style.display = 'none';
@@ -523,6 +550,7 @@
                         statusData.recording = data.recording;
                         statusData.controller_type = data.controller_type;
                         statusData.i2c_failure = data.i2c_failure || false;
+                        statusData.battery_low_alert = data.battery_low_alert || false;
                     }
                 })
                 .catch(error => {
