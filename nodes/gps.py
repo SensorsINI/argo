@@ -1513,10 +1513,23 @@ class GpsNode(ArgoBaseNode):
             # Query GPS status to diagnose hardware issues
             self.query_gps_status()
             
-            # DISABLED: Save configuration to non-volatile memory (CFG-CFG)
-            # Testing if CFG-CFG causes GPS to lose satellite tracking
-            # self.save_gps_configuration()
-            self.get_logger().info("⚠ Configuration save DISABLED for testing - settings will not persist across resets")
+            # Save configuration to non-volatile memory (CFG-CFG) - ONCE per boot only
+            # Sending CFG-CFG multiple times (e.g., on node restart) kills hot start capability
+            # Use /tmp flag file to track if we've already saved config this boot
+            cfg_saved_flag = "/tmp/gps_config_saved"
+            import os
+            if not os.path.exists(cfg_saved_flag):
+                self.get_logger().info("First GPS configuration this boot - saving to non-volatile memory...")
+                self.save_gps_configuration()
+                # Create flag file to prevent re-saving on node restart
+                try:
+                    with open(cfg_saved_flag, 'w') as f:
+                        f.write(f"{time.time()}\n")
+                    self.get_logger().info("✓ Configuration saved to non-volatile memory (will not re-save until reboot)")
+                except Exception as e:
+                    self.get_logger().warn(f"Failed to create config flag file: {e}")
+            else:
+                self.get_logger().info("⚠ Configuration already saved this boot - skipping CFG-CFG to preserve hot start")
             
             self.get_logger().info("✓ GPS configured for hot start capability")
             
