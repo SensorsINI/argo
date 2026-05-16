@@ -1553,23 +1553,18 @@ class GpsNode(ArgoBaseNode):
         self.get_logger().info("Configuring GPS for hot start capability...")
         
         try:
-            # Configure backup battery for hot start (CFG-BAT)
-            # This enables the GPS to maintain almanac/ephemeris data during power cycles
-            backup_battery_cfg = bytes([0xB5, 0x62,  # Sync chars
-                                       0x06, 0x09,  # Class: CFG, ID: BAT
-                                       0x04, 0x00,  # Length: 4 bytes
-                                       0x01,        # Enable backup battery
-                                       0x00,        # Reserved
-                                       0x00,        # Reserved
-                                       0x00])       # Reserved
-            
-            # Calculate checksum
-            backup_battery_cfg += self._ubx_checksum(backup_battery_cfg[2:])
-            
-            # Send backup battery configuration
-            self.serial_port.write(backup_battery_cfg)
-            time.sleep(0.1)
-            self.get_logger().debug("✓ Backup battery configuration sent")
+            # NOTE: Backup battery / supercapacitor configuration
+            # The SparkFun NEO-M9N board may not have a backup battery populated.
+            # Without backup power on V_BCKP pin, the GPS will perform cold start on every power cycle:
+            # - Cold start: 26-30 seconds to first fix (no retained data)
+            # - Hot start: 1-2 seconds (with backup battery and retained ephemeris)
+            #
+            # For M9N modules, power management is configured via CFG-VALSET with PM2 keys,
+            # not the legacy CFG-BAT/CFG-CFG commands. However, without hardware backup battery,
+            # software configuration won't enable hot start capability.
+            #
+            # If hot start is needed, verify V_BCKP has backup power source (battery/supercap)
+            self.get_logger().info("Note: Hot start requires backup battery on V_BCKP (not configured in software)")
             
             # Configure navigation engine using CFG-VALSET (modern interface for NEO-M9N)
             # CRITICAL: Use Sea dynamic model for sailboat, not Automotive!
