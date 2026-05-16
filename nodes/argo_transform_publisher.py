@@ -228,7 +228,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         
         # Ignore zero or invalid GPS coordinates (0,0) that might indicate a reset
         if abs(msg.latitude) < 0.0001 and abs(msg.longitude) < 0.0001:
-            self.get_logger().warn("Ignoring zero GPS coordinates - possible reset")
+            # Silently ignore zero coordinates (happens when GPS has no fix)
             return
         
         # Set map origin from first GPS fix only if not already set from config
