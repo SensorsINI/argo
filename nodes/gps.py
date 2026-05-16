@@ -2072,8 +2072,21 @@ class GpsNode(ArgoBaseNode):
             
             # If this is the last message, swap buffers and calculate average SNR
             if message_number == total_messages:
-                # Atomically swap the complete satellite list
-                self.satellites_in_view = self.satellites_in_view_temp
+                # Debug: log GSV burst completion
+                self.get_logger().info(f"GSV burst complete: msg {message_number}/{total_messages}, total={sats_in_view_total}, temp_len={len(self.satellites_in_view_temp)}, current_len={len(self.satellites_in_view)}")
+                
+                # Only update satellites_in_view if we have satellites OR it's explicitly reporting 0
+                # This prevents clearing the list on spurious empty GSV bursts
+                if len(self.satellites_in_view_temp) > 0:
+                    # Have satellites - update the list
+                    self.satellites_in_view = self.satellites_in_view_temp
+                elif sats_in_view_total == 0:
+                    # GPS explicitly reports 0 satellites - clear the list
+                    self.satellites_in_view = []
+                else:
+                    # Empty burst but GPS didn't explicitly say 0 - keep previous list
+                    self.get_logger().info(f"Keeping previous satellite list (temp was empty but total!={0})")
+                    pass
                 
                 # Calculate average SNR from satellites with valid signal
                 valid_snrs = [sat['snr'] for sat in self.satellites_in_view if sat['snr'] is not None and sat['snr'] > 0]
@@ -2360,6 +2373,9 @@ class GpsNode(ArgoBaseNode):
         # This gives a more stable indication of GPS health, as satellites_used drops to 0
         # during brief fix losses even when GPS is still tracking many satellites
         total_sats_in_view = len(self.satellites_in_view)
+        
+        # Temporary debug: log what we're about to publish
+        self.get_logger().info(f"[TIMER] Publishing sat counts: in_view={total_sats_in_view} (list={self.satellites_in_view}), used={self.satellites_used}")
         
         # Logical consistency check: can't use more satellites than we can see
         # If satellites_used > satellites_in_view, it means GSV data is stale/incomplete
