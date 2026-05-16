@@ -1448,11 +1448,24 @@ class GpsNode(ArgoBaseNode):
             add_key_value_u1(valset_payload, 0x201100aa, 3)    # INFIL_NCNOTHRS: 3 satellites minimum
             add_key_value_u1(valset_payload, 0x201100ab, 20)   # INFIL_CNOTHRS: 20 dBHz threshold (permissive)
             
+            # Enable all GNSS constellations for maximum satellite availability
+            # CFG-SIGNAL-GPS_ENA (0x1031001f): Enable GPS L1C/A
+            # CFG-SIGNAL-GAL_ENA (0x10310021): Enable Galileo E1
+            # CFG-SIGNAL-BDS_ENA (0x10310022): Enable BeiDou B1I
+            # CFG-SIGNAL-QZSS_ENA (0x10310024): Enable QZSS L1C/A
+            # CFG-SIGNAL-GLO_ENA (0x10310025): Enable GLONASS L1
+            add_key_value_u1(valset_payload, 0x1031001f, 1)    # GPS enabled
+            add_key_value_u1(valset_payload, 0x10310021, 1)    # Galileo enabled
+            add_key_value_u1(valset_payload, 0x10310022, 1)    # BeiDou enabled
+            add_key_value_u1(valset_payload, 0x10310024, 1)    # QZSS enabled
+            add_key_value_u1(valset_payload, 0x10310025, 1)    # GLONASS enabled
+            
             # Send CFG-VALSET command
             nav_result = self._send_ubx(0x06, 0x8A, valset_payload, expect_ack=True, timeout=2.0)
             
             if nav_result:
-                self.get_logger().info("✓ Navigation engine configured: Sea mode, min_elev=0°, min_cno=6dBHz (CFG-VALSET)")
+                self.get_logger().info("✓ Navigation engine configured: Sea mode, min_elev=0°, min_cno=6dBHz")
+                self.get_logger().info("✓ GNSS constellations enabled: GPS, GLONASS, Galileo, BeiDou, QZSS")
             else:
                 self.get_logger().warn("⚠ Navigation configuration (CFG-VALSET) not acknowledged - may use default settings")
             
@@ -2204,14 +2217,41 @@ class GpsNode(ArgoBaseNode):
                 f"reset_due_in={self._format_hms(reset_due_in_s)}"
             )
 
-        # Add satellite count and signal strength information
-        if self.average_snr > 0:
-            sat_str = f"sats={self.satellites_used} SNR={self.average_snr:.0f}dB"
+        # Add detailed satellite constellation information
+        # Count satellites by constellation (PRN ranges)
+        gps_sats = len([s for s in self.satellites_in_view if 1 <= s['prn'] <= 32])
+        glonass_sats = len([s for s in self.satellites_in_view if 65 <= s['prn'] <= 96])
+        galileo_sats = len([s for s in self.satellites_in_view if s['prn'] >= 211])
+        beidou_sats = len([s for s in self.satellites_in_view if 159 <= s['prn'] <= 163 or 33 <= s['prn'] <= 64])
+        total_in_view = len(self.satellites_in_view)
+        
+        # Count satellites with valid SNR (being tracked)
+        sats_with_signal = len([s for s in self.satellites_in_view if s.get('snr') and s['snr'] > 0])
+        
+        # Build constellation string
+        if total_in_view > 0:
+            const_parts = []
+            if gps_sats > 0: const_parts.append(f"GPS:{gps_sats}")
+            if glonass_sats > 0: const_parts.append(f"GLO:{glonass_sats}")
+            if galileo_sats > 0: const_parts.append(f"GAL:{galileo_sats}")
+            if beidou_sats > 0: const_parts.append(f"BDS:{beidou_sats}")
+            const_str = " ".join(const_parts) if const_parts else f"total:{total_in_view}"
+            
+            if self.average_snr > 0:
+                sat_str = f"in_view={total_in_view}({const_str}) tracking={sats_with_signal} SNR={self.average_snr:.0f}dB used={self.satellites_used}"
+            else:
+                sat_str = f"in_view={total_in_view}({const_str}) tracking={sats_with_signal} used={self.satellites_used}"
         else:
-            sat_str = f"sats={self.satellites_used}"
+            # No satellites in view at all
+            if self.satellites_used > 0:
+                # We're using satellites but GSV hasn't reported any (stale data)
+                sat_str = f"used={self.satellites_used} in_view=? (GSV pending)"
+            else:
+                # Truly no satellites - critical hardware issue
+                sat_str = f"in_view=0 (NO RF SIGNAL - check antenna!)"
         
         return (
-            "GPS: No fix - searching for satellites... "
+            "GPS: No fix - searching... "
             f"({sat_str}; since_fix={self._format_hms(time_without_fix_s)}; {pps_str}; {ant_str}; {reset_str})"
         )
 

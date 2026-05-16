@@ -797,7 +797,10 @@
                 document.getElementById('gps-lock').textContent = `🔴 Last fix (${satCount} sats${snrStr})`;
             } else {
                 // No lock - show satellite count and signal strength to indicate GPS health
-                if (satCount === 0) {
+                if (satCount === 0 && snrAvg === 0) {
+                    // No satellites in view AND no signal - critical hardware issue
+                    document.getElementById('gps-lock').textContent = '🔴 NO RF SIGNAL - Check antenna!';
+                } else if (satCount === 0) {
                     if (snrAvg > 0) {
                         // Satellites tracked but not yet used for fix
                         document.getElementById('gps-lock').textContent = `🟡 SEARCHING (${snrAvg.toFixed(0)}dB signal)`;
