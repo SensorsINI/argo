@@ -2223,12 +2223,14 @@ class GpsNode(ArgoBaseNode):
                         f"GGA: Position {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt {self.current_altitude}m, {self.satellites_used} sats")
                     return True
                 else:
-                    # No valid fix - log diagnostic info in debug mode
-                    if self.debug_mode and num_sats and int(num_sats) > 0:
-                        self.get_logger().debug(
-                            f"GGA: No fix - quality={fix_quality}, sats={num_sats}, hdop={hdop}, "
-                            f"lat={'empty' if not latitude_raw else latitude_raw[:8]}, "
-                            f"lon={'empty' if not longitude_raw else longitude_raw[:9]}")
+                    # No valid fix - log diagnostic info when we have satellites (helps diagnose issues)
+                    if num_sats and int(num_sats) >= 3:
+                        hdop_val = float(hdop) if hdop else 99.99
+                        # HDOP interpretation: <1=ideal, 1-2=excellent, 2-5=good, 5-10=moderate, 10-20=fair, >20=poor
+                        hdop_quality = "POOR" if hdop_val > 10 else "MODERATE" if hdop_val > 5 else "GOOD"
+                        self.get_logger().info(
+                            f"GGA diagnostic: quality={fix_quality} (need >0), sats={num_sats}, "
+                            f"HDOP={hdop} ({hdop_quality} geometry - need <10 for fix)")
                     # No valid fix - clear GPS fix status
                     if self.gps_fix_valid:  # Only update health if fix status changed
                         self.gps_fix_valid = False
@@ -2477,8 +2479,8 @@ class GpsNode(ArgoBaseNode):
                     self.no_fix_log_count += 1
                     
                     # Poll PUBX-03 for detailed satellite status every 30 seconds when we have satellites but no fix
-                    # This helps diagnose why GPS can't get a fix
-                    if self.satellites_used >= 4 and self.no_fix_log_count % 6 == 0:  # Every 30s (6 * 5s intervals)
+                    # This helps diagnose why GPS can't get a fix (ephemeris, geometry, etc.)
+                    if self.satellites_used >= 3 and self.no_fix_log_count % 6 == 0:  # Every 30s (6 * 5s intervals)
                         self.get_logger().info(f"Polling satellite status (no fix with {self.satellites_used} satellites)...")
                         self.poll_pubx_svstatus()
 
