@@ -1479,6 +1479,85 @@ class GpsNode(ArgoBaseNode):
                 return False
         return False
 
+    def poll_pubx_svstatus(self):
+        """Poll PUBX-03 (Satellite Status) to diagnose why there's no fix.
+        
+        Returns a dict with satellite status information:
+        - satellites: list of dicts with {svid, status, azimuth, elevation, cno, lck}
+        - status codes: '-'=not used, 'U'=used in solution, 'e'=ephemeris available but not used
+        """
+        try:
+            # Send PUBX,03 poll command
+            # Format: $PUBX,03*<checksum>\r\n
+            poll_cmd = "$PUBX,03"
+            checksum = 0
+            for char in poll_cmd[1:]:  # Skip initial $
+                checksum ^= ord(char)
+            poll_msg = f"{poll_cmd}*{checksum:02X}\r\n"
+            
+            self.get_logger().debug(f"Polling PUBX-03 for satellite status...")
+            self.serial_port.write(poll_msg.encode('ascii'))
+            time.sleep(0.5)  # Wait for response
+            
+            # Read response (could be multiple PUBX,03 messages for all satellites)
+            if self.serial_port.in_waiting > 0:
+                response = self.serial_port.read(self.serial_port.in_waiting).decode('ascii', errors='ignore')
+                
+                # Parse PUBX,03 messages
+                satellites = []
+                for line in response.split('\n'):
+                    if line.startswith('$PUBX,03'):
+                        parts = line.split(',')
+                        if len(parts) >= 7:
+                            # PUBX,03 format: $PUBX,03,<msgId>,<n>,<sv>,<status>,<az>,<el>,<cno>,<lck>,...
+                            try:
+                                num_sats = int(parts[3])
+                                # Parse satellite entries (each is 6 fields)
+                                for i in range(num_sats):
+                                    base = 4 + (i * 6)
+                                    if base + 5 < len(parts):
+                                        sat_info = {
+                                            'svid': int(parts[base]),
+                                            'status': parts[base + 1],
+                                            'azimuth': int(parts[base + 2]) if parts[base + 2] else None,
+                                            'elevation': int(parts[base + 3]) if parts[base + 3] else None,
+                                            'cno': int(parts[base + 4]) if parts[base + 4] else None,
+                                            'lck': int(parts[base + 5]) if parts[base + 5] else None
+                                        }
+                                        satellites.append(sat_info)
+                            except (ValueError, IndexError) as e:
+                                self.get_logger().debug(f"Error parsing PUBX,03: {e}")
+                
+                if satellites:
+                    # Log summary
+                    used = [s for s in satellites if s['status'] == 'U']
+                    ephemeris_not_used = [s for s in satellites if s['status'] == 'e']
+                    not_used = [s for s in satellites if s['status'] == '-']
+                    
+                    self.get_logger().info(
+                        f"PUBX-03 Satellite Status: {len(satellites)} tracked, "
+                        f"{len(used)} used (U), {len(ephemeris_not_used)} with ephemeris but not used (e), "
+                        f"{len(not_used)} not used (-)")
+                    
+                    if ephemeris_not_used and self.debug_mode:
+                        self.get_logger().debug(f"Satellites with ephemeris but NOT USED: {[s['svid'] for s in ephemeris_not_used]}")
+                    
+                    return {
+                        'satellites': satellites,
+                        'used_count': len(used),
+                        'ephemeris_not_used_count': len(ephemeris_not_used)
+                    }
+                else:
+                    self.get_logger().debug("No PUBX-03 data received")
+                    return None
+            else:
+                self.get_logger().debug("No response to PUBX-03 poll")
+                return None
+                
+        except Exception as e:
+            self.get_logger().warn(f"Error polling PUBX-03: {e}")
+            return None
+
     def query_current_dynmodel(self):
         """Query the current dynamic platform model using CFG-VALGET."""
         try:
@@ -2144,6 +2223,12 @@ class GpsNode(ArgoBaseNode):
                         f"GGA: Position {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt {self.current_altitude}m, {self.satellites_used} sats")
                     return True
                 else:
+                    # No valid fix - log diagnostic info in debug mode
+                    if self.debug_mode and num_sats and int(num_sats) > 0:
+                        self.get_logger().debug(
+                            f"GGA: No fix - quality={fix_quality}, sats={num_sats}, hdop={hdop}, "
+                            f"lat={'empty' if not latitude_raw else latitude_raw[:8]}, "
+                            f"lon={'empty' if not longitude_raw else longitude_raw[:9]}")
                     # No valid fix - clear GPS fix status
                     if self.gps_fix_valid:  # Only update health if fix status changed
                         self.gps_fix_valid = False
@@ -2390,6 +2475,12 @@ class GpsNode(ArgoBaseNode):
                     self.get_logger().info(status_line)
                     self.last_no_fix_log_time = current_time
                     self.no_fix_log_count += 1
+                    
+                    # Poll PUBX-03 for detailed satellite status every 30 seconds when we have satellites but no fix
+                    # This helps diagnose why GPS can't get a fix
+                    if self.satellites_used >= 4 and self.no_fix_log_count % 6 == 0:  # Every 30s (6 * 5s intervals)
+                        self.get_logger().info(f"Polling satellite status (no fix with {self.satellites_used} satellites)...")
+                        self.poll_pubx_svstatus()
 
     @staticmethod
     def _format_hms(seconds: float) -> str:
