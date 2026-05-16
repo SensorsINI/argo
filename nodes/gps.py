@@ -1059,14 +1059,22 @@ class GpsNode(ArgoBaseNode):
             # Any configuration command (CFG-PMS, CFG-TP5, CFG-MSG) causes GPS to restart
             # satellite tracking from scratch, losing all downloaded ephemeris.
             #
-            # The GPS module retains its configuration across reboots via backup battery.
-            # We only need to configure on FIRST boot or after factory reset.
-            #
-            # TODO: Add a flag file to detect first boot and only configure then
-            if not factory_reset_performed:
-                self.get_logger().info("Skipping GPS configuration to preserve ephemeris (already configured)")
-                # self.configure_hot_start()  # DISABLED - disrupts satellite tracking
-                # self.enable_nmea_sentences()  # DISABLED - already configured
+            # Use /tmp flag file to detect first boot after power-on (/tmp is cleared on boot)
+            gps_config_flag = '/tmp/gps_configured'
+            needs_configuration = not os.path.exists(gps_config_flag) or factory_reset_performed
+            
+            if needs_configuration:
+                self.get_logger().info("First boot or factory reset - configuring GPS...")
+                self.configure_hot_start()  # Configure navigation engine FIRST
+                self.enable_nmea_sentences()
+                # Create flag file to prevent reconfiguration on node restart
+                try:
+                    with open(gps_config_flag, 'w') as f:
+                        f.write(f"GPS configured at {time.time()}\n")
+                except Exception as e:
+                    self.get_logger().warn(f"Could not create GPS config flag: {e}")
+            else:
+                self.get_logger().info("GPS already configured this boot - skipping to preserve ephemeris")
             else:
                 # After factory reset: use factory defaults with minimal essential configuration
                 # Per NEO-M9N Integration Manual 3.1.5, factory defaults include:
