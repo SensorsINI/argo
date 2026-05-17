@@ -139,10 +139,8 @@ pcb/datasheets/USB To LoRa Data Transfer Module SX1262 Solution Suitable For Dat
 pcb/datasheets/USB-TO-LoRa-xF - Waveshare Wiki.pdf
 pcb/orange-pi/xpowers_axp313a_apr22_xonlink_PMIC.pdf
 pcb/datasheets/NEO-M9N Hookup Guide - SparkFun Learn.pdf
-power_control/sys_heartbeat/argo-ph4-led-overlay-overlay.dts.preprocessed
-power_control/sys_heartbeat/argo-ph4-led-overlay-overlay.dtbo
-power_control/sys_heartbeat/argo-ph4-led-overlay-overlay.dtbo
-power_control/sys_heartbeat/argo-ph4-led-overlay-overlay.dts.preprocessed
+power_control/sys_heartbeat/*.dts.preprocessed
+power_control/sys_heartbeat/*.dtbo
 scripts/nohup.out
 a.out
 pcb/datasheets/Molex SL connectors I2C 987651-0406.pdf
