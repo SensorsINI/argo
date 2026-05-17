@@ -860,17 +860,35 @@
             }
             
             // Separate satellite count display
+            const staleIndicatorSats = data.gps_data_stale ? ' ⚠️ STALE' : '';
             document.getElementById('gps-satellites').textContent = 
-                `in view: ${satCount}, in use: ${satUsed}`;
+                `in view: ${satCount}, in use: ${satUsed}${staleIndicatorSats}`;
+            if (data.gps_data_stale) {
+                document.getElementById('gps-satellites').style.color = '#ff6b6b';
+            } else {
+                document.getElementById('gps-satellites').style.color = '';
+            }
             
             // Separate SNR display
+            const staleIndicatorSNR = data.gps_data_stale ? ' ⚠️ STALE' : '';
             document.getElementById('gps-snr').textContent = 
-                snrAvg > 0 ? `${snrAvg.toFixed(0)} dB` : '-- dB';
+                snrAvg > 0 ? `${snrAvg.toFixed(0)} dB${staleIndicatorSNR}` : `-- dB${staleIndicatorSNR}`;
+            if (data.gps_data_stale) {
+                document.getElementById('gps-snr').style.color = '#ff6b6b';
+            } else {
+                document.getElementById('gps-snr').style.color = '';
+            }
             
             // Position accuracy display
-            document.getElementById('gps-accuracy').textContent = 
-                data.gps_position_accuracy !== null && data.gps_position_accuracy !== undefined ? 
+            const staleIndicatorAcc = data.gps_data_stale ? ' ⚠️ STALE' : '';
+            const accText = data.gps_position_accuracy !== null && data.gps_position_accuracy !== undefined ? 
                 `${data.gps_position_accuracy.toFixed(1)} m` : '-- m';
+            document.getElementById('gps-accuracy').textContent = `${accText}${staleIndicatorAcc}`;
+            if (data.gps_data_stale) {
+                document.getElementById('gps-accuracy').style.color = '#ff6b6b';
+            } else {
+                document.getElementById('gps-accuracy').style.color = '';
+            }
             
             // Use current coordinates if available, otherwise use last valid coordinates
             const displayLat = data.gps_latitude !== null && data.gps_latitude !== undefined 
