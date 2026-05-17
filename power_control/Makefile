@@ -139,7 +139,10 @@ enable_service:
 	@sudo systemctl enable $(POWER_SERVICE_NAME)
 	@echo "🔄 Starting argo power control service..."
 	@if systemctl is-active --quiet $(POWER_SERVICE_NAME); then \
-		echo "✅ Service is already running"; \
+		echo "🔄 Service running — restarting to apply updated unit file..."; \
+		sudo systemctl restart $(POWER_SERVICE_NAME); \
+		echo "⏳ Waiting for service to initialize..."; \
+		sleep 1; \
 	else \
 		sudo systemctl start $(POWER_SERVICE_NAME); \
 		echo "⏳ Waiting for service to initialize..."; \

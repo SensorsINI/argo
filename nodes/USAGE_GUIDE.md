@@ -97,7 +97,7 @@ controller_node:
 rudder_sail_radio_node:
   ros__parameters:
     human_override_timeout: 2.0        # Seconds before robot can take control
-    deadband_threshold: 0.05           # Minimum radio change to detect human
+    deadband_threshold: 0.40           # Minimum radio change to detect human (see argo.yaml)
     safety_max_rudder: 1.0            # Maximum rudder command
     safety_max_sail: 1.0              # Maximum sail command
 ```
@@ -107,7 +107,7 @@ rudder_sail_radio_node:
 rudder_sail_radio_node:
   ros__parameters:
     human_override_timeout: 5.0        # Longer timeout (5 seconds)
-    deadband_threshold: 0.02           # More sensitive to human input
+    deadband_threshold: 0.30           # More sensitive (lower = easier false triggers from RC noise)
     safety_max_rudder: 0.8            # More conservative limits
     safety_max_sail: 0.8
 ```

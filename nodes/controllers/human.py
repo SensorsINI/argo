@@ -17,10 +17,13 @@ from .base import BaseController, BoatState, ControlCommand
 class HumanController(BaseController):
     """Human controller that passes through keyboard/radio commands.
     
-    This controller does not generate any autonomous control commands.
-    Instead, it passes through control commands from keyboard/radio input
-    (state.radio_rudder and state.radio_sail). Useful for studying simulator
-    dynamics with full manual control.
+    Activated temporarily when the power button is single-tapped (argo_power_control.py
+    sets controller_type to 'human'); tap again to restore the previous autonomous type.
+    Used for manual servo/radio setup while Argo nodes are running.
+    
+    This controller does not generate autonomous control commands. It passes through
+    keyboard/radio input (state.radio_rudder and state.radio_sail) and publishes
+    release_servos=True so rudder_sail_radio.py can put servos in high-impedance mode.
     
     Behavior:
     - Always passes through radio/keyboard input when available

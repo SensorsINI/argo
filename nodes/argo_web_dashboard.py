@@ -1398,7 +1398,7 @@ class ArgoWebDashboard(ArgoBaseNode):
                 prev_state = self.state.get('human_controlled')
                 if last_update is not None:
                     age = now - last_update
-                    if age > 5.0:  # 5 seconds (2s timeout + 3s buffer)
+                    if age > 8.0:  # Buffer over human_override_timeout (4s) + republish interval (2s)
                         if self.state['human_controlled']:
                             self.get_logger().info(
                                 f"⚠️ Human control message stale ({age:.1f}s old), updating to ROBOT mode "

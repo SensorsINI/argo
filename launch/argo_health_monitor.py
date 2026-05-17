@@ -126,6 +126,14 @@ class ArgoHealthMonitor(ArgoBaseNode):
             self.executable_to_health[executable] = (ros2_node_name, health_topic)
             self.executable_to_health[filename] = (ros2_node_name, health_topic)
         
+        # WiFi link health for bag logging and controller range management
+        self._wifi_connected: Optional[bool] = None
+        self.wifi_health_pub = self.create_publisher(Bool, '/wifi_health', 10)
+        # Polled (no async NM/DBus); 30s is enough for bag range logging and RTH on loss
+        self.wifi_check_period = 30.0
+        self.wifi_check_timer = self.create_timer(
+            self.wifi_check_period, self._check_and_publish_wifi_health)
+
         # Publishers
         self.health_pub = self.create_publisher(
             String, '/argo/health/status', 10)
@@ -146,6 +154,7 @@ class ArgoHealthMonitor(ArgoBaseNode):
         
         # Run initial health check immediately to populate entries for all nodes
         self.check_node_health()
+        self._check_and_publish_wifi_health()
         
         self.get_logger().info("Argo Health Monitor started")
         self.get_logger().info(f"Monitoring {len(self.node_configs)} nodes")
@@ -225,6 +234,48 @@ class ArgoHealthMonitor(ArgoBaseNode):
                 except Exception as e:
                     self.get_logger().debug(f"Could not subscribe to {health_topic}: {e}")
     
+    def _check_wifi_connected(self) -> bool:
+        """True when wlan0 has an active WiFi connection (AP associated with IP or NM profile)."""
+        try:
+            result = subprocess.run(
+                ['nmcli', '-t', '-f', 'NAME,TYPE', 'connection', 'show', '--active'],
+                capture_output=True, text=True, timeout=5.0,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().splitlines():
+                    if line.endswith(':802-11-wireless'):
+                        name = line[:-len(':802-11-wireless')]
+                        if name and 'ztw4lntpwi' not in name:
+                            return True
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        try:
+            result = subprocess.run(
+                ['ip', '-4', 'addr', 'show', 'dev', 'wlan0'],
+                capture_output=True, text=True, timeout=5.0,
+            )
+            if result.returncode == 0 and 'inet ' in result.stdout and '127.0.0.1' not in result.stdout:
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+        return False
+
+    def _check_and_publish_wifi_health(self):
+        """Publish /wifi_health for rosbag range analysis and controller WiFi-loss RTH."""
+        if self.shutdown_requested:
+            return
+
+        connected = self._check_wifi_connected()
+        msg = Bool()
+        msg.data = connected
+        self.wifi_health_pub.publish(msg)
+
+        if connected != self._wifi_connected:
+            self.get_logger().info(
+                f"WiFi {'connected' if connected else 'disconnected'}")
+            self._wifi_connected = connected
+
     def check_node_health(self):
         """Check health of all configured nodes (fallback for nodes without health topics)
         

@@ -118,6 +118,7 @@ controller_node:
     arrival_distance_m: 3.0  # Distance to middle waypoint (meters) to consider "arrived" (used by crosser controller)
     tack_min_angle_from_wind: 50.0  # Minimum angle from wind during tack to avoid stays (degrees, used by crosser controller)
     no_go_zone_angle: 45.0  # Angle from wind where sailing is impossible (degrees, used by crosser controller)
+    rth_on_wifi_loss: true  # Temporarily switch to return_to_home when /wifi_health goes false (keeps boat in WiFi range)
 
 gps_node:
   ros__parameters:
@@ -132,11 +133,11 @@ gps_node:
 
 rudder_sail_radio_node:
   ros__parameters:
-    human_override_timeout: 4.0      # Seconds after last human activity before robot can take control
-    deadband_threshold: 0.1875        # Minimum change in radio input to count as human activity (5σ measured)
+    human_override_timeout: 8.0      # Seconds after last human activity before robot can take control
+    deadband_threshold: 0.25          # Rudder: |pos|>threshold; Sail: only Δsail>threshold (2 reads) — see rudder_sail_radio.py
     safety_max_rudder: 1.0            # Maximum rudder command magnitude
     safety_max_sail: 1.0              # Maximum sail command magnitude
     param_file_path: argo.yaml
 argo_boat_visualization:
   ros__parameters:
-    visualization_scale: 1.0        # Scale factor for boat visualization (1.0 realistic)
+    visualization_scale: 6.0        # Scale factor for boat visualization (1.0 realistic)

@@ -40,9 +40,13 @@
 #      - Good for: Emergency return, lost connection scenarios, automated return
 #
 # CONTROLLER SWITCHING:
-#   - Via parameter: Set 'controller_type' in argo.yaml ('proportional', 'wind_aware', 'return_to_home')
+#   - Via parameter: Set 'controller_type' in argo.yaml ('proportional', 'wind_aware', 'return_to_home',
+#     'crosser', 'human')
+#   - Power button single tap (argo_power_control.py): temporarily sets controller_type to 'human'
+#     (HumanController in controllers/human.py) for manual servo/radio setup; restores prior type on
+#     second tap via /tmp/argo_power_controller_resume_type
 #   - Via service: Call /controller_node/switch_controller (Trigger service)
-#   - Automatic: RTH controller activates on connection loss timeout
+#   - Automatic: RTH controller activates on connection loss timeout; Crosser may fall back to human
 #   - Hot-reload: Parameter file changes detected and applied automatically
 #
 # TARGET HEADING BEHAVIOR:
@@ -76,7 +80,7 @@
 #     /fix (NavSatFix) - GPS position for home tracking
 #
 # PARAMETERS:
-#   controller_type: 'proportional' (default), 'wind_aware', 'return_to_home'
+#   controller_type: 'proportional' (default), 'wind_aware', 'return_to_home', 'crosser', 'human'
 #   rudder_gain: Proportional gain for rudder control (default: 1.0)
 #   rudder_full_scale_deg: Heading error for full rudder deflection (default: 60.0°)
 #   data_collection_enabled: Enable training data recording (default: false)
@@ -310,6 +314,7 @@ class ControllerNode(ArgoBaseNode):
         self.declare_parameter('tack_cooldown_s', 12.0)
         self.declare_parameter('tacking_upwind_on_target_deg', 15.0)
         self.declare_parameter('tacking_upwind_stable_before_switch_s', 4.0)
+        self.declare_parameter('rth_on_wifi_loss', False)
 
         self.param_file = Path(self.get_parameter(
             'param_file_path').get_parameter_value().string_value)
@@ -447,6 +452,14 @@ class ControllerNode(ArgoBaseNode):
         self.create_subscription(
             String, '/lora_remote_command', self.lora_command_callback, 10)
 
+        # WiFi link health (published by argo_health_monitor); optional temporary RTH on loss
+        self._rth_on_wifi_loss_enabled = self.get_parameter(
+            'rth_on_wifi_loss').get_parameter_value().bool_value
+        self._wifi_connected: Optional[bool] = None
+        self._rth_switched_due_to_wifi = False
+        self._controller_before_wifi_rth: Optional[str] = None
+        self.create_subscription(Bool, '/wifi_health', self.wifi_health_callback, 10)
+
         # GPS position for home tracking and navigation
         self.create_subscription(
             NavSatFix, '/fix', self.gps_position_callback, 10)
@@ -522,7 +535,8 @@ class ControllerNode(ArgoBaseNode):
             config['geofence_map_name'] = self.get_parameter('geofence_map_name').get_parameter_value().string_value
             self.controller = CrosserController(config, logger=logger, parent_node=parent_node)
         elif controller_type == 'human':
-            # Human controller does nothing - allows full manual control
+            # HumanController (controllers/human.py): release servos for radio/manual setup;
+            # activated temporarily via power-button single tap in argo_power_control.py
             self.controller = HumanController(config, logger=logger, parent_node=parent_node)
         else:
             self.get_logger().warn(
@@ -824,6 +838,40 @@ class ControllerNode(ArgoBaseNode):
         else:
             if old_status:
                 self.get_logger().warn("📡 Shore connection LOST - Return-to-home may activate")
+
+    def wifi_health_callback(self, msg):
+        """React to /wifi_health from argo_health_monitor (temporary RTH when configured)."""
+        self._rth_on_wifi_loss_enabled = self.get_parameter(
+            'rth_on_wifi_loss').get_parameter_value().bool_value
+        wifi_connected = msg.data
+        if not self._rth_on_wifi_loss_enabled:
+            self._wifi_connected = wifi_connected
+            return
+
+        was_connected = self._wifi_connected
+        self._wifi_connected = wifi_connected
+        if was_connected is None:
+            return
+
+        if not wifi_connected and was_connected:
+            if not isinstance(self.controller, ReturnToHomeController):
+                self._controller_before_wifi_rth = self.get_parameter(
+                    'controller_type').get_parameter_value().string_value
+                old_name = self.controller.name if self.controller else "None"
+                self.switch_controller('return_to_home')
+                self._rth_switched_due_to_wifi = True
+                self.get_logger().warn(
+                    f"📶 WiFi lost — temporary RTH from {old_name} "
+                    f"(restore to {self._controller_before_wifi_rth} when WiFi returns)")
+            return
+
+        if wifi_connected and not was_connected and self._rth_switched_due_to_wifi:
+            restore_type = self._controller_before_wifi_rth or 'crosser'
+            self.switch_controller(restore_type)
+            self._rth_switched_due_to_wifi = False
+            self._controller_before_wifi_rth = None
+            self.get_logger().info(
+                f"📶 WiFi restored — resuming {restore_type} controller")
 
     def lora_command_callback(self, msg):
         """Receive remote commands from shore via LoRa"""

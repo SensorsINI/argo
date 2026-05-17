@@ -32,6 +32,7 @@ import os
 import sys
 import subprocess
 import threading
+import time
 import logging
 import yaml
 import tempfile
@@ -68,6 +69,8 @@ class ArgoRecordingNode(ArgoBaseNode):
         self.is_recording = False
         self.stopped_bag_name = None
         self.mcap_config_file = None  # Temporary file for MCAP config
+        self._stop_requested = False
+        self._buzzer_lock = threading.Lock()
 
         # Ensure bagfiles directory exists
         os.makedirs(self.bagfiles_dir, exist_ok=True)
@@ -385,47 +388,92 @@ class ArgoRecordingNode(ArgoBaseNode):
         return f"argo_{timestamp}"
 
     def _run_recording_success_beep_async(self, reason: str) -> None:
-        """1s buzzer after recording start/stop succeeds (any client: dashboard, CLI, power button)."""
+        """Short buzzer after recording start/stop succeeds (any client: dashboard, CLI, power button)."""
         script = self._abeep_script
-        dur = 1.0
+        dur = 0.5
 
         def worker():
             if not os.path.isfile(script):
                 self._log_warn(f"abeep script missing: {script}")
                 return
             cmd = ['bash', script, '--wait', f"{dur:.3f}"]
-            try:
-                result = subprocess.run(
-                    cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=max(15.0, dur + 5.0),
-                )
-                if result.returncode == 0:
-                    self.get_logger().info(
-                        f"Buzzer pulse complete ({reason})"
-                        if reason
-                        else "Buzzer pulse complete"
-                    )
-                else:
-                    detail = (
-                        (result.stderr or result.stdout or "").strip()
-                        or f"exit {result.returncode}"
-                    )
-                    self.get_logger().warning(
-                        f"Buzzer pulse failed ({reason}): {detail}"
-                        if reason
-                        else f"Buzzer pulse failed: {detail}"
-                    )
-            except Exception as e:
-                self.get_logger().warning(
-                    f"Buzzer pulse exception ({reason}): {e}"
-                    if reason
-                    else f"Buzzer pulse exception: {e}"
-                )
+            with self._buzzer_lock:
+                for attempt in range(2):
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=max(15.0, dur + 5.0),
+                        )
+                        if result.returncode == 0:
+                            self.get_logger().info(
+                                f"Buzzer pulse complete ({reason})"
+                                if reason
+                                else "Buzzer pulse complete"
+                            )
+                            return
+                        detail = (
+                            (result.stderr or result.stdout or "").strip()
+                            or f"exit {result.returncode}"
+                        )
+                        if attempt == 0 and 'busy' in detail.lower():
+                            time.sleep(0.25)
+                            continue
+                        self.get_logger().warning(
+                            f"Buzzer pulse failed ({reason}): {detail}"
+                            if reason
+                            else f"Buzzer pulse failed: {detail}"
+                        )
+                        return
+                    except Exception as e:
+                        self.get_logger().warning(
+                            f"Buzzer pulse exception ({reason}): {e}"
+                            if reason
+                            else f"Buzzer pulse exception: {e}"
+                        )
+                        return
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _log_available_topics_async(self) -> None:
+        """Log topic count in background so start/stop services return quickly."""
+
+        def worker():
+            try:
+                topics_cmd = [
+                    'bash', '-c',
+                    'source /opt/ros/humble/setup.bash && ros2 topic list',
+                ]
+                topics_result = subprocess.run(
+                    topics_cmd, capture_output=True, text=True, timeout=15)
+                if topics_result.returncode == 0:
+                    topic_count = len([
+                        line for line in topics_result.stdout.strip().split('\n')
+                        if line.strip()
+                    ])
+                    self._log_info(
+                        f"📡 Found {topic_count} topics available for recording")
+                    self._log_debug(
+                        f"Available topics: {topics_result.stdout.strip()}")
+                else:
+                    self._log_warn("⚠️  Could not list available topics")
+            except Exception as e:
+                self._log_warn(f"⚠️  Error listing topics: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _log_rosbag_output_line(self, line: str, *, on_failure: bool) -> None:
+        """rosbag2 logs to stderr; map [INFO]/[WARN]/[ERROR] to the right level."""
+        if '[ERROR]' in line or '[FATAL]' in line:
+            self._log_error(f"   {line}")
+        elif '[WARN]' in line:
+            self._log_warn(f"   {line}")
+        elif on_failure:
+            self._log_info(f"   {line}")
+        else:
+            self._log_debug(f"   {line}")
 
     def start_recording_callback(self, request, response):
         """Service callback to start recording"""
@@ -508,6 +556,8 @@ class ArgoRecordingNode(ArgoBaseNode):
                     "start_recording() returning False - already recording")
                 return False
 
+            self._stop_requested = False
+
             # Generate new bag name
             self.current_bag_name = self.generate_bag_name()
             self.bag_path = os.path.join(
@@ -519,19 +569,6 @@ class ArgoRecordingNode(ArgoBaseNode):
             self._log_info(f"🚀 Starting recording: {bag_path_display}")
             self._log_info(f"📁 Bag path: {bag_path_display}")
             self._log_info(f"🕐 Start time: {datetime.now()}")
-            
-            # Log available topics before recording starts
-            try:
-                topics_cmd = ['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 topic list']
-                topics_result = subprocess.run(topics_cmd, capture_output=True, text=True, timeout=15)
-                if topics_result.returncode == 0:
-                    topic_count = len([line for line in topics_result.stdout.strip().split('\n') if line.strip()])
-                    self._log_info(f"📡 Found {topic_count} topics available for recording")
-                    self._log_debug(f"Available topics: {topics_result.stdout.strip()}")
-                else:
-                    self._log_warn("⚠️  Could not list available topics")
-            except Exception as e:
-                self._log_warn(f"⚠️  Error listing topics: {e}")
 
             # Build rosbag recording command with storage format and configuration
             base_cmd = f'source /opt/ros/humble/setup.bash && ros2 bag record -a --include-hidden-topics -o {self.current_bag_name}'
@@ -590,8 +627,9 @@ class ArgoRecordingNode(ArgoBaseNode):
             self.monitor_thread.start()
             self._log_debug("Monitoring thread started")
 
-            self._log_debug("start_recording() returning True")
+            self._log_available_topics_async()
             self._run_recording_success_beep_async("recording_started")
+            self._log_debug("start_recording() returning True")
             return True
 
         except Exception as e:
@@ -630,6 +668,7 @@ class ArgoRecordingNode(ArgoBaseNode):
                 self._log_warn("⚠️  No recording in progress")
                 return False
 
+            self._stop_requested = True
             self._log_info("🛑 Stopping recording...")
 
             if self.recording_process:
@@ -730,16 +769,14 @@ class ArgoRecordingNode(ArgoBaseNode):
 
     def _monitor_recording(self):
         """Monitor recording process in background thread"""
-        if not self.recording_process:
+        proc = self.recording_process
+        if not proc:
             return
 
         try:
             stdout_lines = []
             stderr_lines = []
-            
-            # Read stdout and stderr in parallel
-            import threading
-            
+
             def read_output(pipe, output_list, label):
                 """Read from pipe and append to output list"""
                 try:
@@ -755,52 +792,61 @@ class ArgoRecordingNode(ArgoBaseNode):
                     pipe.close()
             
             # Start threads to read stdout and stderr
-            stdout_thread = threading.Thread(target=read_output, args=(self.recording_process.stdout, stdout_lines, "stdout"))
-            stderr_thread = threading.Thread(target=read_output, args=(self.recording_process.stderr, stderr_lines, "stderr"))
+            stdout_thread = threading.Thread(
+                target=read_output, args=(proc.stdout, stdout_lines, "stdout"))
+            stderr_thread = threading.Thread(
+                target=read_output, args=(proc.stderr, stderr_lines, "stderr"))
             stdout_thread.daemon = True
             stderr_thread.daemon = True
             stdout_thread.start()
             stderr_thread.start()
-            
-            # Wait for process to complete
-            return_code = self.recording_process.wait()
-            
-            # Wait for threads to finish reading
+
+            return_code = proc.wait()
+
             stdout_thread.join(timeout=1.0)
             stderr_thread.join(timeout=1.0)
-            
-            if return_code != 0:
-                # Log full error output
-                error_msg = f"❌ Recording process ended with code {return_code}"
+
+            stop_requested = self._stop_requested
+            self._stop_requested = False
+            # Python reports SIGTERM as negative signal number (e.g. -15).
+            stopped_by_user = stop_requested or return_code in (0, -2, -15)
+
+            if stopped_by_user:
+                self._log_info(
+                    f"Recording process ended (code {return_code}"
+                    f"{', stop requested' if stop_requested else ''})")
+                if stderr_lines or stdout_lines:
+                    self._log_debug("rosbag output (stop/exit):")
+                    for line in stderr_lines + stdout_lines:
+                        self._log_rosbag_output_line(line, on_failure=False)
+                if self.is_recording:
+                    self.is_recording = False
+                    self.set_unhealthy("Recording inactive")
+                    self.publish_status()
+            else:
+                error_msg = f"❌ Recording process ended unexpectedly (code {return_code})"
                 self._log_error(error_msg)
-                
-                # Log stderr output (usually contains the actual error)
                 if stderr_lines:
-                    self._log_error("📋 Error output from rosbag:")
+                    self._log_error("📋 rosbag stderr:")
                     for line in stderr_lines:
-                        self._log_error(f"   {line}")
-                
-                # Log stdout output (may contain additional context)
+                        self._log_rosbag_output_line(line, on_failure=True)
                 if stdout_lines:
-                    # Only log stdout if it's not too verbose (last 10 lines)
-                    relevant_lines = stdout_lines[-10:] if len(stdout_lines) > 10 else stdout_lines
+                    relevant_lines = (
+                        stdout_lines[-10:] if len(stdout_lines) > 10 else stdout_lines)
                     if relevant_lines:
-                        self._log_error("📋 Output from rosbag (last lines):")
+                        self._log_error("📋 rosbag stdout (last lines):")
                         for line in relevant_lines:
-                            self._log_error(f"   {line}")
-                
-                # Combine all error output for the info message
-                all_error_output = '\n'.join(stderr_lines) if stderr_lines else '\n'.join(stdout_lines[-5:]) if stdout_lines else "Unknown error"
+                            self._log_rosbag_output_line(line, on_failure=True)
+                all_error_output = (
+                    '\n'.join(stderr_lines) if stderr_lines
+                    else '\n'.join(stdout_lines[-5:]) if stdout_lines
+                    else "Unknown error")
                 self.is_recording = False
                 self.set_unhealthy("Recording failed")
                 self.publish_status()
-                self.publish_info(f"Recording failed (exit code {return_code}): {all_error_output[:200]}")
-            else:
-                self._log_info("✅ Recording process completed normally")
-                self.is_recording = False
-                self.set_unhealthy("Recording completed")
-                self.publish_status()
-                self.publish_info("Recording completed")
+                self.publish_info(
+                    f"Recording failed (exit code {return_code}): "
+                    f"{all_error_output[:200]}")
 
         except Exception as e:
             self._log_error(f"❌ Error monitoring recording: {e}")

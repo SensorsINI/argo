@@ -462,11 +462,7 @@
                 lastCriticalState.battery_low_alert = criticalData.battery_low_alert || false;
             }
             
-            if (!needsUpdate) {
-                return; // No changes, skip UI update
-            }
-            
-            // Update critical UI elements
+            // Always refresh control mode / recording (short HUMAN bursts are easy to miss)
             updateCriticalUIElements(criticalData);
         }
         
@@ -496,7 +492,13 @@
             
             // Controller type
             if (data.controller_type !== undefined) {
-                document.getElementById('controller-type').textContent = data.controller_type;
+                const typeEl = document.getElementById('controller-type');
+                const typeName = data.controller_type || 'Unknown';
+                if (data.human_controlled) {
+                    typeEl.textContent = `${typeName} · radio active`;
+                } else {
+                    typeEl.textContent = typeName;
+                }
             }
             
             // I2C failure alert

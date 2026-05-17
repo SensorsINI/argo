@@ -33,8 +33,9 @@
 #   Software shutdown sends HIGH pulse to POW_OFF → RESET coil deactivates relay
 #
 # POWER BUTTON BEHAVIOR (Rev3 PCB - Active HIGH):
-#   - Single tap: Toggle controller_type between human and last autonomous type (ros2 param)
-#   - Double tap: Toggle recording
+#   - Single tap: Temporarily toggle controller_type to human (HumanController) for manual
+#     servo/radio setup; second single tap restores the previous autonomous type (/tmp file)
+#   - Double tap: Toggle rosbag recording on/off
 #   - Quadruple tap: Restart Argo launch service
 #   - Long press (>= threshold DEFAULT_SHUTDOWN_THRESHOLD_S): Initiate shutdown sequence
 #   - Button press at boot activates SET coil; by software start, button is already released
@@ -238,6 +239,8 @@ try:
     import rclpy
     from rclpy.logging import LoggingSeverity
     from std_srvs.srv import Trigger
+    from rcl_interfaces.srv import GetParameters, SetParameters
+    from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue, ParameterType
     from argo_base_node import ArgoBaseNode # Import the base node
     ROS2_AVAILABLE = True
 except ImportError:
@@ -621,6 +624,8 @@ class PowerController(ArgoBaseNode):
 
         # Controller runtime mode (HumanController = manual-friendly LED cadence)
         self.controller_runtime_is_human = False
+        self._controller_get_params_client = None
+        self._controller_set_params_client = None
 
         # Check if Argo service is already running at startup
         self.get_logger().info("Checking if Argo service is already running...")
@@ -1012,7 +1017,7 @@ class PowerController(ArgoBaseNode):
 
         self.get_logger().info("🎬 Calling recording start service...")
         success, message = self._call_trigger_service(
-            '/argo/recording/start', timeout_sec=6.0)
+            '/argo/recording/start', timeout_sec=30.0)
 
         if success:
             self.get_logger().info(f"✅ Recording started: {message}")
@@ -1244,7 +1249,7 @@ class PowerController(ArgoBaseNode):
             return False
 
     def toggle_controller_pause(self):
-        """Toggle controller between human mode and last autonomous type (replaces pause service)."""
+        """Single-tap action: temporarily switch to HumanController for manual setup, or restore."""
         try:
             if not self.check_argo_service_status():
                 self.get_logger().warning("Single tap detected but Argo service is not running")
@@ -1293,48 +1298,83 @@ class PowerController(ArgoBaseNode):
                 "critical"
             )
 
+    def _ensure_controller_param_clients(self) -> bool:
+        """Create ROS2 parameter service clients (in-process; ros2 CLI fails when rclpy is running)."""
+        if not ROS2_AVAILABLE or not rclpy.ok():
+            return False
+        if self._controller_get_params_client is None:
+            self._controller_get_params_client = self.create_client(
+                GetParameters, '/controller_node/get_parameters')
+            self._controller_set_params_client = self.create_client(
+                SetParameters, '/controller_node/set_parameters')
+        return True
+
     def _ros2_get_controller_type_param(self) -> Optional[str]:
-        """Read controller_type from controller_node (best effort)."""
-        try:
-            setup_path = f"/opt/ros/{os.environ.get('ROS_DISTRO', 'humble')}/setup.bash"
-            cmd = [
-                'bash', '-c',
-                f'source {shlex.quote(setup_path)} && ros2 param get /controller_node controller_type',
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if r.returncode != 0:
-                return None
-            for line in (r.stdout or '').splitlines():
-                if 'String value is:' in line:
-                    return line.split('String value is:', 1)[1].strip().strip('\'"').lower()
+        """Read controller_type from controller_node via parameter service."""
+        if not self._ensure_controller_param_clients():
             return None
-        except Exception:
+        client = self._controller_get_params_client
+        try:
+            if not client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().warning(
+                    "controller_node get_parameters service not available")
+                return None
+            request = GetParameters.Request()
+            request.names = ['controller_type']
+            future = client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            if not future.done():
+                self.get_logger().warning("controller_type get timed out")
+                return None
+            result = future.result()
+            if result is None or not result.values:
+                return None
+            val = result.values[0]
+            if val.type == ParameterType.PARAMETER_STRING:
+                return val.string_value.strip().lower()
+            return None
+        except Exception as e:
+            self.get_logger().warning(f"Failed to get controller_type: {e}")
             return None
 
     def _ros2_set_controller_type_param(self, controller_type: str) -> tuple[bool, str]:
-        """Set controller_type on controller_node. Only allows known lowercase names."""
+        """Set controller_type on controller_node via parameter service."""
         safe = (controller_type or '').strip().lower()
         allowed = (
             'proportional', 'wind_aware', 'return_to_home', 'crosser', 'human',
         )
         if safe not in allowed:
             return False, f"Refusing to set invalid controller_type: {controller_type!r}"
+        if not self._ensure_controller_param_clients():
+            return False, "ROS2 not available for parameter set"
+        client = self._controller_set_params_client
         try:
-            setup_path = f"/opt/ros/{os.environ.get('ROS_DISTRO', 'humble')}/setup.bash"
-            cmd = [
-                'bash', '-c',
-                f'source {shlex.quote(setup_path)} && ros2 param set /controller_node controller_type {shlex.quote(safe)}',
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            out = (r.stdout or r.stderr or '').strip()
-            if r.returncode == 0:
-                return True, out or f"controller_type set to {safe}"
-            return False, out or f"ros2 param set failed (exit {r.returncode})"
+            if not client.wait_for_service(timeout_sec=3.0):
+                return False, "controller_node set_parameters service not available"
+            param_msg = ParameterMsg()
+            param_msg.name = 'controller_type'
+            param_msg.value = ParameterValue()
+            param_msg.value.type = ParameterType.PARAMETER_STRING
+            param_msg.value.string_value = safe
+            request = SetParameters.Request()
+            request.parameters = [param_msg]
+            future = client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            if not future.done():
+                return False, "controller_type set timed out"
+            result = future.result()
+            if result is None or not result.results or not result.results[0].successful:
+                reason = (
+                    result.results[0].reason
+                    if result and result.results else "no response"
+                )
+                return False, f"Failed to set controller_type: {reason}"
+            return True, f"controller_type set to {safe}"
         except Exception as e:
             return False, str(e)
 
     def _toggle_controller_human_via_ros_param(self) -> tuple[bool, str]:
-        """Switch to human when autonomous; restore from /tmp file when already human."""
+        """Set controller_type to human (nodes/controllers/human.py); restore prior type on second tap."""
         cur = self._ros2_get_controller_type_param()
         if cur is None:
             return False, "Could not read controller_type (is controller_node running?)"
@@ -2484,13 +2524,13 @@ class PowerController(ArgoBaseNode):
 
         # Define patterns for each action type
         patterns = {
-            'single': [  # Single tap: human/autonomous controller toggle — 1 quick flash
+            'single': [  # Single tap: temporary HumanController for manual setup
                 (0.1, True),   # 100ms on
                 (0.1, False),  # 100ms off
                 (0.1, True),   # 100ms on
                 (0.1, False),  # 100ms off,
             ],
-            'double': [  # Recording toggle - 2 quick flashes
+            'double': [  # Double tap: recording toggle
                 (0.1, True),   # 100ms on
                 (0.1, False),  # 100ms off
                 (0.1, True),   # 100ms on
@@ -2840,7 +2880,9 @@ class PowerController(ArgoBaseNode):
                     ).start()
                     # Immediate desktop notification
                     self.send_desktop_notification(
-                        "Controller mode", "Single tap — toggling human vs autonomous controller...", "normal")
+                        "Controller mode",
+                        "Single tap — temporary HumanController for manual servo setup...",
+                        "normal")
                     self.toggle_controller_pause()
                 elif tap_count == 2:
                     self.get_logger().info(
@@ -5468,8 +5510,8 @@ HARDWARE CONFIGURATION (Rev3 PCB):
   - LEDs: Active LOW control (GPIO LOW = ON, GPIO HIGH = OFF)
 
 POWER BUTTON BEHAVIOR (Active HIGH):
-  - Single tap: Toggle human vs autonomous controller (ros2 param)
-  - Double tap (2 quick taps): Toggle recording on/off
+  - Single tap: Temporarily switch to HumanController (manual servo/radio); tap again to restore
+  - Double tap (2 quick taps): Toggle rosbag recording on/off
   - Quadruple tap (4 quick taps): Restart Argo launch service
   - Long press (>= threshold): Initiate shutdown sequence
   - Button press at boot activates SET coil; software always sees button released
@@ -5630,7 +5672,7 @@ def main():
                 test_gradual_frequency_pattern(args.threshold)
             elif args.simulate_single_tap:
                 controller.toggle_controller_pause()
-            elif args.simulate_double-tap:
+            elif args.simulate_double_tap:
                 controller.toggle_recording()
             elif args.simulate_quadruple_tap:
                 controller.restart_argo_service()

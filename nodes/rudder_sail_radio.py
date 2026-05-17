@@ -172,7 +172,11 @@ HUMAN_CONTROL_TIMEOUT_S = 2.0
 # The launch system loads parameters from nodes/argo.yaml via --params-file,
 # which overrides these defaults. To change the value, edit the YAML file or use ros2 param set.
 # YAML file location: nodes/argo.yaml (rudder_sail_radio_node section)
-DEFAULT_DEADBAND_THRESHOLD = 0.1875 # servo command threshold away from zero rudder on scale -1 to +1 for human control to take over (5σ measured)
+# Human-activity deadband (normalized -1..+1). Value in argo.yaml overrides this default.
+# Rudder: spring-centered at 0 — |radio_rudder| > deadband means stick deflected (human).
+# Sail: TX holds last channel — only frame-to-frame sail_change > deadband counts (not |position|).
+DEFAULT_DEADBAND_THRESHOLD = 0.25
+HUMAN_ACTIVITY_CONSECUTIVE_READS = 2  # consecutive reads required for sail_change only (filters PWM spikes)
 DEFAULT_SAFETY_MAX_RUDDER = 1.0 # limit rudder comamnd to this magnitude in case of mechanical constraints
 DEFAULT_SAFETY_MAX_SAIL = 1.0 # limit sail comamnd to this magnitude in case of mechanical constraints
 
@@ -426,9 +430,10 @@ class RudderSailRadioNode(ArgoBaseNode):
         self.safety_max_sail = self.get_parameter(
             'safety_max_sail').get_parameter_value().double_value
         
-        # Log parameter values for debugging
+        # Log parameter values for debugging (deadband comes from argo.yaml, not the old 0.05 default)
         self.get_logger().info(
-            f"Control authority parameters: deadband_threshold={self.deadband_threshold:.3f}, "
+            f"Control authority parameters: deadband_threshold={self.deadband_threshold:.3f} "
+            f"(consecutive_reads={HUMAN_ACTIVITY_CONSECUTIVE_READS}), "
             f"human_override_timeout={self.human_override_timeout:.1f}s, "
             f"safety_max_rudder={self.safety_max_rudder:.2f}, safety_max_sail={self.safety_max_sail:.2f}")
         
@@ -482,6 +487,7 @@ class RudderSailRadioNode(ArgoBaseNode):
         # Track previous radio values for human activity detection
         self.prev_radio_rudder = 0.0
         self.prev_radio_sail = 0.0
+        self._sail_change_streak = 0
         
         # Track if radio was previously invalid (0 or out of range) to detect radio turn-on
         self._radio_was_invalid = True  # Start assuming radio is off/invalid
@@ -812,35 +818,51 @@ class RudderSailRadioNode(ArgoBaseNode):
             self.prev_radio_sail = self.radio_sail
             return True
 
-        # Detect human activity based on significant radio input changes
+        # Human activity — asymmetric rudder vs sail (hardware/TX behavior differs).
         rudder_change = abs(self.radio_rudder - self.prev_radio_rudder)
         sail_change = abs(self.radio_sail - self.prev_radio_sail)
-        
-        # Store change values for periodic status logging
+        rudder_deflected = abs(self.radio_rudder) > self.deadband_threshold
+
         self._last_rudder_change = rudder_change
         self._last_sail_change = sail_change
+        self._last_rudder_deflected = rudder_deflected
 
-        if rudder_change > self.deadband_threshold or sail_change > self.deadband_threshold:
+        activity_reason = None
+        if rudder_deflected:
+            activity_reason = (
+                f"rudder deflected |pos|={abs(self.radio_rudder):.3f} > {self.deadband_threshold:.3f}"
+            )
+        elif sail_change > self.deadband_threshold:
+            self._sail_change_streak += 1
+            if self._sail_change_streak >= HUMAN_ACTIVITY_CONSECUTIVE_READS:
+                activity_reason = (
+                    f"sail Δ={sail_change:.3f} > {self.deadband_threshold:.3f} "
+                    f"(streak {self._sail_change_streak})"
+                )
+        else:
+            self._sail_change_streak = 0
+
+        if activity_reason is not None:
             self.last_human_activity = time.time()
-            self._last_radio_value_change_time = time.time()  # Track for adaptive read frequency
-            self._last_activity_time = time.time()  # Track for adaptive timer frequencies (wake up!)
+            self._last_radio_value_change_time = time.time()
+            self._last_activity_time = time.time()
             if not self.human_controlled:
                 self.get_logger().info(
-                    f"Human activity detected (rudder: {rudder_change:.3f}, sail: {sail_change:.3f}, deadband: {self.deadband_threshold:.3f})")
+                    f"Human activity detected: {activity_reason} "
+                    f"(Δrudder={rudder_change:.3f}, Δsail={sail_change:.3f})")
             else:
-                # Throttle debug logging to 1 in 100 messages
                 self._debug_human_activity_counter += 1
                 if self._debug_human_activity_counter % 100 == 0:
                     self.get_logger().debug(
-                        f"Human activity continues (rudder: {rudder_change:.3f}, sail: {sail_change:.3f}, deadband: {self.deadband_threshold:.3f})")
-        elif rudder_change > 0.001 or sail_change > 0.001:  # Small changes also update timestamp
-            self._last_radio_value_change_time = time.time()  # Track any change for adaptive reads
-            self._last_activity_time = time.time()  # Even small radio changes wake up timers
-            # Throttle debug logging to 1 in 100 messages
+                        f"Human activity continues: {activity_reason}")
+        elif rudder_change > 0.001 or sail_change > 0.001:
+            self._last_radio_value_change_time = time.time()
+            self._last_activity_time = time.time()
             self._debug_small_change_counter += 1
             if self._debug_small_change_counter % 100 == 0:
                 self.get_logger().debug(
-                    f"Small radio change (rudder: {rudder_change:.3f}, sail: {sail_change:.3f}, deadband: {self.deadband_threshold:.3f}) - not enough to update human_activity")
+                    f"Small radio change (Δrudder={rudder_change:.3f}, Δsail={sail_change:.3f}, "
+                    f"|rudder|={abs(self.radio_rudder):.3f}, deadband={self.deadband_threshold:.3f})")
 
         # Update previous values for next comparison
         self.prev_radio_rudder = self.radio_rudder
@@ -1180,13 +1202,15 @@ class RudderSailRadioNode(ArgoBaseNode):
             time_since_human = current_time - self.last_human_activity if self.last_human_activity > 0 else float('inf')
             rudder_change = getattr(self, '_last_rudder_change', 0.0)
             sail_change = getattr(self, '_last_sail_change', 0.0)
+            rudder_deflected = getattr(self, '_last_rudder_deflected', False)
             self.get_logger().info(
                 f"Control status: human_controlled={self.human_controlled}, "
                 f"last_human_activity={time_since_human:.1f}s ago, "
                 f"deadband={self.deadband_threshold:.3f}, "
                 f"timeout={self.human_override_timeout:.1f}s, "
-                f"rudder_change={rudder_change:.3f}, "
-                f"sail_change={sail_change:.3f}")
+                f"|rudder|={abs(self.radio_rudder):.3f}"
+                f"{' (deflected)' if rudder_deflected else ''}, "
+                f"Δrudder={rudder_change:.3f}, Δsail={sail_change:.3f}")
             self._last_status_log_time = current_time
 
         # 5. Select control commands based on authority
@@ -1389,10 +1413,14 @@ class RudderSailRadioNode(ArgoBaseNode):
         time_since_auto = current_time - self.last_auto_update
         
         # Publish human control status (only on change or timeout)
+        # Republish more often while human has authority so dashboard does not go stale
+        human_publish_interval = (
+            2.0 if self.human_controlled else self.MAX_PUBLISH_INTERVAL
+        )
         human_changed = (
             self.prev_published_human_controlled is None or
             self.human_controlled != self.prev_published_human_controlled or
-            (current_time - self.last_status_publish_time) > self.MAX_PUBLISH_INTERVAL
+            (current_time - self.last_status_publish_time) > human_publish_interval
         )
         
         if human_changed:
@@ -1479,7 +1507,7 @@ SERVICES:
 
 PARAMETERS:
   human_override_timeout: Seconds after last human activity before robot can take control (default: 2.0)
-  deadband_threshold: Minimum change in radio input to count as human activity (default: 0.05)
+  deadband_threshold: Minimum change in radio input to count as human activity (default: 0.40)
   safety_max_rudder: Maximum rudder command magnitude (default: 1.0)
   safety_max_sail: Maximum sail command magnitude (default: 1.0)
 
