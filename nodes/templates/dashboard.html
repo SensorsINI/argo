@@ -152,9 +152,33 @@
             </div>
         </div>
 
+        <!-- Overhead Map -->
+        <div class="card" id="map-view-card">
+            <h2>Overhead Map</h2>
+            <p class="map-view-legend">
+                <span class="map-legend-item"><span class="map-legend-swatch map-legend-boat"></span> Boat heading</span>
+                <span class="map-legend-item"><span class="map-legend-swatch map-legend-wind"></span> Wind flow</span>
+                <span class="map-legend-item"><span class="map-legend-swatch map-legend-cog"></span> GPS course</span>
+            </p>
+            <div class="map-view-container">
+                <canvas id="argo-map-canvas" aria-label="Argo overhead map"></canvas>
+            </div>
+            <div class="map-view-controls">
+                <button type="button" id="map-recenter-btn" class="btn btn-secondary btn-small">Fit boat + area</button>
+                <label class="map-grid-toggle" for="map-grid-toggle">
+                    <input type="checkbox" id="map-grid-toggle">
+                    10 m grid (N/E)
+                </label>
+                <span id="map-view-status" class="map-view-status">Loading map…</span>
+            </div>
+        </div>
+
         <!-- Home Position Card -->
         <div class="card" id="home-card" style="display: none;">
-            <h2>🏠 Home Position</h2>
+            <h2>🏠 Sailing Area Home</h2>
+            <div style="font-size: 0.85em; color: #666; margin-bottom: 8px;">
+                Distance to map home waypoint
+            </div>
             <div class="status-grid">
                 <div class="status-item">
                     <span class="label">Distance:</span>
@@ -347,6 +371,7 @@
         </div>
     </div>
 
+    <script src="{{ url_for('static', filename='map_view.js') }}"></script>
     <script>
         let statusData = {};
         let pendingAction = null;
@@ -586,6 +611,7 @@
                 .then(data => {
                     statusData = data;
                     updateUI(data);
+                    if (window.ArgoMapView) ArgoMapView.updateFromStatus(data);
                     updateConnectionStatus(true);
                     // Update critical state tracking
                     lastCriticalState.human_controlled = data.human_controlled;
@@ -1472,6 +1498,7 @@
 
         // Load controllers on page load
         loadControllers();
+        if (window.ArgoMapView) ArgoMapView.init();
         
         // Auto-update every 2 seconds
         // Initial status update
@@ -1651,6 +1678,9 @@
                         if (hdrWifi) hdrWifi.textContent = data.current_wifi_ssid;
                     }
                     geofenceSetStatus(currentMap ? `Current map: ${currentMap}` : 'No active map configured');
+                    if (window.ArgoMapView && currentMap) {
+                        ArgoMapView.reload(currentMap);
+                    }
                 })
                 .catch(err => geofenceSetStatus(`❌ ${err.message || err}`));
         }

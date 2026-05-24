@@ -7,6 +7,7 @@ Mobile-friendly web interface for monitoring and controlling Argo sailboat.
 
 Features:
 - Real-time status monitoring (nodes, battery, GPS, sensors)
+- Overhead map view (GPS, heading, wind on sailing area geometry)
 - Controller switching (Proportional, Wind-Aware, Return-to-Home)
 - System control (start/stop, recording)
 - Optimized for phone screens with large touch targets
@@ -19,6 +20,7 @@ Access: http://ORANGEPI_IP:8080
 import os
 import sys
 import json
+import math
 import time
 import subprocess
 import threading
@@ -237,6 +239,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.argo_yaml_path = os.path.join(self.argo_dir, 'nodes', 'argo.yaml')
         self.available_geofence_maps = self._load_available_geofence_maps()
+        self._map_geometry_cache: Dict[str, Dict[str, Any]] = {}
+        self._earth_radius_m = 6378137.0
+        self._sync_map_home_position()
         self.node_manager = ArgoNodeManager(self.argo_dir)
         
         # ROS2 Service clients
@@ -295,6 +300,8 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.app = Flask(__name__, 
                         template_folder=os.path.join(os.path.dirname(__file__), 'templates'),
                         static_folder=os.path.join(os.path.dirname(__file__), 'static'))
+        # Reload templates from disk when files change (dashboard.html edits without node restart)
+        self.app.config['TEMPLATES_AUTO_RELOAD'] = True
         CORS(self.app)
         self.setup_routes()
         
@@ -904,18 +911,6 @@ class ArgoWebDashboard(ArgoBaseNode):
                     # Don't clear coordinates when fix is lost - keep showing last valid position
                     
                     self.state['data_source'] = 'LoRa'
-            
-            # Set home position on first valid fix (always do this, even in low-power mode)
-            # Use last valid coordinates if current coordinates are None
-            current_lat_for_home = self.state['gps_latitude'] if self.state['gps_latitude'] is not None else self.state['gps_last_valid_latitude']
-            current_lon_for_home = self.state['gps_longitude'] if self.state['gps_longitude'] is not None else self.state['gps_last_valid_longitude']
-            if (self.state['home_latitude'] is None and 
-                current_lat_for_home is not None):
-                self.state['home_latitude'] = current_lat_for_home
-                self.state['home_longitude'] = current_lon_for_home
-                self.get_logger().info(
-                    f"🏠 Home position set: {self.state['home_latitude']:.6f}°, "
-                    f"{self.state['home_longitude']:.6f}°")
             
             # In low-power mode, skip remaining processing after home position check
             if self.low_power_mode:
@@ -1967,6 +1962,148 @@ class ArgoWebDashboard(ArgoBaseNode):
     def _maps_dir(self) -> Path:
         return Path(self.argo_dir) / "foxglove" / "maps"
 
+    def _sync_map_home_position(self) -> bool:
+        """Set home_latitude/home_longitude from the active geofence map's home waypoint."""
+        geom = self._get_map_geometry()
+        if not geom.get("success"):
+            return False
+        with self.state_lock:
+            self.state["home_latitude"] = geom["origin_lat"]
+            self.state["home_longitude"] = geom["origin_lon"]
+        self.get_logger().info(
+            f"🏠 Map home waypoint: {geom['origin_lat']:.6f}°, {geom['origin_lon']:.6f}° "
+            f"({geom.get('map_name', '')})"
+        )
+        return True
+
+    def _resolve_geofence_map_name(self, map_name: Optional[str] = None) -> Optional[str]:
+        """Resolve map name (explicit, config, or case-insensitive match)."""
+        name = GeofenceManager.normalize_map_name((map_name or "").strip())
+        if not name:
+            name = self._get_current_geofence_map_name()
+        if not name:
+            return None
+        available = self.available_geofence_maps or []
+        if name in available:
+            return name
+        name_lower = name.lower()
+        for candidate in available:
+            if candidate.lower() == name_lower:
+                return candidate
+        return name
+
+    def _lonlat_to_map_xy(self, lon: float, lat: float, origin_lon: float, origin_lat: float):
+        """Equirectangular projection to local ENU meters (same as sailing_area_publisher)."""
+        x = (math.radians(lon) - math.radians(origin_lon)) * self._earth_radius_m * math.cos(math.radians(origin_lat))
+        y = (math.radians(lat) - math.radians(origin_lat)) * self._earth_radius_m
+        return x, y
+
+    def _find_map_home_origin(self, geojson_data: dict) -> tuple:
+        """Return (origin_lon, origin_lat) from the map's home waypoint."""
+        for feature in geojson_data.get("features", []):
+            props = feature.get("properties", {})
+            if props.get("name") == "home" and props.get("type") == "waypoint":
+                coords = feature["geometry"]["coordinates"]
+                return float(coords[0]), float(coords[1])
+        return None, None
+
+    def _build_map_geometry(self, map_name: str) -> Dict[str, Any]:
+        """Load GeoJSON and convert to map-frame geometry for the web map view."""
+        maps_dir = self._maps_dir()
+        geojson_path = maps_dir / f"{map_name}.geojson"
+        if not geojson_path.is_file():
+            return {"success": False, "message": f"Map file not found: {geojson_path.name}"}
+
+        with open(geojson_path, "r", encoding="utf-8") as f:
+            geojson_data = json.load(f)
+
+        origin_lon, origin_lat = self._find_map_home_origin(geojson_data)
+        if origin_lon is None or origin_lat is None:
+            return {"success": False, "message": f"No home waypoint in map '{map_name}'"}
+
+        waypoints = []
+        boundaries = []
+        hazards = []
+
+        def _ring_to_xy(ring):
+            pts = []
+            for coord in ring:
+                x, y = self._lonlat_to_map_xy(float(coord[0]), float(coord[1]), origin_lon, origin_lat)
+                pts.append([round(x, 3), round(y, 3)])
+            return pts
+
+        for feature in geojson_data.get("features", []):
+            geom = feature.get("geometry", {})
+            props = feature.get("properties", {})
+            geom_type = geom.get("type")
+            feature_type = props.get("type", "unknown")
+            name = props.get("name", "")
+
+            if geom_type == "Point":
+                coords = geom["coordinates"]
+                x, y = self._lonlat_to_map_xy(float(coords[0]), float(coords[1]), origin_lon, origin_lat)
+                waypoints.append({
+                    "name": name,
+                    "x": round(x, 3),
+                    "y": round(y, 3),
+                    "is_home": name == "home",
+                })
+            elif geom_type == "LineString":
+                boundaries.append({"name": name, "type": feature_type, "points": _ring_to_xy(geom["coordinates"])})
+            elif geom_type == "Polygon":
+                ring = geom["coordinates"][0] if geom.get("coordinates") else []
+                entry = {"name": name, "type": feature_type, "points": _ring_to_xy(ring)}
+                if feature_type == "hazard":
+                    hazards.append(entry)
+                else:
+                    boundaries.append(entry)
+
+        xs, ys = [], []
+        for wp in waypoints:
+            xs.append(wp["x"])
+            ys.append(wp["y"])
+        for group in boundaries + hazards:
+            for pt in group["points"]:
+                xs.append(pt[0])
+                ys.append(pt[1])
+
+        bounds = None
+        if xs and ys:
+            bounds = {
+                "min_x": round(min(xs), 3),
+                "max_x": round(max(xs), 3),
+                "min_y": round(min(ys), 3),
+                "max_y": round(max(ys), 3),
+            }
+
+        return {
+            "success": True,
+            "map_name": map_name,
+            "origin_lat": origin_lat,
+            "origin_lon": origin_lon,
+            "waypoints": waypoints,
+            "boundaries": boundaries,
+            "hazards": hazards,
+            "bounds": bounds,
+        }
+
+    def _get_map_geometry(self, map_name: Optional[str] = None) -> Dict[str, Any]:
+        """Return cached map geometry for the web overhead map."""
+        resolved = self._resolve_geofence_map_name(map_name)
+        if not resolved:
+            return {"success": False, "message": "No geofence map configured"}
+        available = set(self.available_geofence_maps or [])
+        if resolved not in available:
+            return {"success": False, "message": f"Unknown map: '{resolved}'"}
+
+        if resolved not in self._map_geometry_cache:
+            built = self._build_map_geometry(resolved)
+            if built.get("success"):
+                self._map_geometry_cache[resolved] = built
+            else:
+                return built
+        return self._map_geometry_cache[resolved]
+
     # Recording bags live under <argo>/bags (one folder per recording); same layout as nodes/record.py
     _BAG_FOLDER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 
@@ -2080,6 +2217,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             new_line = self._format_geofence_map_yaml_line(new_map_name, indent)
             updated = re.sub(line_pattern, new_line, original, count=1, flags=re.MULTILINE)
             yaml_path.write_text(updated, encoding="utf-8")
+            self._map_geometry_cache.pop(new_map_name, None)
+            self._sync_map_home_position()
             return {"success": True, "message": f"Updated geofence map to '{new_map_name}'"}
         except Exception as e:
             return {"success": False, "message": f"Failed to update argo.yaml: {e}"}
@@ -2465,6 +2604,15 @@ class ArgoWebDashboard(ArgoBaseNode):
                 ssid = payload.get("ssid", "")
                 # This can disconnect the client; rollback is scheduled locally.
                 return jsonify(self._wifi_switch_with_rollback(ssid=ssid, rollback_seconds=60))
+            except Exception as e:
+                return jsonify({"success": False, "message": str(e)})
+
+        @self.app.route('/api/map/geometry', methods=['GET'])
+        def map_geometry():
+            """Static sailing-area geometry in map-frame meters for browser map view."""
+            try:
+                map_name = (request.args.get("map") or "").strip() or None
+                return jsonify(self._get_map_geometry(map_name))
             except Exception as e:
                 return jsonify({"success": False, "message": str(e)})
 
