@@ -7,8 +7,8 @@
 
     const DEG = Math.PI / 180;
     const VIS_SCALE = 3;
-    const BOAT_LEN = 8 * VIS_SCALE;
-    const BOAT_WID = 5 * VIS_SCALE;
+    const HEADING_HEAD_LEN = 12;
+    const HEADING_TAIL_LEN = 4 * HEADING_HEAD_LEN;
     const ARROW_MIN = 12;
     const ARROW_MAX = 40;
     const WIND_ARROW_MIN = ARROW_MIN * VIS_SCALE;
@@ -52,8 +52,17 @@
         return { x, y };
     }
 
-    function compassToCanvasRad(compassDeg) {
-        return (90 - compassDeg) * DEG;
+    /**
+     * Screen-pixel offset for a compass bearing on a north-up map.
+     * compassDeg: direction the arrow points; 0°=North, 90°=East, clockwise (true compass).
+     * Screen y is flipped vs map north (north = up = negative dy).
+     */
+    function compassScreenDelta(compassDeg, length) {
+        const rad = compassDeg * DEG;
+        return {
+            dx: Math.sin(rad) * length,
+            dy: -Math.cos(rad) * length,
+        };
     }
 
     function windFlowCompassDeg(compassHeading, windAngleRel) {
@@ -271,9 +280,9 @@
 
     function drawArrow(ctx, x, y, compassDeg, lengthPx, color, lineWidth) {
         if (compassDeg == null) return;
-        const rad = compassToCanvasRad(compassDeg);
-        const ex = x + Math.cos(rad) * lengthPx;
-        const ey = y + Math.sin(rad) * lengthPx;
+        const { dx, dy } = compassScreenDelta(compassDeg, lengthPx);
+        const ex = x + dx;
+        const ey = y + dy;
         ctx.beginPath();
         ctx.moveTo(x, y);
         ctx.lineTo(ex, ey);
@@ -281,8 +290,9 @@
         ctx.lineWidth = lineWidth || 2;
         ctx.stroke();
         const head = Math.max(6, lengthPx * 0.25);
-        const a1 = rad + Math.PI * 0.82;
-        const a2 = rad - Math.PI * 0.82;
+        const screenRad = Math.atan2(dy, dx);
+        const a1 = screenRad + Math.PI * 0.82;
+        const a2 = screenRad - Math.PI * 0.82;
         ctx.beginPath();
         ctx.moveTo(ex, ey);
         ctx.lineTo(ex + Math.cos(a1) * head, ey + Math.sin(a1) * head);
@@ -291,32 +301,43 @@
         ctx.stroke();
     }
 
-    function drawBoat(ctx, x, y, headingDeg, stale) {
-        const rad = compassToCanvasRad(headingDeg || 0);
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-        const hw = BOAT_WID / 2;
-        const hl = BOAT_LEN / 2;
-        const local = [
-            [hl, 0],
-            [-hl, hw],
-            [-hl * 0.6, 0],
-            [-hl, -hw],
-        ];
+    function drawHeadingArrow(ctx, x, y, headingDeg, stale) {
+        const color = stale ? 'rgba(255, 107, 107, 0.85)' : 'rgba(30, 60, 114, 0.95)';
+        const totalLen = HEADING_TAIL_LEN + HEADING_HEAD_LEN;
+        const { dx, dy } = compassScreenDelta(headingDeg || 0, totalLen);
+        const tail = compassScreenDelta(headingDeg || 0, HEADING_TAIL_LEN);
+        const tailEndX = x + tail.dx;
+        const tailEndY = y + tail.dy;
+        const tipX = x + dx;
+        const tipY = y + dy;
+
         ctx.beginPath();
-        local.forEach((pt, i) => {
-            const rx = pt[0] * cos - pt[1] * sin;
-            const ry = pt[0] * sin + pt[1] * cos;
-            const sx = x + rx;
-            const sy = y + ry;
-            if (i === 0) ctx.moveTo(sx, sy);
-            else ctx.lineTo(sx, sy);
-        });
-        ctx.closePath();
-        ctx.fillStyle = stale ? 'rgba(255, 107, 107, 0.85)' : 'rgba(30, 60, 114, 0.95)';
+        ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
         ctx.fill();
         ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(tailEndX, tailEndY);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        const screenRad = Math.atan2(dy, dx);
+        const a1 = screenRad + Math.PI * 0.82;
+        const a2 = screenRad - Math.PI * 0.82;
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(tipX + Math.cos(a1) * HEADING_HEAD_LEN, tipY + Math.sin(a1) * HEADING_HEAD_LEN);
+        ctx.lineTo(tipX + Math.cos(a2) * HEADING_HEAD_LEN, tipY + Math.sin(a2) * HEADING_HEAD_LEN);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
         ctx.stroke();
     }
 
@@ -407,7 +428,9 @@
                 drawArrow(ctx, bp.x, bp.y, st.cog, vLen, 'rgba(255, 193, 7, 0.9)', 1.5);
             }
 
-            drawBoat(ctx, bp.x, bp.y, st.heading, st.stale);
+            if (st.heading != null) {
+                drawHeadingArrow(ctx, bp.x, bp.y, st.heading, st.stale);
+            }
         }
     }
 

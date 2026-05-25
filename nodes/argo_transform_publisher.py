@@ -285,8 +285,8 @@ class ArgoTransformPublisher(ArgoBaseNode):
             self.get_logger().debug(f"[TF_TRACE:GPS] GPS callback - lat={self.current_lat:.8f}, lon={self.current_lon:.8f}, x={x:.6f}, y={y:.6f} (was x={old_x:.6f}, y={old_y:.6f}), timestamp={self.last_gps_timestamp}")
     
     def pose_callback(self, msg):
-        """Update boat heading from pose topic"""
-        self.boat_heading = msg.z  # Heading in degrees
+        """Update boat heading from /pose (ENU math yaw: 0°=East, CCW)."""
+        self.boat_heading = float(msg.z) % 360.0
     
     def accel_callback(self, msg):
         """Estimate roll and pitch from accelerometer data"""

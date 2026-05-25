@@ -464,9 +464,8 @@ class ArgoWebDashboard(ArgoBaseNode):
         self._topic_subscriptions.append(
             self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), self.volatile_qos)
         )
-        self._topic_subscriptions.append(
-            self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), self.volatile_qos)
-        )
+        # IMU heading for display comes from /compass only (true compass). /pose is math yaw
+        # for TF/controller; subscribing here caused duplicate updates with no benefit.
         self._topic_subscriptions.append(
             self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), self.volatile_qos)
         )
@@ -751,28 +750,6 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Update health status - compass heading is boat data
         self._update_boat_data_received(f"compass_{source}")
-    
-    def pose_cb(self, msg, source='wifi'):
-        """Unified callback that tracks source and timestamp"""
-        # Skip processing in low-power mode (no viewers)
-        if self.low_power_mode:
-            return
-
-        now = time.time()
-        # /pose z is mathematical yaw (0°=East, CCW), same as simulator; convert for display.
-        heading_math = float(msg.z) % 360.0
-        compass_heading = (450.0 - heading_math) % 360.0
-        
-        with self.state_lock:
-            if source == 'wifi':
-                self.last_wifi_update['compass_heading'] = now
-                self.state['compass_heading'] = compass_heading
-                self.state['data_source'] = 'WiFi'
-            
-            self._update_data_age_indicators()
-        
-        # Update health status - pose data is boat data
-        self._update_boat_data_received(f"pose_{source}")
     
     def gps_cog_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""

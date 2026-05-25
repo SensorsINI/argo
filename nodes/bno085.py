@@ -268,50 +268,90 @@ class BNO085Bridge(Node):
         script_path = Path(__file__).resolve()
         self.argo_dir = str(script_path.parents[1])  # nodes -> argo
         
-        # Load yaw offset from configuration (argo.yaml), with hardware-mount default
-        # Hardware default: board mounted +Y forward, +X starboard, +Z up → -90° about +Z
-        default_mount_offset = -90.0
-        initial_offset = self._load_initial_yaw_offset(default_mount_offset)
-        # Declare parameter and read final value
-        self.declare_parameter('imu.yaw_offset_deg', float(initial_offset))
-        self.yaw_offset_deg = self.get_parameter('imu.yaw_offset_deg').get_parameter_value().double_value % 360.0
-        # Persist back if argo.yaml differs from declared value (e.g., first run)
-        if abs(self.yaw_offset_deg - initial_offset) > 1e-6:
-            self._persist_yaw_offset_to_yaml(self.yaw_offset_deg)
-        
-        # Allow runtime updates via parameter callback (and persist to argo.yaml)
+        # IMU mount + trim from argo.yaml (fusion quaternion is already mag-north referenced)
+        imu_cfg = self._load_imu_yaml_config()
+        self.declare_parameter(
+            'imu.mount_forward_axis',
+            str(imu_cfg.get('mount_forward_axis', 'y')),
+        )
+        self.declare_parameter(
+            'imu.mount_yaw_deg',
+            float(imu_cfg.get('mount_yaw_deg', 0.0)),
+        )
+        self.declare_parameter(
+            'imu.yaw_offset_deg',
+            float(imu_cfg.get('yaw_offset_deg', 0.0)),
+        )
+        self.mount_forward_axis = (
+            self.get_parameter('imu.mount_forward_axis')
+            .get_parameter_value()
+            .string_value
+        )
+        self.mount_yaw_deg = (
+            self.get_parameter('imu.mount_yaw_deg')
+            .get_parameter_value()
+            .double_value
+        )
+        self.yaw_offset_deg = (
+            self.get_parameter('imu.yaw_offset_deg')
+            .get_parameter_value()
+            .double_value
+            % 360.0
+        )
+
+        # Allow runtime updates via parameter callback (yaw_offset persisted to argo.yaml)
         self.add_on_set_parameters_callback(self._on_parameter_change)
 
-        # Some BNO08x / fusion frame conventions yield yaw that increases in the
-        # opposite direction to our compass heading convention (0=N, 90=E, CW-positive).
-        # If North/South look correct but East/West are swapped, enable this.
-        self.declare_parameter('imu.yaw_invert', False)
-        self.yaw_invert = bool(self.get_parameter('imu.yaw_invert').get_parameter_value().bool_value)
-        
-        # Apply XY rotation to accel/gyro to keep frames consistent with yaw
+        # If North/South are correct but East/West are swapped, enable this (negates east
+        # component before atan2 — equivalent to compass = (360 - heading) % 360).
+        self.declare_parameter(
+            'imu.yaw_invert',
+            self._parse_yaml_bool(imu_cfg.get('yaw_invert'), False),
+        )
+        self.yaw_invert = self._parse_yaml_bool(
+            self.get_parameter('imu.yaw_invert').get_parameter_value().bool_value,
+            False,
+        )
+
+        # Rotate accel/gyro XY so horizontal components match compass frame
         self.apply_axis_rotation = True
+
+        self.get_logger().info(
+            f'IMU heading: mount_forward_axis={self.mount_forward_axis}, '
+            f'mount_yaw_deg={self.mount_yaw_deg:.1f}, '
+            f'yaw_offset_deg={self.yaw_offset_deg:.1f} (trim only), '
+            f'yaw_invert={self.yaw_invert}'
+        )
     
     def _argo_yaml_path(self) -> Path:
         """Return absolute path to nodes/argo.yaml."""
         return Path(self.argo_dir) / 'nodes' / 'argo.yaml'
     
-    def _load_initial_yaw_offset(self, fallback: float) -> float:
-        """Load initial yaw offset from nodes/argo.yaml; create section if missing."""
+    def _load_imu_yaml_config(self) -> dict:
+        """Load imu section from nodes/argo.yaml."""
         try:
             yaml_path = self._argo_yaml_path()
             if not yaml_path.exists():
-                return float(fallback)
+                return {}
             with open(yaml_path, 'r') as f:
                 cfg = yaml.safe_load(f) or {}
-            # Navigate: /** -> ros__parameters -> imu -> yaw_offset_deg
             root = cfg.get('/**', {}).get('ros__parameters', {})
-            imu_cfg = root.get('imu', {})
-            val = imu_cfg.get('yaw_offset_deg', None)
-            if val is None:
-                return float(fallback)
-            return float(val)
+            return root.get('imu', {}) or {}
         except Exception:
-            return float(fallback)
+            return {}
+
+    @staticmethod
+    def _parse_yaml_bool(value, default: bool = False) -> bool:
+        """Parse bool from YAML/ROS (avoid bool('false') == True)."""
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
     
     def _persist_yaw_offset_to_yaml(self, value: float) -> None:
         """Persist yaw offset into nodes/argo.yaml under /**/ros__parameters/imu.
@@ -350,6 +390,16 @@ class BNO085Bridge(Node):
             import traceback
             self.get_logger().debug(f'Traceback: {traceback.format_exc()}')
     
+    def _yaw_invert_active(self) -> bool:
+        """Read imu.yaw_invert from the parameter server (live; not cached)."""
+        try:
+            return self._parse_yaml_bool(
+                self.get_parameter('imu.yaw_invert').get_parameter_value().bool_value,
+                False,
+            )
+        except Exception:
+            return bool(self.yaw_invert)
+
     def _on_parameter_change(self, parameters):
         """Handle runtime parameter updates and persist yaw offset changes."""
         from rcl_interfaces.msg import SetParametersResult
@@ -365,6 +415,19 @@ class BNO085Bridge(Node):
                 except Exception as e:
                     result.successful = False
                     result.reason = f'Invalid imu.yaw_offset_deg: {e}'
+            elif param.name == 'imu.mount_forward_axis':
+                self.mount_forward_axis = param.get_parameter_value().string_value
+            elif param.name == 'imu.mount_yaw_deg':
+                self.mount_yaw_deg = param.get_parameter_value().double_value
+            elif param.name == 'imu.yaw_invert':
+                self.yaw_invert = self._parse_yaml_bool(
+                    param.get_parameter_value().bool_value,
+                    False,
+                )
+                self.get_logger().info(
+                    f'imu.yaw_invert={self.yaw_invert} '
+                    f'(E/W reflected: {"on" if self.yaw_invert else "off"})'
+                )
         return result
     
     def _rotate_xy(self, x: float, y: float, degrees: float):
@@ -375,6 +438,60 @@ class BNO085Bridge(Node):
         xr = c * x - s * y
         yr = s * x + c * y
         return xr, yr
+
+    def _forward_axis_vector(self):
+        """Unit vector for bow direction in the BNO085 sensor frame."""
+        axis = str(self.mount_forward_axis).strip().lower()
+        vectors = {
+            'x': (1.0, 0.0, 0.0),
+            'y': (0.0, 1.0, 0.0),
+            'neg_x': (-1.0, 0.0, 0.0),
+            'neg_y': (0.0, -1.0, 0.0),
+            '-x': (-1.0, 0.0, 0.0),
+            '-y': (0.0, -1.0, 0.0),
+        }
+        return vectors.get(axis, (0.0, 1.0, 0.0))
+
+    def _quat_rotate_vector(self, w, x, y, z, vx, vy, vz):
+        """Rotate vector v by unit quaternion q (Hamilton, active rotation)."""
+        qx, qy, qz = float(x), float(y), float(z)
+        qw = float(w)
+        tx = 2.0 * (qy * vz - qz * vy)
+        ty = 2.0 * (qz * vx - qx * vz)
+        tz = 2.0 * (qx * vy - qy * vx)
+        return (
+            vx + qw * tx + (qy * tz - qz * ty),
+            vy + qw * ty + (qz * tx - qx * tz),
+            vz + qw * tz + (qx * ty - qy * tx),
+        )
+
+    def _heading_from_rotation_vector(self, w, x, y, z):
+        """
+        Compass heading from mag-referenced fusion quaternion.
+
+        Rotates the configured bow axis into ENU and uses atan2(east, north).
+        0°=North, 90°=East, clockwise from above (does not apply trim/invert).
+        """
+        fx, fy, fz = self._forward_axis_vector()
+        if self.mount_yaw_deg != 0.0:
+            rad = math.radians(self.mount_yaw_deg)
+            c, s = math.cos(rad), math.sin(rad)
+            fx, fy = c * fx - s * fy, s * fx + c * fy
+        wx, wy, _wz = self._quat_rotate_vector(w, x, y, z, fx, fy, fz)
+        heading = math.degrees(math.atan2(wx, wy))
+        if heading < 0.0:
+            heading += 360.0
+        return heading
+
+    def _apply_yaw_invert(self, heading_deg: float) -> float:
+        """
+        Mirror E↔W while keeping N/S: (360 - heading) % 360.
+
+        Unchanged at 0°/180° — verify with bow toward E or W, not N.
+        """
+        if self._yaw_invert_active():
+            return (360.0 - heading_deg) % 360.0
+        return heading_deg
     
     def quaternion_to_euler(self, w, x, y, z):
         """Convert quaternion to Euler angles (roll, pitch, yaw) in degrees."""
@@ -412,21 +529,21 @@ class BNO085Bridge(Node):
         self.recovery_attempt_count = 0
         self.last_recovery_attempt_time = 0.0
         
-        roll, pitch, yaw = self.quaternion_to_euler(
-            msg.orientation.w, msg.orientation.x, 
-            msg.orientation.y, msg.orientation.z
+        qw, qx, qy, qz = (
+            msg.orientation.w,
+            msg.orientation.x,
+            msg.orientation.y,
+            msg.orientation.z,
         )
+        roll, pitch, euler_yaw = self.quaternion_to_euler(qw, qx, qy, qz)
 
-        # Optional handedness fix: mirror yaw about the North-South axis.
-        # This preserves 0° (N) and 180° (S) but swaps 90° (E) and 270° (W).
-        if self.yaw_invert:
-            yaw = (-yaw) % 360.0
-        
-        # Apply fixed yaw offset for mounting (rotate +90° about Z)
-        yaw = (yaw + self.yaw_offset_deg) % 360.0
+        # Bow heading from fusion quaternion + physical mount
+        heading = self._heading_from_rotation_vector(qw, qx, qy, qz)
+        heading = self._apply_yaw_invert(heading)
+        plane_align_deg = (heading - euler_yaw) % 360.0
+        heading_compass = (heading + self.yaw_offset_deg) % 360.0
         
         # /compass: compass convention (0=N, 90=E). /pose: math yaw for TF/controller (same as sim bridge).
-        heading_compass = yaw
         compass_msg = Vector3(x=0.0, y=0.0, z=heading_compass)
         self.pub_compass.publish(compass_msg)
         pose_msg = Vector3(
@@ -441,7 +558,7 @@ class BNO085Bridge(Node):
         gy = math.degrees(msg.angular_velocity.y)
         gz = math.degrees(msg.angular_velocity.z)
         if self.apply_axis_rotation:
-            gx, gy = self._rotate_xy(gx, gy, self.yaw_offset_deg)
+            gx, gy = self._rotate_xy(gx, gy, plane_align_deg)
         gyro_msg = Vector3(x=gx, y=gy, z=gz)
         self.pub_gyro.publish(gyro_msg)
         
@@ -450,7 +567,7 @@ class BNO085Bridge(Node):
         ay = msg.linear_acceleration.y / 9.81
         az = msg.linear_acceleration.z / 9.81
         if self.apply_axis_rotation:
-            ax, ay = self._rotate_xy(ax, ay, self.yaw_offset_deg)
+            ax, ay = self._rotate_xy(ax, ay, plane_align_deg)
         accel_msg = Vector3(x=ax, y=ay, z=az)
         self.pub_accel.publish(accel_msg)
     
