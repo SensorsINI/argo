@@ -151,10 +151,10 @@ rudder_sail_radio_node:
     # Rudder: measure radio endpoints at full stick (watch radio_rudder_pw_us). cmd -1/+1 uses these;
     # crosser/human PWM output maps cmd -1/+1 to servo_* endpoints (amplifies throw vs radio).
     # release_servos=true (HumanController) bypasses this — radio drives servo directly.
-    radio_rudder_min_pw: 1100
-    radio_rudder_max_pw: 1900
-    servo_rudder_min_pw: 900    # kernel minimum (argo_radio_servo_module)
-    servo_rudder_max_pw: 2100   # kernel maximum
+    radio_rudder_min_pw: 1100.0
+    radio_rudder_max_pw: 1900.0
+    servo_rudder_min_pw: 900.0    # kernel minimum (argo_radio_servo_module)
+    servo_rudder_max_pw: 2100.0   # kernel maximum
     safety_max_sail: 1.0        # Sail: normalized cap; PWM still 1500±500us per unit
     param_file_path: argo.yaml
 argo_boat_visualization:
