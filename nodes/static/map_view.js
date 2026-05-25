@@ -65,12 +65,6 @@
         };
     }
 
-    function windFlowCompassDeg(compassHeading, windAngleRel) {
-        if (compassHeading == null || windAngleRel == null) return null;
-        const fromAbs = (compassHeading + windAngleRel) % 360;
-        return (fromAbs + 180) % 360;
-    }
-
     function extractLiveState(data) {
         const lat = data.gps_latitude != null ? data.gps_latitude : data.gps_last_valid_latitude;
         const lon = data.gps_longitude != null ? data.gps_longitude : data.gps_last_valid_longitude;
@@ -90,6 +84,7 @@
             heading: data.compass_heading,
             wind_speed: data.wind_speed,
             wind_angle: data.wind_angle,
+            wind_flow_compass: data.wind_flow_compass,
             cog: data.gps_cog,
             sog: data.gps_sog,
             stale: !!data.gps_data_stale,
@@ -414,13 +409,12 @@
 
             const bp = mapToScreen(st.x, st.y);
 
-            if (st.wind_speed != null && st.wind_angle != null && st.heading != null) {
-                const flow = windFlowCompassDeg(st.heading, st.wind_angle);
+            if (st.wind_speed != null && st.wind_flow_compass != null) {
                 const wLen = Math.min(
                     WIND_ARROW_MAX,
                     Math.max(WIND_ARROW_MIN, st.wind_speed * 8 * VIS_SCALE)
                 );
-                drawArrow(ctx, bp.x, bp.y, flow, wLen, 'rgba(40, 167, 69, 0.85)', 2.5);
+                drawArrow(ctx, bp.x, bp.y, st.wind_flow_compass, wLen, 'rgba(40, 167, 69, 0.85)', 2.5);
             }
 
             if (st.sog != null && st.cog != null && st.sog > 0.05) {
@@ -449,6 +443,11 @@
                 heading: lerpAngle(displayState.heading, targetState.heading, alpha),
                 wind_speed: targetState.wind_speed,
                 wind_angle: targetState.wind_angle,
+                wind_flow_compass: lerpAngle(
+                    displayState.wind_flow_compass,
+                    targetState.wind_flow_compass,
+                    alpha
+                ),
                 cog: targetState.cog,
                 sog: targetState.sog,
                 stale: targetState.stale,
