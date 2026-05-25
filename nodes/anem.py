@@ -37,6 +37,11 @@
 # --debug: Enable debug logging of sensor values
 # --debug_visually: Show real-time ASCII visualization of wind vector
 #
+# Static Offset Calibration (argo.yaml):
+# Each SDP3x sensor has a small zero-wind baseline differential pressure. Subtract per-sensor
+# offsets (anem_node.ros__parameters.dp_offset_*) before computing speed and angle.
+# With no airflow, run `python3 nodes/anem.py --debug` and average dp(pascal) over ~30 s.
+#
 # Calibration and Verification:
 # The anemometer system includes calibration tools to verify correct operation:
 #
@@ -332,6 +337,25 @@ class AnemNode(ArgoBaseNode):
         super().__init__('anem_node')
 
         self.get_logger().info('Initializing Anemometer node...')
+
+        # Zero-wind baseline offsets (Pa) — see nodes/argo.yaml anem_node section
+        self.declare_parameter('dp_offset_ctr', 0.0)
+        self.declare_parameter('dp_offset_cw', 0.0)
+        self.declare_parameter('dp_offset_ccw', 0.0)
+        self.declare_parameter('calm_speed_threshold_mps', 0.10)
+        self._dp_offsets = (
+            self.get_parameter('dp_offset_ctr').get_parameter_value().double_value,
+            self.get_parameter('dp_offset_cw').get_parameter_value().double_value,
+            self.get_parameter('dp_offset_ccw').get_parameter_value().double_value,
+        )
+        self._calm_speed_threshold = (
+            self.get_parameter('calm_speed_threshold_mps').get_parameter_value().double_value
+        )
+        if any(abs(o) > 1e-9 for o in self._dp_offsets):
+            self.get_logger().info(
+                f"DP baseline offsets (Pa): CTR={self._dp_offsets[0]:.4f}, "
+                f"CW={self._dp_offsets[1]:.4f}, CCW={self._dp_offsets[2]:.4f}"
+            )
 
         # Publishers
         self.pub_diff_pressure = self.create_publisher(
@@ -923,20 +947,28 @@ class AnemNode(ArgoBaseNode):
                 for i in range(3)
             ]
 
-            # Unpack averaged differential pressures with meaningful names
-            dp_ctr_avg = dp_avg[0]  # Center sensor (0x21, 0°)
-            dp_cw_avg = dp_avg[1]   # CW 120° sensor (0x22)
-            dp_ccw_avg = dp_avg[2]  # CCW 240° sensor (0x23)
+            # Subtract zero-wind baseline offsets before speed/angle calculation
+            dp_cal = [
+                dp_avg[i] - self._dp_offsets[i]
+                for i in range(3)
+            ]
 
-            # Calculate wind parameters from averaged data
+            # Unpack calibrated differential pressures with meaningful names
+            dp_ctr_avg = dp_cal[0]  # Center sensor (0x21, 0°)
+            dp_cw_avg = dp_cal[1]   # CW 120° sensor (0x22)
+            dp_ccw_avg = dp_cal[2]  # CCW 240° sensor (0x23)
+
+            # Calculate wind parameters from calibrated data
             temp_celsius = sum(temp_avg) / 3.0
             angle_deg = calculate_angle_deg(dp_ctr_avg, dp_cw_avg, dp_ccw_avg)
             speed_mps = calculate_speed_mps(
                 dp_ctr_avg, dp_cw_avg, dp_ccw_avg, temp_celsius)
+            if speed_mps < self._calm_speed_threshold:
+                speed_mps = 0.0
 
-            # Publish differential pressure
+            # Publish calibrated differential pressure (baseline subtracted)
             self.pub_diff_pressure.publish(
-                Vector3(x=float(dp_avg[0]), y=float(dp_avg[1]), z=float(dp_avg[2])))
+                Vector3(x=float(dp_cal[0]), y=float(dp_cal[1]), z=float(dp_cal[2])))
 
             # Publish wind speed, angle, and temperature
             self.pub_wind_temp.publish(
@@ -953,13 +985,15 @@ class AnemNode(ArgoBaseNode):
 
             self.get_logger().debug(
                 f"Anemometer: speed(m/s)={speed_mps:.2f} angle(deg)={angle_deg:.1f} "
-                f"temp(C)={temp_celsius:.1f} dp(pascal)=({dp_avg[0]:.4f}, {dp_avg[1]:.4f}, {dp_avg[2]:.4f}) "
+                f"temp(C)={temp_celsius:.1f} "
+                f"dp_raw(pascal)=({dp_avg[0]:.4f}, {dp_avg[1]:.4f}, {dp_avg[2]:.4f}) "
+                f"dp_cal(pascal)=({dp_cal[0]:.4f}, {dp_cal[1]:.4f}, {dp_cal[2]:.4f}) "
                 f"[averaged over {len(dp_samples)} samples]"
             )
 
             if self.debug_visually:
                 self._render_visual(speed_mps, angle_deg,
-                                    temp_celsius, tuple(dp_avg))
+                                    temp_celsius, tuple(dp_cal))
 
         except Exception as e:
             self.get_logger().error(f"Error in publish callback: {e}")
