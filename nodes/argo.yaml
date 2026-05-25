@@ -106,7 +106,7 @@
       yaw_invert: false # verified correct in lab, dashboard display at least roughly correct
 controller_node:
   ros__parameters:
-    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, crosser, human
+    controller_type: human  # Options: proportional, wind_aware, return_to_home, crosser, human
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
     rudder_full_scale_deg: 60.0  # Heading error (degrees) that produces full rudder deflection (-1.0 to +1.0)
@@ -148,8 +148,14 @@ rudder_sail_radio_node:
   ros__parameters:
     human_override_timeout: 8.0      # Seconds after last human activity before robot can take control
     deadband_threshold: 0.25          # Rudder: |pos|>threshold; Sail: only Δsail>threshold (2 reads) — see rudder_sail_radio.py
-    safety_max_rudder: 1.0            # Maximum rudder command magnitude
-    safety_max_sail: 1.0              # Maximum sail command magnitude
+    # Rudder: measure radio endpoints at full stick (watch radio_rudder_pw_us). cmd -1/+1 uses these;
+    # crosser/human PWM output maps cmd -1/+1 to servo_* endpoints (amplifies throw vs radio).
+    # release_servos=true (HumanController) bypasses this — radio drives servo directly.
+    radio_rudder_min_pw: 1100
+    radio_rudder_max_pw: 1900
+    servo_rudder_min_pw: 900    # kernel minimum (argo_radio_servo_module)
+    servo_rudder_max_pw: 2100   # kernel maximum
+    safety_max_sail: 1.0        # Sail: normalized cap; PWM still 1500±500us per unit
     param_file_path: argo.yaml
 argo_boat_visualization:
   ros__parameters:

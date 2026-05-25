@@ -188,6 +188,9 @@ class BaseController:
     def update_config(self, config: Dict[str, Any]):
         """Update controller configuration."""
         self.config.update(config)
+    def clip_rudder(self, cmd_rudder: float) -> float:
+        """Clip rudder to ±1; rudder_sail_radio maps ±1 to servo_rudder_*_pw in argo.yaml."""
+        return max(-1.0, min(1.0, float(cmd_rudder)))
 
     def _get_captains_log_publisher(self):
         """Get or create the captain's log publisher."""

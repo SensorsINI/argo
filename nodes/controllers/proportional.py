@@ -37,7 +37,7 @@ class ProportionalHeadingController(BaseController):
 
         # Proportional controller for rudder
         cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
-        cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
+        cmd_rudder = self.clip_rudder(cmd_rudder)
 
         # Pass through sail command from radio (could be enhanced later)
         cmd_sail = state.radio_sail if state.radio_sail is not None else 0.0
