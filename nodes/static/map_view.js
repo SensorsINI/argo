@@ -434,19 +434,22 @@
             return;
         }
         if (targetState && displayState) {
-            const alpha = 0.25;
+            // Position: follow GPS quickly (dashboard polls /fix at 1–2 Hz; heavy smoothing looked
+            // like a stuck GPS). Heading/wind: light smoothing only.
+            const posAlpha = 0.92;
+            const angleAlpha = 0.35;
             displayState = {
-                x: lerp(displayState.x, targetState.x, alpha),
-                y: lerp(displayState.y, targetState.y, alpha),
+                x: lerp(displayState.x, targetState.x, posAlpha),
+                y: lerp(displayState.y, targetState.y, posAlpha),
                 lat: targetState.lat,
                 lon: targetState.lon,
-                heading: lerpAngle(displayState.heading, targetState.heading, alpha),
+                heading: lerpAngle(displayState.heading, targetState.heading, angleAlpha),
                 wind_speed: targetState.wind_speed,
                 wind_angle: targetState.wind_angle,
                 wind_flow_compass: lerpAngle(
                     displayState.wind_flow_compass,
                     targetState.wind_flow_compass,
-                    alpha
+                    angleAlpha
                 ),
                 cog: targetState.cog,
                 sog: targetState.sog,

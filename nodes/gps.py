@@ -244,6 +244,10 @@ class GpsNode(ArgoBaseNode):
         self.last_gsv_time = None  # Track when we last received valid GSV data (None until first GSV)
         self.last_gsv_update_time = 0.0  # Track when we last aggregated all constellation data
 
+        # UBX-NAV-SAT diagnostics (ephemeris / almanac / used-in-solution)
+        self._nav_sat_diag = None
+        self._last_nav_sat_poll_time = 0.0
+
         # NavSatFix data storage
         self.current_altitude = None  # Altitude in meters above WGS84 ellipsoid
         self.current_hdop = None  # Horizontal Dilution of Precision
@@ -1575,8 +1579,10 @@ class GpsNode(ArgoBaseNode):
             # Parse satellite data (each sat is 12 bytes)
             satellites_used = 0
             satellites_with_ephemeris = 0
+            satellites_with_almanac = 0
             satellites_healthy = 0
             low_snr_sats = []
+            tracked_with_cno = 0
             
             for i in range(num_svs):
                 offset = 8 + (i * 12)
@@ -1603,21 +1609,29 @@ class GpsNode(ArgoBaseNode):
                     satellites_healthy += 1
                 if eph_avail:
                     satellites_with_ephemeris += 1
+                if alm_avail:
+                    satellites_with_almanac += 1
+                if cno > 0:
+                    tracked_with_cno += 1
                 if cno > 0 and cno < 25:  # Low SNR
-                    low_snr_sats.append((sv_id, cno))
+                    low_snr_sats.append((gnss_id, sv_id, cno))
             
             self.get_logger().info(
-                f"Satellite analysis: {satellites_used} used in solution, "
-                f"{satellites_with_ephemeris} have ephemeris, {satellites_healthy} healthy")
+                f"UBX-NAV-SAT: tracked={num_svs} with_CNO={tracked_with_cno} used={satellites_used} "
+                f"eph={satellites_with_ephemeris} alm={satellites_with_almanac} healthy={satellites_healthy}")
             
             if low_snr_sats:
-                self.get_logger().info(f"Low SNR satellites (<25 dBHz): {low_snr_sats[:5]}")  # Show first 5
+                self.get_logger().info(
+                    f"Low SNR (<25 dBHz, gnssId,svId,cno): {low_snr_sats[:8]}")
             
             return {
+                'tracked': num_svs,
+                'with_cno': tracked_with_cno,
                 'used': satellites_used,
                 'ephemeris': satellites_with_ephemeris,
+                'almanac': satellites_with_almanac,
                 'healthy': satellites_healthy,
-                'low_snr': len(low_snr_sats)
+                'low_snr': len(low_snr_sats),
             }
                 
         except Exception as e:
@@ -1710,8 +1724,10 @@ class GpsNode(ArgoBaseNode):
     _KEY_SBAS_USE_INTEGRITY = 0x10360005
     _KEY_SBAS_PRNSCANMASK = 0x50360006
 
-    # Dynamic platform model: 5 = At sea (zero vertical velocity, sea level; manual §3.1.7.1)
-    _DYNMODEL_AT_SEA = 5
+    # Dynamic platform model: 3 = Pedestrian (low speed/acceleration; manual §3.1.7.1).
+    # At sea (5) assumes zero vertical velocity but field tests showed very sluggish position
+    # convergence; Pedestrian tracks slow horizontal motion better for a toy sailboat.
+    _DYNMODEL_PEDESTRIAN = 3
     # EGNOS GEO PRNs: 121, 123 (test), 136 — manual §3.2 example 2 (Europe)
     _EGNOS_SBAS_PRN_MASK = 0x000000000001000A
 
@@ -1746,15 +1762,15 @@ class GpsNode(ArgoBaseNode):
         """Configure NEO-M9N for European EGNOS SBAS and slow marine navigation.
 
         Per NEO-M9N Integration Manual (UBX-19014286):
-        - §3.1.7.1: At sea dynamic model (zero vertical velocity; 25 m/s horizontal >> toy sailboat)
+        - §3.1.7.1: Pedestrian dynamic model (low speed/acceleration, small position deviation)
         - §3.1.7.5: Frozen COG output in NMEA below ~0.1 m/s (CFG-NMEA-OUT_FROZENCOG)
-        - §3.2: EGNOS-only SBAS PRN mask; differential corrections; no integrity (avoids GPS-only lockout)
-
-        Pedestrian (3) gives smaller position deviation but allows vertical motion; At sea matches
-        water surface constraints while still supporting very low SOG/COG.
+        - §3.2: EGNOS-only SBAS PRN mask for corrections only (USE_RANGING=0 — GPS/GAL/GLO/BDS unchanged)
+        - Navigation input filters left at firmware defaults (0); do not raise C/N0 fix threshold
         """
         self.get_logger().info(
-            "Configuring navigation: At sea model, EGNOS SBAS (Europe), low-speed COG/SOG...")
+            "Configuring navigation: Pedestrian model, EGNOS SBAS corrections (Europe), low-speed COG/SOG...")
+        self.get_logger().info(
+            "  SBAS PRN mask selects EGNOS correction GEOs only; GNSS constellations are not restricted")
         valset_payload = bytearray([
             0x00,       # version: SET (immediate)
             0x03,       # layers: RAM + BBR (persist without rewriting flash each boot)
@@ -1762,11 +1778,12 @@ class GpsNode(ArgoBaseNode):
         ])
 
         # Platform dynamics (§3.1.7.1)
-        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_DYNMODEL, self._DYNMODEL_AT_SEA)
-        self._cfg_valset_add_i1(valset_payload, self._KEY_NAVSPG_INFIL_MINELEV, 5)
-        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_MINCNO, 6)
-        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_NCNOTHRS, 3)
-        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_CNOTHRS, 20)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_DYNMODEL, self._DYNMODEL_PEDESTRIAN)
+        # Clear any prior INFIL overrides in BBR (e.g. CNOTHRS=20 blocked fix at ~17 dBHz signal)
+        self._cfg_valset_add_i1(valset_payload, self._KEY_NAVSPG_INFIL_MINELEV, 0)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_MINCNO, 0)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_NCNOTHRS, 0)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_CNOTHRS, 0)
 
         # Low-speed COG: emit last valid COG in RMC/VTG when speed < 0.1 m/s (§3.1.7.5)
         self._cfg_valset_add_l(valset_payload, self._KEY_NMEA_OUT_FROZENCOG, True)
@@ -1787,7 +1804,7 @@ class GpsNode(ArgoBaseNode):
         nav_result = self._send_ubx(0x06, 0x8A, valset_payload, expect_ack=True, timeout=3.0)
         if nav_result:
             self.get_logger().info(
-                "✓ Navigation: At sea, EGNOS SBAS (PRN 121/123/136), frozen COG in NMEA")
+                "✓ Navigation: Pedestrian, EGNOS SBAS (PRN 121/123/136), frozen COG in NMEA")
             time.sleep(0.5)
             self.query_current_dynmodel()
             return True
@@ -2292,6 +2309,7 @@ class GpsNode(ArgoBaseNode):
 
                     self.get_logger().debug(
                         f"GGA: Position {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt {self.current_altitude}m, {self.satellites_used} sats")
+                    self.publish_navsat_fix()
                     return True
                 else:
                     # No valid fix - log diagnostic info when we have satellites (helps diagnose issues)
@@ -2555,11 +2573,16 @@ class GpsNode(ArgoBaseNode):
                     self.last_no_fix_log_time = current_time
                     self.no_fix_log_count += 1
                     
-                    # Poll PUBX-03 for detailed satellite status every 30 seconds when we have satellites but no fix
-                    # This helps diagnose why GPS can't get a fix (ephemeris, geometry, etc.)
-                    if self.satellites_used >= 3 and self.no_fix_log_count % 6 == 0:  # Every 30s (6 * 5s intervals)
-                        self.get_logger().info(f"Polling satellite status (no fix with {self.satellites_used} satellites)...")
-                        self.poll_pubx_svstatus()
+                    # Poll UBX-NAV-SAT for ephemeris/almanac (GSV alone cannot show eph validity)
+                    poll_interval_s = 15.0 if self.debug_mode else 30.0
+                    sats_with_signal = len(
+                        [s for s in self.satellites_in_view if s.get('snr') and s['snr'] > 0])
+                    if (current_time - self._last_nav_sat_poll_time >= poll_interval_s
+                            and (len(self.satellites_in_view) > 0 or sats_with_signal > 0)):
+                        diag = self.poll_pubx_svstatus()
+                        if diag:
+                            self._nav_sat_diag = diag
+                        self._last_nav_sat_poll_time = current_time
 
     @staticmethod
     def _format_hms(seconds: float) -> str:
@@ -2653,9 +2676,19 @@ class GpsNode(ArgoBaseNode):
                 # Truly no satellites for >15s - critical hardware issue
                 sat_str = f"in_view=0 (NO RF SIGNAL - check antenna!)"
         
+        eph_str = ""
+        if self._nav_sat_diag:
+            d = self._nav_sat_diag
+            eph_str = (
+                f" nav_sat:tracked={d.get('tracked', '?')} cno={d.get('with_cno', '?')} "
+                f"eph={d.get('ephemeris', '?')} alm={d.get('almanac', '?')} "
+                f"used={d.get('used', '?')}"
+            )
+
         return (
             "GPS: No fix - searching... "
-            f"({sat_str}; since_fix={self._format_hms(time_without_fix_s)}; {pps_str}; {ant_str}; {reset_str})"
+            f"({sat_str}{eph_str}; since_fix={self._format_hms(time_without_fix_s)}; "
+            f"{pps_str}; {ant_str}; {reset_str})"
         )
 
     def publish_navigation_data(self):
