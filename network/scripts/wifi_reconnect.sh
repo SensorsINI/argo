@@ -246,14 +246,22 @@ is_network_available() {
 connect_to_network() {
     local network_name="$1"
     log_message "Attempting to connect to preferred network: $network_name"
-    
-    if nmcli connection up "$network_name" 2>/dev/null; then
+
+    local out rc
+    out="$(nmcli connection up "$network_name" 2>&1)"
+    rc=$?
+
+    if [ $rc -eq 0 ]; then
         log_message "Successfully connected to $network_name"
         return 0
-    else
-        log_message "Failed to connect to $network_name"
-        return 1
     fi
+
+    if [ -n "$out" ]; then
+        log_message "Failed to connect to $network_name (nmcli rc=$rc): ${out//$'\n'/ | }"
+    else
+        log_message "Failed to connect to $network_name (nmcli rc=$rc, no output)"
+    fi
+    return 1
 }
 
 # Function to check if connection is stable (not recently changed)
@@ -422,21 +430,32 @@ main() {
     
     # If on a preferred network, only check for higher-priority ones
     if [ "$IS_ON_PREFERRED" = true ]; then
-        # Check if there's a higher-priority preferred network available
+        local higher_available=false
+        local switch_failed=false
+
         for i in "${!PREFERRED_NETWORKS[@]}"; do
             if [ $i -lt $CURRENT_PRIORITY_INDEX ]; then
-                # This is a higher-priority network
                 if is_network_available "${PREFERRED_NETWORKS[$i]}"; then
+                    higher_available=true
                     log_message "Higher-priority preferred network ${PREFERRED_NETWORKS[$i]} is available, switching"
                     if connect_to_network "${PREFERRED_NETWORKS[$i]}"; then
                         record_connection_change "${PREFERRED_NETWORKS[$i]}"
                         log_network_health_snapshot "after-switch-to-${PREFERRED_NETWORKS[$i]}"
                         return 0
                     fi
+                    switch_failed=true
+                    log_network_health_snapshot "after-failed-switch-to-${PREFERRED_NETWORKS[$i]}"
                 fi
             fi
         done
-        log_message "Already on highest-priority preferred network, staying on: $CURRENT_CONNECTION"
+
+        if [ $CURRENT_PRIORITY_INDEX -eq 0 ]; then
+            log_message "Already on highest-priority preferred network, staying on: $CURRENT_CONNECTION"
+        elif [ "$switch_failed" = true ]; then
+            log_message "Staying on $CURRENT_CONNECTION (connect to higher-priority preferred network failed; see nmcli output above)"
+        elif [ "$higher_available" = false ]; then
+            log_message "Staying on $CURRENT_CONNECTION (no higher-priority preferred networks in range)"
+        fi
         return 0
     fi
     
@@ -451,6 +470,7 @@ main() {
                 log_network_health_snapshot "after-switch-to-$preferred"
                 return 0
             fi
+            log_network_health_snapshot "after-failed-switch-to-$preferred"
         else
             log_message "Preferred network $preferred is not available"
         fi
