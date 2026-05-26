@@ -10,6 +10,10 @@ Interactive wrapper to **re-record** an existing rosbag2 with visualization node
 ### `argo_bag_rerecord.py`
 ROS 2 **launch** description (Python): play an input bag with sim time, run `argo_boat_visualization`, `argo_transform_publisher`, and related nodes, and record a new bag. Invoke with `ros2 launch ./scripts/argo_bag_rerecord.py ...` from the repo root (or pass an absolute path to this file).
 
+By default (`exclude_recorded_markers:=true`), marker topics that those live nodes re-publish (`/visualization_marker*`, `/sailing_*` marker arrays, etc.) are **not** replayed from the input bag, so the output recording does not contain duplicate marker streams. Set `exclude_recorded_markers:=false` to replay the bag verbatim (previous behavior).
+
+**Time trim:** pass both `trim_start` and `trim_end` to copy only messages whose **bag log timestamps** fall in that window into a temporary bag before playback. Use ISO-8601 (e.g. `2026-05-08T16:32:33.466+02:00`), or wall clock with `trim_timezone` (default `Europe/Zurich`), e.g. `trim_start:="2026-05-08 4:32:33.466 PM"` (suffix `CEST` is stripped). Alternatively pass two **numbers** as seconds from the bag start (per `metadata.yaml`). The temp bag is deleted on shutdown.
+
 ### `fix_rosbag_pose_legacy_compass.py`
 Offline bag copy that rewrites legacy **`/pose.z`** (compass duplicated on pose) to ENU math yaw. Does not regenerate markers or `/tf`.
 

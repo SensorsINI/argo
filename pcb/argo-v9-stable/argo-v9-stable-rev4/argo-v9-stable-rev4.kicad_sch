@@ -14728,7 +14728,7 @@
 		)
 		(uuid "5ddbd66f-a9d8-4391-8457-1301007da1ee")
 	)
-	(text "IMU BNO055 I2C addr 0x69"
+	(text "IMU BNO085 I2C addr 0x69"
 		(exclude_from_sim no)
 		(at 216.916 82.804 0)
 		(effects
