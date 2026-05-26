@@ -20,7 +20,7 @@ alias mount1="mount | grep -E '^/'|grep -v snapd"
 alias akill='$ARGO_DIR/scripts/akill.sh'
 alias al='$ARGO_DIR/launch/argo_start_standard.sh'      # Start Argo nodes using standard launch
 alias aq='$ARGO_DIR/launch/argo_stop_standard.sh'       # Stop Argo nodes using standard launch
-# Restart all standard nodes (no args), or one node: ars argo_web_dashboard
+# Restart all standard nodes (no args), or start one if stopped: ars anem (see --restart)
 # unalias first: if ars was alias ars='aq && al', sourcing "ars() {" expands to "aq && al() {"
 # and runs stop/start during source ~/.bashrc
 if alias ars &>/dev/null; then unalias ars; fi

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
 """
-Restart a single Argo ROS2 node without stopping argo_launch_standard.service.
+Start or restart a single Argo ROS2 node without stopping argo_launch_standard.service.
 
-Uses launch/argo_nodes.yaml for names, executables, and systemd service mapping.
+Default: start the node only if it is not already running (e.g. after killing a
+process to run it from the CLI: ars anem). Use --restart to stop and start again.
+
+Uses launch/argo_nodes.yaml for names, executables, and short names (anem, gps).
 """
 
 import argparse
@@ -217,21 +220,39 @@ def _launch_node(argo_dir: str, cfg: Dict[str, Any]) -> subprocess.Popen:
     )
 
 
-def _restart_systemd_service(svc_cfg: Dict[str, Any]) -> int:
+def _systemd_service_active(service_name: str) -> bool:
+    result = subprocess.run(
+        ['systemctl', 'is-active', '--quiet', service_name],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _ensure_systemd_service(svc_cfg: Dict[str, Any], force_restart: bool) -> int:
     service_name = svc_cfg.get('service_name')
     if not service_name:
         raise SystemExit(f"No service_name for {svc_cfg.get('name')}")
 
     name = svc_cfg.get('name', service_name)
-    print(f"🔄 Restarting systemd service {service_name} ({name})...")
+    if _systemd_service_active(service_name) and not force_restart:
+        print(f"ℹ️  {service_name} ({name}) is already active")
+        print(f"   Use: ars {name} --restart  to restart the service")
+        return 0
+
+    action = (
+        'restart'
+        if force_restart and _systemd_service_active(service_name)
+        else 'start'
+    )
+    print(f"🔄 {action.capitalize()}ing systemd service {service_name} ({name})...")
     result = subprocess.run(
-        ['sudo', 'systemctl', 'restart', service_name],
+        ['sudo', 'systemctl', action, service_name],
         timeout=30,
     )
     if result.returncode != 0:
-        print(f"❌ systemctl restart {service_name} failed (exit {result.returncode})")
+        print(f"❌ systemctl {action} {service_name} failed (exit {result.returncode})")
         return result.returncode
-    print(f"✅ {service_name} restarted")
+    print(f"✅ {service_name} {action}ed")
     return 0
 
 
@@ -256,14 +277,16 @@ def _verify_ros_node(name: str, timeout_sec: float = 8.0) -> bool:
     return False
 
 
-def restart_node(node_query: str, skip_verify: bool = False) -> int:
+def start_node(
+    node_query: str, skip_verify: bool = False, force_restart: bool = False
+) -> int:
     argo_dir = _argo_root()
     config = load_argo_nodes_config(argo_dir)
     kind, cfg = _resolve_node_query(config, node_query)
     name = cfg.get('name', node_query)
 
     if kind == 'service':
-        return _restart_systemd_service(cfg)
+        return _ensure_systemd_service(cfg, force_restart)
 
     active = subprocess.run(
         ['systemctl', 'is-active', '--quiet', LAUNCH_SERVICE],
@@ -277,7 +300,17 @@ def restart_node(node_query: str, skip_verify: bool = False) -> int:
         return 1
 
     pids = _find_pids(argo_dir, cfg)
-    _terminate_pids(pids, name)
+    if pids and not force_restart:
+        print(
+            f"ℹ️  {name} already running (PID(s): {', '.join(map(str, pids))})"
+        )
+        print(f"   Use: ars {node_query} --restart  to stop and start again")
+        return 0
+
+    if pids and force_restart:
+        _terminate_pids(pids, name)
+    else:
+        print(f"ℹ️  {name} is not running — starting...")
 
     proc = _launch_node(argo_dir, cfg)
     time.sleep(1)
@@ -302,13 +335,24 @@ def restart_node(node_query: str, skip_verify: bool = False) -> int:
 def main() -> None:
     config = load_argo_nodes_config(_argo_root())
     parser = argparse.ArgumentParser(
-        description='Restart one Argo node without restarting the full launch service.',
-        epilog='Full fleet restart: ars (no arguments)',
+        description=(
+            'Start one Argo node if not running, or restart with --restart. '
+            'Does not stop argo_launch_standard.service.'
+        ),
+        epilog=(
+            'Examples: ars anem | ars gps_node | ars argo_web_dashboard --restart\n'
+            'Full fleet restart: ars (no arguments)'
+        ),
     )
     parser.add_argument(
         'node',
         nargs='?',
-        help='ROS2 node name from argo_nodes.yaml (e.g. argo_web_dashboard, gps_node)',
+        help='Node name or script stem from argo_nodes.yaml (e.g. anem, gps, argo_web_dashboard)',
+    )
+    parser.add_argument(
+        '--restart',
+        action='store_true',
+        help='Stop the node if running, then start it again',
     )
     parser.add_argument(
         '--no-verify',
@@ -318,7 +362,7 @@ def main() -> None:
     parser.add_argument(
         '--list',
         action='store_true',
-        help='List restartable node names and exit',
+        help='List node names and exit',
     )
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
@@ -333,7 +377,13 @@ def main() -> None:
         print("\nFor all nodes: use ars with no arguments (aq && al).")
         sys.exit(2)
 
-    sys.exit(restart_node(args.node, skip_verify=args.no_verify))
+    sys.exit(
+        start_node(
+            args.node,
+            skip_verify=args.no_verify,
+            force_restart=args.restart,
+        )
+    )
 
 
 if __name__ == '__main__':
