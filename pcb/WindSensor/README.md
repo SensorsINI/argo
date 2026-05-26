@@ -23,15 +23,15 @@ These images show a sample of the wind sensor housing and its design. The right 
   <tr>
     <td align="center">
       <b>Wind Sensor Housing Photo</b><br/>
-      <img src="WindSensor-rev1/images/wind-sensor-3d.jpg" alt="Wind Sensor 3D Turntable" width="360"/>
+      <img src="WindSensor-rev1c/images/wind-sensor-3d.jpg" alt="Wind Sensor 3D Turntable" width="360"/>
     </td>
     <td align="center">
       <b>3D Turntable GIF</b><br/>
-      <img src="WindSensor-rev1/images/windsensor-3d-turntable.gif" alt="Wind Sensor 3D Turntable" width="360"/>
+      <img src="WindSensor-rev1c/images/windsensor-3d-turntable.gif" alt="Wind Sensor 3D Turntable" width="360"/>
     </td>
     <td align="center">
       <b>Air Passages</b><br/>
-      <img src="WindSensor-rev1/images/windsensor-air-passages.png" alt="Wind Sensor Air Passages" width="360"/>
+      <img src="WindSensor-rev1c/images/windsensor-air-passages.png" alt="Wind Sensor Air Passages" width="360"/>
     </td>
   </tr>
 </table>
@@ -41,11 +41,11 @@ These images show a sample of the wind sensor housing and its design. The right 
   <tr>
     <td align="center">
       <b>Mast Step Up (1cm)</b><br/>
-      <img src="WindSensor-rev1/images/mast-step-up.png" alt="Mast Step Up" width="320" height="240"/>
+      <img src="WindSensor-rev1c/images/mast-step-up.png" alt="Mast Step Up" width="320" height="240"/>
     </td>
     <td align="center">
       <b>Cable Gland Housing</b><br/>
-      <img src="WindSensor-rev1/images/cable-gland.png" alt="Cable Gland Housing" width="320" height="240"/>
+      <img src="WindSensor-rev1c/images/cable-gland.png" alt="Cable Gland Housing" width="320" height="240"/>
     </td>
   </tr>
 </table>
