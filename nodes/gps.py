@@ -21,6 +21,7 @@ import argcomplete
 import re
 import math
 from functools import reduce
+from typing import Optional
 import pynmea2
 try:
     import gpiod
