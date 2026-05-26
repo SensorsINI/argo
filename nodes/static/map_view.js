@@ -87,7 +87,7 @@
             wind_flow_compass: data.wind_flow_compass,
             cog: data.gps_cog,
             sog: data.gps_sog,
-            stale: !!data.gps_data_stale,
+            stale: !!data.gps_data_stale || !!data.gps_position_frozen,
             has_fix: lat != null && lon != null,
         };
     }
@@ -434,13 +434,11 @@
             return;
         }
         if (targetState && displayState) {
-            // Position: follow GPS quickly (dashboard polls /fix at 1–2 Hz; heavy smoothing looked
-            // like a stuck GPS). Heading/wind: light smoothing only.
-            const posAlpha = 0.92;
+            // Position: snap to latest /fix (no extra low-pass; receiver filtering is enough).
             const angleAlpha = 0.35;
             displayState = {
-                x: lerp(displayState.x, targetState.x, posAlpha),
-                y: lerp(displayState.y, targetState.y, posAlpha),
+                x: targetState.x,
+                y: targetState.y,
                 lat: targetState.lat,
                 lon: targetState.lon,
                 heading: lerpAngle(displayState.heading, targetState.heading, angleAlpha),

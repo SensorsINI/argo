@@ -248,6 +248,13 @@ class GpsNode(ArgoBaseNode):
         self._nav_sat_diag = None
         self._last_nav_sat_poll_time = 0.0
 
+        # Detect receiver reporting a fixed lat/lon while the boat is moving
+        self._track_lat = None
+        self._track_lon = None
+        self._position_stuck_since = None
+        self._last_position_move_log_time = 0.0
+        self._nav_config_checked = False
+
         # NavSatFix data storage
         self.current_altitude = None  # Altitude in meters above WGS84 ellipsoid
         self.current_hdop = None  # Horizontal Dilution of Precision
@@ -350,6 +357,9 @@ class GpsNode(ArgoBaseNode):
 
         # Timer to check for extended no-fix condition and trigger reset if needed
         self.reset_check_timer = self.create_timer(60.0, self.check_and_reset_if_needed)  # Check every 60 seconds
+
+        # One-shot: verify BBR navigation filters (INFIL/static hold) after warm-up
+        self.create_timer(12.0, self._verify_navigation_config_once)
         # Timer to monitor PPS line and publish reception status
         self.pps_timer = self.create_timer(0.1, self.monitor_pps_status)  # 10 Hz polling for PPS
 
@@ -623,6 +633,66 @@ class GpsNode(ArgoBaseNode):
         except Exception as e:
             self.get_logger().warn(f"UBX send failed: class=0x{ubx_class:02X} id=0x{ubx_id:02X}: {e}")
             return False
+
+    def _read_serial_ubx_frames(self, timeout: float = 1.5) -> bytes:
+        """Read raw bytes from GPS serial for UBX response parsing."""
+        if not (self.serial_port and self.serial_port.is_open):
+            return b''
+        original_timeout = self.serial_port.timeout
+        self.serial_port.timeout = 0.1
+        buf = bytearray()
+        start = time.time()
+        try:
+            while time.time() - start < timeout:
+                if self.serial_port.in_waiting > 0:
+                    buf.extend(self.serial_port.read(self.serial_port.in_waiting))
+                else:
+                    time.sleep(0.05)
+        finally:
+            self.serial_port.timeout = original_timeout
+        return bytes(buf)
+
+    def _cfg_valget_u1(self, key_id: int) -> Optional[int]:
+        """Read a U1 configuration value from RAM via CFG-VALGET."""
+        if not (self.serial_port and self.serial_port.is_open):
+            return None
+        payload = bytearray([
+            0x00, 0x00, 0x00, 0x00,
+            key_id & 0xFF, (key_id >> 8) & 0xFF,
+            (key_id >> 16) & 0xFF, (key_id >> 24) & 0xFF,
+        ])
+        try:
+            if self.serial_port.in_waiting > 0:
+                self.serial_port.read(self.serial_port.in_waiting)
+            length = len(payload)
+            header = bytes([
+                0xB5, 0x62, 0x06, 0x8B,
+                length & 0xFF, (length >> 8) & 0xFF,
+            ])
+            ck = self._ubx_checksum(
+                bytes([0x06, 0x8B, length & 0xFF, (length >> 8) & 0xFF]) + payload
+            )
+            self.serial_port.write(header + payload + ck)
+            resp = self._read_serial_ubx_frames(timeout=1.5)
+            for i in range(len(resp) - 13):
+                if resp[i:i + 2] != b'\xB5\x62' or resp[i + 2] != 0x06 or resp[i + 3] != 0x8B:
+                    continue
+                plen = resp[i + 4] + (resp[i + 5] << 8)
+                end = i + 6 + plen
+                if end > len(resp):
+                    continue
+                data = resp[i + 6:end]
+                if len(data) < 8:
+                    continue
+                resp_key = int.from_bytes(data[4:8], 'little')
+                if resp_key != key_id:
+                    continue
+                if len(data) >= 9:
+                    return data[8]
+                return None
+        except Exception as e:
+            self.get_logger().debug(f"CFG-VALGET 0x{key_id:08x} failed: {e}")
+        return None
 
     def _cfg_rxm(self, lp_mode: int) -> bool:
         """Send UBX-CFG-RXM to set low power (PSM) mode.
@@ -1640,35 +1710,59 @@ class GpsNode(ArgoBaseNode):
 
     def query_current_dynmodel(self):
         """Query the current dynamic platform model using CFG-VALGET."""
-        try:
-            # CFG-VALGET message to query CFG-NAVSPG-DYNMODEL (0x20110021)
-            valget_payload = bytearray([
-                0x00,        # Version: 0
-                0x00,        # Layer: 0 = RAM (current active config)
-                0x00, 0x00,  # Position (reserved, set to 0)
-                # Key ID for DYNMODEL (4 bytes, little-endian)
-                0x21, 0x00, 0x11, 0x20
-            ])
-            
-            result = self._send_ubx(0x06, 0x8B, valget_payload, expect_ack=False, timeout=2.0)
-            if result and isinstance(result, (bytes, bytearray)) and len(result) >= 1:
-                # Response format: header (8 bytes) + key (4 bytes) + value (1 byte for U1)
-                # Extract the DYNMODEL value from response
-                dynmodel = result[0]
-                model_names = {
-                    0: "Portable", 2: "Stationary", 3: "Pedestrian", 
-                    4: "Automotive", 5: "Sea", 6: "Airborne <1g",
-                    7: "Airborne <2g", 8: "Airborne <4g", 9: "Wrist"
-                }
-                model_name = model_names.get(dynmodel, f"Unknown({dynmodel})")
-                self.get_logger().info(f"Current dynamic platform model: {model_name} ({dynmodel})")
-                return dynmodel
-            else:
-                self.get_logger().debug("Dynamic platform model query returned no payload (using factory defaults)")
-                return None
-        except Exception as e:
-            self.get_logger().warn(f"Error querying dynamic model: {e}")
+        dynmodel = self._cfg_valget_u1(self._KEY_NAVSPG_DYNMODEL)
+        if dynmodel is None:
+            self.get_logger().debug("Dynamic platform model query returned no value")
             return None
+        model_names = {
+            0: "Portable", 2: "Stationary", 3: "Pedestrian",
+            4: "Automotive", 5: "Sea", 6: "Airborne <1g",
+            7: "Airborne <2g", 8: "Airborne <4g", 9: "Wrist",
+        }
+        model_name = model_names.get(dynmodel, f"Unknown({dynmodel})")
+        self.get_logger().info(f"Current dynamic platform model: {model_name} ({dynmodel})")
+        return dynmodel
+
+    def verify_navigation_config(self, auto_fix: bool = True) -> bool:
+        """Log navigation filter settings; re-apply profile if BBR still has bad INFIL."""
+        cno_thrs = self._cfg_valget_u1(self._KEY_NAVSPG_INFIL_CNOTHRS)
+        static_speed = self._cfg_valget_u1(self._KEY_MOT_GNSSSPEED_THRS)
+        dynmodel = self._cfg_valget_u1(self._KEY_NAVSPG_DYNMODEL)
+
+        model_names = {
+            0: "Portable", 2: "Stationary", 3: "Pedestrian",
+            4: "Automotive", 5: "Sea",
+        }
+        dyn_name = model_names.get(dynmodel, f"?({dynmodel})") if dynmodel is not None else "?"
+
+        self.get_logger().info(
+            f"GPS nav config: DYNMODEL={dyn_name} "
+            f"INFIL_CNOTHRS={cno_thrs if cno_thrs is not None else '?'} dBHz "
+            f"static_hold_speed_thrs={static_speed if static_speed is not None else '?'} "
+            f"(0=off; SBAS mask does not disable GPS/GAL/GLO/BDS)"
+        )
+
+        needs_fix = cno_thrs is not None and cno_thrs > 0
+        if static_speed is not None and static_speed > 0:
+            static_mps = static_speed * 0.01
+            self.get_logger().warn(
+                f"GPS static hold may be enabled (GNSSSPEED_THRS={static_speed} "
+                f"≈ {static_mps:.2f} m/s) — position can freeze when moving slowly"
+            )
+
+        if needs_fix and auto_fix:
+            self.get_logger().warn(
+                f"GPS INFIL_CNOTHRS={cno_thrs} dBHz in BBR can block fix / freeze weak signals; "
+                "re-applying Europe navigation profile..."
+            )
+            return self.configure_navigation_europe_sailboat()
+        return not needs_fix
+
+    def _verify_navigation_config_once(self):
+        if self._nav_config_checked:
+            return
+        self._nav_config_checked = True
+        self.verify_navigation_config(auto_fix=True)
 
     def reset_config_to_defaults(self):
         """Reset GPS configuration to factory defaults using CFG-CFG.
@@ -1724,10 +1818,9 @@ class GpsNode(ArgoBaseNode):
     _KEY_SBAS_USE_INTEGRITY = 0x10360005
     _KEY_SBAS_PRNSCANMASK = 0x50360006
 
-    # Dynamic platform model: 3 = Pedestrian (low speed/acceleration; manual §3.1.7.1).
-    # At sea (5) assumes zero vertical velocity but field tests showed very sluggish position
-    # convergence; Pedestrian tracks slow horizontal motion better for a toy sailboat.
-    _DYNMODEL_PEDESTRIAN = 3
+    # Portable (0): factory default; best position tracking while actually moving on campus.
+    # Pedestrian/At sea over-filter horizontal position during dry-sail tests (map looked stuck).
+    _DYNMODEL_PORTABLE = 0
     # EGNOS GEO PRNs: 121, 123 (test), 136 — manual §3.2 example 2 (Europe)
     _EGNOS_SBAS_PRN_MASK = 0x000000000001000A
 
@@ -1762,13 +1855,13 @@ class GpsNode(ArgoBaseNode):
         """Configure NEO-M9N for European EGNOS SBAS and slow marine navigation.
 
         Per NEO-M9N Integration Manual (UBX-19014286):
-        - §3.1.7.1: Pedestrian dynamic model (low speed/acceleration, small position deviation)
+        - §3.1.7.1: Portable dynamic model (responsive position while moving; frozen COG still enabled)
         - §3.1.7.5: Frozen COG output in NMEA below ~0.1 m/s (CFG-NMEA-OUT_FROZENCOG)
         - §3.2: EGNOS-only SBAS PRN mask for corrections only (USE_RANGING=0 — GPS/GAL/GLO/BDS unchanged)
         - Navigation input filters left at firmware defaults (0); do not raise C/N0 fix threshold
         """
         self.get_logger().info(
-            "Configuring navigation: Pedestrian model, EGNOS SBAS corrections (Europe), low-speed COG/SOG...")
+            "Configuring navigation: Portable model, EGNOS SBAS corrections (Europe), low-speed COG/SOG...")
         self.get_logger().info(
             "  SBAS PRN mask selects EGNOS correction GEOs only; GNSS constellations are not restricted")
         valset_payload = bytearray([
@@ -1778,7 +1871,7 @@ class GpsNode(ArgoBaseNode):
         ])
 
         # Platform dynamics (§3.1.7.1)
-        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_DYNMODEL, self._DYNMODEL_PEDESTRIAN)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_DYNMODEL, self._DYNMODEL_PORTABLE)
         # Clear any prior INFIL overrides in BBR (e.g. CNOTHRS=20 blocked fix at ~17 dBHz signal)
         self._cfg_valset_add_i1(valset_payload, self._KEY_NAVSPG_INFIL_MINELEV, 0)
         self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_MINCNO, 0)
@@ -1804,9 +1897,10 @@ class GpsNode(ArgoBaseNode):
         nav_result = self._send_ubx(0x06, 0x8A, valset_payload, expect_ack=True, timeout=3.0)
         if nav_result:
             self.get_logger().info(
-                "✓ Navigation: Pedestrian, EGNOS SBAS (PRN 121/123/136), frozen COG in NMEA")
+                "✓ Navigation: Portable, EGNOS SBAS (PRN 121/123/136), frozen COG in NMEA")
             time.sleep(0.5)
             self.query_current_dynmodel()
+            self.verify_navigation_config(auto_fix=False)
             return True
 
         self.get_logger().warn("⚠ Europe/sailboat navigation CFG-VALSET not acknowledged")
@@ -2309,6 +2403,7 @@ class GpsNode(ArgoBaseNode):
 
                     self.get_logger().debug(
                         f"GGA: Position {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt {self.current_altitude}m, {self.satellites_used} sats")
+                    self._update_position_motion_check()
                     self.publish_navsat_fix()
                     return True
                 else:
@@ -2690,6 +2785,51 @@ class GpsNode(ArgoBaseNode):
             f"({sat_str}{eph_str}; since_fix={self._format_hms(time_without_fix_s)}; "
             f"{pps_str}; {ant_str}; {reset_str})"
         )
+
+    def _update_position_motion_check(self):
+        """Warn if GGA lat/lon is frozen while SOG suggests movement (static hold / bad BBR)."""
+        if not self.gps_fix_valid or self.current_latitude is None or self.current_longitude is None:
+            self._position_stuck_since = None
+            return
+
+        lat = self.current_latitude
+        lon = self.current_longitude
+        now = time.time()
+
+        if self._track_lat is not None and self._track_lon is not None:
+            dlat = math.radians(lat - self._track_lat)
+            dlon = math.radians(lon - self._track_lon)
+            a = (
+                math.sin(dlat / 2) ** 2
+                + math.cos(math.radians(self._track_lat))
+                * math.cos(math.radians(lat))
+                * math.sin(dlon / 2) ** 2
+            )
+            dist_m = 6378137.0 * 2 * math.asin(math.sqrt(min(1.0, a)))
+
+            if dist_m < 2.0:
+                if self._position_stuck_since is None:
+                    self._position_stuck_since = now
+                stuck_s = now - self._position_stuck_since
+                sog = self.current_sog or 0.0
+                if sog > 0.25 and stuck_s > 15.0 and (now - self._last_position_move_log_time) > 30.0:
+                    self.get_logger().warn(
+                        f"GPS position frozen ~{stuck_s:.0f}s at {lat:.6f},{lon:.6f} "
+                        f"while SOG={sog:.1f}kt — static hold or bad INFIL in BBR? "
+                        "Run: python3 nodes/gps.py --apply-nav-config"
+                    )
+                    self._last_position_move_log_time = now
+            else:
+                self._position_stuck_since = None
+                if self.debug_mode and (now - self._last_position_move_log_time) > 10.0:
+                    self.get_logger().debug(
+                        f"GPS position delta {dist_m:.1f}m -> {lat:.6f},{lon:.6f} "
+                        f"SOG={self.current_sog or 0:.1f}kt"
+                    )
+                    self._last_position_move_log_time = now
+
+        self._track_lat = lat
+        self._track_lon = lon
 
     def publish_navigation_data(self):
         """Publish SOG and COG data to ROS topics."""

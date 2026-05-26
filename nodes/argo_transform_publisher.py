@@ -45,6 +45,17 @@ from pathlib import Path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
 
+# Dragonforce 65 waterline length (m); hull speed V_kn = 1.34 * sqrt(LWL_ft)
+_DF65_LWL_M = 0.65
+
+
+def _df65_hull_speed_mps(lwl_m: float = _DF65_LWL_M) -> float:
+    """Theoretical hull speed in m/s (1 kn = 0.514444 m/s)."""
+    lwl_ft = lwl_m / 0.3048
+    v_kn = 1.34 * math.sqrt(lwl_ft)
+    return v_kn * 0.514444
+
+
 class ArgoTransformPublisher(ArgoBaseNode):
     def __init__(self, debug_mode=False):
         super().__init__('argo_transform_publisher')
@@ -139,10 +150,20 @@ class ArgoTransformPublisher(ArgoBaseNode):
         # Read publish rate from shared simulation parameters (argo.yaml)
         self.declare_parameter('simulation.publish_rate', 10.0)
         self.publish_rate = self.get_parameter('simulation.publish_rate').get_parameter_value().double_value
+
+        # GPS spike filter: implied speed cannot exceed DF65 hull speed (~1.0 m/s at 0.65 m LWL)
+        hull_mps = _df65_hull_speed_mps()
+        self.declare_parameter('gps_spike_max_speed_mps', hull_mps)
+        self._max_gps_speed_mps = self.get_parameter(
+            'gps_spike_max_speed_mps').get_parameter_value().double_value
+        if self._max_gps_speed_mps <= 0:
+            self._max_gps_speed_mps = hull_mps
         if self.publish_rate <= 0:
             self.publish_rate = 10.0
         
-        self.get_logger().info(f"Transform publisher rate: {self.publish_rate:.1f} Hz")
+        self.get_logger().info(
+            f"Transform publisher rate: {self.publish_rate:.1f} Hz, "
+            f"GPS spike max speed: {self._max_gps_speed_mps:.2f} m/s (DF65 hull speed)")
         
         # Timer for dynamic transforms
         self.timer = self.create_timer(1.0/self.publish_rate, self.publish_dynamic_transforms)
@@ -259,7 +280,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
                     f"(distance to origin {distance_to_origin:.1f}m)")
             elif distance > 0.0 and self._last_gps_wall_time is not None:
                 # Implied speed check (multipath flyaways), not a distance cap on real motion
-                max_speed_mps = 15.0
+                max_speed_mps = self._max_gps_speed_mps
                 dt = time.time() - self._last_gps_wall_time
                 if 0.05 < dt < 30.0 and (distance / dt) > max_speed_mps:
                     self.get_logger().warn(

@@ -92,6 +92,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         # GPS data staleness tracking
         self.last_gps_data_time = 0  # Timestamp of last GPS data received
         self.gps_data_timeout = 5.0  # Consider GPS data stale if no update for 5 seconds
+        self._gps_track_lat = None
+        self._gps_track_lon = None
+        self._gps_position_stuck_since = None
         
         # Service callback threading fix - use flag-based approach
         self.health_service_requested = False
@@ -161,6 +164,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             'gps_last_valid_longitude': None,  # Last valid GPS coordinates (preserved when fix is lost)
             'gps_node_healthy': True,  # GPS node health status
             'gps_data_stale': False,  # GPS data is stale (no updates or node unhealthy)
+            'gps_position_frozen': False,  # lat/lon unchanged while fix locked (receiver static hold)
             
             # Navigation
             'compass_heading': None,
@@ -898,7 +902,11 @@ class ArgoWebDashboard(ArgoBaseNode):
                     # Store last valid coordinates for display when fix is lost
                     self.state['gps_last_valid_latitude'] = msg.latitude
                     self.state['gps_last_valid_longitude'] = msg.longitude
+                    self._update_gps_position_frozen(msg.latitude, msg.longitude, now)
                 # Don't clear coordinates when fix is lost - keep showing last valid position
+                else:
+                    self.state['gps_position_frozen'] = False
+                    self._gps_position_stuck_since = None
                 
                 # Extract position accuracy from covariance (if available)
                 if msg.position_covariance_type != 0:  # Not COVARIANCE_TYPE_UNKNOWN
@@ -927,6 +935,10 @@ class ArgoWebDashboard(ArgoBaseNode):
                         # Store last valid coordinates for display when fix is lost
                         self.state['gps_last_valid_latitude'] = msg.latitude
                         self.state['gps_last_valid_longitude'] = msg.longitude
+                        self._update_gps_position_frozen(msg.latitude, msg.longitude, now)
+                    else:
+                        self.state['gps_position_frozen'] = False
+                        self._gps_position_stuck_since = None
                     # Don't clear coordinates when fix is lost - keep showing last valid position
                     
                     self.state['data_source'] = 'LoRa'
@@ -1358,6 +1370,25 @@ class ArgoWebDashboard(ArgoBaseNode):
             return response
     
     # ==================== Utility Functions ====================
+
+    def _update_gps_position_frozen(self, lat: float, lon: float, now: float) -> None:
+        """Flag when /fix lat/lon stops changing while still locked (receiver static hold)."""
+        frozen = False
+        if self._gps_track_lat is not None and self._gps_track_lon is not None:
+            dist_nm = self._calculate_distance(self._gps_track_lat, self._gps_track_lon, lat, lon)
+            dist_m = dist_nm * 1852.0
+            if dist_m < 2.0:
+                if self._gps_position_stuck_since is None:
+                    self._gps_position_stuck_since = now
+                if now - self._gps_position_stuck_since > 20.0:
+                    sog = self.state.get('gps_sog') or 0.0
+                    if sog > 0.25:
+                        frozen = True
+            else:
+                self._gps_position_stuck_since = None
+        self._gps_track_lat = lat
+        self._gps_track_lon = lon
+        self.state['gps_position_frozen'] = frozen
     
     def _calculate_distance(self, lat1, lon1, lat2, lon2):
         """Calculate distance in nautical miles using Haversine formula."""
