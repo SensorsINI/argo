@@ -167,10 +167,12 @@ class ArgoWebDashboard(ArgoBaseNode):
             'imu_healthy': None,
             'imu_health_age': None,
             
-            # Wind
+            # Wind (/anem_speed_angle_temp y is relative CW from bow; fused with /compass)
             'wind_speed': None,
             'wind_angle': None,
             'wind_temp': None,
+            'wind_from_compass': None,   # absolute, where wind comes from (true compass)
+            'wind_flow_compass': None,   # absolute, where wind blows to (for map arrow)
             
             # Controller
             'human_controlled': None,  # None = unknown until first message received
@@ -200,6 +202,9 @@ class ArgoWebDashboard(ArgoBaseNode):
             'last_update': time.time()
         }
         
+        # Simulator true wind (compass, where wind comes from); None on real hardware
+        self.true_wind_direction_from_sim = None
+
         # Viewer activity tracking for CPU optimization
         self.last_viewer_request_time = time.time()  # Track last HTTP request
         self.viewer_timeout = 30.0  # Enter low-power mode after 30s of no requests
@@ -464,9 +469,8 @@ class ArgoWebDashboard(ArgoBaseNode):
         self._topic_subscriptions.append(
             self.create_subscription(Vector3, '/compass', lambda msg: self.compass_cb(msg, 'wifi'), self.volatile_qos)
         )
-        self._topic_subscriptions.append(
-            self.create_subscription(Vector3, '/pose', lambda msg: self.pose_cb(msg, 'wifi'), self.volatile_qos)
-        )
+        # IMU heading for display comes from /compass only (true compass). /pose is math yaw
+        # for TF/controller; subscribing here caused duplicate updates with no benefit.
         self._topic_subscriptions.append(
             self.create_subscription(Float64, '/gps_cog', lambda msg: self.gps_cog_cb(msg, 'wifi'), self.volatile_qos)
         )
@@ -475,6 +479,11 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
         self._topic_subscriptions.append(
             self.create_subscription(Vector3, '/anem_speed_angle_temp', lambda msg: self.wind_cb(msg, 'wifi'), self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(
+                Float64, '/simulator/true_wind_direction', self.true_wind_cb, self.volatile_qos
+            )
         )
         self._topic_subscriptions.append(
             self.create_subscription(NavSatFix, '/fix', lambda msg: self.gps_fix_cb(msg, 'wifi'), self.volatile_qos)
@@ -727,6 +736,36 @@ class ArgoWebDashboard(ArgoBaseNode):
         with self.state_lock:
             self.state['saltwater_voltage'] = msg.data
     
+    def _update_absolute_wind(self) -> None:
+        """
+        Fuse anem relative wind with /compass (same as controller.py / anem.py).
+
+        anem y: degrees CW from bow, where wind comes from (relative).
+        compass_heading: true compass bow heading from bno085 /compass.
+        wind_from_compass = (heading + rel) % 360; wind_flow = from + 180° (map arrow).
+        """
+        if self.true_wind_direction_from_sim is not None:
+            from_deg = float(self.true_wind_direction_from_sim) % 360.0
+        else:
+            rel = self.state.get('wind_angle')
+            hdg = self.state.get('compass_heading')
+            if rel is None or hdg is None:
+                self.state['wind_from_compass'] = None
+                self.state['wind_flow_compass'] = None
+                return
+            from_deg = (float(hdg) + float(rel)) % 360.0
+        self.state['wind_from_compass'] = from_deg
+        self.state['wind_flow_compass'] = (from_deg + 180.0) % 360.0
+
+    def true_wind_cb(self, msg: Float64) -> None:
+        """Simulator-only absolute wind (compass, where wind comes from)."""
+        if self.low_power_mode:
+            return
+        with self.state_lock:
+            self.true_wind_direction_from_sim = float(msg.data) % 360.0
+            self._update_absolute_wind()
+            self._update_data_age_indicators()
+
     def compass_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
         # Skip processing in low-power mode (no viewers)
@@ -747,32 +786,11 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.state['compass_heading'] = msg.z
                     self.state['data_source'] = 'LoRa'
             
+            self._update_absolute_wind()
             self._update_data_age_indicators()
         
         # Update health status - compass heading is boat data
         self._update_boat_data_received(f"compass_{source}")
-    
-    def pose_cb(self, msg, source='wifi'):
-        """Unified callback that tracks source and timestamp"""
-        # Skip processing in low-power mode (no viewers)
-        if self.low_power_mode:
-            return
-
-        now = time.time()
-        # /pose z is mathematical yaw (0°=East, CCW), same as simulator; convert for display.
-        heading_math = float(msg.z) % 360.0
-        compass_heading = (450.0 - heading_math) % 360.0
-        
-        with self.state_lock:
-            if source == 'wifi':
-                self.last_wifi_update['compass_heading'] = now
-                self.state['compass_heading'] = compass_heading
-                self.state['data_source'] = 'WiFi'
-            
-            self._update_data_age_indicators()
-        
-        # Update health status - pose data is boat data
-        self._update_boat_data_received(f"pose_{source}")
     
     def gps_cog_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -852,6 +870,7 @@ class ArgoWebDashboard(ArgoBaseNode):
                     self.state['air_temp'] = msg.z
                     self.state['data_source'] = 'LoRa'
             
+            self._update_absolute_wind()
             self._update_data_age_indicators()
         
         # Update health status - wind data is boat data

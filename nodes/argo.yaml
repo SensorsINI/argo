@@ -7,7 +7,7 @@
 /**:
   ros__parameters:
     # Map configuration (used by sailing_area_publisher, argo_transform_publisher, controllers)
-    geofence_map_name: Argo Irchel North pond sailing area  # Hotel dei Pini | Argo Irchel pond sailing area
+    geofence_map_name: behind INI  # Argo Irchel North pond sailing area | Argo Irchel pond sailing area | Argo Pool Hotel dek Pini | Hotel dei Pini | Hotel dei Pini close to shore
     # Controller parameters (used by controller.py and crosser controller)
     p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
     min_rudder_near_boundary: 0.5  # Minimum rudder command when close to boundary (0.0-1.0)
@@ -90,20 +90,23 @@
         wind_gust_max_speed: 7.0           # Max gust speed (m/s, placeholder)
         wind_gust_max_delta_percent: 10.0  # Max gust speed variation percent (placeholder)
     # ----------------------------------------------------------------------------
-    # IMU Yaw Offset (degrees)
-    # - Purpose: Fixed rotation about +Z to align BNO085 sensor frame to boat frame
-    # - Sign: Positive rotates COUNTER-CLOCKWISE (mathematical) before publishing
-    #         Final heading and XY data use: (raw_yaw + yaw_offset_deg) % 360
-    # - Typical mounts:
-    #     • Board with +Y forward, +X starboard, +Z up → use about -90°
-    # - Tuning: Adjust so when bow points to true/magnetic North, /compass ≈ 0°
+    # IMU heading (bno085.py) — fusion quaternion is mag-north referenced after ellipsoid cal
+    # - mount_forward_axis: bow direction in sensor frame (+Y on PCB, +X starboard, +Z up)
+    # - mount_yaw_deg: extra rotation in sensor XY plane if PCB is rotated about vertical axis
+    # - yaw_offset_deg: fine trim only (declination, sub-degree alignment); default 0
+    # - yaw_invert: if N/S correct but E/W swapped, set true; test bow E/W (no change at N/S)
+    # - Reload IMU config: sudo systemctl restart argo_bno085.service
+    #   (ars / argo_launch restart does NOT restart the BNO085 bridge — separate service)
+    # - /compass: 0°=North, 90°=East (CW). /pose.z: ENU math yaw; compass = (450 - pose.z) % 360
     # ----------------------------------------------------------------------------
     imu:
-      yaw_offset_deg: 59.25
-      yaw_invert: false
+      mount_forward_axis: y
+      mount_yaw_deg: 0.0
+      yaw_offset_deg: 0.0
+      yaw_invert: false # verified correct in lab, dashboard display at least roughly correct
 controller_node:
   ros__parameters:
-    controller_type: crosser  # Options: proportional, wind_aware, return_to_home, crosser, human
+    controller_type: human  # Options: proportional, wind_aware, return_to_home, crosser, human
     data_collection_enabled: false  # Enable training data recording for machine learning (used by controller.py)
     rudder_gain: 0.3  # Proportional gain for rudder control (formula: rudder_cmd = gain * heading_error / rudder_full_scale_deg)
     rudder_full_scale_deg: 60.0  # Heading error (degrees) that produces full rudder deflection (-1.0 to +1.0)
@@ -145,8 +148,14 @@ rudder_sail_radio_node:
   ros__parameters:
     human_override_timeout: 8.0      # Seconds after last human activity before robot can take control
     deadband_threshold: 0.25          # Rudder: |pos|>threshold; Sail: only Δsail>threshold (2 reads) — see rudder_sail_radio.py
-    safety_max_rudder: 1.0            # Maximum rudder command magnitude
-    safety_max_sail: 1.0              # Maximum sail command magnitude
+    # Rudder: measure radio endpoints at full stick (watch radio_rudder_pw_us). cmd -1/+1 uses these;
+    # crosser/human PWM output maps cmd -1/+1 to servo_* endpoints (amplifies throw vs radio).
+    # release_servos=true (HumanController) bypasses this — radio drives servo directly.
+    radio_rudder_min_pw: 1100.0
+    radio_rudder_max_pw: 1900.0
+    servo_rudder_min_pw: 900.0    # kernel minimum (argo_radio_servo_module)
+    servo_rudder_max_pw: 2100.0   # kernel maximum
+    safety_max_sail: 1.0        # Sail: normalized cap; PWM still 1500±500us per unit
     param_file_path: argo.yaml
 argo_boat_visualization:
   ros__parameters:

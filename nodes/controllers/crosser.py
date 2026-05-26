@@ -604,7 +604,7 @@ class CrosserController(BaseController):
                     state.target_heading, state.compass_heading)
                 normalized_error = compass_err / self.rudder_full_scale_deg
                 cmd_rudder = self.p_heading_gain * normalized_error
-                cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
+                cmd_rudder = self.clip_rudder(cmd_rudder)
             else:
                 cmd_rudder = 0.0
             cmd_sail = 0.0
@@ -1166,7 +1166,7 @@ class CrosserController(BaseController):
                             f"Emergency: near boundary inside area ({abs(signed_db):.1f}m from edge) - "
                             f"applying minimum rudder {cmd_rudder:+.3f}")
             
-            cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
+            cmd_rudder = self.clip_rudder(cmd_rudder)
         else:
             cmd_rudder = 0.0
             compass_err = 0.0

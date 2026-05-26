@@ -18,7 +18,7 @@ This will add `source ~/argo/dotfiles/bashrc` to your `~/.bashrc` file.
 Quick commands for Argo robot control:
 - `al` - Start Argo nodes
 - `aq` - Stop Argo nodes  
-- `ars` - Restart Argo nodes
+- `ars` - Restart all Argo launch nodes (`aq && al`), or one node: `ars argo_web_dashboard`
 - `as` - Show Argo status
 - `am` - Monitor mode
 - `ar` - Start recording

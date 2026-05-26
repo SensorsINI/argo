@@ -31,6 +31,7 @@ from sensor_msgs.msg import NavSatFix
 from rosgraph_msgs.msg import Clock
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 import math
+import time
 import numpy as np
 import sys
 import os
@@ -91,6 +92,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         # GPS timestamp tracking - store the timestamp of the GPS message that provided current position
         # This ensures transforms use the correct timestamp to match GPS data, preventing backwards movement
         self.last_gps_timestamp = None
+        self._last_gps_wall_time = None
         
         # Debug tracing
         self.debug_trace = self.declare_parameter('debug_trace', False).get_parameter_value().bool_value
@@ -240,34 +242,31 @@ class ArgoTransformPublisher(ArgoBaseNode):
             if self.debug_trace:
                 self.get_logger().debug(f"[TF_TRACE:GPS] Map origin set - lat={self.map_origin_lat:.8f}, lon={self.map_origin_lon:.8f}")
 
-        # Always update the current position (but only if valid)
-        # Prevent jumps by checking if position changed dramatically (more than 1km)
-        if self.map_origin_set:
-            # Calculate distance from current position to last known position
-            dx = (msg.longitude - self.current_lon) * 111320.0 * math.cos(math.radians(self.map_origin_lat))  # meters
-            dy = (msg.latitude - self.current_lat) * 111320.0  # meters
-            distance = math.sqrt(dx*dx + dy*dy)
-            
-            # Check if new position is near the map origin (home waypoint) - indicates a reset
-            # Calculate distance from new position to map origin
-            dx_to_origin = (msg.longitude - self.map_origin_lon) * 111320.0 * math.cos(math.radians(self.map_origin_lat))  # meters
-            dy_to_origin = (msg.latitude - self.map_origin_lat) * 111320.0  # meters
-            distance_to_origin = math.sqrt(dx_to_origin*dx_to_origin + dy_to_origin*dy_to_origin)
-            
-            # If jump is more than 100m, check if it's a reset (position near origin)
-            if distance > 100.0 and self.current_lat != 0.0 and self.current_lon != 0.0:
-                # Allow the jump if new position is close to origin (within 50m) - this is a reset
-                # 50m threshold accounts for coordinate conversion errors while still detecting resets
-                if distance_to_origin < 50.0:
-                    self.get_logger().info(f"Detected simulation reset: accepting position jump of {distance:.1f}m to home location (distance to origin: {distance_to_origin:.1f}m)")
+        # Reject only implausible GPS spikes (not normal boat motion — a 100m move is ~70s at 1 m/s).
+        if self.map_origin_set and (self.current_lat != 0.0 or self.current_lon != 0.0):
+            dx = (msg.longitude - self.current_lon) * 111320.0 * math.cos(math.radians(self.map_origin_lat))
+            dy = (msg.latitude - self.current_lat) * 111320.0
+            distance = math.sqrt(dx * dx + dy * dy)
+
+            dx_to_origin = (msg.longitude - self.map_origin_lon) * 111320.0 * math.cos(math.radians(self.map_origin_lat))
+            dy_to_origin = (msg.latitude - self.map_origin_lat) * 111320.0
+            distance_to_origin = math.sqrt(dx_to_origin * dx_to_origin + dy_to_origin * dy_to_origin)
+
+            # Simulation / home reset: large jump landing near map origin
+            if distance > 100.0 and distance_to_origin < 50.0:
+                self.get_logger().info(
+                    f"Detected position reset near map origin: jump {distance:.1f}m "
+                    f"(distance to origin {distance_to_origin:.1f}m)")
+            elif distance > 0.0 and self._last_gps_wall_time is not None:
+                # Implied speed check (multipath flyaways), not a distance cap on real motion
+                max_speed_mps = 15.0
+                dt = time.time() - self._last_gps_wall_time
+                if 0.05 < dt < 30.0 and (distance / dt) > max_speed_mps:
+                    self.get_logger().warn(
+                        f"Ignoring implausible GPS spike: {distance:.1f}m in {dt:.2f}s "
+                        f"({distance / dt:.1f} m/s > {max_speed_mps:.1f} m/s)")
                     if self.debug_trace:
-                        self.get_logger().debug(f"[TF_TRACE:GPS] Reset detected - accepting jump to origin")
-                    # Continue to update position (don't return)
-                else:
-                    # Large jump but not near origin - likely an error, ignore it
-                    self.get_logger().warn(f"Ignoring GPS position jump: {distance:.1f}m (from {self.current_lat:.6f},{self.current_lon:.6f} to {msg.latitude:.6f},{msg.longitude:.6f}) - not near origin (distance to origin: {distance_to_origin:.1f}m)")
-                    if self.debug_trace:
-                        self.get_logger().debug(f"[TF_TRACE:GPS] Position jump ignored - distance={distance:.1f}m, not a reset")
+                        self.get_logger().debug("[TF_TRACE:GPS] Spike rejected by speed check")
                     return
         
         old_lat, old_lon = self.current_lat, self.current_lon
@@ -277,6 +276,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         # Store the GPS message timestamp - this is critical for correct transform ordering
         # Transforms that use this GPS position should use this timestamp, not the current clock time
         self.last_gps_timestamp = msg.header.stamp
+        self._last_gps_wall_time = time.time()
         
         if self.debug_trace:
             # Convert to x,y for logging
@@ -285,8 +285,8 @@ class ArgoTransformPublisher(ArgoBaseNode):
             self.get_logger().debug(f"[TF_TRACE:GPS] GPS callback - lat={self.current_lat:.8f}, lon={self.current_lon:.8f}, x={x:.6f}, y={y:.6f} (was x={old_x:.6f}, y={old_y:.6f}), timestamp={self.last_gps_timestamp}")
     
     def pose_callback(self, msg):
-        """Update boat heading from pose topic"""
-        self.boat_heading = msg.z  # Heading in degrees
+        """Update boat heading from /pose (ENU math yaw: 0°=East, CCW)."""
+        self.boat_heading = float(msg.z) % 360.0
     
     def accel_callback(self, msg):
         """Estimate roll and pitch from accelerometer data"""

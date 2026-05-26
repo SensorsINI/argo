@@ -36,9 +36,9 @@ COLOR_WIFI='\e[0;94m'              # Bright blue for WiFi reconnect
 COLOR_TIMESTAMP='\e[0;90m'         # Gray for timestamps
 RESET='\e[0m'
 
-# Priority color codes (unconditional highlighting)
-COLOR_ERROR='\e[1;91m'             # Bold bright red for ERROR
-COLOR_WARN='\e[1;33m'              # Bold dark yellow for WARN
+# Priority color codes (unconditional highlighting; red/pink not used for services)
+COLOR_ERROR='\e[1;91m'             # Bold bright red for ERROR/FATAL
+COLOR_WARN='\e[0;35m'              # Dark pink for WARN/WARNING
 
 # Service names
 SERVICE_ARGO="argo_launch_standard.service"
@@ -98,8 +98,8 @@ while getopts "n:fet:ha" opt; do
             echo "  - ${SERVICE_WIFI} (bright blue)"
             echo ""
             echo "Priority highlighting:"
-            echo "  - ERROR lines              (bold bright red)"
-            echo "  - WARN lines               (bold dark yellow)"
+            echo "  - ERROR/FATAL lines        (bold bright red)"
+            echo "  - WARN/WARNING lines       (dark pink)"
             echo ""
             echo "Examples:"
             echo "  argo_logs.sh                    # Follow all logs (live)"
@@ -168,8 +168,8 @@ echo -e "${COLOR_POWER}●${RESET} ${SERVICE_POWER} (green)"
 echo -e "${COLOR_IMU}●${RESET} ${SERVICE_IMU} (magenta)"
 echo -e "${COLOR_ARGO_LAUNCH}●${RESET} ${SERVICE_HEALTH} (cyan)"
 echo -e "${COLOR_WIFI}●${RESET} ${SERVICE_WIFI} (bright blue)"
-echo -e "${COLOR_ERROR}●${RESET} ERROR lines (bold bright red)"
-echo -e "${COLOR_WARN}●${RESET} WARN lines (bold dark yellow)"
+echo -e "${COLOR_ERROR}●${RESET} ERROR/FATAL lines (bold bright red)"
+echo -e "${COLOR_WARN}●${RESET} WARN/WARNING lines (dark pink)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -177,9 +177,9 @@ echo ""
 colorize_logs() {
     while IFS= read -r line; do
         # Priority highlighting for errors and warnings
-        if echo "$line" | grep -qi "ERROR"; then
+        if echo "$line" | grep -qiE "ERROR|FATAL"; then
             echo -e "${COLOR_ERROR}${line}${RESET}"
-        elif echo "$line" | grep -qi "WARN"; then
+        elif echo "$line" | grep -qiE "WARN|WARNING"; then
             echo -e "${COLOR_WARN}${line}${RESET}"
         # Service-specific coloring
         elif echo "$line" | grep -q "argo_lifecycle_manager\|argo-launch\|argo_health_monitor"; then

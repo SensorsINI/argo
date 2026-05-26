@@ -67,6 +67,7 @@ class GpsNode(ArgoBaseNode):
 
     Key Features:
     - Automatic GPS communication verification and setup
+    - Europe/EGNOS SBAS and marine navigation profile (CFG-NAVSPG, CFG-SBAS) per NEO-M9N manual §3.1.7–3.2
     - Hot start configuration for fast GPS acquisition (CFG-BAT, CFG-NAV5, CFG-PMS)
     - NMEA sentence parsing (GGA, RMC, VTG) for position and navigation data
     - Standard NavSatFix messages for 3D mapping in Foxglove
@@ -153,9 +154,11 @@ class GpsNode(ArgoBaseNode):
     --debug: Enable detailed debug logging of GPS data and communication
     --reset: Perform hardware reset on GPS module at startup using reset pin
     --factory-reset: Reset GPS configuration to factory defaults (clears BBR and Flash)
+    --apply-nav-config: Apply Europe/EGNOS + At sea navigation profile (even if already streaming)
     """
 
-    def __init__(self, debug_mode=False, do_hardware_reset=False, do_factory_reset=False):
+    def __init__(self, debug_mode=False, do_hardware_reset=False, do_factory_reset=False,
+                 do_apply_nav_config=False):
         super().__init__('gps_node')
 
         # Set logger level to DEBUG if debug mode is enabled
@@ -166,6 +169,7 @@ class GpsNode(ArgoBaseNode):
         # Store hardware reset flag for use during setup
         self.do_hardware_reset_on_startup = do_hardware_reset
         self.do_factory_reset_on_startup = do_factory_reset
+        self.do_apply_nav_config_on_startup = do_apply_nav_config
 
         self.get_logger().info('Initializing GPS node...')
 
@@ -239,6 +243,10 @@ class GpsNode(ArgoBaseNode):
         self.average_snr = 0.0  # Average SNR of satellites with valid signal
         self.last_gsv_time = None  # Track when we last received valid GSV data (None until first GSV)
         self.last_gsv_update_time = 0.0  # Track when we last aggregated all constellation data
+
+        # UBX-NAV-SAT diagnostics (ephemeris / almanac / used-in-solution)
+        self._nav_sat_diag = None
+        self._last_nav_sat_poll_time = 0.0
 
         # NavSatFix data storage
         self.current_altitude = None  # Altitude in meters above WGS84 ellipsoid
@@ -1069,23 +1077,19 @@ class GpsNode(ArgoBaseNode):
             #
             # The GPS module retains its configuration permanently via backup battery.
             # Configuration should only be done manually via --factory-reset or setup script.
-            if not factory_reset_performed:
-                self.get_logger().info("GPS outputting data - skipping configuration to preserve ephemeris")
+            if not factory_reset_performed and not self.do_apply_nav_config_on_startup:
+                self.get_logger().info(
+                    "GPS outputting data - skipping configuration to preserve ephemeris "
+                    "(use --apply-nav-config to force Europe/sailboat profile)")
             else:
-                # After factory reset: use factory defaults with minimal essential configuration
-                # Per NEO-M9N Integration Manual 3.1.5, factory defaults include:
-                # - UART: 38400 baud, 8N1
-                # - Output: NMEA GGA, GLL, GSA, GSV, RMC, VTG, TXT
-                # - NMEA 4.10 with all GNSS bands
-                self.get_logger().info("Using factory default configuration:")
-                self.get_logger().info("  UART: 38400 baud, 8N1")
-                self.get_logger().info("  NMEA: GGA, GLL, GSA, GSV, RMC, VTG, TXT (all GNSS)")
-                self.get_logger().info("  Dynamic model: Portable (factory default)")
-                
-                # NOTE: SparkFun NEO-M9N breakout board has hardware antenna power circuit
-                # (VCC_RF with FB1 ferrite bead, R14 10Ω resistor, C1 47pF capacitor)
-                # No software configuration needed - antenna power is always on
-                # self.configure_antenna_power()  # DISABLED - not needed with SparkFun board
+                if factory_reset_performed:
+                    self.get_logger().info(
+                        "Applying Europe/sailboat navigation profile after factory reset...")
+                else:
+                    self.get_logger().info(
+                        "Applying Europe/sailboat navigation profile (--apply-nav-config)...")
+                self.configure_hot_start()
+                self.enable_nmea_sentences()
             
             self.get_logger().info("GPS setup completed. Device is working correctly.")
             self.set_healthy("GPS initialized and receiving data")
@@ -1575,8 +1579,10 @@ class GpsNode(ArgoBaseNode):
             # Parse satellite data (each sat is 12 bytes)
             satellites_used = 0
             satellites_with_ephemeris = 0
+            satellites_with_almanac = 0
             satellites_healthy = 0
             low_snr_sats = []
+            tracked_with_cno = 0
             
             for i in range(num_svs):
                 offset = 8 + (i * 12)
@@ -1603,21 +1609,29 @@ class GpsNode(ArgoBaseNode):
                     satellites_healthy += 1
                 if eph_avail:
                     satellites_with_ephemeris += 1
+                if alm_avail:
+                    satellites_with_almanac += 1
+                if cno > 0:
+                    tracked_with_cno += 1
                 if cno > 0 and cno < 25:  # Low SNR
-                    low_snr_sats.append((sv_id, cno))
+                    low_snr_sats.append((gnss_id, sv_id, cno))
             
             self.get_logger().info(
-                f"Satellite analysis: {satellites_used} used in solution, "
-                f"{satellites_with_ephemeris} have ephemeris, {satellites_healthy} healthy")
+                f"UBX-NAV-SAT: tracked={num_svs} with_CNO={tracked_with_cno} used={satellites_used} "
+                f"eph={satellites_with_ephemeris} alm={satellites_with_almanac} healthy={satellites_healthy}")
             
             if low_snr_sats:
-                self.get_logger().info(f"Low SNR satellites (<25 dBHz): {low_snr_sats[:5]}")  # Show first 5
+                self.get_logger().info(
+                    f"Low SNR (<25 dBHz, gnssId,svId,cno): {low_snr_sats[:8]}")
             
             return {
+                'tracked': num_svs,
+                'with_cno': tracked_with_cno,
                 'used': satellites_used,
                 'ephemeris': satellites_with_ephemeris,
+                'almanac': satellites_with_almanac,
                 'healthy': satellites_healthy,
-                'low_snr': len(low_snr_sats)
+                'low_snr': len(low_snr_sats),
             }
                 
         except Exception as e:
@@ -1693,6 +1707,111 @@ class GpsNode(ArgoBaseNode):
             self.get_logger().error(f"Failed to reset GPS configuration: {e}")
             return False
 
+    # u-blox CFG key IDs (M9 interface description / pyubx2 config database)
+    _KEY_NAVSPG_DYNMODEL = 0x20110021
+    _KEY_NAVSPG_INFIL_MINELEV = 0x201100A4
+    _KEY_NAVSPG_INFIL_MINCNO = 0x201100A3
+    _KEY_NAVSPG_INFIL_NCNOTHRS = 0x201100AA
+    _KEY_NAVSPG_INFIL_CNOTHRS = 0x201100AB
+    _KEY_NMEA_OUT_FROZENCOG = 0x10930026
+    _KEY_MOT_GNSSSPEED_THRS = 0x20250038
+    _KEY_MOT_GNSSDIST_THRS = 0x3025003B
+    _KEY_SIGNAL_SBAS_ENA = 0x10310020
+    _KEY_SIGNAL_SBAS_L1CA_ENA = 0x10310005
+    _KEY_SBAS_USE_TESTMODE = 0x10360002
+    _KEY_SBAS_USE_RANGING = 0x10360003
+    _KEY_SBAS_USE_DIFFCORR = 0x10360004
+    _KEY_SBAS_USE_INTEGRITY = 0x10360005
+    _KEY_SBAS_PRNSCANMASK = 0x50360006
+
+    # Dynamic platform model: 3 = Pedestrian (low speed/acceleration; manual §3.1.7.1).
+    # At sea (5) assumes zero vertical velocity but field tests showed very sluggish position
+    # convergence; Pedestrian tracks slow horizontal motion better for a toy sailboat.
+    _DYNMODEL_PEDESTRIAN = 3
+    # EGNOS GEO PRNs: 121, 123 (test), 136 — manual §3.2 example 2 (Europe)
+    _EGNOS_SBAS_PRN_MASK = 0x000000000001000A
+
+    @staticmethod
+    def _cfg_valset_add_key(payload: bytearray, key: int, value_bytes: bytes) -> None:
+        payload.extend([
+            key & 0xFF, (key >> 8) & 0xFF, (key >> 16) & 0xFF, (key >> 24) & 0xFF,
+        ])
+        payload.extend(value_bytes)
+
+    @classmethod
+    def _cfg_valset_add_u1(cls, payload: bytearray, key: int, value: int) -> None:
+        cls._cfg_valset_add_key(payload, key, bytes([value & 0xFF]))
+
+    @classmethod
+    def _cfg_valset_add_i1(cls, payload: bytearray, key: int, value: int) -> None:
+        cls._cfg_valset_add_key(payload, key, bytes([value & 0xFF if value >= 0 else (256 + value) & 0xFF]))
+
+    @classmethod
+    def _cfg_valset_add_u2(cls, payload: bytearray, key: int, value: int) -> None:
+        cls._cfg_valset_add_key(payload, key, bytes([value & 0xFF, (value >> 8) & 0xFF]))
+
+    @classmethod
+    def _cfg_valset_add_l(cls, payload: bytearray, key: int, enabled: bool) -> None:
+        cls._cfg_valset_add_key(payload, key, bytes([1 if enabled else 0]))
+
+    @classmethod
+    def _cfg_valset_add_x8(cls, payload: bytearray, key: int, value: int) -> None:
+        cls._cfg_valset_add_key(payload, key, value.to_bytes(8, 'little'))
+
+    def configure_navigation_europe_sailboat(self) -> bool:
+        """Configure NEO-M9N for European EGNOS SBAS and slow marine navigation.
+
+        Per NEO-M9N Integration Manual (UBX-19014286):
+        - §3.1.7.1: Pedestrian dynamic model (low speed/acceleration, small position deviation)
+        - §3.1.7.5: Frozen COG output in NMEA below ~0.1 m/s (CFG-NMEA-OUT_FROZENCOG)
+        - §3.2: EGNOS-only SBAS PRN mask for corrections only (USE_RANGING=0 — GPS/GAL/GLO/BDS unchanged)
+        - Navigation input filters left at firmware defaults (0); do not raise C/N0 fix threshold
+        """
+        self.get_logger().info(
+            "Configuring navigation: Pedestrian model, EGNOS SBAS corrections (Europe), low-speed COG/SOG...")
+        self.get_logger().info(
+            "  SBAS PRN mask selects EGNOS correction GEOs only; GNSS constellations are not restricted")
+        valset_payload = bytearray([
+            0x00,       # version: SET (immediate)
+            0x03,       # layers: RAM + BBR (persist without rewriting flash each boot)
+            0x00, 0x00,
+        ])
+
+        # Platform dynamics (§3.1.7.1)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_DYNMODEL, self._DYNMODEL_PEDESTRIAN)
+        # Clear any prior INFIL overrides in BBR (e.g. CNOTHRS=20 blocked fix at ~17 dBHz signal)
+        self._cfg_valset_add_i1(valset_payload, self._KEY_NAVSPG_INFIL_MINELEV, 0)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_MINCNO, 0)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_NCNOTHRS, 0)
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_CNOTHRS, 0)
+
+        # Low-speed COG: emit last valid COG in RMC/VTG when speed < 0.1 m/s (§3.1.7.5)
+        self._cfg_valset_add_l(valset_payload, self._KEY_NMEA_OUT_FROZENCOG, True)
+
+        # Static hold disabled (0 = firmware default off) — do not freeze position while drifting
+        self._cfg_valset_add_u1(valset_payload, self._KEY_MOT_GNSSSPEED_THRS, 0)
+        self._cfg_valset_add_u2(valset_payload, self._KEY_MOT_GNSSDIST_THRS, 0)
+
+        # SBAS / EGNOS for Europe (§3.2)
+        self._cfg_valset_add_l(valset_payload, self._KEY_SIGNAL_SBAS_ENA, True)
+        self._cfg_valset_add_l(valset_payload, self._KEY_SIGNAL_SBAS_L1CA_ENA, True)
+        self._cfg_valset_add_l(valset_payload, self._KEY_SBAS_USE_TESTMODE, True)
+        self._cfg_valset_add_l(valset_payload, self._KEY_SBAS_USE_RANGING, False)
+        self._cfg_valset_add_l(valset_payload, self._KEY_SBAS_USE_DIFFCORR, True)
+        self._cfg_valset_add_l(valset_payload, self._KEY_SBAS_USE_INTEGRITY, False)
+        self._cfg_valset_add_x8(valset_payload, self._KEY_SBAS_PRNSCANMASK, self._EGNOS_SBAS_PRN_MASK)
+
+        nav_result = self._send_ubx(0x06, 0x8A, valset_payload, expect_ack=True, timeout=3.0)
+        if nav_result:
+            self.get_logger().info(
+                "✓ Navigation: Pedestrian, EGNOS SBAS (PRN 121/123/136), frozen COG in NMEA")
+            time.sleep(0.5)
+            self.query_current_dynmodel()
+            return True
+
+        self.get_logger().warn("⚠ Europe/sailboat navigation CFG-VALSET not acknowledged")
+        return False
+
     def configure_hot_start(self):
         """Configure GPS for hot start capability with backup battery and almanac retention."""
         self.get_logger().info("Configuring GPS for hot start capability...")
@@ -1710,83 +1829,8 @@ class GpsNode(ArgoBaseNode):
             #
             # If hot start is needed, verify V_BCKP has backup power source (battery/supercap)
             self.get_logger().info("Note: Hot start requires backup battery on V_BCKP (not configured in software)")
-            
-            # Configure navigation engine using CFG-VALSET (modern interface for NEO-M9N)
-            # CRITICAL: Use Sea dynamic model for sailboat, not Automotive!
-            # NEO-M9N uses the new configuration interface (CFG-VALSET), not legacy CFG-NAV5
-            self.get_logger().info("Configuring navigation engine (Sea dynamic model, relaxed filters)...")
-            
-            # CFG-VALSET payload format:
-            # Version (1): 0x00 = SET (immediate), 0x01 = transaction mode
-            # Layers (1): 0x01 = RAM only, 0x02 = BBR, 0x04 = Flash, 0x07 = all
-            # CRITICAL: Writing to BBR/Flash disrupts satellite tracking! Use RAM only.
-            # Reserved (2): 0x0000
-            # Key-Value pairs: each key is 4 bytes (little-endian), value follows
-            
-            # Configuration keys (all 1-byte values, U1 or I1 types)
-            # CFG-NAVSPG-DYNMODEL = 0x20110021 - Dynamic model
-            # CFG-NAVSPG-INFIL_MINELEV = 0x201100a4 - Minimum elevation (signed, degrees)
-            # CFG-NAVSPG-INFIL_MINCNO = 0x201100a3 - Minimum CNO/SNR (dBHz)
-            # CFG-NAVSPG-INFIL_NCNOTHRS = 0x201100aa - Number of sats required above CNO threshold
-            # CFG-NAVSPG-INFIL_CNOTHRS = 0x201100ab - CNO threshold for fix attempt (dBHz)
-            
-            def add_key_value_u1(payload, key, value):
-                """Helper to add a 1-byte unsigned key-value pair"""
-                payload.extend([
-                    key & 0xFF, (key >> 8) & 0xFF, 
-                    (key >> 16) & 0xFF, (key >> 24) & 0xFF,
-                    value & 0xFF
-                ])
-            
-            def add_key_value_i1(payload, key, value):
-                """Helper to add a 1-byte signed key-value pair"""
-                # Convert signed to unsigned byte representation
-                byte_val = value if value >= 0 else (256 + value)
-                payload.extend([
-                    key & 0xFF, (key >> 8) & 0xFF, 
-                    (key >> 16) & 0xFF, (key >> 24) & 0xFF,
-                    byte_val & 0xFF
-                ])
-            
-            valset_payload = bytearray([
-                0x00,        # Version: 0 = SET (immediate)
-                0x02,        # Layers: 0x02 = BBR only (battery-backed RAM, persists across restarts)
-                0x00, 0x00,  # Reserved
-            ])
-            
-            # Add configuration key-value pairs
-            # Dynamic Platform Model: Pedestrian (3) is ideal for small, slow-moving sailboats
-            # - Max altitude: 9000m (allows land testing, unlike Sea model's 500m limit)
-            # - Max velocity: 30 m/s (plenty for 65cm sailboat)
-            # - Max vertical velocity: 20 m/s
-            # - Position deviation: Small (better accuracy than Sea model's Medium)
-            # Alternative models: Portable(0), Stationary(2), Automotive(4), Sea(5), Airborne(6-8)
-            add_key_value_u1(valset_payload, 0x20110021, 3)    # DYNMODEL: Pedestrian (3)
-            add_key_value_i1(valset_payload, 0x201100a4, 0)    # INFIL_MINELEV: 0 degrees (accept low satellites)
-            add_key_value_u1(valset_payload, 0x201100a3, 6)    # INFIL_MINCNO: 6 dBHz (very permissive for weak signals)
-            add_key_value_u1(valset_payload, 0x201100aa, 3)    # INFIL_NCNOTHRS: 3 satellites minimum
-            add_key_value_u1(valset_payload, 0x201100ab, 20)   # INFIL_CNOTHRS: 20 dBHz threshold (permissive)
-            
-            # Enable all GNSS constellations for maximum satellite availability
-            # CFG-SIGNAL-GPS_ENA (0x1031001f): Enable GPS L1C/A
-            # CFG-SIGNAL-GAL_ENA (0x10310021): Enable Galileo E1
-            # CFG-SIGNAL-BDS_ENA (0x10310022): Enable BeiDou B1I
-            # CFG-SIGNAL-QZSS_ENA (0x10310024): Enable QZSS L1C/A
-            # CFG-SIGNAL-GLO_ENA (0x10310025): Enable GLONASS L1
-            add_key_value_u1(valset_payload, 0x1031001f, 1)    # GPS enabled
-            add_key_value_u1(valset_payload, 0x10310021, 1)    # Galileo enabled
-            add_key_value_u1(valset_payload, 0x10310022, 1)    # BeiDou enabled
-            add_key_value_u1(valset_payload, 0x10310024, 1)    # QZSS enabled
-            add_key_value_u1(valset_payload, 0x10310025, 1)    # GLONASS enabled
-            
-            # Send CFG-VALSET command - DISABLED (causes satellite tracking disruption)
-            # nav_result = self._send_ubx(0x06, 0x8A, valset_payload, expect_ack=True, timeout=2.0)
-            # 
-            # if nav_result:
-            #     self.get_logger().info("✓ Navigation engine configured: Sea mode, min_elev=0°, min_cno=6dBHz")
-            #     self.get_logger().info("✓ GNSS constellations enabled: GPS, GLONASS, Galileo, BeiDou, QZSS")
-            # else:
-            #     self.get_logger().warn("⚠ Navigation configuration (CFG-VALSET) not acknowledged - may use default settings")
+
+            self.configure_navigation_europe_sailboat()
             
             # Configure power management for hot start (CFG-PMS)
             # This ensures the GPS maintains satellite data during low power states
@@ -1817,28 +1861,6 @@ class GpsNode(ArgoBaseNode):
             
             # Configure PPS (Pulse Per Second) output
             self.configure_pps_output()
-            
-            # Query current dynamic platform model to see what's configured
-            self.query_current_dynmodel()
-            
-            # CRITICAL DECISION: Skip CFG-VALSET configuration entirely!
-            #
-            # Problem: ANY configuration command (CFG-VALSET, CFG-CFG) disrupts satellite tracking.
-            # Even writing to RAM or BBR causes satellites to be lost and requires reacquisition.
-            #
-            # Solution: Use factory defaults! The u-blox NEO-M9N default configuration is good enough:
-            # - GPS constellation enabled by default
-            # - Can acquire satellites with default settings
-            # - No need to configure GLONASS/Galileo/BeiDou (nice to have, but not critical)
-            #
-            # We'll still configure:
-            # - Antenna power (non-disruptive)
-            # - PPS output (non-disruptive)
-            # - NMEA sentences (non-disruptive)
-            #
-            # DECISION: SKIP CFG-VALSET entirely to avoid satellite tracking disruption.
-            
-            self.get_logger().info("✓ GPS using factory defaults (skipping CFG-VALSET to avoid satellite disruption)")
             
             self.get_logger().info("✓ GPS configured for hot start capability")
             
@@ -2287,6 +2309,7 @@ class GpsNode(ArgoBaseNode):
 
                     self.get_logger().debug(
                         f"GGA: Position {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt {self.current_altitude}m, {self.satellites_used} sats")
+                    self.publish_navsat_fix()
                     return True
                 else:
                     # No valid fix - log diagnostic info when we have satellites (helps diagnose issues)
@@ -2550,11 +2573,16 @@ class GpsNode(ArgoBaseNode):
                     self.last_no_fix_log_time = current_time
                     self.no_fix_log_count += 1
                     
-                    # Poll PUBX-03 for detailed satellite status every 30 seconds when we have satellites but no fix
-                    # This helps diagnose why GPS can't get a fix (ephemeris, geometry, etc.)
-                    if self.satellites_used >= 3 and self.no_fix_log_count % 6 == 0:  # Every 30s (6 * 5s intervals)
-                        self.get_logger().info(f"Polling satellite status (no fix with {self.satellites_used} satellites)...")
-                        self.poll_pubx_svstatus()
+                    # Poll UBX-NAV-SAT for ephemeris/almanac (GSV alone cannot show eph validity)
+                    poll_interval_s = 15.0 if self.debug_mode else 30.0
+                    sats_with_signal = len(
+                        [s for s in self.satellites_in_view if s.get('snr') and s['snr'] > 0])
+                    if (current_time - self._last_nav_sat_poll_time >= poll_interval_s
+                            and (len(self.satellites_in_view) > 0 or sats_with_signal > 0)):
+                        diag = self.poll_pubx_svstatus()
+                        if diag:
+                            self._nav_sat_diag = diag
+                        self._last_nav_sat_poll_time = current_time
 
     @staticmethod
     def _format_hms(seconds: float) -> str:
@@ -2648,9 +2676,19 @@ class GpsNode(ArgoBaseNode):
                 # Truly no satellites for >15s - critical hardware issue
                 sat_str = f"in_view=0 (NO RF SIGNAL - check antenna!)"
         
+        eph_str = ""
+        if self._nav_sat_diag:
+            d = self._nav_sat_diag
+            eph_str = (
+                f" nav_sat:tracked={d.get('tracked', '?')} cno={d.get('with_cno', '?')} "
+                f"eph={d.get('ephemeris', '?')} alm={d.get('almanac', '?')} "
+                f"used={d.get('used', '?')}"
+            )
+
         return (
             "GPS: No fix - searching... "
-            f"({sat_str}; since_fix={self._format_hms(time_without_fix_s)}; {pps_str}; {ant_str}; {reset_str})"
+            f"({sat_str}{eph_str}; since_fix={self._format_hms(time_without_fix_s)}; "
+            f"{pps_str}; {ant_str}; {reset_str})"
         )
 
     def publish_navigation_data(self):
@@ -3056,6 +3094,7 @@ Options:
 --debug: Enable detailed debug logging
 --reset: Perform hardware reset on GPS module at startup
 --factory-reset: Reset GPS configuration to factory defaults
+--apply-nav-config: Apply Europe/EGNOS + At sea navigation profile
         """
     )
     
@@ -3064,6 +3103,9 @@ Options:
                        help='Perform hardware reset on GPS module at startup using reset pin')
     parser.add_argument('--factory-reset', action='store_true',
                        help='Reset GPS configuration to factory defaults (clears BBR and Flash storage)')
+    parser.add_argument('--apply-nav-config', action='store_true',
+                       dest='apply_nav_config',
+                       help='Apply Europe/EGNOS + At sea navigation profile even if GPS is already streaming')
     
     try:
         ArgoBaseNode.run_node(GpsNode, args, parser)

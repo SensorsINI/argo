@@ -133,12 +133,12 @@
                     <span class="value" id="gps-snr">-- dB</span>
                 </div>
                 <div class="status-item">
-                    <span class="label">Speed/Course:</span>
+                    <span class="label">Speed / COG:</span>
                     <span class="value" id="gps-speed-course">-.-- kts @ ---°</span>
                 </div>
-                <!-- Row 3: IMU Bearing, IMU Status, Wind -->
+                <!-- Row 3: IMU heading, IMU Status, Wind -->
                 <div class="status-item">
-                    <span class="label">IMU Bearing:</span>
+                    <span class="label">IMU heading:</span>
                     <span class="value" id="compass-heading">--- °</span>
                 </div>
                 <div class="status-item">
@@ -146,19 +146,25 @@
                     <span class="value" id="imu-status">❓ UNKNOWN</span>
                 </div>
                 <div class="status-item">
-                    <span class="label">Wind:</span>
+                    <span class="label">Wind from:</span>
                     <span class="value" id="wind-status">-.-- m/s @ ---°</span>
                 </div>
             </div>
+            <p class="nav-angle-legend">
+                <strong>Angle conventions</strong> (true compass, top-down): 0° = North, 90° = East, increasing clockwise.<br>
+                IMU heading &amp; GPS COG: direction the bow moves or points.<br>
+                Wind sensor: relative to bow (0° = from ahead, CW). Map green arrow: absolute flow (N-up), fused with IMU heading.
+            </p>
         </div>
 
         <!-- Overhead Map -->
         <div class="card" id="map-view-card">
             <h2>Overhead Map</h2>
             <p class="map-view-legend">
-                <span class="map-legend-item"><span class="map-legend-swatch map-legend-boat"></span> Boat heading</span>
-                <span class="map-legend-item"><span class="map-legend-swatch map-legend-wind"></span> Wind flow</span>
-                <span class="map-legend-item"><span class="map-legend-swatch map-legend-cog"></span> GPS course</span>
+                <span class="map-legend-item"><span class="map-legend-swatch map-legend-boat"></span> IMU heading</span>
+                <span class="map-legend-item"><span class="map-legend-swatch map-legend-wind"></span> Wind flow (absolute)</span>
+                <span class="map-legend-item"><span class="map-legend-swatch map-legend-cog"></span> GPS COG</span>
+                <span class="map-legend-item">Map: N up; arrows = compass° (CW from N)</span>
             </p>
             <div class="map-view-container">
                 <canvas id="argo-map-canvas" aria-label="Argo overhead map"></canvas>
@@ -975,10 +981,13 @@
             }
             document.getElementById('imu-status').textContent = imuStatusText;
             
-            // Wind
+            // Wind: sensor relative; absolute from when compass + anem are both available
             if (data.wind_speed !== null && data.wind_angle !== null) {
-                document.getElementById('wind-status').textContent = 
-                    `${data.wind_speed.toFixed(2)} m/s @ ${Math.round(data.wind_angle)}°`;
+                let windText = `${data.wind_speed.toFixed(2)} m/s, ${Math.round(data.wind_angle)}° rel`;
+                if (data.wind_from_compass != null) {
+                    windText += ` (${Math.round(data.wind_from_compass)}° from N)`;
+                }
+                document.getElementById('wind-status').textContent = windText;
             } else {
                 document.getElementById('wind-status').textContent = '-.-- m/s @ ---°';
             }

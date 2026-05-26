@@ -36,7 +36,7 @@ class WindAwareController(BaseController):
         compass_err = signed_angle_difference_degrees(
             state.target_heading, state.compass_heading)
         cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
-        cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
+        cmd_rudder = self.clip_rudder(cmd_rudder)
 
         # Wind-aware sail control
         cmd_sail = state.radio_sail if state.radio_sail is not None else 0.0

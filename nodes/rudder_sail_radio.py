@@ -177,8 +177,12 @@ HUMAN_CONTROL_TIMEOUT_S = 2.0
 # Sail: TX holds last channel — only frame-to-frame sail_change > deadband counts (not |position|).
 DEFAULT_DEADBAND_THRESHOLD = 0.25
 HUMAN_ACTIVITY_CONSECUTIVE_READS = 2  # consecutive reads required for sail_change only (filters PWM spikes)
-DEFAULT_SAFETY_MAX_RUDDER = 1.0 # limit rudder comamnd to this magnitude in case of mechanical constraints
-DEFAULT_SAFETY_MAX_SAIL = 1.0 # limit sail comamnd to this magnitude in case of mechanical constraints
+DEFAULT_SAFETY_MAX_SAIL = 1.0 # limit sail command magnitude (normalized); sail PWM stays 1500±500us scale
+# Rudder: measured radio endpoints -> ±1 command; ±1 command -> servo output endpoints (kernel 900-2100)
+DEFAULT_RADIO_RUDDER_MIN_PW = 1100
+DEFAULT_RADIO_RUDDER_MAX_PW = 1900
+DEFAULT_SERVO_RUDDER_MIN_PW = 900
+DEFAULT_SERVO_RUDDER_MAX_PW = 2100
 
 # Control loop timing constants
 DEFAULT_CONTROL_LOOP_PERIOD = 0.05  # 20 Hz for responsive control (active)
@@ -194,32 +198,40 @@ TEST_DELAY_S = 0.5
 TEST_DEFAULT_PW = 1500
 
 
-def cmd_to_pw_us(cmd: float) -> int:
-    """Converts a normalized command (-1 to +1) to a pulse width in microseconds (1000 to 2000).
-    
-    Rudder convention: -1 = full left, 0 = center, +1 = full right (looking down at boat)
-    Sail convention: -1 = pulled in fully, 0 = half out, +1 = let out fully
-    PWM convention: 1000us = -1, 1500us = 0, 2000us = +1
-    """
-    # Clamp command to [-1, 1]
-    cmd = max(-1.0, min(1.0, cmd))
-    # Linear interpolation: 1500 is center, 500 is range on each side
-    pw = 1500 + 500 * cmd
-    return int(pw)
+def pw_us_to_cmd_scaled(pw_us: float, min_pw: float, max_pw: float) -> float:
+    """Map pulse width (us) to normalized command in [-1, +1] using calibrated endpoints."""
+    min_pw = float(min_pw)
+    max_pw = float(max_pw)
+    if max_pw <= min_pw:
+        return 0.0
+    center = (min_pw + max_pw) / 2.0
+    half = (max_pw - min_pw) / 2.0
+    pw_us = max(min_pw, min(max_pw, float(pw_us)))
+    return (pw_us - center) / half
+
+
+def cmd_to_pw_us_scaled(cmd: float, min_pw: float, max_pw: float) -> int:
+    """Map normalized command [-1, +1] to pulse width (us) using calibrated endpoints."""
+    min_pw = float(min_pw)
+    max_pw = float(max_pw)
+    if max_pw <= min_pw:
+        return int((min_pw + max_pw) / 2.0)
+    center = (min_pw + max_pw) / 2.0
+    half = (max_pw - min_pw) / 2.0
+    cmd = max(-1.0, min(1.0, float(cmd)))
+    return int(center + half * cmd)
+
+
+def cmd_to_pw_us(cmd: float, max_cmd: float = 1.0) -> int:
+    """Sail (and legacy): 1500us center, 500us per unit; max_cmd clips normalized command."""
+    cmd = max(-max_cmd, min(max_cmd, cmd))
+    return int(1500 + 500 * cmd)
 
 
 def pw_us_to_cmd(pw_us: float) -> float:
-    """Converts a pulse width in microseconds (1000 to 2000) to a normalized command (-1 to +1).
-    
-    Rudder convention: -1 = full left, 0 = center, +1 = full right (looking down at boat)
-    Sail convention: -1 = pulled in fully, 0 = half out, +1 = let out fully
-    PWM convention: 1000us = -1, 1500us = 0, 2000us = +1
-    """
-    # Clamp pulse width to [1000, 2000] for stable conversion
-    pw_us = max(1000.0, min(2000.0, pw_us))
-    # Linear interpolation
-    cmd = (pw_us - 1500.0) / 500.0
-    return cmd
+    """Sail (and legacy): standard 1000-2000us RC scale to [-1, +1]."""
+    pw_us = max(1000.0, min(2000.0, float(pw_us)))
+    return (pw_us - 1500.0) / 500.0
 
 # Test mode helper functions
 
@@ -417,7 +429,10 @@ class RudderSailRadioNode(ArgoBaseNode):
                                HUMAN_CONTROL_TIMEOUT_S)  # seconds
         # ignore small radio movements
         self.declare_parameter('deadband_threshold', DEFAULT_DEADBAND_THRESHOLD)
-        self.declare_parameter('safety_max_rudder', DEFAULT_SAFETY_MAX_RUDDER)       # safety limits
+        self.declare_parameter('radio_rudder_min_pw', float(DEFAULT_RADIO_RUDDER_MIN_PW))
+        self.declare_parameter('radio_rudder_max_pw', float(DEFAULT_RADIO_RUDDER_MAX_PW))
+        self.declare_parameter('servo_rudder_min_pw', float(DEFAULT_SERVO_RUDDER_MIN_PW))
+        self.declare_parameter('servo_rudder_max_pw', float(DEFAULT_SERVO_RUDDER_MAX_PW))
         self.declare_parameter('safety_max_sail', DEFAULT_SAFETY_MAX_SAIL)
 
         # Load parameter values
@@ -425,17 +440,27 @@ class RudderSailRadioNode(ArgoBaseNode):
             'human_override_timeout').get_parameter_value().double_value
         self.deadband_threshold = self.get_parameter(
             'deadband_threshold').get_parameter_value().double_value
-        self.safety_max_rudder = self.get_parameter(
-            'safety_max_rudder').get_parameter_value().double_value
+        self.radio_rudder_min_pw = self.get_parameter(
+            'radio_rudder_min_pw').get_parameter_value().double_value
+        self.radio_rudder_max_pw = self.get_parameter(
+            'radio_rudder_max_pw').get_parameter_value().double_value
+        self.servo_rudder_min_pw = self.get_parameter(
+            'servo_rudder_min_pw').get_parameter_value().double_value
+        self.servo_rudder_max_pw = self.get_parameter(
+            'servo_rudder_max_pw').get_parameter_value().double_value
         self.safety_max_sail = self.get_parameter(
             'safety_max_sail').get_parameter_value().double_value
-        
+        self._validate_rudder_pw_params()
+
         # Log parameter values for debugging (deadband comes from argo.yaml, not the old 0.05 default)
         self.get_logger().info(
             f"Control authority parameters: deadband_threshold={self.deadband_threshold:.3f} "
             f"(consecutive_reads={HUMAN_ACTIVITY_CONSECUTIVE_READS}), "
             f"human_override_timeout={self.human_override_timeout:.1f}s, "
-            f"safety_max_rudder={self.safety_max_rudder:.2f}, safety_max_sail={self.safety_max_sail:.2f}")
+            f"safety_max_sail={self.safety_max_sail:.2f}")
+        self.get_logger().info(
+            f"Rudder PWM map: radio [{self.radio_rudder_min_pw:.0f}, {self.radio_rudder_max_pw:.0f}] us "
+            f"-> cmd [-1,+1] -> servo [{self.servo_rudder_min_pw:.0f}, {self.servo_rudder_max_pw:.0f}] us")
         
         # Warn if deadband_threshold doesn't match expected default
         if abs(self.deadband_threshold - DEFAULT_DEADBAND_THRESHOLD) > 0.001:
@@ -796,10 +821,10 @@ class RudderSailRadioNode(ArgoBaseNode):
             self.set_unhealthy(failure_reason)
             return False
 
-        # Convert radio inputs using standard servo convention:
-        # Rudder: 1000us -> -1 (full left), 1500us -> 0 (center), 2000us -> +1 (full right)
-        self.radio_rudder = pw_us_to_cmd(radio_rudder_pw_us)
-        # Sail: 1000us -> -1 (pulled in), 1500us -> 0 (half out), 2000us -> +1 (let out)
+        # Rudder: map measured radio endpoints to ±1 (amplifies to full cmd when stick hits radio limits)
+        self.radio_rudder = pw_us_to_cmd_scaled(
+            radio_rudder_pw_us, self.radio_rudder_min_pw, self.radio_rudder_max_pw)
+        # Sail: standard 1000-2000us RC scale
         self.radio_sail = pw_us_to_cmd(radio_sail_pw_us)
 
         self.last_radio_update = time.time()
@@ -1054,11 +1079,15 @@ class RudderSailRadioNode(ArgoBaseNode):
                 self.get_logger().info(
                     f"✅ Parameter updated: human_override_timeout changed from {old_value:.1f}s to {double_value:.1f}s")
                 
-            elif param_name == 'safety_max_rudder':
-                old_value = self.safety_max_rudder
-                self.safety_max_rudder = double_value
+            elif param_name in (
+                'radio_rudder_min_pw', 'radio_rudder_max_pw',
+                'servo_rudder_min_pw', 'servo_rudder_max_pw',
+            ):
+                old = getattr(self, param_name)
+                setattr(self, param_name, double_value)
+                self._validate_rudder_pw_params()
                 self.get_logger().info(
-                    f"✅ Parameter updated: safety_max_rudder changed from {old_value:.2f} to {double_value:.2f}")
+                    f"✅ Parameter updated: {param_name} {old:.0f} -> {double_value:.0f} us")
                 
             elif param_name == 'safety_max_sail':
                 old_value = self.safety_max_sail
@@ -1068,10 +1097,25 @@ class RudderSailRadioNode(ArgoBaseNode):
         
         return result
 
+    def _validate_rudder_pw_params(self):
+        """Clamp servo endpoints to kernel limits; ensure min < max."""
+        if self.radio_rudder_max_pw <= self.radio_rudder_min_pw:
+            raise ValueError(
+                f"radio_rudder_max_pw ({self.radio_rudder_max_pw}) must exceed "
+                f"radio_rudder_min_pw ({self.radio_rudder_min_pw})")
+        if self.servo_rudder_max_pw <= self.servo_rudder_min_pw:
+            raise ValueError(
+                f"servo_rudder_max_pw ({self.servo_rudder_max_pw}) must exceed "
+                f"servo_rudder_min_pw ({self.servo_rudder_min_pw})")
+        lo, hi = float(SERVO_MIN_PW_US), float(SERVO_MAX_PW_US)
+        if self.servo_rudder_min_pw < lo or self.servo_rudder_max_pw > hi:
+            self.get_logger().warn(
+                f"servo rudder endpoints [{self.servo_rudder_min_pw:.0f}, "
+                f"{self.servo_rudder_max_pw:.0f}] us outside kernel range [{lo:.0f}, {hi:.0f}]")
+
     def apply_safety_limits(self, rudder, sail):
-        """Apply safety limits to control commands."""
-        rudder = np.clip(rudder, -self.safety_max_rudder,
-                         self.safety_max_rudder)
+        """Clip normalized commands: rudder ±1 (servo scaling via servo_rudder_*_pw)."""
+        rudder = float(np.clip(rudder, -1.0, 1.0))
         sail = np.clip(sail, -self.safety_max_sail, self.safety_max_sail)
         return rudder, sail
 
@@ -1252,8 +1296,9 @@ class RudderSailRadioNode(ArgoBaseNode):
             # But continue reading and publishing radio inputs for monitoring
         else:
             # Normal operation: write PWM commands to servos
-            servo_rudder_pw_us = cmd_to_pw_us(cmd_rudder)
-            servo_sail_pw_us = cmd_to_pw_us(cmd_sail)
+            servo_rudder_pw_us = cmd_to_pw_us_scaled(
+                cmd_rudder, self.servo_rudder_min_pw, self.servo_rudder_max_pw)
+            servo_sail_pw_us = cmd_to_pw_us(cmd_sail, self.safety_max_sail)
 
             self.write_sysfs_pw(SERVO_RUDDER_PATH, servo_rudder_pw_us)
             self.write_sysfs_pw(SERVO_SAIL_PATH, servo_sail_pw_us)
@@ -1508,7 +1553,8 @@ SERVICES:
 PARAMETERS:
   human_override_timeout: Seconds after last human activity before robot can take control (default: 2.0)
   deadband_threshold: Minimum change in radio input to count as human activity (default: 0.40)
-  safety_max_rudder: Maximum rudder command magnitude (default: 1.0)
+  radio_rudder_min_pw, radio_rudder_max_pw: Measured radio rudder endpoints (us) -> cmd -1/+1
+  servo_rudder_min_pw, servo_rudder_max_pw: Servo output endpoints (us) for cmd -1/+1
   safety_max_sail: Maximum sail command magnitude (default: 1.0)
 
 HARDWARE REQUIREMENTS:

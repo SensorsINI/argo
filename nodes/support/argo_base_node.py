@@ -227,6 +227,8 @@ class ArgoBaseNode(Node):
                     kwargs['do_hardware_reset'] = parsed_args.reset
                 if hasattr(parsed_args, 'factory_reset'):
                     kwargs['do_factory_reset'] = parsed_args.factory_reset
+                if hasattr(parsed_args, 'apply_nav_config'):
+                    kwargs['do_apply_nav_config'] = parsed_args.apply_nav_config
                 
                 node = node_class(**kwargs)
             else:

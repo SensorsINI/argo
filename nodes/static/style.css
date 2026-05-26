@@ -491,6 +491,13 @@ body {
 }
 
 /* Overhead map view */
+.nav-angle-legend {
+    font-size: 0.8em;
+    color: #666;
+    margin-top: 10px;
+    line-height: 1.45;
+}
+
 .map-view-legend {
     display: flex;
     flex-wrap: wrap;

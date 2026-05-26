@@ -20,7 +20,17 @@ alias mount1="mount | grep -E '^/'|grep -v snapd"
 alias akill='$ARGO_DIR/scripts/akill.sh'
 alias al='$ARGO_DIR/launch/argo_start_standard.sh'      # Start Argo nodes using standard launch
 alias aq='$ARGO_DIR/launch/argo_stop_standard.sh'       # Stop Argo nodes using standard launch
-alias ars='aq && al' # Restart standard (not service) Argo nodes
+# Restart all standard nodes (no args), or one node: ars argo_web_dashboard
+# unalias first: if ars was alias ars='aq && al', sourcing "ars() {" expands to "aq && al() {"
+# and runs stop/start during source ~/.bashrc
+if alias ars &>/dev/null; then unalias ars; fi
+ars() {
+    if [ "$#" -eq 0 ]; then
+        "$ARGO_DIR/launch/argo_stop_standard.sh" && "$ARGO_DIR/launch/argo_start_standard.sh"
+    else
+        python3 "$ARGO_DIR/launch/argo_restart_node.py" "$@"
+    fi
+}
 alias arsall='echo "Restarting all Argo services and nodes..." && sudo systemctl restart argo_launch_standard.service && sudo systemctl restart argo_health_monitor.service' # Restart all Argo services and nodes
 alias as='python3 $ARGO_DIR/launch/argo_lifecycle_manager.py status'      # Show Argo status (restored rich output)
 alias asq='python3 $ARGO_DIR/launch/argo_lifecycle_manager.py quick_status --quiet'  # Quick status (restored rich output)

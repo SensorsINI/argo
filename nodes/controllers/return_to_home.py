@@ -146,7 +146,7 @@ class ReturnToHomeController(BaseController):
             compass_err = signed_angle_difference_degrees(
                 state.target_heading, state.compass_heading)
             cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
-            cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
+            cmd_rudder = self.clip_rudder(cmd_rudder)
             cmd_sail = 0.0
             return ControlCommand(rudder=cmd_rudder, sail=cmd_sail, timestamp=state.timestamp)
 
@@ -179,7 +179,7 @@ class ReturnToHomeController(BaseController):
                     state.target_heading = brg_w
                     compass_err = signed_angle_difference_degrees(brg_w, state.compass_heading)
                     cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
-                    cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
+                    cmd_rudder = self.clip_rudder(cmd_rudder)
                     cmd_sail = 0.0
                     if state.wind_angle is not None:
                         wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
@@ -214,7 +214,7 @@ class ReturnToHomeController(BaseController):
 
         compass_err = signed_angle_difference_degrees(bearing_to_home, state.compass_heading)
         cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
-        cmd_rudder = float(np.clip(cmd_rudder, -1.0, 1.0))
+        cmd_rudder = self.clip_rudder(cmd_rudder)
 
         # Wind-aware sail control
         cmd_sail = 0.0
