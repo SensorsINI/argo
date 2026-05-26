@@ -96,6 +96,18 @@ The mast is raised by 1cm to allow clearance of the main sail boom over the cabl
   <img src="WindSensor-rev1c/images/WindSensor-rev1c-pcb-layout.png" alt="WindSensor PCB Layout" width="640" height="480"/>
 </div>
 
+<div align="center">
+  <b>WindSensor PCB Layout(PCB dims 20x20mm)</b><br/>
+  <img src="WindSensor-rev1c/images/WindSensor-air-passages.png" alt="WindSensor air passages" width="480" height="480"/>
+</div>
+
+Sensors are numbered left to right on the PCB. On every SDP32, the **upper** (windward) port is wired to the **negative** (−) pressure port; I2C reports P(+) − P(−), so headwind on the center tube gives **negative** raw readings. The ±120° pitot paths invert sign relative to the center sensor. `anem.py` negates CTR only; CW/CCW keep raw sign.
+
+| Label | I2C address | Angle (looking down on mast) | `anem.py` sign (after offset subtract) |
+|-------|-------------|----------------------------|----------------------------------------|
+| CW    | 0x21        | +120° (clockwise from bow) | × +1 (routing inverted vs CTR)         |
+| CTR   | 0x22        | 0° (bow/stern)             | × −1 (negate I2C; − port on upper)     |
+| CCW   | 0x23        | −120° / 240° CCW from bow  | × +1 (routing inverted vs CTR)         |
 
 
 ### Electrical

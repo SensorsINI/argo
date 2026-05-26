@@ -125,12 +125,11 @@ controller_node:
 
 anem_node:
   ros__parameters:
-    # Zero-wind baseline differential pressure (Pa) — subtracted from each sensor before
-    # speed/angle calculation. Measure with no airflow: `python3 nodes/anem.py --debug` and
-    # average the dp(pascal) values over ~30 s of calm conditions.
-    dp_offset_ctr: 0.0233   # Center sensor (0x21, 0°)
-    dp_offset_cw: 0.0213    # CW sensor (0x22, 120°)
-    dp_offset_ccw: 0.0387   # CCW sensor (0x23, 240°)
+    # Zero-wind baseline DP (Pa) on raw I2C — subtracted before DP_SIGN_CORRECTION.
+    # Measure with no airflow: `python3 nodes/anem.py --debug`, average dp_raw over ~30 s.
+    dp_offset_ctr: -0.0247  # CTR 0x22, 0° (mean dp_raw, calm, 31 samples 2026-05-26)
+    dp_offset_cw: -0.0025   # CW 0x21, +120°
+    dp_offset_ccw: 0.0007   # CCW 0x23, −120°
     calm_speed_threshold_mps: 0.10  # Report 0 m/s when calibrated speed is below this
 
 gps_node:

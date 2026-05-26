@@ -10,10 +10,11 @@
 # Hardware Setup:
 # - As of argo PCB version 4, uses TWI2 on pins 27/28 (SDA.2/SCL.2)
 #   for electrical isolation of the wind sensor in case of short circuit from the mast and salt water intrusion.
-# - Three sensors at addresses:
-#   * I2C_CTR (0x21): Center sensor (0° - front/back)
-#   * I2C_CW (0x22): Clockwise 120° from front (looking down on mast)
-#   * I2C_CCW (0x23): Counter-clockwise 120° from front (240° - looking down on mast)
+# - Three sensors (left to right on PCB; see pcb/WindSensor/README.md):
+#   * I2C_CW (0x21): +120° CW from bow
+#   * I2C_CTR (0x22): 0° bow/stern
+#   * I2C_CCW (0x23): −120° CCW from bow
+#   CTR: negate I2C; CW/CCW: +1 (pitot routing vs CTR, see README)
 # - Resolve Linux bus index for TWI2 and verify with:
 #   ls /sys/devices/platform/soc*/5002800.i2c/i2c-*
 #   sudo i2cdetect -y <resolved_bus_index>
@@ -39,7 +40,8 @@
 #
 # Static Offset Calibration (argo.yaml):
 # Each SDP3x sensor has a small zero-wind baseline differential pressure. Subtract per-sensor
-# offsets (anem_node.ros__parameters.dp_offset_*) before computing speed and angle.
+# offsets (anem_node.ros__parameters.dp_offset_*) from raw I2C readings, then apply
+# DP_SIGN_CORRECTION (−1 on CTR, +1 on CW/CCW) before speed/angle.
 # With no airflow, run `python3 nodes/anem.py --debug` and average dp(pascal) over ~30 s.
 #
 # Calibration and Verification:
@@ -72,12 +74,12 @@
 # Topics Published:
 # /anem_speed_angle_temp (geometry_msgs/Vector3):
 #   x: wind speed in m/s
-#   y: wind angle in degrees CW from front of boat (looking down)
+#   y: wind angle in degrees CW from front (looking down); direction wind is coming FROM
 #   z: average temperature in celsius
-# /anem_diffpressure (geometry_msgs/Vector3):
-#   x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
-#   y: differential pressure from I2C_CW (0x22, 120°) in Pascals
-#   z: differential pressure from I2C_CCW (0x23, 240°) in Pascals
+# /anem_diffpressure (geometry_msgs/Vector3) — calibrated, PCB sign-corrected:
+#   x: I2C_CTR (0x22, 0°) in Pascals
+#   y: I2C_CW (0x21, +120°) in Pascals
+#   z: I2C_CCW (0x23, −120° / 240°) in Pascals
 
 # Import the shared pause service
 import sys
@@ -107,11 +109,16 @@ from std_srvs.srv import Trigger
 TWI2_CONTROLLER_BASENAME = "5002800.i2c"
 TWI2_DEFAULT_LINUX_BUS = 4
 
-# I2C sensor addresses
-I2C_CTR = 0x21  # Center sensor (0° - front/back)
-I2C_CW = 0x22   # Clockwise 120° from front (looking down on mast)
-# Counter-clockwise 120° from front (240° - looking down on mast)
-I2C_CCW = 0x23
+# I2C sensor addresses (left to right on PCB), looking down on mast.
+# Sign convention (pcb/WindSensor/README.md, SDP32 datasheet):
+#   I2C reports P(+) − P(−). Upper (windward) port is the − port → negate CTR.
+#   ±120° pitot routing inverts sign vs CTR on the chip, so CW/CCW use × +1.
+I2C_CW = 0x21   # +120° CW from bow
+I2C_CTR = 0x22  # 0° bow/stern
+I2C_CCW = 0x23  # −120° CCW from bow (240° CW from bow)
+
+# Multiply (offset-subtracted) raw DP by index: [CTR, CW, CCW]
+DP_SIGN_CORRECTION = (-1, 1, 1)
 
 # Publishing configuration constants
 PUBLISHING_RATE = 3.0  # Hz - final publishing rate
@@ -126,7 +133,7 @@ VISUAL_FULLSCALE_SPEED_KNOTS = 8.0
 VISUAL_DISPLAY_WIDTH = 60  # characters - width of visual display
 VISUAL_DISPLAY_HEIGHT = 40  # characters - height of visual display
 # Pascals - full scale differential pressure for bar charts
-VISUAL_DP_FULLSCALE_PA = 50.0
+VISUAL_DP_FULLSCALE_PA = 15.0
 
 # from https://stackoverflow.com/questions/49906101/byte-array-to-int-in-python-2-x-using-standard-libraries
 # This function is compatible with Python 3.
@@ -231,17 +238,16 @@ def calculate_angle_deg(dp_ctr, dp_cw, dp_ccw):
     - Sign correction applied to Y-component for proper coordinate system alignment
 
     Args:
-        dp_ctr: Differential pressure from center sensor (0x21) in Pascals
-        dp_cw: Differential pressure from CW 120° sensor (0x22) in Pascals
-        dp_ccw: Differential pressure from CCW 240° sensor (0x23) in Pascals
+        dp_ctr: Calibrated DP from center sensor (0x22, 0°) in Pascals
+        dp_cw: Calibrated DP from CW sensor (0x21, +120°) in Pascals
+        dp_ccw: Calibrated DP from CCW sensor (0x23, −120°) in Pascals
 
     Returns:
-        Wind angle in degrees CW from front of boat (looking down)
-        Range: 0° to 360° (0° = wind from front, 90° = wind from starboard, etc.)
+        Wind angle in degrees CW from bow (looking down); direction wind is coming FROM.
+        Range: 0°–360° (0° = from bow, 90° = from starboard, 180° = from stern).
     """
     try:
-        # Convert sensor positions to radians
-        # CTR is at 0°, CW at 120°, CCW at 240° (120° spacing)
+        # CTR at 0°, CW at +120°, CCW at 240° CW (120° spacing)
         ctr_angle = 0 * math.pi / 180
         cw_angle = 120 * math.pi / 180
         ccw_angle = 240 * math.pi / 180
@@ -293,9 +299,9 @@ def calculate_speed_mps(dp_ctr, dp_cw, dp_ccw, temp_celsius):
     shown about the same with the same approx 10% overestimation.
 
     Args:
-        dp_ctr: Differential pressure from center sensor (0x21, 0°) in Pascals
-        dp_cw: Differential pressure from CW 120° sensor (0x22) in Pascals
-        dp_ccw: Differential pressure from CCW 240° sensor (0x23) in Pascals
+        dp_ctr: Calibrated DP from center sensor (0x22, 0°) in Pascals
+        dp_cw: Calibrated DP from CW sensor (0x21, +120°) in Pascals
+        dp_ccw: Calibrated DP from CCW sensor (0x23, −120°) in Pascals
         temp_celsius: Temperature in Celsius from sensor
 
     Returns:
@@ -543,7 +549,7 @@ class AnemNode(ArgoBaseNode):
             bar[x_pos] = 'X'  # Use 'X' for non-zero values
 
         # Format: "CTR: +12.34 Pa |--------X--------|"
-        return f"{label}: {dp_value:+7.2f} Pa {''.join(bar)}"
+        return f"{label}: {dp_value:+9.3f} Pa {''.join(bar)}"
 
     def _render_visual(self, speed_mps: float, angle_deg: float, temp_c: float, dp_tuple):
         if not self._vis_initialized:
@@ -561,8 +567,9 @@ class AnemNode(ArgoBaseNode):
         cx = width // 2
         cy = height // 2
 
-        # Compute endpoint based on angle (CW from forward) and speed
-        # Forward is up; x = sin(theta), y = -cos(theta)
+        # Wind-from arrow: angle_deg is where wind comes FROM (0° = from bow).
+        # Bow is up on screen; marker 'o' is wind-from direction (not where it blows to).
+        #   ex = cx + r*sin(θ), ey = cy - r*cos(θ)  →  θ=0° places 'o' above center (up).
         theta = math.radians(angle_deg)
         radius = min(cx - 2, cy - 2)
         scale = radius / max(self._vis_speed_ref, 0.1)
@@ -584,16 +591,17 @@ class AnemNode(ArgoBaseNode):
             grid[ey][ex] = 'o'
 
         # Header lines (fixed count to avoid scrolling)
-        bar_width = width - 18  # Reserve space for label and value
+        bar_width = width - 20  # Reserve space for label and value (+9.3f Pa)
         header = [
             f"Wind v={speed_mps:5.2f} m/s  angle={angle_deg:6.2f} deg  temp={temp_c:5.1f} C",
             "",
-            f"Differential Pressure Sensors (CTR={hex(I2C_CTR)}, CW={hex(I2C_CW)}, CCW={hex(I2C_CCW)}):",
+            f"DP raw Pa (avg before offset/sign; use for argo.yaml dp_offset_*):",
             self._make_dp_bar(dp_tuple[0], "CTR", bar_width),
             self._make_dp_bar(dp_tuple[1], "CW ", bar_width),
             self._make_dp_bar(dp_tuple[2], "CCW", bar_width),
             "",
-            f"Wind vector display (scale: {self._vis_speed_ref:.1f} m/s = full radius)",
+            f"Wind-from vector (scale: {self._vis_speed_ref:.1f} m/s = full radius; bow/0 deg = up)",
+            "  'o' = direction wind is coming FROM (0 deg=headwind from bow, arrow points up)",
             "Use Ctrl+C to exit visual mode"
         ]
 
@@ -947,16 +955,16 @@ class AnemNode(ArgoBaseNode):
                 for i in range(3)
             ]
 
-            # Subtract zero-wind baseline offsets before speed/angle calculation
+            # Baseline subtract (offsets from raw I2C), then PCB sign correction
             dp_cal = [
-                dp_avg[i] - self._dp_offsets[i]
+                (dp_avg[i] - self._dp_offsets[i]) * DP_SIGN_CORRECTION[i]
                 for i in range(3)
             ]
 
-            # Unpack calibrated differential pressures with meaningful names
-            dp_ctr_avg = dp_cal[0]  # Center sensor (0x21, 0°)
-            dp_cw_avg = dp_cal[1]   # CW 120° sensor (0x22)
-            dp_ccw_avg = dp_cal[2]  # CCW 240° sensor (0x23)
+            # Unpack: i2cAddr order is (CTR, CW, CCW)
+            dp_ctr_avg = dp_cal[0]  # 0x22, 0°
+            dp_cw_avg = dp_cal[1]   # 0x21, +120°
+            dp_ccw_avg = dp_cal[2]  # 0x23, −120°
 
             # Calculate wind parameters from calibrated data
             temp_celsius = sum(temp_avg) / 3.0
@@ -993,7 +1001,7 @@ class AnemNode(ArgoBaseNode):
 
             if self.debug_visually:
                 self._render_visual(speed_mps, angle_deg,
-                                    temp_celsius, tuple(dp_cal))
+                                    temp_celsius, tuple(dp_avg))
 
         except Exception as e:
             self.get_logger().error(f"Error in publish callback: {e}")
@@ -1072,10 +1080,11 @@ to determine wind speed and direction using directional wind meter principles.
 Hardware Setup:
   - Uses TWI2 on pins 27/28 (SDA.2/SCL.2)
   - Linux bus index is resolved at runtime from controller 5002800.i2c
-  - Three sensors at addresses:
-    * I2C_CTR (0x21): Center sensor (0° - front/back)
-    * I2C_CW (0x22): Clockwise 120° from front (looking down on mast)
-    * I2C_CCW (0x23): Counter-clockwise 120° from front (240° - looking down on mast)
+  - Three sensors (see pcb/WindSensor/README.md):
+    * I2C_CW (0x21): +120° CW from bow
+    * I2C_CTR (0x22): 0° bow/stern
+    * I2C_CCW (0x23): −120° CCW from bow
+    * CTR I2C negated; CW/CCW not (pitot routing inverts vs center)
   - Run "ls /sys/devices/platform/soc*/5002800.i2c/i2c-*" to resolve Linux i2c-* index
   - Then run "sudo i2cdetect -y <resolved_bus_index>" to verify sensor connections
   - Sensors show as addresses 21, 22, 23 in hex
@@ -1095,14 +1104,13 @@ Features:
   - Transient I2C failure recovery: switches to 1Hz retry mode, recovers to 3Hz normal operation
 
 Configuration Constants (modify at top of file):
-  - I2C_CTR: I2C address for center sensor (default: 0x21)
-  - I2C_CW: I2C address for CW 60° sensor (default: 0x22)
-  - I2C_CCW: I2C address for CCW 60° sensor (default: 0x23)
+  - I2C_CW: 0x21 (+120°), I2C_CTR: 0x22 (0°), I2C_CCW: 0x23 (−120°)
+  - DP_SIGN_CORRECTION: (-1, 1, 1) — negate CTR I2C; CW/CCW unchanged (pitot routing)
   - PUBLISHING_RATE: Final publishing rate in Hz (default: 3.0)
   - SAMPLES_PER_PUBLISH: Number of sensor reads to average per publish cycle (default: 15)
   - CRC_ERROR_LOG_THROTTLE_S: Maximum CRC error logging frequency in seconds (default: 1.0)
   - VISUAL_FULLSCALE_SPEED_KNOTS: Full-scale wind speed for visual display (default: 8.0)
-  - VISUAL_DP_FULLSCALE_PA: Full-scale differential pressure for bar charts (default: 5.0)
+  - VISUAL_DP_FULLSCALE_PA: Full-scale differential pressure for bar charts (default: 15.0)
   - VISUAL_DISPLAY_WIDTH: Visual display width in characters (default: 60)
   - VISUAL_DISPLAY_HEIGHT: Visual display height in characters (default: 40)
 
@@ -1114,9 +1122,9 @@ Topics Published:
   /temperature_air (std_msgs/Float32):
     Air temperature in celsius (published at low rate: 1 per minute)
   /anem_diffpressure (geometry_msgs/Vector3):
-    x: differential pressure from I2C_CTR (0x21, 0°) in Pascals
-    y: differential pressure from I2C_CW (0x22, 120°) in Pascals  
-    z: differential pressure from I2C_CCW (0x23, 240°) in Pascals
+    x: I2C_CTR (0x22, 0°) in Pascals
+    y: I2C_CW (0x21, +120°) in Pascals
+    z: I2C_CCW (0x23, −120°) in Pascals
   /anem_node_health (std_msgs/Bool):
     data: true when node is healthy, false when unhealthy or shutting down
     Published only on state changes, startup, and shutdown
