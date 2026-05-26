@@ -460,6 +460,7 @@ class PowerController(ArgoBaseNode):
         self.initial_button_state = None
         # Flag to track when button detection should be active
         self.button_detection_active = False
+        self._button_monitor_thread = None
         # Flag to track if warning notification has been sent for current button press
         self.warning_notification_sent = False
 
@@ -2661,6 +2662,9 @@ class PowerController(ArgoBaseNode):
         self.get_logger().info("Button detection is always active (button powers on system via SET coil)")
 
         while self.running:
+            if not self.gpio_available or self.power_button_line is None:
+                break
+
             try:
                 # Wait for GPIO interrupt events using select() - this is the key to low CPU usage!
                 # The process sleeps until a hardware interrupt occurs
@@ -2702,86 +2706,99 @@ class PowerController(ArgoBaseNode):
                 # This timeout happens every 1 second and uses minimal CPU
 
             except Exception as e:
+                if not self.running or not self.gpio_available or self.power_button_line is None:
+                    break
                 self.get_logger().error(
                     f"Error in interrupt-based button monitoring: {e}")
                 time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
 
+        self.get_logger().info("Hardware interrupt-based button monitoring stopped")
+
     def monitor_button_release_timeout(self):
         """Monitor for button release by checking current state and handle long press timeout"""
-        # Since we only get falling edge interrupts, we need to poll for release
-        # But this thread only runs during button press, so overall CPU usage is still very low
+        # Rising-edge interrupt marks press; poll line value to detect release
         poll_interval = 0.1  # 10Hz polling during button press only
+        released_normally = False
 
-        while self.running and self.power_button_pressed:
-            try:
-                # Read current button state to detect release
-                # Note: This requires switching the line back to input mode temporarily
-                current_state = self.get_current_button_state()
+        try:
+            while self.running and self.power_button_pressed:
+                try:
+                    # Read current button state to detect release
+                    current_state = self.get_current_button_state()
 
-                # Check for button release (active-high button: released = low)
-                if current_state == BUTTON_RELEASED_STATE:  # Button released
-                    press_duration = time.time() - self.button_press_start_time
-                    self.get_logger().debug(
-                        f"Power button released after {press_duration:.2f} seconds (interrupt + polling)")
+                    # Check for button release (active-high button: released = low)
+                    if current_state == BUTTON_RELEASED_STATE:  # Button released
+                        press_duration = time.time() - self.button_press_start_time
+                        self.get_logger().debug(
+                            f"Power button released after {press_duration:.2f} seconds (interrupt + polling)")
 
-                    if press_duration >= self.SHUTDOWN_THRESHOLD:
-                        self.get_logger().info(
-                            "Long press detected, initiating shutdown...")
-                        self.initiate_shutdown()
+                        if press_duration >= self.SHUTDOWN_THRESHOLD:
+                            self.get_logger().info(
+                                "Long press detected, initiating shutdown...")
+                            self.initiate_shutdown()
+                        else:
+                            # Check if button was released after warning but before shutdown (shutdown cancelled)
+                            if (press_duration >= SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S and
+                                self.warning_notification_sent and
+                                    not self.shutdown_initiated):
+                                self.get_logger().info(
+                                    "Shutdown cancelled - button released after warning threshold")
+                                self.send_desktop_notification(
+                                    "Shutdown Cancelled",
+                                    f"Power button released - shutdown cancelled!\nButton was held for {press_duration:.1f}s",
+                                    "normal"
+                                )
+                            else:
+                                # Short press - add to tap detection system
+                                self.add_tap(press_duration)
+
+                        self.power_button_pressed = False
+                        self.button_press_start_time = None
+                        # Reset warning flag when button is released
+                        self.warning_notification_sent = False
+                        released_normally = True
+                        break  # Exit this monitoring thread
+
+                    # Check for long press timeout while button is still held
                     else:
-                        # Check if button was released after warning but before shutdown (shutdown cancelled)
+                        press_duration = time.time() - self.button_press_start_time
+
+                        # Check for warning threshold - send notification to warn user to release button
                         if (press_duration >= SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S and
-                            self.warning_notification_sent and
+                            not self.warning_notification_sent and
                                 not self.shutdown_initiated):
                             self.get_logger().info(
-                                "Shutdown cancelled - button released after warning threshold")
+                                f"Button press reached warning threshold ({SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S}s) - sending warning notification")
                             self.send_desktop_notification(
-                                "Shutdown Cancelled",
-                                f"Power button released - shutdown cancelled!\nButton was held for {press_duration:.1f}s",
-                                "normal"
+                                "Power Button Warning",
+                                f"Release the power button now to abort shutdown!\nButton held for {press_duration:.1f}s (shutdown in {self.SHUTDOWN_THRESHOLD - press_duration:.1f}s)",
+                                "critical",
+                                FINAL_SHUTDOWN_NOTIFICATION_MS  # No timeout - stays until dismissed
                             )
-                        else:
-                            # Short press - add to tap detection system
-                            self.add_tap(press_duration)
+                            self.warning_notification_sent = True
 
-                    self.power_button_pressed = False
-                    self.button_press_start_time = None
-                    # Reset warning flag when button is released
-                    self.warning_notification_sent = False
-                    break  # Exit this monitoring thread
+                        # Check for shutdown threshold
+                        if press_duration >= self.SHUTDOWN_THRESHOLD:
+                            if not self.shutdown_initiated:
+                                self.get_logger().info(
+                                    "Long press threshold reached, initiating shutdown...")
+                                self.initiate_shutdown()
+                            released_normally = True
+                            break  # Exit monitoring loop
 
-                # Check for long press timeout while button is still held
-                else:
-                    press_duration = time.time() - self.button_press_start_time
+                    time.sleep(poll_interval)
 
-                    # Check for warning threshold - send notification to warn user to release button
-                    if (press_duration >= SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S and
-                        not self.warning_notification_sent and
-                            not self.shutdown_initiated):
-                        self.get_logger().info(
-                            f"Button press reached warning threshold ({SHUTDOWN_WARNING_BEFORE_SHUTDOWN_S}s) - sending warning notification")
-                        self.send_desktop_notification(
-                            "Power Button Warning",
-                            f"Release the power button now to abort shutdown!\nButton held for {press_duration:.1f}s (shutdown in {self.SHUTDOWN_THRESHOLD - press_duration:.1f}s)",
-                            "critical",
-                            FINAL_SHUTDOWN_NOTIFICATION_MS  # No timeout - stays until dismissed
-                        )
-                        self.warning_notification_sent = True
-
-                    # Check for shutdown threshold
-                    if press_duration >= self.SHUTDOWN_THRESHOLD:
-                        if not self.shutdown_initiated:
-                            self.get_logger().info(
-                                "Long press threshold reached, initiating shutdown...")
-                            self.initiate_shutdown()
-                        break  # Exit monitoring loop
-
-                time.sleep(poll_interval)
-
-            except Exception as e:
-                self.get_logger().error(f"Error in button release monitoring: {e}")
-                time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
-                break
+                except Exception as e:
+                    self.get_logger().error(f"Error in button release monitoring: {e}")
+                    time.sleep(BUTTON_ERROR_RECOVERY_DELAY_S)
+                    break
+        finally:
+            if not released_normally and self.power_button_pressed:
+                self.get_logger().warning(
+                    "Button release monitor exited abnormally - clearing pressed state")
+                self.power_button_pressed = False
+                self.button_press_start_time = None
+                self.warning_notification_sent = False
 
     def get_current_button_state(self):
         """Get current button state - works with interrupt-configured line"""
@@ -3706,9 +3723,9 @@ class PowerController(ArgoBaseNode):
 
         # Start power button monitoring in separate thread
         self.get_logger().info("Starting hardware interrupt-based button detection")
-        button_thread = threading.Thread(
+        self._button_monitor_thread = threading.Thread(
             target=self.monitor_power_button_interrupts, daemon=True)
-        button_thread.start()
+        self._button_monitor_thread.start()
 
         # Start green LED heartbeat in separate thread
         self.get_logger().info("Starting green LED heartbeat thread")
@@ -5214,6 +5231,15 @@ If you take no action within 30 seconds, the system will automatically
         self.get_logger().info("Cleaning up power controller...")
 
         try:
+            # Stop button monitor before releasing GPIO (avoids NoneType on event_get_fd)
+            self.running = False
+            self.button_detection_active = False
+            if self._button_monitor_thread is not None:
+                self._button_monitor_thread.join(timeout=2.0)
+                if self._button_monitor_thread.is_alive():
+                    self.get_logger().warning(
+                        "Button monitor thread did not exit before GPIO release")
+
             # Stop battery monitoring
             self.battery_monitoring_active = False
 
@@ -5253,6 +5279,7 @@ If you take no action within 30 seconds, the system will automatically
             self.set_red_led(False)
 
             # Release GPIO lines before closing chip
+            self.gpio_available = False
             self._release_gpio_lines_safe()
 
             # Release sysfs LED control back to kernel
