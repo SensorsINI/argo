@@ -79,12 +79,23 @@ The mast is raised by 1cm to allow clearance of the main sail boom over the cabl
 
 ## PCB and specifications
 
-### PCB 3D View
+### PCB Views
 
 <div align="center">
   <b>WindSensor PCB 3D View (PCB dims 20x20mm)</b><br/>
   <img src="WindSensor-rev1c/images/windsensor-pcb-3d.png" alt="WindSensor PCB 3D View" width="640" height="480"/>
 </div>
+
+<div align="center">
+  <b>WindSensor PCB Schematic</b><br/>
+  <img src="WindSensor-rev1c/images/WindSensor-rev1c-schematic.png" alt="WindSensor Schematic" width="640" height="480"/>
+</div>
+
+<div align="center">
+  <b>WindSensor PCB Layout(PCB dims 20x20mm)</b><br/>
+  <img src="WindSensor-rev1c/images/WindSensor-rev1c-pcb-layout.png" alt="WindSensor PCB Layout" width="640" height="480"/>
+</div>
+
 
 
 ### Electrical
