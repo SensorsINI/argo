@@ -180,7 +180,7 @@ class GpsNode(ArgoBaseNode):
         # UART5 pins are TX=11 (PH2) and RX=13 (PH3) on the Orange Pi Zero 2W
         self.declare_parameter('serial_port', '/dev/ttyS5')
         # u-blox NEO-M9N default baud rate (38400 is factory default after firmware update)
-        self.declare_parameter('baud_rate', 38400)
+        self.declare_parameter('baud_rate', 921600)
         self.declare_parameter('gps_frame_id', 'argo_gps')
         # GPIO line for GPS 1PPS input monitoring (-1 disables; default 229 = pin 24 / PH5)
         self.declare_parameter('pps_gpio_line', 229)
@@ -280,12 +280,42 @@ class GpsNode(ArgoBaseNode):
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 bytesize=serial.EIGHTBITS,
-                timeout=1.0  # Add a timeout for reads
+                timeout=1.0,
             )
             self.get_logger().info(
                 f"Serial connection established on {self.serial_port_name}")
             self.get_logger().debug(
                 f"Serial port settings: {self.baud_rate} baud, 8N1, 1.0s timeout")
+
+            # If configured baud != factory default, verify that NMEA actually arrives.
+            # A factory reset or cold-start reset reverts the receiver to 38400; without
+            # this check gps.py would open the port successfully but read garbled data.
+            if self.baud_rate != self._FALLBACK_BAUD:
+                deadline = time.time() + 2.0
+                nmea_seen = False
+                while time.time() < deadline:
+                    raw = self.serial_port.readline().decode('ascii', errors='ignore').strip()
+                    if raw.startswith('$'):
+                        nmea_seen = True
+                        break
+                if not nmea_seen:
+                    self.get_logger().warn(
+                        f"No NMEA at {self.baud_rate} baud — receiver may have reset to "
+                        f"{self._FALLBACK_BAUD} (factory default). Retrying at fallback baud.")
+                    self.serial_port.close()
+                    self.serial_port = serial.Serial(
+                        self.serial_port_name,
+                        baudrate=self._FALLBACK_BAUD,
+                        parity=serial.PARITY_NONE,
+                        stopbits=serial.STOPBITS_ONE,
+                        bytesize=serial.EIGHTBITS,
+                        timeout=1.0,
+                    )
+                    self.baud_rate = self._FALLBACK_BAUD
+                    self.get_logger().info(
+                        f"Reconnected at fallback baud {self._FALLBACK_BAUD}. "
+                        "Run --apply-nav-config to restore 921600.")
+
         except serial.SerialException as e:
             self.get_logger().error(
                 f"CRITICAL: Failed to open serial port {self.serial_port_name}: {e}")
@@ -1895,6 +1925,10 @@ class GpsNode(ArgoBaseNode):
     _KEY_SBAS_USE_DIFFCORR = 0x10360004
     _KEY_SBAS_USE_INTEGRITY = 0x10360005
     _KEY_SBAS_PRNSCANMASK = 0x50360006
+    # UART1 baud rate (interface desc §5.9.27; U4, default 38400)
+    _KEY_UART1_BAUDRATE = 0x40520001
+    _TARGET_BAUD  = 921600   # Maximum supported baud; reduces buffer fill-time at 27 sentences/s
+    _FALLBACK_BAUD = 38400   # Factory-default; used after hardware/factory reset
     # Navigation/measurement rate (interface desc §5.9.18; U2, units 0.001 s)
     _KEY_RATE_MEAS = 0x30210001   # Nominal time between measurements (ms); default 1000 = 1 Hz
     _KEY_RATE_NAV  = 0x30210002   # Nav solutions per measurement cycle; default 1
@@ -1936,12 +1970,76 @@ class GpsNode(ArgoBaseNode):
         cls._cfg_valset_add_key(payload, key, bytes([value & 0xFF, (value >> 8) & 0xFF]))
 
     @classmethod
+    def _cfg_valset_add_u4(cls, payload: bytearray, key: int, value: int) -> None:
+        cls._cfg_valset_add_key(payload, key, value.to_bytes(4, 'little'))
+
+    @classmethod
     def _cfg_valset_add_l(cls, payload: bytearray, key: int, enabled: bool) -> None:
         cls._cfg_valset_add_key(payload, key, bytes([1 if enabled else 0]))
 
     @classmethod
     def _cfg_valset_add_x8(cls, payload: bytearray, key: int, value: int) -> None:
         cls._cfg_valset_add_key(payload, key, value.to_bytes(8, 'little'))
+
+    def _set_uart_baudrate(self, new_baud: int) -> bool:
+        """Switch the NEO-M9N UART1 baud rate and reopen the serial port.
+
+        The receiver sends its ACK at the OLD baud rate and then immediately
+        switches, so we must reopen the port at new_baud after the ACK is received.
+        The setting is written to both RAM and BBR so it survives power cycles
+        (but NOT a factory / cold-start reset, which reverts to 38400).
+        """
+        if self.baud_rate == new_baud:
+            self.get_logger().info(f"UART1 baud already at {new_baud} — no change needed")
+            return True
+
+        self.get_logger().info(
+            f"Changing UART1 baud rate: {self.baud_rate} → {new_baud} baud...")
+
+        payload = bytearray([
+            0x00,       # version: SET
+            0x03,       # layers: RAM + BBR
+            0x00, 0x00,
+        ])
+        self._cfg_valset_add_u4(payload, self._KEY_UART1_BAUDRATE, new_baud)
+
+        # ACK arrives at old baud; receiver then switches.
+        ok = self._send_ubx(0x06, 0x8A, payload, expect_ack=True, timeout=3.0)
+        if not ok:
+            self.get_logger().warn("⚠ UART1 baud-rate CFG-VALSET not acknowledged")
+            return False
+
+        # Receiver has now switched; reopen at new baud.
+        time.sleep(0.1)
+        try:
+            if self.serial_port and self.serial_port.is_open:
+                self.serial_port.close()
+            time.sleep(0.2)
+            self.serial_port = serial.Serial(
+                self.serial_port_name,
+                baudrate=new_baud,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                bytesize=serial.EIGHTBITS,
+                timeout=1.0,
+            )
+            self.baud_rate = new_baud
+            self.get_logger().info(f"✓ Serial port reopened at {new_baud} baud")
+        except serial.SerialException as e:
+            self.get_logger().error(f"Failed to reopen serial port at {new_baud} baud: {e}")
+            return False
+
+        # Verify NMEA arrives at the new baud rate.
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            raw = self.serial_port.readline().decode('ascii', errors='ignore').strip()
+            if raw.startswith('$GN') or raw.startswith('$GP'):
+                self.get_logger().info(
+                    f"✓ UART1 baud rate confirmed at {new_baud} baud: {raw[:60]}")
+                return True
+        self.get_logger().warn(
+            f"⚠ No NMEA received at {new_baud} baud within 3 s — baud change may have failed")
+        return False
 
     def configure_navigation_europe_sailboat(self) -> bool:
         """Configure NEO-M9N for European EGNOS SBAS and slow marine navigation.
@@ -2017,6 +2115,14 @@ class GpsNode(ArgoBaseNode):
             time.sleep(0.5)
             self.query_current_dynmodel()
             self.verify_navigation_config(auto_fix=False)
+
+            # Upgrade UART1 to maximum baud rate.
+            # NEO-M9N outputs ~27 sentences/second; at 38400 the 4096-byte serial
+            # buffer fills in ~3 s.  At 921600 (×24 faster) the same buffer holds
+            # ~88 seconds of data — far beyond any realistic backlog.
+            if self.baud_rate != self._TARGET_BAUD:
+                self._set_uart_baudrate(self._TARGET_BAUD)
+
             return True
 
         self.get_logger().warn("⚠ Europe/sailboat navigation CFG-VALSET not acknowledged")
