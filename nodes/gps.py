@@ -653,6 +653,46 @@ class GpsNode(ArgoBaseNode):
             self.serial_port.timeout = original_timeout
         return bytes(buf)
 
+    def _cfg_valget_u2(self, key_id: int) -> Optional[int]:
+        """Read a U2 (little-endian 16-bit) configuration value from RAM via CFG-VALGET."""
+        if not (self.serial_port and self.serial_port.is_open):
+            return None
+        payload = bytearray([
+            0x00, 0x00, 0x00, 0x00,
+            key_id & 0xFF, (key_id >> 8) & 0xFF,
+            (key_id >> 16) & 0xFF, (key_id >> 24) & 0xFF,
+        ])
+        try:
+            if self.serial_port.in_waiting > 0:
+                self.serial_port.read(self.serial_port.in_waiting)
+            length = len(payload)
+            header = bytes([
+                0xB5, 0x62, 0x06, 0x8B,
+                length & 0xFF, (length >> 8) & 0xFF,
+            ])
+            ck = self._ubx_checksum(
+                bytes([0x06, 0x8B, length & 0xFF, (length >> 8) & 0xFF]) + payload
+            )
+            self.serial_port.write(header + payload + ck)
+            resp = self._read_serial_ubx_frames(timeout=1.5)
+            for i in range(len(resp) - 14):
+                if resp[i:i + 2] != b'\xB5\x62' or resp[i + 2] != 0x06 or resp[i + 3] != 0x8B:
+                    continue
+                plen = resp[i + 4] + (resp[i + 5] << 8)
+                end = i + 6 + plen
+                if end > len(resp):
+                    continue
+                data = resp[i + 6:end]
+                if len(data) < 10:
+                    continue
+                resp_key = int.from_bytes(data[4:8], 'little')
+                if resp_key != key_id:
+                    continue
+                return data[8] | (data[9] << 8)
+        except Exception as e:
+            self.get_logger().debug(f"CFG-VALGET U2 0x{key_id:08x} failed: {e}")
+        return None
+
     def _cfg_valget_u1(self, key_id: int) -> Optional[int]:
         """Read a U1 configuration value from RAM via CFG-VALGET."""
         if not (self.serial_port and self.serial_port.is_open):
@@ -1725,37 +1765,74 @@ class GpsNode(ArgoBaseNode):
         return dynmodel
 
     def verify_navigation_config(self, auto_fix: bool = True) -> bool:
-        """Log navigation filter settings; re-apply profile if BBR still has bad INFIL."""
-        cno_thrs = self._cfg_valget_u1(self._KEY_NAVSPG_INFIL_CNOTHRS)
+        """Log navigation filter settings; re-apply profile if BBR has problematic values.
+
+        Checks:
+          - INFIL_CNOTHRS > 0  → blocks fix at low signal (old BBR poison)
+          - MOT_GNSSSPEED_THRS > 0 → static hold freezes position at low speed
+          - RATE_MEAS > 1000 ms → GGA/RMC updates too infrequently (map looks frozen)
+          - PM_OPERATEMODE != 0 → Power Save Mode (PSMOO/PSMCT) causes very slow / skipped fixes
+        """
+        cno_thrs    = self._cfg_valget_u1(self._KEY_NAVSPG_INFIL_CNOTHRS)
         static_speed = self._cfg_valget_u1(self._KEY_MOT_GNSSSPEED_THRS)
-        dynmodel = self._cfg_valget_u1(self._KEY_NAVSPG_DYNMODEL)
+        dynmodel    = self._cfg_valget_u1(self._KEY_NAVSPG_DYNMODEL)
+        rate_meas   = self._cfg_valget_u2(self._KEY_RATE_MEAS)
+        pm_mode     = self._cfg_valget_u1(self._KEY_PM_OPERATEMODE)
+        sigattcomp  = self._cfg_valget_u1(self._KEY_NAVSPG_SIGATTCOMP)
 
         model_names = {
             0: "Portable", 2: "Stationary", 3: "Pedestrian",
             4: "Automotive", 5: "Sea",
         }
+        pm_names = {0: "FULL", 1: "PSMOO", 2: "PSMCT"}
         dyn_name = model_names.get(dynmodel, f"?({dynmodel})") if dynmodel is not None else "?"
+        pm_name  = pm_names.get(pm_mode, f"?({pm_mode})") if pm_mode is not None else "?"
 
+        rate_hz_str = f"{1000.0 / rate_meas:.2f} Hz" if rate_meas else "?"
+        sigatt_name = {0: "DIS", 255: "AUTO"}.get(sigattcomp, f"{sigattcomp}") if sigattcomp is not None else "?"
         self.get_logger().info(
             f"GPS nav config: DYNMODEL={dyn_name} "
             f"INFIL_CNOTHRS={cno_thrs if cno_thrs is not None else '?'} dBHz "
             f"static_hold_speed_thrs={static_speed if static_speed is not None else '?'} "
-            f"(0=off; SBAS mask does not disable GPS/GAL/GLO/BDS)"
+            f"RATE_MEAS={rate_meas if rate_meas is not None else '?'} ms ({rate_hz_str}) "
+            f"PM_OPERATEMODE={pm_name} SIGATTCOMP={sigatt_name}"
         )
-
-        needs_fix = cno_thrs is not None and cno_thrs > 0
-        if static_speed is not None and static_speed > 0:
-            static_mps = static_speed * 0.01
+        if sigattcomp == 0:
             self.get_logger().warn(
-                f"GPS static hold may be enabled (GNSSSPEED_THRS={static_speed} "
-                f"≈ {static_mps:.2f} m/s) — position can freeze when moving slowly"
+                "GPS SIGATTCOMP=DIS: receiver penalises all low-C/N0 signals as multipath — "
+                "this worsens accuracy near buildings and with mast-base antenna placement; "
+                "re-applying to set AUTO"
             )
+            needs_fix = True
+
+        needs_fix = False
+
+        if cno_thrs is not None and cno_thrs > 0:
+            self.get_logger().warn(
+                f"GPS INFIL_CNOTHRS={cno_thrs} dBHz in BBR can block fix / freeze weak signals")
+            needs_fix = True
+
+        if static_speed is not None and static_speed > 0:
+            self.get_logger().warn(
+                f"GPS static hold enabled (GNSSSPEED_THRS={static_speed} ≈ {static_speed * 0.01:.2f} m/s)"
+                " — position will freeze when moving slowly")
+            needs_fix = True
+
+        if rate_meas is not None and rate_meas > 1000:
+            self.get_logger().warn(
+                f"GPS RATE_MEAS={rate_meas} ms ({rate_hz_str}) in BBR — "
+                "GGA/RMC sentences arrive too infrequently; map position will appear frozen")
+            needs_fix = True
+
+        if pm_mode is not None and pm_mode != 0:
+            self.get_logger().warn(
+                f"GPS PM_OPERATEMODE={pm_name} ({pm_mode}) — Power Save Mode is ON; "
+                "receiver skips fixes between sleep cycles (PSMOO default 10 s period), "
+                "causing map dot to appear stuck")
+            needs_fix = True
 
         if needs_fix and auto_fix:
-            self.get_logger().warn(
-                f"GPS INFIL_CNOTHRS={cno_thrs} dBHz in BBR can block fix / freeze weak signals; "
-                "re-applying Europe navigation profile..."
-            )
+            self.get_logger().warn("Re-applying Europe navigation profile to fix BBR settings...")
             return self.configure_navigation_europe_sailboat()
         return not needs_fix
 
@@ -1818,6 +1895,20 @@ class GpsNode(ArgoBaseNode):
     _KEY_SBAS_USE_DIFFCORR = 0x10360004
     _KEY_SBAS_USE_INTEGRITY = 0x10360005
     _KEY_SBAS_PRNSCANMASK = 0x50360006
+    # Navigation/measurement rate (interface desc §5.9.18; U2, units 0.001 s)
+    _KEY_RATE_MEAS = 0x30210001   # Nominal time between measurements (ms); default 1000 = 1 Hz
+    _KEY_RATE_NAV  = 0x30210002   # Nav solutions per measurement cycle; default 1
+    # Power management (interface desc §5.9.16; E1)
+    # 0=FULL (continuous), 1=PSMOO (on/off), 2=PSMCT (cyclic tracking)
+    _KEY_PM_OPERATEMODE = 0x20D00001
+    # Signal attenuation compensation (interface desc §5.9.17; E1)
+    # DIS=0 (default): receiver de-weights low-C/N0 signals assuming multipath.
+    # AUTO=255: receiver estimates overall antenna attenuation level and does NOT
+    # penalise consistently-weak-but-valid signals (e.g. under radome, antenna at
+    # mast base, or near buildings). Strongly recommended for any non-ideal antenna
+    # placement. Has no downside on open water.
+    _KEY_NAVSPG_SIGATTCOMP = 0x201100D6
+    _SIGATTCOMP_AUTO = 255
 
     # Portable (0): factory default; best position tracking while actually moving on campus.
     # Pedestrian/At sea over-filter horizontal position during dry-sail tests (map looked stuck).
@@ -1871,13 +1962,24 @@ class GpsNode(ArgoBaseNode):
             0x00, 0x00,
         ])
 
-        # Platform dynamics (§3.1.7.1)
+        # Platform dynamics (§3.1.7.1).
+        # NOTE: "At sea" (5) has a 500m max altitude sanity check; Irchel pond is ~400m ASL
+        # but surrounding campus is 504-527m — that model invalidates fixes at this altitude.
+        # Portable (0) has no altitude cap and allows the filter to track real movement well.
         self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_DYNMODEL, self._DYNMODEL_PORTABLE)
+        # Minimum elevation: 5° excludes satellites on the horizon whose long atmospheric path
+        # and low incident angle maximise multipath near buildings. No meaningful impact on open water.
+        self._cfg_valset_add_i1(valset_payload, self._KEY_NAVSPG_INFIL_MINELEV, 5)
         # Clear any prior INFIL overrides in BBR (e.g. CNOTHRS=20 blocked fix at ~17 dBHz signal)
-        self._cfg_valset_add_i1(valset_payload, self._KEY_NAVSPG_INFIL_MINELEV, 0)
         self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_MINCNO, 0)
         self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_NCNOTHRS, 0)
         self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_INFIL_CNOTHRS, 0)
+        # Signal attenuation compensation: AUTO (255).
+        # Default DIS (0) causes the receiver to de-weight ALL low-C/N0 signals as multipath.
+        # Near the building or with antenna at mast base, valid signals are simply attenuated —
+        # not multipath — so DIS mode rejects good data and trusts building reflections instead.
+        # AUTO lets the receiver estimate the attenuation floor and stops penalising those signals.
+        self._cfg_valset_add_u1(valset_payload, self._KEY_NAVSPG_SIGATTCOMP, self._SIGATTCOMP_AUTO)
 
         # Low-speed COG: emit last valid COG in RMC/VTG when speed < 0.1 m/s (§3.1.7.5)
         self._cfg_valset_add_l(valset_payload, self._KEY_NMEA_OUT_FROZENCOG, True)
@@ -1885,6 +1987,19 @@ class GpsNode(ArgoBaseNode):
         # Static hold disabled (0 = firmware default off) — do not freeze position while drifting
         self._cfg_valset_add_u1(valset_payload, self._KEY_MOT_GNSSSPEED_THRS, 0)
         self._cfg_valset_add_u2(valset_payload, self._KEY_MOT_GNSSDIST_THRS, 0)
+
+        # Navigation/measurement rate: 1 Hz (1000 ms), one nav solution per measurement.
+        # Explicitly set these so that any prior BBR override (e.g. from u-center) is cleared.
+        # Without this, a BBR RATE-MEAS > 1000 ms (or PSM PSMOO with a long period) can make
+        # position updates extremely slow — up to once per 10–1800 s — causing the map dot to
+        # appear frozen at the start location even during a long walk/sail.
+        self._cfg_valset_add_u2(valset_payload, self._KEY_RATE_MEAS, 1000)  # 1 Hz
+        self._cfg_valset_add_u2(valset_payload, self._KEY_RATE_NAV, 1)
+
+        # Power management: continuous mode (FULL). Overrides any BBR PSMOO/PSMCT setting.
+        # PSMOO (on/off operation) with POSUPDATEPERIOD=10 s (factory default) or longer
+        # gives fixes only every N seconds and is the most likely cause of "stuck GPS" in the field.
+        self._cfg_valset_add_u1(valset_payload, self._KEY_PM_OPERATEMODE, 0)  # 0=FULL
 
         # SBAS / EGNOS for Europe (§3.2)
         self._cfg_valset_add_l(valset_payload, self._KEY_SIGNAL_SBAS_ENA, True)
@@ -2813,11 +2928,11 @@ class GpsNode(ArgoBaseNode):
                     self._position_stuck_since = now
                 stuck_s = now - self._position_stuck_since
                 sog = self.current_sog or 0.0
-                if sog > 0.25 and stuck_s > 15.0 and (now - self._last_position_move_log_time) > 30.0:
+                if sog > 0.5 and stuck_s > 30.0 and (now - self._last_position_move_log_time) > 60.0:
                     self.get_logger().warn(
                         f"GPS position frozen ~{stuck_s:.0f}s at {lat:.6f},{lon:.6f} "
-                        f"while SOG={sog:.1f}kt — static hold or bad INFIL in BBR? "
-                        "Run: python3 nodes/gps.py --apply-nav-config"
+                        f"while SOG={sog:.1f}kt — likely GNSS multipath (building/obstruction) "
+                        "or static hold (run --apply-nav-config if nav config was not recently applied)"
                     )
                     self._last_position_move_log_time = now
             else:
