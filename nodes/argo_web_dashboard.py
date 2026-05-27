@@ -63,6 +63,11 @@ from geofence_manager import GeofenceManager
 
 UPDATE_RATE = .2  # Hz
 
+# Match temp_monitor.py thresholds for CPU temperature alerts
+CPU_TEMP_HIGH_THRESHOLD_C = 85.0
+CPU_TEMP_CRITICAL_THRESHOLD_C = 100.0
+
+
 class ArgoWebDashboard(ArgoBaseNode):
     """ROS2 node providing web-based monitoring and control interface."""
     
@@ -135,6 +140,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             
             # Temperature
             'cpu_temp': None,
+            'cpu_temp_high_alert': False,  # High CPU temp warning from temp_monitor
+            'cpu_temp_critical_alert': False,  # Critical CPU temp warning from temp_monitor
             'pcb_temp': None,
             'air_temp': None,
             
@@ -465,6 +472,12 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.create_subscription(Bool, '/battery_low_alert', self.battery_low_alert_cb, 10)
         )
         self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/temperature_high_alert', self.cpu_temp_high_alert_cb, 10)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/temperature_critical_alert', self.cpu_temp_critical_alert_cb, 10)
+        )
+        self._topic_subscriptions.append(
             self.create_subscription(Bool, '/charging_status', self.charging_status_cb, 10)
         )
         self._topic_subscriptions.append(
@@ -688,6 +701,18 @@ class ArgoWebDashboard(ArgoBaseNode):
         # CRITICAL: Don't skip in low-power mode - battery warnings are safety-critical
         with self.state_lock:
             self.state['battery_low_alert'] = msg.data
+
+    def cpu_temp_high_alert_cb(self, msg):
+        """Callback for high CPU temperature alert."""
+        # CRITICAL: Don't skip in low-power mode - temperature warnings are safety-critical
+        with self.state_lock:
+            self.state['cpu_temp_high_alert'] = msg.data
+
+    def cpu_temp_critical_alert_cb(self, msg):
+        """Callback for critical CPU temperature alert."""
+        # CRITICAL: Don't skip in low-power mode - temperature warnings are safety-critical
+        with self.state_lock:
+            self.state['cpu_temp_critical_alert'] = msg.data
     
     def charging_status_cb(self, msg):
         """Callback for battery charging status."""
@@ -1508,8 +1533,15 @@ class ArgoWebDashboard(ArgoBaseNode):
             with open('/sys/class/thermal/thermal_zone2/temp', 'r') as f:
                 temp_millicelsius = int(f.read().strip())
                 self.get_logger().debug(f"CPU temperature: {temp_millicelsius} millicelsius")   # DEBUG
+                cpu_temp = temp_millicelsius // 1000
                 with self.state_lock:
-                    self.state['cpu_temp'] = temp_millicelsius // 1000
+                    self.state['cpu_temp'] = cpu_temp
+                    # Immediate alert when displayed temp exceeds limit (topic clears with hysteresis)
+                    if cpu_temp is not None:
+                        if cpu_temp >= CPU_TEMP_CRITICAL_THRESHOLD_C:
+                            self.state['cpu_temp_critical_alert'] = True
+                        if cpu_temp >= CPU_TEMP_HIGH_THRESHOLD_C:
+                            self.state['cpu_temp_high_alert'] = True
         except Exception as e:
             self.get_logger().error(f"Error reading CPU temperature: {e}")
     
@@ -2607,14 +2639,17 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         @self.app.route('/api/status/critical')
         def get_critical_status():
-            """Get only critical status fields (human_controlled, recording, controller_type, i2c_failure, battery_low_alert) for fast polling."""
+            """Get only critical status fields for fast polling."""
             with self.state_lock:
                 return jsonify({
                     'human_controlled': self.state.get('human_controlled'),
                     'recording': self.state.get('recording'),
                     'controller_type': self.state.get('controller_type'),
                     'i2c_failure': self.state.get('i2c_failure', False),
-                    'battery_low_alert': self.state.get('battery_low_alert', False)
+                    'battery_low_alert': self.state.get('battery_low_alert', False),
+                    'cpu_temp_high_alert': self.state.get('cpu_temp_high_alert', False),
+                    'cpu_temp_critical_alert': self.state.get('cpu_temp_critical_alert', False),
+                    'cpu_temp': self.state.get('cpu_temp'),
                 })
 
         # ==================== WiFi Management API ====================

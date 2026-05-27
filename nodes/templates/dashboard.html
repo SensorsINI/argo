@@ -51,6 +51,16 @@
                 ⚠️ LOW BATTERY WARNING<br>
                 <span style="font-size: 0.9em; font-weight: normal;">Battery critically low - Consider returning to shore immediately</span>
             </div>
+            <!-- Critical CPU Temperature Alert -->
+            <div id="cpu-temp-critical-alert" class="critical-alert" style="display: none; background-color: #ff4444; color: white; padding: 12px; border-radius: 8px; margin-bottom: 12px; font-weight: bold; text-align: center;">
+                🔴 CRITICAL CPU TEMPERATURE<br>
+                <span id="cpu-temp-critical-details" style="font-size: 0.9em; font-weight: normal;">CPU temperature critically high - Reduce load or move to shade immediately</span>
+            </div>
+            <!-- High CPU Temperature Alert -->
+            <div id="cpu-temp-high-alert" class="critical-alert" style="display: none; background-color: #ff6b00; color: white; padding: 12px; border-radius: 8px; margin-bottom: 12px; font-weight: bold; text-align: center;">
+                🌡️ HIGH CPU TEMPERATURE WARNING<br>
+                <span id="cpu-temp-high-details" style="font-size: 0.9em; font-weight: normal;">CPU temperature exceeds safe limit - Consider reducing load or moving to shade</span>
+            </div>
             <div class="status-grid">
                 <!-- Row 1: System, Nodes, Health -->
                 <div class="status-item">
@@ -391,6 +401,8 @@
         let lastCriticalState = {
             i2c_failure: false,
             battery_low_alert: false,
+            cpu_temp_high_alert: false,
+            cpu_temp_critical_alert: false,
             human_controlled: null,
             recording: null,
             controller_type: null
@@ -492,6 +504,16 @@
                 needsUpdate = true;
                 lastCriticalState.battery_low_alert = criticalData.battery_low_alert || false;
             }
+
+            // Update CPU temperature alerts
+            if ((criticalData.cpu_temp_high_alert || false) !== lastCriticalState.cpu_temp_high_alert) {
+                needsUpdate = true;
+                lastCriticalState.cpu_temp_high_alert = criticalData.cpu_temp_high_alert || false;
+            }
+            if ((criticalData.cpu_temp_critical_alert || false) !== lastCriticalState.cpu_temp_critical_alert) {
+                needsUpdate = true;
+                lastCriticalState.cpu_temp_critical_alert = criticalData.cpu_temp_critical_alert || false;
+            }
             
             // Always refresh control mode / recording (short HUMAN bursts are easy to miss)
             updateCriticalUIElements(criticalData);
@@ -537,6 +559,13 @@
             
             // Low battery alert
             updateLowBatteryAlert(data.battery_low_alert || false);
+
+            // CPU temperature alerts
+            updateCpuTempAlerts(
+                data.cpu_temp_high_alert || false,
+                data.cpu_temp_critical_alert || false,
+                data.cpu_temp
+            );
         }
         
         // Update I2C failure alert visibility
@@ -562,6 +591,39 @@
                 }
             }
         }
+
+        // Update CPU temperature alert visibility (critical takes precedence over high)
+        function updateCpuTempAlerts(highAlert, criticalAlert, cpuTemp) {
+            const highElement = document.getElementById('cpu-temp-high-alert');
+            const criticalElement = document.getElementById('cpu-temp-critical-alert');
+            const highDetails = document.getElementById('cpu-temp-high-details');
+            const criticalDetails = document.getElementById('cpu-temp-critical-details');
+            const tempText = (cpuTemp !== null && cpuTemp !== undefined) ? `${cpuTemp} °C` : 'unknown';
+
+            if (criticalElement) {
+                if (criticalAlert) {
+                    criticalElement.style.display = 'block';
+                    if (criticalDetails) {
+                        criticalDetails.textContent =
+                            `CPU at ${tempText} (limit 100 °C) - Reduce load or move to shade immediately`;
+                    }
+                } else {
+                    criticalElement.style.display = 'none';
+                }
+            }
+
+            if (highElement) {
+                if (highAlert && !criticalAlert) {
+                    highElement.style.display = 'block';
+                    if (highDetails) {
+                        highDetails.textContent =
+                            `CPU at ${tempText} (limit 85 °C) - Consider reducing load or moving to shade`;
+                    }
+                } else {
+                    highElement.style.display = 'none';
+                }
+            }
+        }
         
         // Fast polling for critical states (only when page is visible)
         let criticalStatusInterval = null;
@@ -584,6 +646,11 @@
                         statusData.controller_type = data.controller_type;
                         statusData.i2c_failure = data.i2c_failure || false;
                         statusData.battery_low_alert = data.battery_low_alert || false;
+                        statusData.cpu_temp_high_alert = data.cpu_temp_high_alert || false;
+                        statusData.cpu_temp_critical_alert = data.cpu_temp_critical_alert || false;
+                        if (data.cpu_temp !== undefined) {
+                            statusData.cpu_temp = data.cpu_temp;
+                        }
                     }
                 })
                 .catch(error => {
@@ -625,10 +692,17 @@
                     lastCriticalState.controller_type = data.controller_type;
                     lastCriticalState.i2c_failure = data.i2c_failure || false;
                     lastCriticalState.battery_low_alert = data.battery_low_alert || false;
+                    lastCriticalState.cpu_temp_high_alert = data.cpu_temp_high_alert || false;
+                    lastCriticalState.cpu_temp_critical_alert = data.cpu_temp_critical_alert || false;
                     // Full /api/status must drive critical banners: updateUI() calls
                     // updateCriticalUIElements() without these fields and would hide them.
                     updateI2CFailureAlert(data.i2c_failure || false);
                     updateLowBatteryAlert(data.battery_low_alert || false);
+                    updateCpuTempAlerts(
+                        data.cpu_temp_high_alert || false,
+                        data.cpu_temp_critical_alert || false,
+                        data.cpu_temp
+                    );
                 })
                 .catch(error => {
                     console.error('Error fetching status:', error);
@@ -848,8 +922,15 @@
             }
             
             // Temperatures
-            document.getElementById('cpu-temp').textContent = 
-                data.cpu_temp ? `${data.cpu_temp} °C` : '-- °C';
+            const cpuTempEl = document.getElementById('cpu-temp');
+            cpuTempEl.textContent = data.cpu_temp ? `${data.cpu_temp} °C` : '-- °C';
+            if (data.cpu_temp_critical_alert) {
+                cpuTempEl.style.color = '#ff4444';
+            } else if (data.cpu_temp_high_alert) {
+                cpuTempEl.style.color = '#ff6b00';
+            } else {
+                cpuTempEl.style.color = '';
+            }
             document.getElementById('pcb-temp').textContent = 
                 data.pcb_temp !== null && data.pcb_temp !== undefined ? `${data.pcb_temp.toFixed(1)} °C` : '-- °C';
             document.getElementById('air-temp').textContent = 
@@ -1003,13 +1084,16 @@
                 document.getElementById('home-card').style.display = 'none';
             }
             
-            // Controller + safety banners (include i2c/battery so partial updates do not hide alerts)
+            // Controller + safety banners (include i2c/battery/cpu temp so partial updates do not hide alerts)
             updateCriticalUIElements({
                 human_controlled: data.human_controlled,
                 recording: data.recording,
                 controller_type: data.controller_type,
                 i2c_failure: data.i2c_failure || false,
-                battery_low_alert: data.battery_low_alert || false
+                battery_low_alert: data.battery_low_alert || false,
+                cpu_temp_high_alert: data.cpu_temp_high_alert || false,
+                cpu_temp_critical_alert: data.cpu_temp_critical_alert || false,
+                cpu_temp: data.cpu_temp
             });
             
             // Update controller button highlighting based on current controller type
