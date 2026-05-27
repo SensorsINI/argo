@@ -1200,24 +1200,57 @@ class GpsNode(ArgoBaseNode):
             else:
                 self.get_logger().warn("⚠ Hardware reset requested but GPIO reset line not available")
 
-        # First, listen briefly for any automatic output
+        # Listen for automatic NMEA output — must be VALID NMEA, not just any bytes.
+        # A baud mismatch (e.g. receiver at 921600, port at 38400) also produces bytes,
+        # so we require at least one properly-formed sentence before declaring success.
         self.get_logger().debug("Listening for automatic GPS output...")
-        time.sleep(1.0)  # Brief pause to let any automatic data come through
+        time.sleep(1.0)
 
-        # Check if there's any data waiting
+        _GNSS_PREFIXES = ('$GN', '$GP', '$GL', '$GA', '$GB')
         automatic_output_detected = False
-        if self.serial_port.in_waiting > 0:
-            try:
-                waiting_data = self.serial_port.read(
-                    self.serial_port.in_waiting).decode('ascii', errors='ignore')
-                if waiting_data.strip():
-                    self.get_logger().info("✓ GPS is outputting data automatically!")
-                    self.get_logger().debug(
-                        f"Sample output: {waiting_data[:100]}...")
-                    automatic_output_detected = True
-            except Exception as e:
-                # self.get_logger().debug(f"Error reading automatic data: {e}")
-                pass
+        try:
+            self.serial_port.reset_input_buffer()
+            for _ in range(4):   # 4 × 0.5 s = 2 s total
+                time.sleep(0.5)
+                avail = self.serial_port.in_waiting
+                if avail == 0:
+                    continue
+                chunk = self.serial_port.read(avail).decode('ascii', errors='ignore')
+                for line in chunk.splitlines():
+                    line = line.strip()
+                    if any(line.startswith(p) for p in _GNSS_PREFIXES) and line.count(',') >= 5:
+                        self.get_logger().info("✓ GPS is outputting data automatically!")
+                        self.get_logger().debug(f"Sample NMEA: {line[:80]}")
+                        automatic_output_detected = True
+                        break
+                if automatic_output_detected:
+                    break
+            else:
+                if not automatic_output_detected:
+                    # Bytes arrived but none were valid NMEA — likely a baud mismatch.
+                    # Try to detect the receiver at 921600 / 115200 and revert to 38400.
+                    self.get_logger().warn(
+                        "⚠ Bytes received but no valid NMEA at 38400 baud — "
+                        "possible baud mismatch (receiver may be at 921600 from a previous session).")
+                    self._probe_and_revert_baud()
+                    # After revert attempt, do a fresh NMEA check at 38400.
+                    self.serial_port.reset_input_buffer()
+                    for _ in range(4):
+                        time.sleep(0.5)
+                        avail = self.serial_port.in_waiting
+                        if avail == 0:
+                            continue
+                        chunk = self.serial_port.read(avail).decode('ascii', errors='ignore')
+                        for line in chunk.splitlines():
+                            line = line.strip()
+                            if any(line.startswith(p) for p in _GNSS_PREFIXES) and line.count(',') >= 5:
+                                self.get_logger().info("✓ GPS back to 38400 baud and outputting NMEA!")
+                                automatic_output_detected = True
+                                break
+                        if automatic_output_detected:
+                            break
+        except Exception as e:
+            self.get_logger().debug(f"Error during NMEA detection: {e}")
         
         # Query firmware version (always do this for diagnostics, unless factory reset just happened)
         if not factory_reset_performed:
@@ -1998,11 +2031,104 @@ class GpsNode(ArgoBaseNode):
     def _cfg_valset_add_x8(cls, payload: bytearray, key: int, value: int) -> None:
         cls._cfg_valset_add_key(payload, key, value.to_bytes(8, 'little'))
 
+    def _probe_and_revert_baud(self) -> bool:
+        """Blind-write a baud-revert command at each candidate baud and verify 38400.
+
+        Called when bytes arrive at 38400 but are not valid NMEA, indicating the
+        receiver's BBR has it transmitting at a higher baud rate (typically 921600).
+
+        Because the Allwinner H618 UART cannot reliably *receive* at 921600 baud,
+        we cannot confirm the receiver is there by reading NMEA.  Instead we
+        blind-write CFG-VALSET(baud=38400) at each candidate speed (921600, 115200)
+        and then verify whether valid NMEA appears at 38400 afterward.
+        """
+        import serial as _serial
+
+        _GNSS_PREFIXES = ('$GN', '$GP', '$GL', '$GA', '$GB')
+
+        def _ubx_frame(cls_id, msg_id, payload):
+            length = len(payload)
+            header = bytes([0xB5, 0x62, cls_id, msg_id, length & 0xFF, (length >> 8) & 0xFF])
+            ck = self._ubx_checksum(bytes([cls_id, msg_id, length & 0xFF, (length >> 8) & 0xFF]) + payload)
+            return header + payload + ck
+
+        def _nmea_at_38400() -> bool:
+            try:
+                s = _serial.Serial(
+                    self.serial_port_name, baudrate=self._FALLBACK_BAUD,
+                    parity=_serial.PARITY_NONE, stopbits=_serial.STOPBITS_ONE,
+                    bytesize=_serial.EIGHTBITS, timeout=0.5,
+                )
+                s.reset_input_buffer()
+                for _ in range(4):
+                    time.sleep(0.5)
+                    avail = s.in_waiting
+                    if avail > 0:
+                        chunk = s.read(avail).decode('ascii', errors='ignore')
+                        for line in chunk.splitlines():
+                            line = line.strip()
+                            if any(line.startswith(p) for p in _GNSS_PREFIXES) and line.count(',') >= 5:
+                                s.close()
+                                return True
+                s.close()
+            except Exception:
+                pass
+            return False
+
+        payload = bytearray([0x00, 0x03, 0x00, 0x00])
+        self._cfg_valset_add_u4(payload, self._KEY_UART1_BAUDRATE, self._FALLBACK_BAUD)
+        frame = _ubx_frame(0x06, 0x8A, bytes(payload))
+
+        for probe_baud in (921600, 115200):
+            try:
+                if self.serial_port and self.serial_port.is_open:
+                    self.serial_port.close()
+                probe_port = _serial.Serial(
+                    self.serial_port_name, baudrate=probe_baud,
+                    parity=_serial.PARITY_NONE, stopbits=_serial.STOPBITS_ONE,
+                    bytesize=_serial.EIGHTBITS, timeout=0.2,
+                )
+                self.get_logger().info(
+                    f"Sending baud-revert to {self._FALLBACK_BAUD} at {probe_baud} (blind)...")
+                probe_port.write(frame)
+                probe_port.flush()
+                time.sleep(0.15)
+                probe_port.close()
+                time.sleep(0.3)
+                if _nmea_at_38400():
+                    self.get_logger().info(
+                        f"✓ Receiver reverted to {self._FALLBACK_BAUD} baud after write at {probe_baud}")
+                    self.serial_port = _serial.Serial(
+                        self.serial_port_name, baudrate=self._FALLBACK_BAUD,
+                        parity=_serial.PARITY_NONE, stopbits=_serial.STOPBITS_ONE,
+                        bytesize=_serial.EIGHTBITS, timeout=1.0,
+                    )
+                    self.baud_rate = self._FALLBACK_BAUD
+                    return True
+                self.get_logger().debug(f"No NMEA at {self._FALLBACK_BAUD} after write at {probe_baud}")
+            except Exception as e:
+                self.get_logger().debug(f"Baud probe at {probe_baud} failed: {e}")
+
+        # Reopen at 38400 regardless so the node has a valid port object
+        try:
+            self.serial_port = _serial.Serial(
+                self.serial_port_name, baudrate=self._FALLBACK_BAUD,
+                parity=_serial.PARITY_NONE, stopbits=_serial.STOPBITS_ONE,
+                bytesize=_serial.EIGHTBITS, timeout=1.0,
+            )
+            self.baud_rate = self._FALLBACK_BAUD
+        except Exception:
+            pass
+        self.get_logger().error(
+            "⚠ Could not revert receiver baud — still garbled at 38400. "
+            "A physical power cycle of the GPS module is required.")
+        return False
+
     def _set_uart_baudrate(self, new_baud: int) -> bool:
         """Switch the NEO-M9N UART1 baud rate and reopen the serial port.
 
-        The receiver sends its ACK at the OLD baud rate and then immediately
-        switches, so we must reopen the port at new_baud after the ACK is received.
+        Uses fire-and-forget (no ACK wait): the receiver switches baud immediately
+        upon parsing CFG-VALSET, before it can ACK at the old baud rate.
         The setting is written to both RAM and BBR so it survives power cycles
         (but NOT a factory / cold-start reset, which reverts to 38400).
         """
@@ -2020,14 +2146,12 @@ class GpsNode(ArgoBaseNode):
         ])
         self._cfg_valset_add_u4(payload, self._KEY_UART1_BAUDRATE, new_baud)
 
-        # ACK arrives at old baud; receiver then switches.
-        ok = self._send_ubx(0x06, 0x8A, payload, expect_ack=True, timeout=3.0)
-        if not ok:
-            self.get_logger().warn("⚠ UART1 baud-rate CFG-VALSET not acknowledged")
-            return False
-
-        # Receiver has now switched; reopen at new baud.
-        time.sleep(0.1)
+        # Fire-and-forget: the receiver switches UART baud immediately on parsing
+        # CFG-VALSET, before it can send an ACK at the old baud rate.  Waiting
+        # for an ACK at the old baud therefore always times out.  Instead we
+        # flush the frame, close the port, and verify NMEA at the new baud.
+        self._send_ubx(0x06, 0x8A, payload, expect_ack=False)
+        time.sleep(0.1)  # let the frame clock out before closing
         try:
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
