@@ -180,7 +180,7 @@ class GpsNode(ArgoBaseNode):
         # UART5 pins are TX=11 (PH2) and RX=13 (PH3) on the Orange Pi Zero 2W
         self.declare_parameter('serial_port', '/dev/ttyS5')
         # u-blox NEO-M9N default baud rate (38400 is factory default after firmware update)
-        self.declare_parameter('baud_rate', 921600)
+        self.declare_parameter('baud_rate', 38400)
         self.declare_parameter('gps_frame_id', 'argo_gps')
         # GPIO line for GPS 1PPS input monitoring (-1 disables; default 229 = pin 24 / PH5)
         self.declare_parameter('pps_gpio_line', 229)
@@ -290,17 +290,32 @@ class GpsNode(ArgoBaseNode):
             # If configured baud != factory default, verify that NMEA actually arrives.
             # A factory reset or cold-start reset reverts the receiver to 38400; without
             # this check gps.py would open the port successfully but read garbled data.
+            #
+            # IMPORTANT: do NOT use readline() here. At 921600 baud with a 38400-baud
+            # transmitter the mismatched bit timing causes the UART to generate a
+            # continuous flood of 0x00 null bytes (framing errors). readline() reads
+            # them endlessly without finding \n and blocks forever.  Use sleep + read()
+            # instead to drain whatever has arrived in the buffer each half-second.
             if self.baud_rate != self._FALLBACK_BAUD:
-                deadline = time.time() + 2.0
+                _GNSS_PREFIXES = ('$GN', '$GP', '$GL', '$GA', '$GB')
                 nmea_seen = False
-                while time.time() < deadline:
-                    raw = self.serial_port.readline().decode('ascii', errors='ignore').strip()
-                    if raw.startswith('$'):
-                        nmea_seen = True
+                self.serial_port.reset_input_buffer()
+                for _ in range(4):   # 4 × 0.5 s = 2 s total
+                    time.sleep(0.5)
+                    avail = self.serial_port.in_waiting
+                    if avail > 0:
+                        chunk = self.serial_port.read(avail).decode('ascii', errors='ignore')
+                        for line in chunk.splitlines():
+                            line = line.strip()
+                            if (any(line.startswith(p) for p in _GNSS_PREFIXES)
+                                    and line.count(',') >= 5):
+                                nmea_seen = True
+                                break
+                    if nmea_seen:
                         break
                 if not nmea_seen:
                     self.get_logger().warn(
-                        f"No NMEA at {self.baud_rate} baud — receiver may have reset to "
+                        f"No valid NMEA at {self.baud_rate} baud — receiver may have reset to "
                         f"{self._FALLBACK_BAUD} (factory default). Retrying at fallback baud.")
                     self.serial_port.close()
                     self.serial_port = serial.Serial(
@@ -1884,13 +1899,12 @@ class GpsNode(ArgoBaseNode):
             # CFG-CFG message to clear all configuration from BBR and Flash
             # Payload: clearMask (4 bytes) + saveMask (4 bytes) + loadMask (4 bytes) + optional deviceMask
             cfg_cfg_payload = bytearray([
-                # clearMask (X4): Clear all configuration from selected layers
-                0x00, 0x00, 0x00, 0x1F,  # bit 0 (BBR) + bit 1 (Flash) = 0x03, but docs say "any bit" clears all
-                                          # Using 0x1F to be explicit about clearing all subsystems
-                # saveMask (X4): Don't save anything (we're clearing, not saving)
+                # clearMask (X4, little-endian): bits 0-4 = ioPort, msgConf, infMsg, navConf, rxmConf
+                0x1F, 0x00, 0x00, 0x00,
+                # saveMask (X4): Don't save anything
                 0x00, 0x00, 0x00, 0x00,
-                # loadMask (X4): Load from remaining layers after clear (reload defaults)
-                0x00, 0x00, 0x00, 0x1F,  # Load all subsystems from lower layers (defaults)
+                # loadMask (X4, little-endian): reload same subsections from lower layers (factory defaults)
+                0x1F, 0x00, 0x00, 0x00,
             ])
             
             self.get_logger().info("Sending CFG-CFG to clear all configuration from BBR and Flash...")
@@ -1927,7 +1941,10 @@ class GpsNode(ArgoBaseNode):
     _KEY_SBAS_PRNSCANMASK = 0x50360006
     # UART1 baud rate (interface desc §5.9.27; U4, default 38400)
     _KEY_UART1_BAUDRATE = 0x40520001
-    _TARGET_BAUD  = 921600   # Maximum supported baud; reduces buffer fill-time at 27 sentences/s
+    # 115200 is the target upgrade baud rate: 3× faster than factory default, reliably
+    # supported by the Allwinner H618 UART hardware (921600 caused signal-integrity
+    # failures on this SoC and should NOT be used).
+    _TARGET_BAUD  = 115200
     _FALLBACK_BAUD = 38400   # Factory-default; used after hardware/factory reset
     # Navigation/measurement rate (interface desc §5.9.18; U2, units 0.001 s)
     _KEY_RATE_MEAS = 0x30210001   # Nominal time between measurements (ms); default 1000 = 1 Hz
@@ -2030,13 +2047,22 @@ class GpsNode(ArgoBaseNode):
             return False
 
         # Verify NMEA arrives at the new baud rate.
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            raw = self.serial_port.readline().decode('ascii', errors='ignore').strip()
-            if raw.startswith('$GN') or raw.startswith('$GP'):
-                self.get_logger().info(
-                    f"✓ UART1 baud rate confirmed at {new_baud} baud: {raw[:60]}")
-                return True
+        # Use read(in_waiting) instead of readline(): at a wrong baud the UART
+        # generates null-byte floods that cause readline() to block indefinitely.
+        _GNSS_PREFIXES = ('$GN', '$GP', '$GL', '$GA', '$GB')
+        self.serial_port.reset_input_buffer()
+        for _ in range(6):   # 6 × 0.5 s = 3 s
+            time.sleep(0.5)
+            avail = self.serial_port.in_waiting
+            if avail > 0:
+                chunk = self.serial_port.read(avail).decode('ascii', errors='ignore')
+                for line in chunk.splitlines():
+                    line = line.strip()
+                    if (any(line.startswith(p) for p in _GNSS_PREFIXES)
+                            and line.count(',') >= 5):
+                        self.get_logger().info(
+                            f"✓ UART1 baud rate confirmed at {new_baud} baud: {line[:60]}")
+                        return True
         self.get_logger().warn(
             f"⚠ No NMEA received at {new_baud} baud within 3 s — baud change may have failed")
         return False
@@ -2116,13 +2142,11 @@ class GpsNode(ArgoBaseNode):
             self.query_current_dynmodel()
             self.verify_navigation_config(auto_fix=False)
 
-            # Upgrade UART1 to maximum baud rate.
-            # NEO-M9N outputs ~27 sentences/second; at 38400 the 4096-byte serial
-            # buffer fills in ~3 s.  At 921600 (×24 faster) the same buffer holds
-            # ~88 seconds of data — far beyond any realistic backlog.
-            if self.baud_rate != self._TARGET_BAUD:
-                self._set_uart_baudrate(self._TARGET_BAUD)
-
+            # Note: baud rate upgrade (_set_uart_baudrate) is intentionally NOT called
+            # during normal nav-config.  The drain-loop in read_and_publish() prevents
+            # serial buffer overflow at 38400 baud.  921600 proved unreliable on the
+            # Allwinner H618 UART hardware; 115200 upgrade may be tested separately
+            # using the --upgrade-baud CLI flag if desired.
             return True
 
         self.get_logger().warn("⚠ Europe/sailboat navigation CFG-VALSET not acknowledged")
