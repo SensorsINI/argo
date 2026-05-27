@@ -3054,10 +3054,86 @@ class GpsNode(ArgoBaseNode):
         # self.get_logger().debug(
         #     f"Published NavSatFix: {self.current_latitude:.6f}°, {self.current_longitude:.6f}°, Alt: {self.current_altitude}m")
 
+    def _process_nmea_sentence(self, data_str: str, current_time: float) -> None:
+        """Parse and dispatch one NMEA sentence string (already stripped)."""
+        if not data_str:
+            return
+        if not data_str.startswith('$'):
+            # Silently discard UBX binary fragments and noise.
+            return
+
+        self.data_count += 1
+        self.last_data_received_time = current_time
+
+        sentence_type = data_str.split(',')[0]
+        self.sentence_types_seen.add(sentence_type)
+
+        msg = String()
+        msg.data = data_str
+        self.pub_data.publish(msg)
+
+        if data_str.startswith('$GNRMC') or data_str.startswith('$GPRMC'):
+            if not self.first_rmc_received:
+                self.first_rmc_received = True
+                self.get_logger().info(f"✓ First RMC sentence received: {data_str[:80]}")
+            if self.parse_rmc_sentence(data_str):
+                self.publish_navigation_data()
+        elif data_str.startswith('$GNVTG') or data_str.startswith('$GPVTG'):
+            if not self.first_vtg_received:
+                self.first_vtg_received = True
+                self.get_logger().info(f"✓ First VTG sentence received: {data_str[:80]}")
+            if self.parse_vtg_sentence(data_str):
+                self.publish_navigation_data()
+        elif data_str.startswith('$GNGGA') or data_str.startswith('$GPGGA'):
+            if not self.first_gga_received:
+                self.first_gga_received = True
+                self.get_logger().info(f"✓ First GGA sentence received: {data_str[:80]}")
+            self.parse_gga_sentence(data_str)
+        elif (data_str.startswith('$GPGSV') or data_str.startswith('$GLGSV') or
+              data_str.startswith('$GAGSV') or data_str.startswith('$GBGSV') or
+              data_str.startswith('$GNGSV')):
+            self.parse_gsv_sentence(data_str)
+
+        self.periodic_status_logging()
+
+        if current_time - self.last_sentence_type_log_time >= 15.0:
+            if self.sentence_types_seen:
+                if not any('GGA' in s for s in self.sentence_types_seen):
+                    self.get_logger().warn("No GGA sentences received - satellite count unavailable")
+            else:
+                self.get_logger().warn("No NMEA sentences received - GPS may not be outputting NMEA data")
+                missing = []
+                if not self.first_gga_received:
+                    missing.append("GGA")
+                if not self.first_rmc_received:
+                    missing.append("RMC")
+                if not self.first_vtg_received:
+                    missing.append("VTG")
+                if missing:
+                    self.get_logger().warn(
+                        f"No expected NMEA sentences received yet (waiting for: {', '.join(missing)})")
+            self.last_sentence_type_log_time = current_time
+
+        if self.debug_mode and current_time - self.last_data_log_time >= 10.0:
+            self.get_logger().info(f"GPS data flowing: {self.data_count} messages received so far")
+            if self.gps_fix_valid:
+                fix_quality_str = self.get_fix_quality_description()
+                accuracy_str = self.get_position_accuracy_info()
+                if self.current_sog is not None and self.current_cog is not None:
+                    self.get_logger().info(
+                        f"GPS Fix ({fix_quality_str}): SOG={self.current_sog:.2f} knots, "
+                        f"COG={self.current_cog:.1f}°, {accuracy_str}")
+                else:
+                    self.get_logger().info(
+                        f"GPS Fix ({fix_quality_str}) obtained, {accuracy_str}")
+            else:
+                status_line = self._format_no_fix_status_line(current_time)
+                if status_line:
+                    self.get_logger().info(status_line)
+            self.last_data_log_time = current_time
+
     def read_and_publish(self):
         """Reads data from the serial port and publishes it."""
-        # Removed pause functionality - GPS node runs continuously
-
         # GPS node runs continuously without pause functionality
 
         # Check for GPS communication timeout
@@ -3124,150 +3200,37 @@ class GpsNode(ArgoBaseNode):
                 self.get_logger().debug(
                     f"GPS timeout detected but not exiting: reset check pending (no fix for {time_without_fix/60:.1f} min)")
 
-        # The `in_waiting` check is not strictly necessary because `readline()`
-        # with a timeout will block until a line is received or the timeout occurs.
-        # We just need to ensure the port is open.
         if self.serial_port and self.serial_port.is_open:
             try:
-                # Readline() will read until a newline or timeout
-                data_bytes = self.serial_port.readline()
-                data_str = data_bytes.decode('ascii', errors='ignore').strip()
+                # Drain ALL buffered lines each callback to prevent GPS position lag.
+                #
+                # Root-cause: the NEO-M9N outputs ~27 sentences/second (GGA + RMC + VTG +
+                # GSA×2 + GSV×12 for 4 constellations) at its default 1 Hz nav rate.
+                # Reading only ONE line per 100ms timer callback consumes ~10/s, so the
+                # kernel serial buffer (4096 bytes) overflows in ~3 seconds.  After that,
+                # fresh GGA sentences are silently dropped; stale buffered sentences drain
+                # over the next 30+ seconds, making the map position appear frozen even
+                # though the fix is valid.  Restarting the node clears the buffer and
+                # immediately shows the correct location.
+                #
+                # Fix: read every line that is already in the buffer before returning, then
+                # do one blocking read so the comm-timeout watchdog still fires if the GPS
+                # stops transmitting.  Processing is unchanged per sentence.
+                lines_drained = 0
+                while self.serial_port.in_waiting > 0 and lines_drained < 120:
+                    raw = self.serial_port.readline()
+                    if raw:
+                        self._process_nmea_sentence(
+                            raw.decode('ascii', errors='ignore').strip(), current_time)
+                        lines_drained += 1
 
-                if data_str:
-                    # Log every sentence received for debugging
-                    # self.get_logger().debug(f"[SERIAL-RX] NMEA: {data_str[:80]}")
-                    
-                    # Only process valid NMEA sentences (must start with $)
-                    # Invalid/corrupted data might be UBX binary, partial reads, or noise
-                    # UBX messages are binary and when decoded as ASCII appear as control characters or garbage
-                    if not data_str.startswith('$'):
-                        # Check if this looks like UBX binary data (control characters, non-printable)
-                        if any(ord(c) < 32 and c not in '\r\n\t' for c in data_str):
-                            # This is likely UBX binary data - silently discard it
-                            # self.get_logger().debug(f"GPS UBX binary data (discarded): {repr(data_str[:50])}")
-                            pass
-                        # else:
-                            # Not NMEA and not clearly binary - log for investigation
-                            # self.get_logger().debug(f"GPS invalid data (ignored): {repr(data_str[:100])}")
-                        # Don't reset timeout for invalid data - only valid NMEA resets it
-                        return  # Skip processing invalid data
-                    
-                    # Process valid NMEA sentence
-                    self.data_count += 1
-                    self.last_data_received_time = current_time  # Reset timeout only on valid NMEA
-                    # self.get_logger().debug(f"GPS Raw: {data_str}")
-                    
-                    # Track sentence types seen
-                    sentence_type = data_str.split(',')[0]
-                    self.sentence_types_seen.add(sentence_type)
-
-                    # Publish raw NMEA data
-                    msg = String()
-                    msg.data = data_str
-                    self.pub_data.publish(msg)
-
-                    # Parse navigation data from specific NMEA sentences (only valid NMEA reaches here)
-                    # NMEA sentence prefixes:
-                    # - $GNRMC/$GPRMC: Recommended Minimum (RMC) - speed, course, position, fix status
-                    # - $GNVTG/$GPVTG: Track Made Good and Ground Speed (VTG) - course, speed, heading
-                    # - $GNGGA/$GPGGA: Global Positioning System Fix Data (GGA) - position, altitude, satellites, HDOP
-                      # HDOP = Horizontal Dilution of Precision (lower values = better horizontal accuracy)
-                    # - $GNGLL/$GPGLL: Geographic Position - Latitude/Longitude (GLL) - position only
-                    # - $GNGSA/$GPGSA: GPS DOP and Active Satellites (GSA) - satellite selection, DOP values
-                      # DOP = Dilution of Precision (measure of satellite geometry quality)
-                    # - $GNGSV/$GPGSV: GPS Satellites in View (GSV) - satellite visibility information
-                    
-                    if data_str.startswith('$GNRMC') or data_str.startswith('$GPRMC'):
-                        # RMC: Most comprehensive navigation sentence - contains position, speed, course, and fix status
-                        # Distinguishing feature: Contains 'A' (valid) or 'V' (invalid) fix status
-                        if not self.first_rmc_received:
-                            self.first_rmc_received = True
-                            self.get_logger().info(f"✓ First RMC sentence received: {data_str[:80]}")
-                        if self.parse_rmc_sentence(data_str):
-                            self.publish_navigation_data()
-                    elif data_str.startswith('$GNVTG') or data_str.startswith('$GPVTG'):
-                        # VTG: Course and speed information - alternative to RMC for navigation data
-                        # Distinguishing feature: Contains course over ground (COG) and speed over ground (SOG)
-                        if not self.first_vtg_received:
-                            self.first_vtg_received = True
-                            self.get_logger().info(f"✓ First VTG sentence received: {data_str[:80]}")
-                        if self.parse_vtg_sentence(data_str):
-                            self.publish_navigation_data()
-                    elif data_str.startswith('$GNGGA') or data_str.startswith('$GPGGA'):
-                        # GGA: Position and satellite information - most detailed position data
-                        # Distinguishing feature: Contains satellite count, HDOP, and altitude
-                          # HDOP = Horizontal Dilution of Precision (lower values = better accuracy)
-                        if not self.first_gga_received:
-                            self.first_gga_received = True
-                            self.get_logger().info(f"✓ First GGA sentence received: {data_str[:80]}")
-                        # Always parse to extract satellite count and position data
-                        self.parse_gga_sentence(data_str)
-                        # Note: NavSatFix published by periodic timer (1 Hz) for consistent rate
-                        # Note: satellite count published by periodic timer (1 Hz)
-                    elif (data_str.startswith('$GPGSV') or data_str.startswith('$GLGSV') or 
-                          data_str.startswith('$GAGSV') or data_str.startswith('$GBGSV') or
-                          data_str.startswith('$GNGSV')):
-                        # GSV: Satellites in view with signal strength (SNR) information
-                        # Multiple constellations: GP=GPS, GL=GLONASS, GA=Galileo, GB=BeiDou, GN=Combined
-                        # Each constellation sends its own multi-message burst
-                        # Parser aggregates across constellations to avoid overwriting data
-                        self.parse_gsv_sentence(data_str)
-
-                    # Handle periodic status logging for normal operation
-                    self.periodic_status_logging()
-
-                    # Log sentence types seen every 15 seconds
-                    if current_time - self.last_sentence_type_log_time >= 15.0:
-                        if self.sentence_types_seen:
-                            sentence_list = sorted(list(self.sentence_types_seen))
-                            # self.get_logger().debug(f"NMEA sentence types received: {', '.join(sentence_list)}")
-                            has_gga = any('GGA' in s for s in self.sentence_types_seen)
-                            if not has_gga:
-                                self.get_logger().warn("No GGA sentences received - satellite count unavailable")
-                        else:
-                            self.get_logger().warn("No NMEA sentences received - GPS may not be outputting NMEA data")
-                            # Debug: Check if expected sentences have been received
-                            expected_status = []
-                            if not self.first_gga_received:
-                                expected_status.append("GGA")
-                            if not self.first_rmc_received:
-                                expected_status.append("RMC")
-                            if not self.first_vtg_received:
-                                expected_status.append("VTG")
-                            if expected_status:
-                                self.get_logger().warn(
-                                    f"No expected NMEA sentences received yet (waiting for: {', '.join(expected_status)})")
-                        self.last_sentence_type_log_time = current_time
-                    
-                    # Log data reception every 10 seconds for debugging (debug mode only)
-                    if self.debug_mode:
-                        if current_time - self.last_data_log_time >= 10.0:
-                            self.get_logger().info(
-                                f"GPS data flowing: {self.data_count} messages received so far")
-                            if self.gps_fix_valid:
-                                fix_quality_str = self.get_fix_quality_description()
-                                accuracy_str = self.get_position_accuracy_info()
-                                if self.current_sog is not None and self.current_cog is not None:
-                                    self.get_logger().info(
-                                        f"GPS Fix ({fix_quality_str}): SOG={self.current_sog:.2f} knots, COG={self.current_cog:.1f}°, {accuracy_str}")
-                                elif self.current_sog is not None:
-                                    self.get_logger().info(
-                                        f"GPS Fix ({fix_quality_str}): SOG={self.current_sog:.2f} knots, COG=N/A (stationary), {accuracy_str}")
-                                else:
-                                    self.get_logger().info(f"GPS Fix ({fix_quality_str}) obtained, waiting for navigation data, {accuracy_str}")
-                            else:
-                                status_line = self._format_no_fix_status_line(current_time)
-                                if status_line:  # Only log if we have meaningful status (not GSV_pending noise)
-                                    self.get_logger().info(status_line)
-                            self.last_data_log_time = current_time
-
-                # The original script performed manual parsing of NMEA sentences
-                # and used a ROS1-specific library (libnmea_navsat_driver).
-                # This functionality is removed because:
-                # 1. The library is not available in ROS2.
-                # 2. The standard `nmea_navsat_driver` ROS2 package should be used
-                #    for parsing NMEA and publishing standard sensor messages.
-                # This node's primary purpose is now to provide the raw data stream.
+                # When nothing is buffered, do one blocking read so the comm-timeout
+                # watchdog works correctly when the GPS stops transmitting.
+                if lines_drained == 0:
+                    raw = self.serial_port.readline()  # blocks up to serial timeout (1.0 s)
+                    if raw:
+                        self._process_nmea_sentence(
+                            raw.decode('ascii', errors='ignore').strip(), current_time)
 
             except serial.SerialException as e:
                 error_msg = str(e)
