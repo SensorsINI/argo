@@ -66,8 +66,9 @@
     }
 
     function extractLiveState(data) {
-        const lat = data.gps_latitude != null ? data.gps_latitude : data.gps_last_valid_latitude;
-        const lon = data.gps_longitude != null ? data.gps_longitude : data.gps_last_valid_longitude;
+        const gpsLocked = data.gps_locked === true;
+        const lat = gpsLocked ? data.gps_latitude : null;
+        const lon = gpsLocked ? data.gps_longitude : null;
         let x = null;
         let y = null;
         if (lat != null && lon != null && geometry) {
@@ -88,7 +89,8 @@
             cog: data.gps_cog,
             sog: data.gps_sog,
             stale: !!data.gps_data_stale || !!data.gps_position_frozen,
-            has_fix: lat != null && lon != null,
+            has_fix: gpsLocked && lat != null && lon != null,
+            gps_locked: gpsLocked,
         };
     }
 
@@ -349,6 +351,21 @@
         ctx.setLineDash([]);
     }
 
+    function drawNoGpsFixLabel(ctx, w, h) {
+        const text = 'No GPS fix';
+        ctx.save();
+        ctx.font = 'bold 14px sans-serif';
+        const pad = 6;
+        const tw = ctx.measureText(text).width;
+        const x = 12;
+        const y = 18;
+        ctx.fillStyle = 'rgba(220, 53, 69, 0.92)';
+        ctx.fillRect(x - pad, y - 14, tw + pad * 2, 18);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(text, x, y);
+        ctx.restore();
+    }
+
     function renderFrame() {
         const canvas = $('argo-map-canvas');
         if (!canvas || !geometry || !mapEnabled) return;
@@ -401,7 +418,12 @@
         });
 
         const st = displayState;
-        if (st && st.has_fix && st.x != null && st.y != null) {
+        const canDrawAtBoat = st && st.has_fix && st.x != null && st.y != null;
+        if (st && !st.has_fix) {
+            drawNoGpsFixLabel(ctx, w, h);
+        }
+
+        if (canDrawAtBoat) {
             const distMap = Math.hypot(st.x - homeX, st.y - homeY);
             if (distMap > 15) {
                 drawHomeToBoatLine(ctx, homeX, homeY, st.x, st.y);
@@ -424,6 +446,20 @@
 
             if (st.heading != null) {
                 drawHeadingArrow(ctx, bp.x, bp.y, st.heading, st.stale);
+            }
+        } else if (st) {
+            // No GPS fix: show heading + wind at map center so sensors are still visible.
+            const cx = w / 2;
+            const cy = h / 2;
+            if (st.wind_speed != null && st.wind_flow_compass != null) {
+                const wLen = Math.min(
+                    WIND_ARROW_MAX,
+                    Math.max(WIND_ARROW_MIN, st.wind_speed * 8 * VIS_SCALE)
+                );
+                drawArrow(ctx, cx, cy, st.wind_flow_compass, wLen, 'rgba(40, 167, 69, 0.85)', 2.5);
+            }
+            if (st.heading != null) {
+                drawHeadingArrow(ctx, cx, cy, st.heading, st.stale);
             }
         }
     }
