@@ -349,12 +349,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.boat_heading = (450.0 - heading_math) % 360.0
     
     def accel_callback(self, msg):
-        """Estimate roll and pitch from accelerometer data"""
+        """Estimate roll and pitch from /accel in base_link frame (g units)."""
         ax, ay, az = msg.x, msg.y, msg.z
-        
-        # Calculate roll and pitch from accelerometer
         self.boat_roll = math.degrees(math.atan2(ay, az))
-        self.boat_pitch = math.degrees(math.atan2(-ax, math.sqrt(ay*ay + az*az)))
+        self.boat_pitch = math.degrees(
+            math.atan2(ax, math.sqrt(ay * ay + az * az))
+        )
     
     def _on_parameter_change(self, parameters):
         """Handle runtime parameter changes (called when parameters are set via ros2 param set or Foxglove)"""

@@ -11,21 +11,18 @@ if sudo systemctl stop "$SERVICE_NAME" 2>/dev/null; then
     echo "✅ Argo launch service stopped successfully"
 else
     echo "⚠️  Failed to stop $SERVICE_NAME via systemctl"
-    echo "📋 Trying direct node termination..."
-    
-    # Fallback: kill ROS2 launch processes
-    pkill -f "ros2 launch.*argo_launch.py" || true
-    pkill -f "argo_health_monitor.py" || true
-    
-    # Also kill individual nodes
-    ros2 node list 2>/dev/null | while read node; do
-        if [[ "$node" == *"node"* ]]; then
-            # Extract node name and try to kill process
-            pkill -f "$node" || true
-        fi
-    done
-    
-    echo "✅ Terminated ROS2 launch processes"
+fi
+
+# Always run akill to catch orphan node processes started outside the service
+# (e.g. via 'ars <node>' which uses start_new_session=True and escapes the cgroup).
+# akill.sh preserves critical services (battery, power, health, bno085).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AKILL="$SCRIPT_DIR/../scripts/akill.sh"
+if [[ -x "$AKILL" ]]; then
+    echo "🧹 Cleaning up any orphan Argo processes..."
+    "$AKILL" || true
+else
+    echo "⚠️  akill.sh not found at $AKILL — orphan processes may survive"
 fi
 
 # Verify the service is stopped

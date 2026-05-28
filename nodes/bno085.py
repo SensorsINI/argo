@@ -50,7 +50,7 @@ TOPICS PUBLISHED
   /compass      (Vector3) - Heading in degrees (z=0-360, 0=N, 90=E, compass CW from North)
   /pose         (Vector3) - Mathematical yaw in degrees on z (0°=East, CCW), matching
                  argo_unified_simulator_bridge and argo_transform_publisher (ENU)
-  /accel        (Vector3) - Acceleration in g (gravity units)
+  /accel        (Vector3) - Acceleration in g, ROS base_link (X=fwd, Y=port, Z=up)
   /gyro         (Vector3) - Angular velocity in degrees/second
   /imu_health   (Bool)    - Health status (true=healthy, false=unhealthy)
 
@@ -431,6 +431,34 @@ class BNO085Bridge(Node):
                 )
         return result
     
+    def _sensor_accel_to_base_link(self, sx: float, sy: float, sz: float):
+        """Map BNO085 sensor accel (g) to ROS base_link (X=fwd, Y=port, Z=up).
+
+        Default mount (mount_forward_axis=y): sensor +Y=bow, +X=starboard, +Z=up.
+        """
+        axis = str(self.mount_forward_axis).strip().lower()
+        if axis in ('x', '+x'):
+            return sx, -sy, sz
+        if axis in ('neg_x', '-x'):
+            return -sx, sy, sz
+        if axis in ('neg_y', '-y'):
+            return -sy, sx, sz
+        # y / +y (default): bow along sensor +Y.
+        # bx=-sy: accelerometer reads -gravity, bow-down → sensor_sy<0 → bx>0 (bow-down positive)
+        # by=-sx: starboard is sensor +X, port is -starboard
+        return -sy, -sx, sz
+
+    def _sensor_gyro_to_base_link(self, sx: float, sy: float, sz: float):
+        """Map BNO085 gyro (deg/s) to ROS base_link angular rates."""
+        axis = str(self.mount_forward_axis).strip().lower()
+        if axis in ('x', '+x'):
+            return sy, -sx, sz
+        if axis in ('neg_x', '-x'):
+            return -sy, sx, sz
+        if axis in ('neg_y', '-y'):
+            return -sx, -sy, sz
+        return sy, -sx, sz
+
     def _rotate_xy(self, x: float, y: float, degrees: float):
         """Rotate a 2D vector (x,y) in the XY plane by 'degrees' about +Z."""
         rad = math.radians(degrees)
@@ -536,12 +564,9 @@ class BNO085Bridge(Node):
             msg.orientation.y,
             msg.orientation.z,
         )
-        roll, pitch, euler_yaw = self.quaternion_to_euler(qw, qx, qy, qz)
-
         # Bow heading from fusion quaternion + physical mount
         heading = self._heading_from_rotation_vector(qw, qx, qy, qz)
         heading = self._apply_yaw_invert(heading)
-        plane_align_deg = (heading - euler_yaw) % 360.0
         heading_compass = (heading + self.yaw_offset_deg) % 360.0
         
         # /compass: compass convention (0=N, 90=E). /pose: math yaw for TF/controller (same as sim bridge).
@@ -554,23 +579,22 @@ class BNO085Bridge(Node):
         )
         self.pub_pose.publish(pose_msg)
         
-        # Publish gyroscope (rad/s → deg/s)
-        gx = math.degrees(msg.angular_velocity.x)
-        gy = math.degrees(msg.angular_velocity.y)
-        gz = math.degrees(msg.angular_velocity.z)
-        if self.apply_axis_rotation:
-            gx, gy = self._rotate_xy(gx, gy, plane_align_deg)
-        gyro_msg = Vector3(x=gx, y=gy, z=gz)
-        self.pub_gyro.publish(gyro_msg)
-        
-        # Publish accelerometer (m/s² → g)
-        ax = msg.linear_acceleration.x / 9.81
-        ay = msg.linear_acceleration.y / 9.81
-        az = msg.linear_acceleration.z / 9.81
-        if self.apply_axis_rotation:
-            ax, ay = self._rotate_xy(ax, ay, plane_align_deg)
-        accel_msg = Vector3(x=ax, y=ay, z=az)
-        self.pub_accel.publish(accel_msg)
+        # Publish gyro/accel in base_link (REP-103). Do not apply plane_align here —
+        # that rotation is sensor-XY only and breaks roll/pitch after axis remap.
+        gx, gy, gz = self._sensor_gyro_to_base_link(
+            math.degrees(msg.angular_velocity.x),
+            math.degrees(msg.angular_velocity.y),
+            math.degrees(msg.angular_velocity.z),
+        )
+        self.pub_gyro.publish(Vector3(x=gx, y=gy, z=gz))
+
+        ax, ay, az = (
+            msg.linear_acceleration.x / 9.81,
+            msg.linear_acceleration.y / 9.81,
+            msg.linear_acceleration.z / 9.81,
+        )
+        bx, by, bz = self._sensor_accel_to_base_link(ax, ay, az)
+        self.pub_accel.publish(Vector3(x=bx, y=by, z=bz))
     
     def mag_callback(self, msg: MagneticField):
         """Process magnetic field message (currently unused)."""

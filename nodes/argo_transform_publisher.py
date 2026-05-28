@@ -299,17 +299,16 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.boat_heading = float(msg.z) % 360.0
     
     def accel_callback(self, msg):
-        """Estimate roll and pitch from accelerometer data"""
-        # Convert accelerometer readings to roll/pitch angles
-        # Assuming accelerometer is in g units
+        """Estimate roll and pitch from /accel in base_link frame (g units)."""
         ax, ay, az = msg.x, msg.y, msg.z
-        
-        # Calculate roll and pitch from accelerometer (assuming no linear acceleration)
-        # Roll (rotation around x-axis, positive when starboard side up)
+
+        # /accel in base_link (+X fwd, +Y port, +Z up) from bno085 bridge.
+        # Roll: atan2(by, bz) — positive = port up (Rx+ rotates port toward up)
         self.boat_roll = math.degrees(math.atan2(ay, az))
-        
-        # Pitch (rotation around y-axis, positive when bow up)
-        self.boat_pitch = math.degrees(math.atan2(-ax, math.sqrt(ay*ay + az*az)))
+        # Pitch: atan2(bx, ...) — positive = bow down (Ry+ rotates bow toward down)
+        self.boat_pitch = math.degrees(
+            math.atan2(ax, math.sqrt(ay * ay + az * az))
+        )
     
     def publish_static_transforms(self):
         """Publish static transforms between sensor frames and base_link"""
