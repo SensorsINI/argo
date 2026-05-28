@@ -188,6 +188,7 @@ from geometry_msgs.msg import Vector3
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 import math
+import re
 import sys
 import time
 import json
@@ -1364,12 +1365,12 @@ class RotationVectorVerifier(Node):
                 sys.stdout.write(ln + '\n')
             sys.stdout.flush()
             
-            # Check if duration has elapsed
-            if elapsed >= self.duration:
+            # Check if duration has elapsed (duration==0 runs until Ctrl+C)
+            if self.duration > 0 and elapsed >= self.duration:
                 self._teardown_ascii_vis()
                 print(f"\n✅ Verification complete after {elapsed:.1f}s")
                 print(f"Total samples: {self.sample_count}")
-                rclpy.shutdown()
+                raise SystemExit("verification_complete")
                 
         except Exception as e:
             # Display failed, but don't crash the node
@@ -1401,46 +1402,69 @@ class RotationVectorVerifier(Node):
 
 def cmd_status():
     """Check BNO085 system status."""
+    ros_env = 'source /opt/ros/humble/setup.bash'
+    ros_cmd = ['bash', '-c']
+
+    def _run_ros(command: str, timeout: float):
+        return subprocess.run(
+            ros_cmd + [f'{ros_env} && {command}'],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
     print("\n📊 BNO085 SYSTEM STATUS")
     print("=" * 60)
-    
-    # Check nodes
+
+    nodes = ''
     try:
-        result = subprocess.run(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 node list'],
-                                capture_output=True, text=True, timeout=5)
+        result = _run_ros('ros2 node list', 10)
         nodes = result.stdout
-        print(f"\n{'✅' if 'bno08x_driver' in nodes else '❌'} BNO08x C++ driver")
-        print(f"{'✅' if 'bno085_bridge' in nodes else '❌'} BNO085 bridge")
-    except:
+        driver_ok = 'bno08x_ros' in nodes or 'bno08x_driver' in nodes
+        bridge_ok = 'bno085_bridge' in nodes
+        print(f"\n{'✅' if driver_ok else '❌'} BNO08x C++ driver (bno08x_ros)")
+        print(f"{'✅' if bridge_ok else '❌'} BNO085 bridge")
+    except subprocess.TimeoutExpired:
+        print("\n❌ ROS2 node list timed out")
+    except Exception:
         print("\n❌ Cannot check ROS2 nodes")
-    
-    # Check topics
-    # TODO: Fix topic detection - currently shows topics as unavailable even when they're publishing
-    #       Verified that topics are actually publishing data (e.g., /imu, /compass) but status
-    #       script incorrectly reports them as missing. May be timing issue or ros2 topic info
-    #       command not working correctly. Consider using ros2 topic list + grep or direct
-    #       topic echo with timeout instead of topic info.
+
+    topic_names = set()
+    try:
+        result = _run_ros('ros2 topic list', 10)
+        topic_names = set(result.stdout.splitlines())
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        pass
+
     print("\nTopics:")
     for topic in ['/imu', '/magnetic_field', '/compass', '/pose', '/accel', '/gyro', '/imu_health']:
-        try:
-            result = subprocess.run(['bash', '-c', f'source /opt/ros/humble/setup.bash && ros2 topic info {topic}'],
-                                    capture_output=True, text=True, timeout=2)
-            print(f"  {'✅' if result.returncode == 0 else '❌'} {topic}")
-        except:
-            print(f"  ❌ {topic}")
-    
-    # Check health status
+        print(f"  {'✅' if topic in topic_names else '❌'} {topic}")
+
+    # echo --once can take several seconds on a loaded graph; avoid ros2 topic info (often >2s here)
     try:
-        result = subprocess.run(['bash', '-c', 'source /opt/ros/humble/setup.bash && ros2 topic echo /imu_health --once'],
-                                capture_output=True, text=True, timeout=2)
-        if result.returncode == 0 and 'true' in result.stdout.lower():
+        result = _run_ros('ros2 topic echo /imu_health --once', 10)
+        if result.returncode == 0 and 'data: true' in result.stdout.lower():
             print("\n💚 Health Status: HEALTHY")
-        elif result.returncode == 0 and 'false' in result.stdout.lower():
+        elif result.returncode == 0 and 'data: false' in result.stdout.lower():
             print("\n❤️  Health Status: UNHEALTHY")
         else:
             print("\n⚠️  Health Status: UNKNOWN")
-    except:
+    except subprocess.TimeoutExpired:
+        print("\n⚠️  Health Status: timed out waiting for /imu_health")
+    except Exception:
         print("\n⚠️  Health Status: Cannot check")
+
+    try:
+        result = _run_ros('ros2 topic echo /compass --once', 10)
+        match = re.search(r'z:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', result.stdout)
+        if result.returncode == 0 and match:
+            print(f"🧭 Compass sample: {float(match.group(1)):.1f}° (0=N, 90=E, from /compass)")
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
+    except Exception:
+        pass
     
     # Check I2C
     print("\nHardware:")
@@ -1501,6 +1525,7 @@ def main():
                 success_level = node.final_report(interrupted=interrupted)
                 # Clean up current node
                 node.destroy_node()
+                node = None
                 
                 # Offer to run verify
                 print("\nWould you like to verify the calibration results?")
@@ -1523,6 +1548,11 @@ def main():
                             verify_node.destroy_node()
                 except (KeyboardInterrupt, EOFError):
                     print("\n✅ Calibration complete")
+            elif args.command == 'verify' and node:
+                if isinstance(e, KeyboardInterrupt):
+                    print("\n✅ Stopped")
+                node.destroy_node()
+                node = None
             else:
                 print("\n✅ Stopped")
         finally:
