@@ -1577,6 +1577,10 @@ class GpsNode(ArgoBaseNode):
             vtg_ck_b = (vtg_ck_b + vtg_ck_a) & 0xFF
         vtg_enable += bytes([vtg_ck_a, vtg_ck_b])
 
+        # GSV rate: every epoch in debug mode (full diagnostics); every 30th epoch
+        # normally (~30 s refresh).  The burst takes ~300 ms so UART load is tiny.
+        gsv_uart1_rate = 1 if self.debug_mode else 30
+
         # Enable NMEA GSV (Satellites in View) - Class 0xF0, ID 0x03
         # This provides satellite visibility and signal strength information
         gsv_enable = bytes([0xB5, 0x62,  # Sync chars
@@ -1584,7 +1588,7 @@ class GpsNode(ArgoBaseNode):
                            0x08, 0x00,  # Length: 8 bytes
                            0xF0, 0x03,  # NMEA GSV message
                            0x00,        # Rate on DDC (I2C)
-                           0x01,        # Rate on UART1 (our connection)
+                           gsv_uart1_rate,  # Rate on UART1
                            0x00,        # Rate on UART2
                            0x01,        # Rate on USB
                            0x00,        # Rate on SPI
@@ -1643,7 +1647,7 @@ class GpsNode(ArgoBaseNode):
                     self.get_logger().warn("⚠ VTG enable sent but no ACK received")
                 time.sleep(0.1)
 
-                self.get_logger().debug("Enabling NMEA GSV sentences...")
+                self.get_logger().debug(f"Enabling NMEA GSV sentences (rate={gsv_uart1_rate})...")
                 gsv_payload = gsv_enable[6:-2]
                 if self._send_ubx(0x06, 0x01, gsv_payload, expect_ack=True, timeout=1.0):
                     self.get_logger().debug("✓ GSV enable ACK received")
@@ -1651,7 +1655,31 @@ class GpsNode(ArgoBaseNode):
                     self.get_logger().warn("⚠ GSV enable sent but no ACK received")
                 time.sleep(0.1)
 
-                self.get_logger().info("✓ Navigation sentences (GGA, RMC, VTG, GSV) enabled on GPS module")
+                # Disable unused sentences (GLL, GSA) and lock in the GSV rate via
+                # a single CFG-VALSET written to RAM + BBR so it survives restarts.
+                #
+                # GLL  (CFG-MSGOUT-NMEA_ID_GLL_UART1 = 0x209100CA): never parsed
+                # GSA  (CFG-MSGOUT-NMEA_ID_GSA_UART1 = 0x209100C0): never parsed
+                #        (~5 sentences × 64 bytes eliminated)
+                # GSV  (CFG-MSGOUT-NMEA_ID_GSV_UART1 = 0x209100C4): rate=30 normally,
+                #        rate=1 in debug (already set via CFG-MSG above; this confirms
+                #        the BBR value matches)
+                rate_payload = bytearray([0x00, 0x03, 0x00, 0x00])  # version=SET, layers=RAM+BBR
+                self._cfg_valset_add_u1(rate_payload, 0x209100CA, 0)               # GLL  → off
+                self._cfg_valset_add_u1(rate_payload, 0x209100C0, 0)               # GSA  → off
+                self._cfg_valset_add_u1(rate_payload, 0x209100C4, gsv_uart1_rate)  # GSV  → rate
+                if self._send_ubx(0x06, 0x8A, bytes(rate_payload), expect_ack=True, timeout=2.0):
+                    self.get_logger().info(
+                        f"✓ NMEA output optimised: GLL/GSA disabled, GSV every "
+                        f"{'epoch' if gsv_uart1_rate == 1 else f'{gsv_uart1_rate} s'}")
+                else:
+                    self.get_logger().warn("⚠ CFG-VALSET for GLL/GSA/GSV rates not acknowledged")
+                time.sleep(0.1)
+
+                gsv_desc = "1 s (debug)" if self.debug_mode else "30 s"
+                self.get_logger().info(
+                    f"✓ NMEA sentences configured: GGA/RMC/VTG at 1 s, GSV at {gsv_desc}, "
+                    f"GLL/GSA disabled")
                 
                 # Flush any pending UBX ACK/NAK messages from the configuration commands
                 # These are binary messages that would otherwise be read as invalid data
