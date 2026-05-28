@@ -3139,7 +3139,7 @@ class GpsNode(ArgoBaseNode):
                 sat_str = f"used={self.satellites_used} in_view=? (GSV pending)"
             else:
                 # Truly no satellites for >15s - critical hardware issue
-                sat_str = f"in_view=0 (NO RF SIGNAL - check antenna!)"
+                sat_str = f"in_view=0 (NO RF SIGNAL - check antenna is connected and not flipped facing the ground.)"
         
         eph_str = ""
         if self._nav_sat_diag:
