@@ -45,16 +45,6 @@ from pathlib import Path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
 
-# Dragonforce 65 waterline length (m); hull speed V_kn = 1.34 * sqrt(LWL_ft)
-_DF65_LWL_M = 0.65
-
-
-def _df65_hull_speed_mps(lwl_m: float = _DF65_LWL_M) -> float:
-    """Theoretical hull speed in m/s (1 kn = 0.514444 m/s)."""
-    lwl_ft = lwl_m / 0.3048
-    v_kn = 1.34 * math.sqrt(lwl_ft)
-    return v_kn * 0.514444
-
 
 class ArgoTransformPublisher(ArgoBaseNode):
     def __init__(self, debug_mode=False):
@@ -151,19 +141,18 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.declare_parameter('simulation.publish_rate', 10.0)
         self.publish_rate = self.get_parameter('simulation.publish_rate').get_parameter_value().double_value
 
-        # GPS spike filter: implied speed cannot exceed DF65 hull speed (~1.0 m/s at 0.65 m LWL)
-        hull_mps = _df65_hull_speed_mps()
-        self.declare_parameter('gps_spike_max_speed_mps', hull_mps)
+        # GPS spike filter: reject multipath flyaways when implied speed exceeds threshold
+        self.declare_parameter('gps_spike_max_speed_mps', 3.0)
         self._max_gps_speed_mps = self.get_parameter(
             'gps_spike_max_speed_mps').get_parameter_value().double_value
         if self._max_gps_speed_mps <= 0:
-            self._max_gps_speed_mps = hull_mps
+            self._max_gps_speed_mps = 3.0
         if self.publish_rate <= 0:
             self.publish_rate = 10.0
         
         self.get_logger().info(
             f"Transform publisher rate: {self.publish_rate:.1f} Hz, "
-            f"GPS spike max speed: {self._max_gps_speed_mps:.2f} m/s (DF65 hull speed)")
+            f"GPS spike max speed: {self._max_gps_speed_mps:.2f} m/s")
         
         # Timer for dynamic transforms
         self.timer = self.create_timer(1.0/self.publish_rate, self.publish_dynamic_transforms)
