@@ -5,6 +5,7 @@ An autonomous sailboat system based on Dragonforce 65 hull, running on Orange Pi
 [argo freecad 3d.webm](https://github.com/user-attachments/assets/29d93eb4-6dfb-44b6-a583-b5699d12e7a1)
 
 ## News
+- **May 2026:** After ignominious series of problems at CCNW with cabling, water leaks, GPS and many other issues and only 30m of actual seawater sailing, came back to INI to fix these problems. Now IMU is working, GPS is working, dashboard has map display, there are new cable glands and a new hull that has been air-pressure tested for leaks. We are ready now for water trials again.
 - **Mar 2026:** Version 4 of argo PCB with bug fixes, wind sensor on separate I2C bus, and new buzzer. Version 3 of the wind sensor PCB with RGBW LED controller. See [Argo2: Robot Sailboat](https://docs.google.com/presentation/d/15X9GgjOmHowyNMNPRnduzyOgwyVcawP_Lhy54-Hc9cc/edit?usp=sharing) slides presented online at [Embodied Intelligence Conference](https://ei26.embodied-intelligence.org/) 20 March 2026.
 - **Feb 2026:** Updated [wind sensor design PCB and housing](pcb/WindSensor/WindSensor-rev1/) complete. 3D parts for wind sensor I2C cable and mast step up completed and printed.
 - **Jan 2026:** [Argo main PCB version 3](pcb/argo-v9-stable/argo-v9-stable-rev3/) completed and seems fully functional with no surgery needed.
