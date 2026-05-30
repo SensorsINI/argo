@@ -123,8 +123,10 @@ import os
 import argparse
 import argcomplete
 import copy
+import json
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 # Import ArgoBaseNode
 sys.path.append(os.path.join(os.path.dirname(__file__), 'support'))
@@ -274,10 +276,19 @@ class ArgoBoatVisualization(ArgoBaseNode):
         self.boat_pos_x_true = None
         self.boat_pos_y_true = None
         self._last_visual_sail_side = 1.0
+        # Map origin — must match argo_transform_publisher / sailing_area_publisher
+        self.map_origin_set = False
+        self.map_origin_lat = 0.0
+        self.map_origin_lon = 0.0
         self.base_lat = None
         self.base_lon = None
         self.boat_pos_x = 0.0
         self.boat_pos_y = 0.0
+        self.last_gps_timestamp = None
+        # GPS antenna offset in base_link (must match argo_transform_publisher)
+        self._gps_offset_base_x = 0.1
+        self._gps_offset_base_y = 0.0
+        self._load_map_origin_from_config()
         self.overlay_markers = []
         self.is_tacking = False
         self._tacking_marker_active = False
@@ -433,64 +444,139 @@ class ArgoBoatVisualization(ArgoBaseNode):
     def controller_state_callback(self, msg: String):
         """Track controller state (e.g., 'tacking', 'jibing', 'broad_reach')."""
         self.controller_state = msg.data
-    
+
+    def _load_map_origin_from_config(self):
+        """Load map origin from geofence_map_name home waypoint (same as transform publisher)."""
+        try:
+            self.declare_parameter('geofence_map_name', 'Argo Irchel pond sailing area')
+            map_name = self.get_parameter('geofence_map_name').get_parameter_value().string_value
+            if not map_name:
+                self.get_logger().debug(
+                    "No geofence_map_name parameter; heading trail GPS fallback uses first GPS fix")
+                return
+
+            argo_dir = Path(__file__).resolve().parents[1]
+            geojson_path = argo_dir / "foxglove" / "maps" / f"{map_name}.geojson"
+            if not geojson_path.exists():
+                self.get_logger().warn(
+                    f"Map file not found: {geojson_path}; heading trail GPS fallback uses first GPS fix")
+                return
+
+            with open(geojson_path, 'r') as f:
+                geojson_data = json.load(f)
+
+            for feature in geojson_data.get('features', []):
+                props = feature.get('properties', {})
+                if props.get('name') == 'home' and props.get('type') == 'waypoint':
+                    coords = feature['geometry']['coordinates']
+                    self.map_origin_lon = coords[0]
+                    self.map_origin_lat = coords[1]
+                    self.map_origin_set = True
+                    self.base_lat = self.map_origin_lat
+                    self.base_lon = self.map_origin_lon
+                    self.get_logger().info(
+                        f"Map origin for trail/GPS fallback from '{map_name}' home: "
+                        f"lat={self.map_origin_lat:.6f}, lon={self.map_origin_lon:.6f}")
+                    return
+
+            self.get_logger().warn(
+                f"No 'home' waypoint in map '{map_name}'; heading trail GPS fallback uses first GPS fix")
+        except Exception as exc:
+            self.get_logger().warn(
+                f"Failed to load map origin from config: {exc}; heading trail GPS fallback uses first GPS fix")
+
+    def lonlat_to_xy(self, lon, lat):
+        """Convert lon/lat to local ENU meters using the configured map origin."""
+        if not self.map_origin_set and (self.base_lat is None or self.base_lon is None):
+            return None, None
+        origin_lat = self.map_origin_lat if self.map_origin_set else self.base_lat
+        origin_lon = self.map_origin_lon if self.map_origin_set else self.base_lon
+        earth_radius = 6378137.0
+        x = (math.radians(lon) - math.radians(origin_lon)) * earth_radius * math.cos(math.radians(origin_lat))
+        y = (math.radians(lat) - math.radians(origin_lat)) * earth_radius
+        return x, y
+
+    def _enu_heading_rad(self):
+        """Boat heading in ENU math convention (0°=East, CCW), matching transform publisher."""
+        return math.radians((90.0 - self.boat_heading) % 360.0)
+
+    def _gps_antenna_offset_map_xy(self):
+        """Rotate base_link GPS antenna offset into map/ENU frame."""
+        heading_rad = self._enu_heading_rad()
+        cos_yaw = math.cos(heading_rad)
+        sin_yaw = math.sin(heading_rad)
+        off_x = cos_yaw * self._gps_offset_base_x - sin_yaw * self._gps_offset_base_y
+        off_y = sin_yaw * self._gps_offset_base_x + cos_yaw * self._gps_offset_base_y
+        return off_x, off_y
+
     def _update_boat_position_from_gps(self):
-        """Convert current GPS lat/lon to local map XY offsets."""
-        if self.base_lat is None or self.base_lon is None:
+        """Convert current GPS lat/lon to base_link XY in map frame."""
+        if math.isnan(self.gps_lat) or math.isnan(self.gps_lon):
             return
         try:
-            R = 6378137.0  # Earth radius in meters
-            d_lat = math.radians(self.gps_lat - self.base_lat)
-            d_lon = math.radians(self.gps_lon - self.base_lon)
-            self.boat_pos_y = d_lat * R
-            self.boat_pos_x = d_lon * R * math.cos(math.radians(self.base_lat))
+            x, y = self.lonlat_to_xy(self.gps_lon, self.gps_lat)
+            if x is None or y is None:
+                return
+            off_x, off_y = self._gps_antenna_offset_map_xy()
+            self.boat_pos_x = x - off_x
+            self.boat_pos_y = y - off_y
         except Exception as exc:
             self.get_logger().warn(f"Failed to update boat XY from GPS: {exc}")
-    
+
+    def _get_boat_position_from_gps(self):
+        """Return base_link map XY from GPS, or (None, None) if origin unavailable."""
+        if self.base_lat is None and not self.map_origin_set:
+            return None, None
+        self._update_boat_position_from_gps()
+        return self.boat_pos_x, self.boat_pos_y
+
     def _get_boat_position_from_tf(self):
         """Get boat position in map frame from TF transforms.
-        
+
         Returns:
-            tuple: (x, y) position in map frame, or falls back to GPS-based position if transform unavailable
+            tuple: (x, y) in map frame, or GPS-based fallback aligned to map origin
         """
-        try:
-            # Use current time for transform lookup (works with /clock during playback)
-            # Convert builtin_interfaces/Time to rclpy.time.Time
+        lookup_times = []
+        if self.last_gps_timestamp is not None:
+            lookup_times.append(rclpy.time.Time.from_msg(self.last_gps_timestamp))
+        if self.sim_time is not None:
             time_msg = self.get_current_time()
-            if self.sim_time is not None:
-                # During playback, use sim_time directly
-                current_time = rclpy.time.Time(seconds=time_msg.sec, nanoseconds=time_msg.nanosec)
-            else:
-                # During live operation, use node's clock
-                current_time = self.get_clock().now()
-            
-            # Look up transform from map to base_link
-            transform = self.tf_buffer.lookup_transform(
-                'map',
-                'base_link',
-                current_time,
-                timeout=rclpy.duration.Duration(seconds=0.1)
+            lookup_times.append(
+                rclpy.time.Time(seconds=time_msg.sec, nanoseconds=time_msg.nanosec)
             )
-            # Extract translation (boat position in map frame)
-            x = transform.transform.translation.x
-            y = transform.transform.translation.y
-            # Debug: Log position periodically to diagnose offset issues
-            if hasattr(self, '_tf_debug_counter'):
-                self._tf_debug_counter += 1
-            else:
-                self._tf_debug_counter = 0
-            if self._tf_debug_counter % 100 == 0:  # Every 10 seconds at 10Hz
-                self.get_logger().debug(f"TF boat position: x={x:.2f}, y={y:.2f}, GPS fallback: x={self.boat_pos_x:.2f}, y={self.boat_pos_y:.2f}")
-            return (x, y)
-        except (TransformException, Exception) as ex:
-            # Transform not available - fall back to GPS-based position
-            if hasattr(self, '_tf_fallback_counter'):
-                self._tf_fallback_counter += 1
-            else:
-                self._tf_fallback_counter = 0
-            if self._tf_fallback_counter % 100 == 0:  # Log fallback periodically
-                self.get_logger().debug(f"TF lookup failed, using GPS fallback: {ex}")
-            return (self.boat_pos_x, self.boat_pos_y)
+        lookup_times.append(rclpy.time.Time())
+
+        last_ex = None
+        for current_time in lookup_times:
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    'map',
+                    'base_link',
+                    current_time,
+                    timeout=rclpy.duration.Duration(seconds=0.2)
+                )
+                x = transform.transform.translation.x
+                y = transform.transform.translation.y
+                if hasattr(self, '_tf_debug_counter'):
+                    self._tf_debug_counter += 1
+                else:
+                    self._tf_debug_counter = 0
+                if self._tf_debug_counter % 100 == 0:
+                    gps_x, gps_y = self._get_boat_position_from_gps()
+                    self.get_logger().debug(
+                        f"TF boat position: x={x:.2f}, y={y:.2f}, "
+                        f"GPS fallback: x={gps_x}, y={gps_y}")
+                return (x, y)
+            except TransformException as ex:
+                last_ex = ex
+
+        if hasattr(self, '_tf_fallback_counter'):
+            self._tf_fallback_counter += 1
+        else:
+            self._tf_fallback_counter = 0
+        if self._tf_fallback_counter % 100 == 0 and last_ex is not None:
+            self.get_logger().debug(f"TF lookup failed, using GPS fallback: {last_ex}")
+        return self._get_boat_position_from_gps()
 
     def _update_heading_trail(self):
         """Store the current boat position and heading for historical visualization."""
@@ -506,7 +592,7 @@ class ArgoBoatVisualization(ArgoBaseNode):
         if any(map(math.isnan, (pos_x, pos_y, self.boat_heading))):
             return
 
-        yaw_rad = math.radians((90.0 - self.boat_heading) % 360.0)
+        yaw_rad = self._enu_heading_rad()
         current_time_s = self.get_clock().now().nanoseconds / 1e9
         entry = HeadingTrailEntry(
             x=float(pos_x),
@@ -742,9 +828,12 @@ class ArgoBoatVisualization(ArgoBaseNode):
     def gps_callback(self, msg):
         """Update GPS position (noisy position)"""
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
+            if abs(msg.latitude) < 0.0001 and abs(msg.longitude) < 0.0001:
+                return
             self.gps_lat = msg.latitude
             self.gps_lon = msg.longitude
-            if self.base_lat is None or self.base_lon is None:
+            self.last_gps_timestamp = msg.header.stamp
+            if not self.map_origin_set and (self.base_lat is None or self.base_lon is None):
                 self.base_lat = msg.latitude
                 self.base_lon = msg.longitude
             self._update_boat_position_from_gps()
@@ -754,24 +843,22 @@ class ArgoBoatVisualization(ArgoBaseNode):
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
             self.gps_lat_true = msg.latitude
             self.gps_lon_true = msg.longitude
-            # Update true position in local coordinates
-            if self.base_lat is not None and self.base_lon is not None:
+            if self.base_lat is not None or self.map_origin_set:
                 try:
-                    R = 6378137.0  # Earth radius in meters
-                    d_lat = math.radians(self.gps_lat_true - self.base_lat)
-                    d_lon = math.radians(self.gps_lon_true - self.base_lon)
-                    self.boat_pos_y_true = d_lat * R
-                    self.boat_pos_x_true = d_lon * R * math.cos(math.radians(self.base_lat))
+                    x, y = self.lonlat_to_xy(self.gps_lon_true, self.gps_lat_true)
+                    if x is not None and y is not None:
+                        off_x, off_y = self._gps_antenna_offset_map_xy()
+                        self.boat_pos_x_true = x - off_x
+                        self.boat_pos_y_true = y - off_y
                 except Exception as exc:
                     self.get_logger().warn(f"Failed to update true boat XY from GPS: {exc}")
-            else:
-                # base_lat/base_lon not set yet - use GPS callback to set them
-                if self.base_lat is None or self.base_lon is None:
-                    self.base_lat = msg.latitude
-                    self.base_lon = msg.longitude
-                    self.boat_pos_y_true = 0.0
-                    self.boat_pos_x_true = 0.0
-                    self.get_logger().info(f"Set base location from true GPS: lat={self.base_lat:.6f}, lon={self.base_lon:.6f}")
+            elif self.base_lat is None and not self.map_origin_set:
+                self.base_lat = msg.latitude
+                self.base_lon = msg.longitude
+                self.boat_pos_y_true = 0.0
+                self.boat_pos_x_true = 0.0
+                self.get_logger().info(
+                    f"Set base location from true GPS: lat={self.base_lat:.6f}, lon={self.base_lon:.6f}")
     
     def create_boat_hull_marker(self):
         """Create a simple boat hull marker as a triangle with tip at bow"""
