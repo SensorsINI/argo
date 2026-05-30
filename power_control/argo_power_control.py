@@ -268,8 +268,7 @@ except ImportError:
 # ROS2 imports
 import rclpy
 from rclpy.node import Node
-from rclpy.executors import MultiThreadedExecutor
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Float32, UInt8, Int32
 from std_srvs.srv import Empty, Trigger
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 # Removed QoS imports - using default QoS only
@@ -351,6 +350,8 @@ LOW_BATTERY_THRESHOLD_V = 7.6      # Low battery warning threshold (SOS LED patt
 CRITICAL_BATTERY_THRESHOLD_V = 7.2  # Critical battery voltage threshold (halt system)
 BATTERY_MONITORING_INTERVAL_S = 30  # Check battery voltage interval (seconds)
 BATTERY_LOG_THRESHOLD_V = 0.05     # Only log battery voltage if it changes by more than 50mV
+# No voltage topic message for this long => stale battery data
+BATTERY_DATA_STALE_TIMEOUT_S = 15.0
 # AC power timeout: If AC power was plugged in more than this time ago, charger may have timed out
 AC_POWER_TIMEOUT_HOURS = 20.0       # Hours - if AC power plug-in time is older than this, trigger shutdown
 AC_POWER_TIMEOUT_S = AC_POWER_TIMEOUT_HOURS * 3600.0  # Convert to seconds
@@ -516,11 +517,17 @@ class PowerController(ArgoBaseNode):
         self.last_network_check = 0.0
         self.status_timeout = 10.0  # Consider unhealthy if no update for 10 seconds
         
-        # Health monitor integration for comprehensive node health
+        # Health monitor integration for comprehensive node health (via topic subscription)
         self.health_monitor_unhealthy_count = 0
         self.health_monitor_unhealthy_nodes = []
-        self.health_monitor_query_interval = 5.0  # Query every 5 seconds
         self.last_health_monitor_query = 0.0
+
+        # Battery topic snapshot (updated by ROS callbacks on main executor thread)
+        self._battery_snapshot_lock = threading.Lock()
+        self._battery_voltage_from_topic = None
+        self._charging_status_from_topic = None
+        self._battery_voltage_msg_time = 0.0
+        self._battery_data_ever_received = False
 
         # Desktop notification caching
         self.cached_desktop_user = None
@@ -3308,10 +3315,16 @@ class PowerController(ArgoBaseNode):
             # I2C failure monitoring (critical - battery monitoring unavailable)
             self.i2c_failure_sub = self.create_subscription(
                 Bool, '/argo/critical/i2c_failure', self._i2c_failure_callback, 10)
-            
-            # Health monitor service client for comprehensive health status
-            self.health_monitor_client = self.create_client(
-                Trigger, '/argo/health/status')
+
+            # Battery data from topics (no service calls from background threads)
+            self.battery_voltage_sub = self.create_subscription(
+                Float32, '/battery_voltage', self._battery_voltage_callback, 10)
+            self.charging_status_sub = self.create_subscription(
+                Bool, '/charging_status', self._charging_status_callback, 10)
+
+            # Health monitor JSON detail topic (replaces service calls from LED thread)
+            self.health_detail_sub = self.create_subscription(
+                String, '/argo/health/status_detail', self._health_status_detail_callback, 10)
 
             self.power_services_created = True
             self.get_logger().info("Power control ROS2 services created:")
@@ -3327,6 +3340,9 @@ class PowerController(ArgoBaseNode):
             self.get_logger().info("  - /controller_state (subscription)")
             self.get_logger().info("  - /ac_power_present (subscription - for fast charge state updates)")
             self.get_logger().info("  - /argo/critical/i2c_failure (subscription - for critical I2C failure detection)")
+            self.get_logger().info("  - /battery_voltage (subscription - battery monitoring)")
+            self.get_logger().info("  - /charging_status (subscription - battery monitoring)")
+            self.get_logger().info("  - /argo/health/status_detail (subscription - node health for LED patterns)")
         except Exception as e:
             self.get_logger().error(f"Failed to create power services: {e}")
 
@@ -3514,6 +3530,65 @@ class PowerController(ArgoBaseNode):
         if old_healthy != self.lora_healthy:
             self.get_logger().info(f"LoRa health changed: {'HEALTHY' if self.lora_healthy else 'UNHEALTHY'} (signal: {msg.data} dBm)")
 
+    def _battery_voltage_callback(self, msg):
+        """Receive battery voltage updates from argo_battery_water topic."""
+        with self._battery_snapshot_lock:
+            self._battery_voltage_from_topic = float(msg.data)
+            self._battery_voltage_msg_time = time.time()
+            self._battery_data_ever_received = True
+
+    def _charging_status_callback(self, msg):
+        """Receive charging status updates from argo_battery_water topic."""
+        with self._battery_snapshot_lock:
+            self._charging_status_from_topic = bool(msg.data)
+
+    def _get_battery_data_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Build battery monitoring dict from topic subscriptions (no service calls)."""
+        with self._battery_snapshot_lock:
+            voltage = self._battery_voltage_from_topic
+            voltage_time = self._battery_voltage_msg_time
+            charging = self._charging_status_from_topic
+            ever_received = self._battery_data_ever_received
+
+        if not ever_received and voltage is None:
+            return None
+
+        current_time = time.time()
+        stale_data = (
+            voltage_time == 0.0
+            or (current_time - voltage_time) > BATTERY_DATA_STALE_TIMEOUT_S
+        )
+
+        return {
+            'battery_voltage': voltage if voltage is not None else 0.0,
+            'charging_status': charging,
+            'ac_power_present': self.ac_power_from_topic,
+            'i2c_failure': self.i2c_failure_detected,
+            'stale_data': stale_data,
+            'battery_storage_rundown': os.path.exists(STORAGE_RUNDOWN_FLAG_FILE),
+        }
+
+    def _health_status_detail_callback(self, msg):
+        """Receive full health status JSON from argo_health_monitor topic."""
+        try:
+            health_data = json.loads(msg.data)
+            nodes_data = health_data.get('nodes', {})
+
+            unhealthy_count = 0
+            unhealthy_nodes = []
+            for node_name, node_info in nodes_data.items():
+                if node_info.get('healthy') is False:
+                    unhealthy_count += 1
+                    unhealthy_nodes.append(
+                        self._format_health_monitor_node_name(node_name, node_info)
+                    )
+
+            self.health_monitor_unhealthy_count = unhealthy_count
+            self.health_monitor_unhealthy_nodes = unhealthy_nodes
+            self.last_health_monitor_query = time.time()
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            self.get_logger().debug(f"Error parsing health status detail topic: {e}")
+
     def _ac_power_callback(self, msg):
         """Receive AC power status updates from topic - triggers immediate charge state update"""
         import time
@@ -3524,7 +3599,7 @@ class PowerController(ArgoBaseNode):
         if old_ac_power is not None and old_ac_power != msg.data:
             self.get_logger().info(f"AC power status changed (from topic): {old_ac_power} -> {msg.data}")
             
-            # Trigger immediate charge state update by calling battery service
+            # Trigger immediate charge state update from topic snapshot
             # This will update charge state pattern immediately instead of waiting for next polling cycle
             if self.battery_monitoring_active:
                 # Use a thread to avoid blocking the callback
@@ -3594,43 +3669,31 @@ class PowerController(ArgoBaseNode):
                 )
     
     def _check_initial_i2c_failure_state(self):
-        """Check initial I2C failure state from battery service on startup.
-        This ensures we have the correct state even if we missed the initial topic message."""
+        """Check initial I2C failure state from topic on startup.
+
+        Waits briefly for argo_battery_water to publish /argo/critical/i2c_failure.
+        """
         try:
-            # Wait a moment for services to be ready
             time.sleep(2)
-            
-            # Call battery service to get current I2C failure state
-            battery_data = self._call_battery_service()
-            if battery_data:
-                i2c_failure = battery_data.get('i2c_failure', False)
-                self.get_logger().info(f"Initial I2C failure state from battery service: {i2c_failure}")
-                
-                # Update state and handle accordingly
-                old_state = self.i2c_failure_detected
-                self.i2c_failure_detected = i2c_failure
-                
-                # If I2C is working (False) but SOS is active, clear it
-                if not i2c_failure and self.i2c_failure_sos_active:
-                    self.get_logger().info("Clearing I2C failure SOS pattern based on battery service status")
-                    self.i2c_failure_sos_active = False
-                    self.resume_heartbeat(reason="i2c_failure_cleared_on_startup")
-                # If I2C is failing (True) but SOS is not active, start it
-                elif i2c_failure and not self.i2c_failure_sos_active and not self.sos_led_active:
-                    self.get_logger().warning("Starting I2C failure SOS pattern based on battery service status")
-                    self.pause_heartbeat(reason="i2c_failure")
-                    self.i2c_failure_sos_active = True
-                    threading.Thread(target=self.sos_led_pattern_i2c_failure, daemon=True).start()
-            else:
-                self.get_logger().warning("Could not get initial I2C failure state from battery service")
+            i2c_failure = self.i2c_failure_detected
+            self.get_logger().info(f"Initial I2C failure state from topic: {i2c_failure}")
+
+            if not i2c_failure and self.i2c_failure_sos_active:
+                self.get_logger().info("Clearing I2C failure SOS pattern based on topic status")
+                self.i2c_failure_sos_active = False
+                self.resume_heartbeat(reason="i2c_failure_cleared_on_startup")
+            elif i2c_failure and not self.i2c_failure_sos_active and not self.sos_led_active:
+                self.get_logger().warning("Starting I2C failure SOS pattern based on topic status")
+                self.pause_heartbeat(reason="i2c_failure")
+                self.i2c_failure_sos_active = True
+                threading.Thread(target=self.sos_led_pattern_i2c_failure, daemon=True).start()
         except Exception as e:
             self.get_logger().warning(f"Error checking initial I2C failure state: {e}")
 
     def _immediate_charge_state_update(self):
-        """Immediately update charge state based on current AC power and battery status"""
+        """Immediately update charge state based on current AC power and battery topics"""
         try:
-            # Call battery service to get current status
-            battery_data = self._call_battery_service()
+            battery_data = self._get_battery_data_snapshot()
             if battery_data:
                 battery_voltage = battery_data.get('battery_voltage', 0)
                 charging_status = battery_data.get('charging_status', None)
@@ -3751,20 +3814,15 @@ class PowerController(ArgoBaseNode):
         # Create ROS2 services for remote control
         self._create_power_services()
         
-        # Check initial I2C failure state from battery service (in case we missed the topic message)
+        # Check initial I2C failure state from topic (in case we missed the first message)
         self._check_initial_i2c_failure_state()
 
         # Publish initial status
         self._publish_power_status("Power control system running")
 
     def run(self):
-        """
-        Main control loop - DEPRECATED.
-        This logic is now handled by the MultiThreadedExecutor in main().
-        This method is kept for potential future use or for non-ROS execution modes.
-        """
-        self.get_logger().warning("run() method is deprecated. Use executor.spin() in main.")
-        # The original while loop is no longer needed here as executor.spin() handles it.
+        """Main control loop - DEPRECATED. Background threads and rclpy.spin() handle runtime."""
+        self.get_logger().warning("run() method is deprecated. Use rclpy.spin() in main.")
         pass
 
     def monitor_critical_battery(self):
@@ -3783,9 +3841,9 @@ class PowerController(ArgoBaseNode):
         last_failure_log_time = 0.0
         FAILURE_LOG_INTERVAL = 60.0  # Log every 60 seconds during failures
 
-        # Startup grace period - don't count failures until battery service has been seen at least once
+        # Startup grace period - don't count failures until battery topics have been seen at least once
         # This prevents false critical alerts if argo_battery_water.service starts after power_control.service
-        battery_service_ever_available = False
+        battery_data_ever_received = False
         startup_time = time.time()
         STARTUP_GRACE_PERIOD_S = 60.0  # 60 seconds to wait for argo_battery_water.service startup
 
@@ -3794,12 +3852,11 @@ class PowerController(ArgoBaseNode):
                 # Always attempt to check battery, even if argo-launch is stopped
                 # This is CRITICAL for safety - battery monitoring must never stop
 
-                # Call battery service to get voltage
-                battery_data = self._call_battery_service()
+                battery_data = self._get_battery_data_snapshot()
                 current_time = time.time()
                 
                 if battery_data:
-                    # Service call succeeded - check if reading is valid
+                    # Snapshot available - check if reading is valid
                     battery_voltage = battery_data.get('battery_voltage', 0)
                     charging_status = battery_data.get('charging_status', None)
                     ac_power_present = battery_data.get('ac_power_present', None)
@@ -3815,10 +3872,10 @@ class PowerController(ArgoBaseNode):
                         f"Battery data received: {battery_voltage:.3f}V (charging={charging_status}, ac_power={ac_power_present}, "
                         f"i2c_failure={i2c_failure}, stale_data={stale_data})")
 
-                    # Mark that we've seen the battery service available at least once
-                    if not battery_service_ever_available:
-                        battery_service_ever_available = True
-                        self.get_logger().info("Battery service is now available - critical battery monitoring active")
+                    # Mark that we've received battery topic data at least once
+                    if not battery_data_ever_received:
+                        battery_data_ever_received = True
+                        self.get_logger().info("Battery topic data received - critical battery monitoring active")
 
                     # Check if reading is invalid (I2C failure, stale data, NaN, or 0.0V)
                     is_invalid_reading = (i2c_failure or stale_data or 
@@ -4258,32 +4315,32 @@ class PowerController(ArgoBaseNode):
                             f"Battery voltage change too small to log: {voltage_change*1000:.1f}mV < {BATTERY_LOG_THRESHOLD_V*1000:.0f}mV "
                             f"(current: {battery_voltage:.3f}V, last logged: {self.last_logged_battery_voltage:.3f}V)")
                 else:
-                    # Service unavailable - handle based on startup state
+                    # Battery data unavailable - handle based on startup state
                     current_time = time.time()
                     time_since_startup = current_time - startup_time
 
-                    if not battery_service_ever_available and time_since_startup < STARTUP_GRACE_PERIOD_S:
-                        # During startup grace period and service never seen - don't count failures yet
+                    if not battery_data_ever_received and time_since_startup < STARTUP_GRACE_PERIOD_S:
+                        # During startup grace period and no data yet - don't count failures
                         self.get_logger().info(
-                            f"Battery service not available yet - waiting for argo_battery_water.service startup "
+                            f"Battery topic data not available yet - waiting for argo_battery_water.service "
                             f"(grace period: {time_since_startup:.0f}s / {STARTUP_GRACE_PERIOD_S:.0f}s)")
-                    elif not battery_service_ever_available and time_since_startup >= STARTUP_GRACE_PERIOD_S:
-                        # Grace period expired but service never became available - log error but DO NOT HALT
+                    elif not battery_data_ever_received and time_since_startup >= STARTUP_GRACE_PERIOD_S:
+                        # Grace period expired but no data ever received - log error but DO NOT HALT
                         self.get_logger().error(
-                            f"CRITICAL: Battery service never became available after {STARTUP_GRACE_PERIOD_S}s grace period!")
+                            f"CRITICAL: Battery topic data never received after {STARTUP_GRACE_PERIOD_S}s grace period!")
                         self.get_logger().error(
                             "Battery monitoring is DISABLED - system will continue WITHOUT battery protection!")
                         self.get_logger().error(
                             "Check if argo_battery_water.service is installed and enabled:")
                         self.get_logger().error("  sudo systemctl status argo_battery_water.service")
                         self.get_logger().error(
-                            "System will NOT halt - service unavailability is not a battery problem!")
-                        # DO NOT HALT - missing service is a configuration problem, not a battery emergency
+                            "System will NOT halt - missing battery publisher is not a battery problem!")
+                        # DO NOT HALT - missing publisher is a configuration problem, not a battery emergency
                     else:
-                        # Service was available before but now failing - track failure start time
+                        # Battery data was available before but now missing - track failure start time
                         if failure_start_time is None:
                             failure_start_time = current_time
-                            failure_cause = "service_failure"  # Service call failed
+                            failure_cause = "data_unavailable"
                             # Format timestamp for "since when"
                             from datetime import datetime
                             failure_start_str = datetime.fromtimestamp(current_time).strftime("%Y-%m-%d %H:%M:%S")
@@ -4297,7 +4354,7 @@ class PowerController(ArgoBaseNode):
                                 else:
                                     time_since_valid_str = f" (last valid reading {time_since_valid/3600:.2f}h ago)"
                             self.get_logger().error(
-                                f"Battery service failure detected - service was available but now unreachable "
+                                f"Battery data unavailable - topics were active but data is now missing "
                                 f"since {failure_start_str}{time_since_valid_str}")
                         else:
                             # Failure already tracked - check if duration is reasonable (detect stale timestamps)
@@ -4527,26 +4584,6 @@ class PowerController(ArgoBaseNode):
             self.get_logger().debug(f"Error checking AC power timeout: {e}")
             return False, None
 
-    def _call_battery_service(self) -> Optional[Dict[str, Any]]:
-        """Call argo_battery_water service to get current battery data using rclpy"""
-        success, message = self._call_trigger_service(
-            '/battery_status', timeout_sec=5.0)
-
-        if success:
-            try:
-                response_data = json.loads(message)
-                # Extract raw_data from the response, which is what the caller expects
-                raw_data = response_data.get('raw_data', {})
-                self.get_logger().debug(
-                    f"Successfully parsed battery data: {raw_data.get('battery_voltage', 'N/A')}V")
-                return raw_data
-            except (json.JSONDecodeError, KeyError) as e:
-                self.get_logger().error(f"Error parsing battery service response: {e}")
-                return None
-        else:
-            # Error message already logged by _call_trigger_service, no need to duplicate
-            return None
-
     def check_wifi_connectivity(self) -> bool:
         """Check WiFi connectivity using multiple methods
 
@@ -4662,61 +4699,6 @@ class PowerController(ArgoBaseNode):
         if current_time - self.last_lora_update > self.status_timeout:
             self.lora_healthy = False
 
-    def _query_health_monitor(self):
-        """Query health monitor service for comprehensive node health status"""
-        import time
-        import json
-        current_time = time.time()
-        
-        # Throttle queries to avoid excessive service calls
-        if current_time - self.last_health_monitor_query < self.health_monitor_query_interval:
-            return
-        
-        # Only query if ROS2 is available and health monitor client exists
-        if not rclpy.ok() or not hasattr(self, 'health_monitor_client') or not self.health_monitor_client:
-            return
-        
-        try:
-            # Check if service is available
-            if not self.health_monitor_client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().debug("Health monitor service not available")
-                return
-            
-            # Make service call
-            request = Trigger.Request()
-            future = self.health_monitor_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-            
-            if future.done():
-                response = future.result()
-                if response.success:
-                    try:
-                        health_data = json.loads(response.message)
-                        nodes_data = health_data.get('nodes', {})
-                        
-                        # Count unhealthy nodes and capture their names for logging
-                        unhealthy_count = 0
-                        unhealthy_nodes = []
-                        for node_name, node_info in nodes_data.items():
-                            health_status = node_info.get('healthy')
-                            if health_status is False:
-                                unhealthy_count += 1
-                                unhealthy_nodes.append(
-                                    self._format_health_monitor_node_name(node_name, node_info)
-                                )
-                        
-                        self.health_monitor_unhealthy_count = unhealthy_count
-                        self.health_monitor_unhealthy_nodes = unhealthy_nodes
-                        self.last_health_monitor_query = current_time
-                        self.get_logger().debug(
-                            f"Health monitor query: {unhealthy_count} unhealthy nodes"
-                            f"{' (' + ', '.join(unhealthy_nodes) + ')' if unhealthy_nodes else ''}"
-                        )
-                    except (json.JSONDecodeError, KeyError) as e:
-                        self.get_logger().debug(f"Error parsing health monitor response: {e}")
-        except Exception as e:
-            self.get_logger().debug(f"Error querying health monitor: {e}")
-    
     def _format_health_monitor_node_name(self, node_key: str, node_info: dict) -> str:
         """Format node name from health monitor data for human-readable output."""
         candidate = node_info.get('display_name')
@@ -4730,15 +4712,11 @@ class PowerController(ArgoBaseNode):
     
     def get_failure_count(self) -> int:
         """Get the number of system failures for LED indication"""
-        # Query health monitor for comprehensive health status
-        self._query_health_monitor()
-        
-        # Use health monitor count if we've successfully queried it (even if count is 0)
-        # This ensures we use comprehensive health status when available
+        # Use health monitor topic cache when available
         if self.last_health_monitor_query > 0:
             return self.health_monitor_unhealthy_count
         
-        # Fallback to local health checks (for backward compatibility when health monitor unavailable)
+        # Fallback to local health checks when health monitor topic unavailable
         # Check for timeouts first
         self._check_status_timeouts()
         

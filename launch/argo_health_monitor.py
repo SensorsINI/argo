@@ -16,6 +16,7 @@ import time
 import yaml
 import signal
 import subprocess
+import json
 from typing import Dict, Optional
 from datetime import datetime
 
@@ -137,6 +138,9 @@ class ArgoHealthMonitor(ArgoBaseNode):
         # Publishers
         self.health_pub = self.create_publisher(
             String, '/argo/health/status', 10)
+        # Full JSON health snapshot for subscribers (avoids service calls from other nodes)
+        self.health_detail_pub = self.create_publisher(
+            String, '/argo/health/status_detail', 10)
         
         # Services
         self.status_service = self.create_service(
@@ -386,20 +390,31 @@ class ArgoHealthMonitor(ArgoBaseNode):
                         self.node_health[health_key]['healthy'] = None  # Unknown
     
     def publish_status(self):
-        """Publish health status summary"""
-        # Exit early if shutdown requested
+        """Publish health status summary and JSON detail topic"""
         if self.shutdown_requested:
             return
-        
-        healthy_count = sum(1 for h in self.node_health.values() if h['healthy'] is True)
-        unhealthy_count = sum(1 for h in self.node_health.values() if h['healthy'] is False)
-        total_count = len(self.node_health)
+
+        try:
+            status_dict = self._build_status_dict()
+        except Exception as e:
+            self.get_logger().warn(f"Failed to build health status: {e}")
+            return
+
+        nodes = status_dict.get('nodes', {})
+        healthy_count = sum(1 for n in nodes.values() if n.get('healthy') is True)
+        unhealthy_count = sum(1 for n in nodes.values() if n.get('healthy') is False)
+        total_count = len(nodes)
         self._maybe_beep_on_healthy_threshold(healthy_count)
-        
+
         status_msg = String()
-        status_msg.data = f"Nodes: {healthy_count}/{total_count} healthy, {unhealthy_count} unhealthy"
-        
+        status_msg.data = (
+            f"Nodes: {healthy_count}/{total_count} healthy, {unhealthy_count} unhealthy"
+        )
         self.health_pub.publish(status_msg)
+
+        detail_msg = String()
+        detail_msg.data = json.dumps(status_dict)
+        self.health_detail_pub.publish(detail_msg)
 
     def _maybe_beep_on_healthy_threshold(self, healthy_count: int):
         """Emit one startup beep once at least N nodes are healthy."""
@@ -446,148 +461,154 @@ class ArgoHealthMonitor(ArgoBaseNode):
             
             self.using_fast_poll = False
     
+    def _build_status_dict(self) -> dict:
+        """Build aggregated health status dict (shared by service and detail topic)."""
+        status_dict = {
+            'timestamp': datetime.now().isoformat(),
+            'nodes': {}
+        }
+
+        # Clean up old entries that use executable strings as keys for special nodes
+        # This handles migration from old format
+        old_keys_to_remove = []
+        for health_key in list(self.node_health.keys()):
+            # Check if this looks like an old special node key (contains 'ros2 run')
+            if 'ros2 run' in health_key:
+                # Try to find the matching node config by executable
+                for cfg in self.node_configs.values():
+                    if cfg.get('executable', '') == health_key and cfg.get('special', False):
+                        # This is an old key for a special node - mark for removal
+                        old_keys_to_remove.append(health_key)
+                        break
+
+        # Remove old keys
+        for old_key in old_keys_to_remove:
+            if old_key in self.node_health:
+                del self.node_health[old_key]
+
+        # Ensure special nodes have entries (trigger health check if needed)
+        # This handles the case where cleanup removed an old entry but check_node_health hasn't run yet
+        special_nodes_missing = []
+        for cfg in self.node_configs.values():
+            if cfg.get('special', False):
+                node_name = cfg.get('name')
+                if node_name and node_name not in self.node_health:
+                    special_nodes_missing.append(cfg)
+
+        # If we have missing special nodes, trigger a quick health check
+        if special_nodes_missing and not self.shutdown_requested:
+            try:
+                # Use direct API instead of subprocess - much faster!
+                node_info_list = get_node_names(node=self, include_hidden_nodes=False)
+                running_nodes = set([name.lstrip('/') for name, namespace, full_name in node_info_list])
+
+                # Initialize missing special nodes
+                for cfg in special_nodes_missing:
+                    node_name = cfg.get('name')
+                    is_running = node_name in running_nodes
+                    self.node_health[node_name] = {
+                        'healthy': True if is_running else None,
+                        'last_seen': time.time() if is_running else 0.0,
+                        'pid': None,
+                        'ros2_node_name': node_name
+                    }
+                    if is_running:
+                        self.get_logger().debug(
+                            f"Created missing entry for special node '{node_name}' (running)"
+                        )
+                    else:
+                        self.get_logger().debug(
+                            f"Created missing entry for special node '{node_name}' (not running)"
+                        )
+            except Exception as e:
+                # If health check fails, log it but continue with existing data
+                self.get_logger().warn(f"Failed to create missing special node entries: {e}")
+
+        # node_health is keyed by .py filenames for regular nodes (e.g., 'gps.py')
+        # or by node name for special nodes (e.g., 'foxglove_bridge')
+        for health_key, health in list(self.node_health.items()):
+            # Find node config by matching either:
+            # 1. For special nodes: match by node name (cfg['name'] == health_key)
+            # 2. For regular nodes: match by executable filename (os.path.basename(executable) == health_key)
+            node_cfg = None
+            ros2_node_name = health.get('ros2_node_name')
+
+            # Skip simulation-only nodes that aren't running (not expected in physical robot mode)
+            # Use explicit groups to determine which nodes are simulation-only
+            if ros2_node_name:
+                is_simulation_only = (ros2_node_name in self.simulation_nodes and
+                                      ros2_node_name not in self.physical_robot_nodes)
+                if is_simulation_only:
+                    # Check if node appears to be running based on health data
+                    # If healthy is None and last_seen is 0, it's likely not running
+                    health_status = health.get('healthy')
+                    last_seen = health.get('last_seen', 0.0)
+                    if health_status is None and last_seen == 0.0:
+                        # Simulation-only node not running - skip it (don't include in status)
+                        continue
+
+            for cfg in self.node_configs.values():
+                is_special = cfg.get('special', False)
+                if is_special:
+                    # Special node: match by node name
+                    if cfg.get('name') == health_key:
+                        node_cfg = cfg
+                        break
+                else:
+                    # Regular node: match by executable filename
+                    if os.path.basename(cfg.get('executable', '')) == health_key:
+                        node_cfg = cfg
+                        break
+
+            # Skip old entries that don't match any config (migration cleanup)
+            if node_cfg is None and 'ros2 run' in health_key:
+                continue
+
+            if node_cfg is None:
+                continue
+
+            if not is_health_monitored_node(node_cfg, self.service_node_names):
+                continue
+
+            status_dict['nodes'][health_key] = {
+                'healthy': health['healthy'],
+                'required': node_cfg.get('required', True),
+                'critical': node_cfg.get('critical', False),
+                'description': node_cfg.get('description', ''),
+                'last_seen': health.get('last_seen', 0.0)
+            }
+
+        # Directly inject our own health status into the final response dict.
+        # The health status is maintained by the ArgoBaseNode parent class.
+        # If this callback is running, the node is alive; its health reflects
+        # whether it can communicate with the ROS daemon to check other nodes.
+        own_health = self.get_health_status()
+        own_config = self.node_configs.get(self.get_name(), {})
+        status_dict['nodes']['argo_health_monitor.py'] = {
+            'healthy': own_health.get('healthy'),
+            'required': own_config.get('required', True),
+            'critical': own_config.get('critical', True),
+            'description': own_config.get('description', 'Health monitoring service'),
+            'last_seen': own_health.get('timestamp', time.time())
+        }
+
+        return status_dict
+
     def status_callback(self, request, response):
-        """Service callback for health status query
-        
+        """Service callback for health status query.
+
         Returns health data keyed by .py filenames (e.g., 'gps.py', 'record.py') or
-        node names for special nodes (e.g., 'foxglove_bridge') for compatibility 
+        node names for special nodes (e.g., 'foxglove_bridge') for compatibility
         with argo_lifecycle_manager.py
         """
         try:
-            import os
-            status_dict = {
-                'timestamp': datetime.now().isoformat(),
-                'nodes': {}
-            }
-            
-            # Clean up old entries that use executable strings as keys for special nodes
-            # This handles migration from old format
-            old_keys_to_remove = []
-            for health_key in list(self.node_health.keys()):
-                # Check if this looks like an old special node key (contains 'ros2 run')
-                if 'ros2 run' in health_key:
-                    # Try to find the matching node config by executable
-                    for cfg in self.node_configs.values():
-                        if cfg.get('executable', '') == health_key and cfg.get('special', False):
-                            # This is an old key for a special node - mark for removal
-                            old_keys_to_remove.append(health_key)
-                            break
-            
-            # Remove old keys
-            for old_key in old_keys_to_remove:
-                if old_key in self.node_health:
-                    del self.node_health[old_key]
-            
-            # Ensure special nodes have entries (trigger health check if needed)
-            # This handles the case where cleanup removed an old entry but check_node_health hasn't run yet
-            special_nodes_missing = []
-            for cfg in self.node_configs.values():
-                if cfg.get('special', False):
-                    node_name = cfg.get('name')
-                    if node_name and node_name not in self.node_health:
-                        special_nodes_missing.append(cfg)
-            
-            # If we have missing special nodes, trigger a quick health check
-            if special_nodes_missing and not self.shutdown_requested:
-                try:
-                    # Use direct API instead of subprocess - much faster!
-                    node_info_list = get_node_names(node=self, include_hidden_nodes=False)
-                    running_nodes = set([name.lstrip('/') for name, namespace, full_name in node_info_list])
-                    
-                    # Initialize missing special nodes
-                    for cfg in special_nodes_missing:
-                        node_name = cfg.get('name')
-                        is_running = node_name in running_nodes
-                        self.node_health[node_name] = {
-                            'healthy': True if is_running else None,
-                            'last_seen': time.time() if is_running else 0.0,
-                            'pid': None,
-                            'ros2_node_name': node_name
-                        }
-                        if is_running:
-                            self.get_logger().debug(f"Created missing entry for special node '{node_name}' (running)")
-                        else:
-                            self.get_logger().debug(f"Created missing entry for special node '{node_name}' (not running)")
-                except Exception as e:
-                    # If health check fails, log it but continue with existing data
-                    self.get_logger().warn(f"Failed to create missing special node entries: {e}")
-            
-            # node_health is keyed by .py filenames for regular nodes (e.g., 'gps.py')
-            # or by node name for special nodes (e.g., 'foxglove_bridge')
-            for health_key, health in list(self.node_health.items()):
-                # Find node config by matching either:
-                # 1. For special nodes: match by node name (cfg['name'] == health_key)
-                # 2. For regular nodes: match by executable filename (os.path.basename(executable) == health_key)
-                node_cfg = None
-                ros2_node_name = health.get('ros2_node_name')
-                
-                # Skip simulation-only nodes that aren't running (not expected in physical robot mode)
-                # Use explicit groups to determine which nodes are simulation-only
-                if ros2_node_name:
-                    is_simulation_only = (ros2_node_name in self.simulation_nodes and 
-                                         ros2_node_name not in self.physical_robot_nodes)
-                    if is_simulation_only:
-                        # Check if node appears to be running based on health data
-                        # If healthy is None and last_seen is 0, it's likely not running
-                        health_status = health.get('healthy')
-                        last_seen = health.get('last_seen', 0.0)
-                        if health_status is None and last_seen == 0.0:
-                            # Simulation-only node not running - skip it (don't include in status)
-                            continue
-                
-                for cfg in self.node_configs.values():
-                    is_special = cfg.get('special', False)
-                    if is_special:
-                        # Special node: match by node name
-                        if cfg.get('name') == health_key:
-                            node_cfg = cfg
-                            break
-                    else:
-                        # Regular node: match by executable filename
-                        if os.path.basename(cfg.get('executable', '')) == health_key:
-                            node_cfg = cfg
-                            break
-                
-                # Skip old entries that don't match any config (migration cleanup)
-                if node_cfg is None and 'ros2 run' in health_key:
-                    continue
-                
-                if node_cfg is None:
-                    continue
-
-                if not is_health_monitored_node(node_cfg, self.service_node_names):
-                    continue
-                
-                status_dict['nodes'][health_key] = {
-                    'healthy': health['healthy'],
-                    'required': node_cfg.get('required', True),
-                    'critical': node_cfg.get('critical', False),
-                    'description': node_cfg.get('description', ''),
-                    'last_seen': health.get('last_seen', 0.0)
-                }
-            
-            # Directly inject our own health status into the final response dict.
-            # The health status is maintained by the ArgoBaseNode parent class.
-            # If this callback is running, the node is alive; its health reflects
-            # whether it can communicate with the ROS daemon to check other nodes.
-            own_health = self.get_health_status()
-            own_config = self.node_configs.get(self.get_name(), {})
-            status_dict['nodes']['argo_health_monitor.py'] = {
-                'healthy': own_health.get('healthy'),
-                'required': own_config.get('required', True),
-                'critical': own_config.get('critical', True),
-                'description': own_config.get('description', 'Health monitoring service'),
-                'last_seen': own_health.get('timestamp', time.time())
-            }
-            
-            import json
+            status_dict = self._build_status_dict()
             response.success = True
             response.message = json.dumps(status_dict, indent=2)
-            
         except Exception as e:
             response.success = False
             response.message = f"Error getting status: {e}"
-        
+
         return response
 
     def _signal_handler(self, signum, frame):
