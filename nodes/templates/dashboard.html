@@ -167,6 +167,62 @@
             </p>
         </div>
 
+        <!-- IMU Compass Calibration & Verify -->
+        <div class="card imu-tools-card" id="imu-tools-card">
+            <div class="imu-tools-header">
+                <h2>IMU Compass Tools</h2>
+                <button type="button" class="btn btn-secondary btn-small" id="imu-tools-toggle" aria-expanded="false">Show</button>
+            </div>
+            <p class="imu-tools-hint" id="imu-tools-hint">Loading IMU status…</p>
+            <div id="imu-tools-body" class="imu-tools-body" hidden>
+                <div class="imu-tab-bar">
+                    <button type="button" class="imu-tab active" data-imu-tab="calibrate">Calibrate</button>
+                    <button type="button" class="imu-tab" data-imu-tab="verify">Verify</button>
+                </div>
+                <div id="imu-panel-calibrate" class="imu-panel">
+                    <p class="imu-instructions">
+                        Move the boat/IMU in a figure-8 through all orientations, away from metal and electronics.
+                        Calibration saves automatically to the BNO085 flash when you finish.
+                    </p>
+                    <div class="imu-progress-row">
+                        <span>Time</span>
+                        <span id="imu-cal-time">—</span>
+                    </div>
+                    <div class="imu-meter-group">
+                        <div class="imu-meter-label">Magnetometer <span id="imu-cal-acc-mag">—</span></div>
+                        <div class="imu-meter"><div id="imu-cal-bar-mag" class="imu-meter-fill"></div></div>
+                        <div class="imu-meter-label">Accelerometer <span id="imu-cal-acc-accel">—</span></div>
+                        <div class="imu-meter"><div id="imu-cal-bar-accel" class="imu-meter-fill"></div></div>
+                        <div class="imu-meter-label">Gyroscope <span id="imu-cal-acc-gyro">—</span></div>
+                        <div class="imu-meter"><div id="imu-cal-bar-gyro" class="imu-meter-fill"></div></div>
+                    </div>
+                    <div class="imu-coverage" id="imu-cal-coverage">Coverage: —</div>
+                    <div class="imu-axis-bars" id="imu-cal-axis-bars"></div>
+                    <p class="imu-guidance" id="imu-cal-guidance"></p>
+                    <div class="imu-btn-row">
+                        <button type="button" class="btn btn-primary imu-session-toggle" id="imu-cal-toggle-btn" aria-pressed="false">Start calibration</button>
+                    </div>
+                    <pre class="imu-report" id="imu-cal-report" hidden></pre>
+                </div>
+                <div id="imu-panel-verify" class="imu-panel" hidden>
+                    <p class="imu-instructions">
+                        Check heading against a known reference. Uses <code>/compass</code> (same as navigation).
+                    </p>
+                    <div class="imu-verify-heading">
+                        <canvas id="imu-verify-compass" width="200" height="200" aria-label="Compass heading"></canvas>
+                        <div class="imu-verify-heading-text">
+                            <div class="imu-heading-value" id="imu-verify-heading">---°</div>
+                            <div class="imu-heading-stability" id="imu-verify-stability">Stability: —</div>
+                        </div>
+                    </div>
+                    <div class="imu-verify-sensors" id="imu-verify-sensors"></div>
+                    <div class="imu-btn-row">
+                        <button type="button" class="btn btn-primary imu-session-toggle" id="imu-verify-toggle-btn" aria-pressed="false">Start verify</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Overhead Map -->
         <div class="card" id="map-view-card">
             <h2>Overhead Map</h2>
@@ -391,6 +447,8 @@
     <script>
         let statusData = {};
         let pendingAction = null;
+        let imuCalSessionActive = false;
+        let imuVerifySessionActive = false;
         
         // Connection state tracking
         let connectionState = null; // 'connected' or 'disconnected'
@@ -519,6 +577,27 @@
             updateCriticalUIElements(criticalData);
         }
         
+        // Live compass/wind/map (fast poll); full /api/status still runs every 2s for the rest
+        function updateLiveSensorElements(data) {
+            if (!data) return;
+            const compassEl = document.getElementById('compass-heading');
+            if (compassEl) {
+                compassEl.textContent =
+                    data.compass_heading != null ? `${Math.round(data.compass_heading)}°` : '--- °';
+            }
+            if (data.wind_speed != null && data.wind_angle != null) {
+                let windText = `${data.wind_speed.toFixed(2)} m/s, ${Math.round(data.wind_angle)}° rel`;
+                if (data.wind_from_compass != null) {
+                    windText += ` (${Math.round(data.wind_from_compass)}° from N)`;
+                }
+                document.getElementById('wind-status').textContent = windText;
+            }
+            const mapPayload = statusData ? { ...statusData, ...data } : data;
+            if (window.ArgoMapView) {
+                ArgoMapView.updateFromStatus(mapPayload);
+            }
+        }
+
         // Update only critical UI elements (called from both fast and regular polling)
         function updateCriticalUIElements(data) {
             // Controller mode
@@ -628,7 +707,85 @@
         // Fast polling for critical states (only when page is visible)
         let criticalStatusInterval = null;
         let isPageVisible = true;
-        
+        const CRITICAL_POLL_MS = 100;
+        const CRITICAL_POLL_VERIFY_MS = 50;
+        let compassEventSource = null;
+        let compassPollFallbackInterval = null;
+
+        function applyCompassHeading(heading) {
+            if (heading == null || Number.isNaN(Number(heading))) return;
+            const h = Number(heading);
+            const el = document.getElementById('compass-heading');
+            if (el) el.textContent = `${Math.round(h)}°`;
+            if (!statusData) statusData = {};
+            statusData.compass_heading = h;
+            if (window.ArgoMapView) {
+                ArgoMapView.updateFromStatus(statusData);
+            }
+            if (imuVerifySessionActive) {
+                const headEl = document.getElementById('imu-verify-heading');
+                if (headEl) headEl.textContent = `${h.toFixed(1)}°`;
+                if (typeof drawImuCompass === 'function') {
+                    drawImuCompass(document.getElementById('imu-verify-compass'), h);
+                }
+            }
+        }
+
+        function startCompassPollFallback() {
+            if (compassPollFallbackInterval) return;
+            const tick = () => {
+                if (!isPageVisible) return;
+                fetch('/api/compass/heading', { cache: 'no-store' })
+                    .then(r => r.json())
+                    .then(d => {
+                        if (d.heading != null) applyCompassHeading(d.heading);
+                    })
+                    .catch(() => {});
+            };
+            tick();
+            compassPollFallbackInterval = setInterval(tick, 50);
+        }
+
+        function startCompassStream() {
+            if (compassEventSource) return;
+            if (typeof EventSource === 'undefined') {
+                startCompassPollFallback();
+                return;
+            }
+            compassEventSource = new EventSource('/api/compass/stream');
+            compassEventSource.onmessage = (ev) => {
+                try {
+                    const d = JSON.parse(ev.data);
+                    if (d.heading != null) applyCompassHeading(d.heading);
+                } catch (e) { /* ignore */ }
+            };
+            compassEventSource.onerror = () => {
+                if (compassEventSource) {
+                    compassEventSource.close();
+                    compassEventSource = null;
+                }
+                startCompassPollFallback();
+            };
+        }
+
+        function stopCompassStream() {
+            if (compassEventSource) {
+                compassEventSource.close();
+                compassEventSource = null;
+            }
+            if (compassPollFallbackInterval) {
+                clearInterval(compassPollFallbackInterval);
+                compassPollFallbackInterval = null;
+            }
+        }
+
+        function updateCriticalPollInterval() {
+            if (!isPageVisible) return;
+            const ms = imuVerifySessionActive ? CRITICAL_POLL_VERIFY_MS : CRITICAL_POLL_MS;
+            if (criticalStatusInterval) clearInterval(criticalStatusInterval);
+            criticalStatusInterval = setInterval(updateCriticalStatus, ms);
+        }
+
         function updateCriticalStatus() {
             // Only poll if page is visible (reduces CPU when tab is hidden)
             if (!isPageVisible) {
@@ -651,6 +808,34 @@
                         if (data.cpu_temp !== undefined) {
                             statusData.cpu_temp = data.cpu_temp;
                         }
+                        if (data.compass_heading !== undefined) {
+                            statusData.compass_heading = data.compass_heading;
+                        }
+                        if (data.wind_speed !== undefined) statusData.wind_speed = data.wind_speed;
+                        if (data.wind_angle !== undefined) statusData.wind_angle = data.wind_angle;
+                        if (data.wind_from_compass !== undefined) {
+                            statusData.wind_from_compass = data.wind_from_compass;
+                        }
+                        if (data.wind_flow_compass !== undefined) {
+                            statusData.wind_flow_compass = data.wind_flow_compass;
+                        }
+                        if (data.gps_locked !== undefined) statusData.gps_locked = data.gps_locked;
+                        if (data.gps_latitude !== undefined) statusData.gps_latitude = data.gps_latitude;
+                        if (data.gps_longitude !== undefined) statusData.gps_longitude = data.gps_longitude;
+                        if (data.gps_data_stale !== undefined) statusData.gps_data_stale = data.gps_data_stale;
+                        if (data.gps_position_frozen !== undefined) {
+                            statusData.gps_position_frozen = data.gps_position_frozen;
+                        }
+                        if (data.gps_cog !== undefined) statusData.gps_cog = data.gps_cog;
+                        if (data.gps_sog !== undefined) statusData.gps_sog = data.gps_sog;
+                    }
+                    updateLiveSensorElements(statusData || data);
+                    if (data.imu_verify && data.imu_verify.active && typeof renderImuVerifySnapshot === 'function') {
+                        renderImuVerifySnapshot({
+                            active: true,
+                            compass_heading: data.imu_verify.compass_heading,
+                            snapshot: data.imu_verify.snapshot,
+                        });
                     }
                 })
                 .catch(error => {
@@ -664,18 +849,31 @@
             isPageVisible = !document.hidden;
             if (isPageVisible) {
                 // Page became visible - resume fast polling
+                startCompassStream();
                 if (!criticalStatusInterval) {
-                    updateCriticalStatus(); // Immediate update
-                    criticalStatusInterval = setInterval(updateCriticalStatus, 1000); // 1s when visible
+                    updateCriticalStatus();
+                    updateCriticalPollInterval();
+                }
+                if (typeof resumeImuSessionPolling === 'function') {
+                    resumeImuSessionPolling();
                 }
             } else {
                 // Page hidden - stop fast polling (regular 2s polling continues)
+                stopCompassStream();
                 if (criticalStatusInterval) {
                     clearInterval(criticalStatusInterval);
                     criticalStatusInterval = null;
                 }
+                if (typeof pauseImuSessionPolling === 'function') {
+                    pauseImuSessionPolling();
+                }
             }
         });
+
+        // Live compass: SSE push on each /compass (do not wait for 2s /api/status)
+        startCompassStream();
+        updateCriticalStatus();
+        updateCriticalPollInterval();
         
         // Fetch full status every 2 seconds
         function updateStatus() {
@@ -1061,6 +1259,20 @@
                 imuStatusText = '🔴 STALE';
             }
             document.getElementById('imu-status').textContent = imuStatusText;
+
+            const imuHint = document.getElementById('imu-tools-hint');
+            if (imuHint) {
+                if (data.imu_session_mode && data.imu_session_mode !== 'idle') {
+                    imuHint.textContent = `Session active: ${data.imu_session_mode}`;
+                } else if (data.imu_calibration_available) {
+                    imuHint.textContent = 'IMU ready — expand to calibrate or verify compass';
+                } else {
+                    imuHint.textContent = 'IMU unavailable — check argo_bno085.service and /imu_health';
+                }
+            }
+            if (typeof updateImuToolsFromStatus === 'function') {
+                updateImuToolsFromStatus(data);
+            }
             
             // Wind: sensor relative; absolute from when compass + anem are both available
             if (data.wind_speed !== null && data.wind_angle !== null) {
@@ -1604,12 +1816,445 @@
         // Regular full status polling (every 2 seconds)
         setInterval(updateStatus, 2000);
         
-        // Fast critical status polling (every 1 second when page is visible, stopped when hidden)
-        // This reduces CPU load when the dashboard tab is not active
-        updateCriticalStatus(); // Initial update
-        if (isPageVisible) {
-            criticalStatusInterval = setInterval(updateCriticalStatus, 1000);
+        // ==================== IMU calibration / verify ====================
+        const IMU_CAL_POLL_MS = 500;
+        const IMU_VERIFY_POLL_MS = 50;   // 20 Hz UI (sensor fusion ~5 Hz on this hardware)
+        let imuSessionPollInterval = null;
+        let imuSessionPollPeriodMs = IMU_CAL_POLL_MS;
+        let imuVerifyRequestId = 0;
+        let imuActiveTab = 'calibrate';
+
+        function setImuCalSessionActive(active) {
+            imuCalSessionActive = !!active;
+            const btn = document.getElementById('imu-cal-toggle-btn');
+            if (!btn) return;
+            btn.textContent = active ? 'Finish & save' : 'Start calibration';
+            btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+            btn.classList.toggle('btn-primary', !active);
+            btn.classList.toggle('btn-secondary', active);
+            updateImuToolsHideButton();
         }
+
+        function setImuVerifySessionActive(active) {
+            imuVerifySessionActive = !!active;
+            const btn = document.getElementById('imu-verify-toggle-btn');
+            if (!btn) return;
+            btn.textContent = active ? 'Stop verify' : 'Start verify';
+            btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+            btn.classList.toggle('btn-primary', !active);
+            btn.classList.toggle('btn-secondary', active);
+            updateImuToolsHideButton();
+            updateCriticalPollInterval();
+        }
+
+        function imuSessionIsActive() {
+            return imuCalSessionActive || imuVerifySessionActive;
+        }
+
+        function updateImuToolsHideButton() {
+            const toggle = document.getElementById('imu-tools-toggle');
+            if (!toggle) return;
+            if (imuCalSessionActive) {
+                toggle.disabled = true;
+                toggle.title = 'Finish calibration before hiding this panel';
+            } else {
+                toggle.disabled = false;
+                toggle.title = '';
+            }
+        }
+
+        function stopImuVerifySession() {
+            if (!imuVerifySessionActive) {
+                return Promise.resolve({ ok: true });
+            }
+            const btn = document.getElementById('imu-verify-toggle-btn');
+            if (btn) btn.disabled = true;
+            return fetch('/api/imu/verify/stop', { method: 'POST' })
+                .then(r => r.json().then(d => ({ ok: r.ok, d })))
+                .then(({ ok, d }) => {
+                    if (!ok) {
+                        throw new Error(d.message || 'Failed to stop verify');
+                    }
+                    setImuVerifySessionActive(false);
+                    stopImuSessionPollingIfIdle();
+                    updateStatus();
+                    return { ok: true };
+                })
+                .finally(() => {
+                    if (btn) btn.disabled = false;
+                });
+        }
+
+        function stopImuCalSession() {
+            if (!imuCalSessionActive) {
+                return Promise.resolve({ ok: true });
+            }
+            const btn = document.getElementById('imu-cal-toggle-btn');
+            if (btn) btn.disabled = true;
+            return fetch('/api/imu/calibration/stop', { method: 'POST' })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.final_report) renderImuCalReport(d.final_report);
+                    setImuCalSessionActive(false);
+                    stopImuSessionPollingIfIdle();
+                    updateStatus();
+                    return { ok: true };
+                })
+                .finally(() => {
+                    if (btn) btn.disabled = false;
+                });
+        }
+
+        function setImuMeter(barId, labelId, level) {
+            const pct = Math.min(100, Math.max(0, (level / 3) * 100));
+            const bar = document.getElementById(barId);
+            const label = document.getElementById(labelId);
+            if (bar) bar.style.width = `${pct}%`;
+            if (label) {
+                const names = ['UNRELIABLE', 'LOW', 'MEDIUM', 'HIGH'];
+                label.textContent = names[Math.max(0, Math.min(3, level))] || '—';
+            }
+        }
+
+        function renderImuCalAxisBars(magRanges) {
+            const el = document.getElementById('imu-cal-axis-bars');
+            if (!el) return;
+            if (!magRanges) {
+                el.innerHTML = '<div class="imu-axis-row">Waiting for magnetometer data…</div>';
+                return;
+            }
+            const target = 60;
+            let html = '';
+            for (const axis of ['x', 'y', 'z']) {
+                const r = magRanges[axis];
+                const pct = Math.min(100, (r.span / target) * 100);
+                html += `<div class="imu-axis-row">${axis.toUpperCase()} span ${r.span.toFixed(1)} µT
+                    <span class="imu-axis-track"><span class="imu-axis-fill" style="width:${pct}%"></span></span></div>`;
+            }
+            el.innerHTML = html;
+        }
+
+        function renderImuCalSnapshot(snap) {
+            if (!snap) return;
+            const acc = snap.accuracy;
+            setImuMeter('imu-cal-bar-mag', 'imu-cal-acc-mag', acc.magnetometer.level);
+            setImuMeter('imu-cal-bar-accel', 'imu-cal-acc-accel', acc.accelerometer.level);
+            setImuMeter('imu-cal-bar-gyro', 'imu-cal-acc-gyro', acc.gyroscope.level);
+            const cov = document.getElementById('imu-cal-coverage');
+            if (cov && snap.coverage) {
+                cov.textContent = `Coverage: ${snap.coverage.display || snap.coverage.label}`;
+            }
+            renderImuCalAxisBars(snap.mag_ranges_uT);
+            const guide = document.getElementById('imu-cal-guidance');
+            if (guide) guide.textContent = snap.guidance || '';
+            const timeEl = document.getElementById('imu-cal-time');
+            if (timeEl) {
+                timeEl.textContent = `${snap.elapsed_s}s / ${snap.duration_s}s`;
+            }
+        }
+
+        function renderImuCalReport(report) {
+            const pre = document.getElementById('imu-cal-report');
+            if (!pre || !report) return;
+            pre.hidden = false;
+            let text = `Result: ${report.success_level}\nDuration: ${report.duration_s}s\n`;
+            if (report.mag_ranges_uT) {
+                for (const axis of ['x', 'y', 'z']) {
+                    const r = report.mag_ranges_uT[axis];
+                    text += `${axis.toUpperCase()}: span ${r.span.toFixed(1)} µT\n`;
+                }
+            }
+            text += report.storage_note || '';
+            pre.textContent = text;
+        }
+
+        function drawImuCompass(canvas, headingDeg) {
+            if (!canvas || headingDeg == null) return;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            const cx = w / 2;
+            const cy = h / 2;
+            const r = Math.min(cx, cy) - 12;
+            ctx.clearRect(0, 0, w, h);
+            ctx.strokeStyle = '#adb5bd';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+            ctx.stroke();
+            ctx.fillStyle = '#1e3c72';
+            ctx.font = 'bold 14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('N', cx, cy - r + 4);
+            ctx.fillText('E', cx + r - 4, cy + 5);
+            ctx.fillText('S', cx, cy + r + 14);
+            ctx.fillText('W', cx - r + 4, cy + 5);
+            const rad = headingDeg * Math.PI / 180;
+            const hx = cx + r * 0.85 * Math.sin(rad);
+            const hy = cy - r * 0.85 * Math.cos(rad);
+            ctx.strokeStyle = '#dc3545';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(hx, hy);
+            ctx.stroke();
+            ctx.fillStyle = '#dc3545';
+            ctx.beginPath();
+            ctx.arc(hx, hy, 6, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+
+        function renderImuVerifySnapshot(data) {
+            const snap = data.snapshot;
+            const heading = data.compass_heading != null ? data.compass_heading : (snap && snap.compass_heading);
+            const headEl = document.getElementById('imu-verify-heading');
+            if (headEl) {
+                headEl.textContent = heading != null ? `${Number(heading).toFixed(1)}°` : '---°';
+            }
+            drawImuCompass(document.getElementById('imu-verify-compass'), heading);
+            const stab = document.getElementById('imu-verify-stability');
+            if (stab) {
+                if (!snap) {
+                    stab.textContent = 'Stability: —';
+                } else {
+                    const s = snap.heading_stability_deg;
+                    const n = snap.compass_samples != null ? snap.compass_samples : 0;
+                    if (s != null) {
+                        stab.textContent = `Stability σ: ${s.toFixed(2)}° (${n} samples)`;
+                    } else if (n < 2) {
+                        stab.textContent = `Stability: collecting… (${n}/2 heading samples)`;
+                    } else {
+                        stab.textContent = 'Stability: —';
+                    }
+                }
+            }
+            const sens = document.getElementById('imu-verify-sensors');
+            if (sens && snap && snap.has_imu) {
+                const ag = snap.accel_g;
+                const gd = snap.gyro_dps;
+                const mg = snap.mag_uT;
+                sens.innerHTML = `Accel (g): ${ag.x.toFixed(2)}, ${ag.y.toFixed(2)}, ${ag.z.toFixed(2)}<br>
+                    Gyro (dps): ${gd.x.toFixed(0)}, ${gd.y.toFixed(0)}, ${gd.z.toFixed(0)}<br>
+                    Mag (µT): ${mg.x.toFixed(1)}, ${mg.y.toFixed(1)}, ${mg.z.toFixed(1)}<br>
+                    Quat unit: ${snap.quaternion_unit_ok ? 'OK' : 'FAIL'} | Gravity: ${snap.gravity_ok ? 'OK' : 'FAIL'}`;
+            }
+        }
+
+        function pollImuCalibrationStatus() {
+            fetch('/api/imu/calibration/status')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.active && data.snapshot) {
+                        renderImuCalSnapshot(data.snapshot);
+                    } else if (data.final_report) {
+                        renderImuCalReport(data.final_report);
+                        setImuCalSessionActive(false);
+                        stopImuSessionPollingIfIdle();
+                    }
+                })
+                .catch(err => console.debug('IMU cal status:', err));
+        }
+
+        function pollImuVerifyStatus() {
+            const reqId = ++imuVerifyRequestId;
+            fetch('/api/imu/verify/status')
+                .then(r => r.json())
+                .then(data => {
+                    if (reqId !== imuVerifyRequestId) return;
+                    if (data.active) {
+                        renderImuVerifySnapshot(data);
+                    } else {
+                        setImuVerifySessionActive(false);
+                        stopImuSessionPollingIfIdle();
+                    }
+                })
+                .catch(err => console.debug('IMU verify status:', err));
+        }
+
+        function imuSessionPollTick() {
+            if (imuActiveTab === 'calibrate') pollImuCalibrationStatus();
+            else pollImuVerifyStatus();
+        }
+
+        function imuSessionPollPeriodForTab(tab) {
+            return tab === 'verify' ? IMU_VERIFY_POLL_MS : IMU_CAL_POLL_MS;
+        }
+
+        function restartImuSessionPolling() {
+            stopImuSessionPolling();
+            if (!imuSessionIsActive()) return;
+            imuSessionPollPeriodMs = imuSessionPollPeriodForTab(imuActiveTab);
+            imuSessionPollTick();
+            imuSessionPollInterval = setInterval(imuSessionPollTick, imuSessionPollPeriodMs);
+        }
+
+        function startImuSessionPolling() {
+            restartImuSessionPolling();
+        }
+
+        function stopImuSessionPolling() {
+            if (imuSessionPollInterval) {
+                clearInterval(imuSessionPollInterval);
+                imuSessionPollInterval = null;
+            }
+        }
+
+        function pauseImuSessionPolling() {
+            stopImuSessionPolling();
+        }
+
+        function resumeImuSessionPolling() {
+            restartImuSessionPolling();
+        }
+
+        function stopImuSessionPollingIfIdle() {
+            if (!imuSessionIsActive()) {
+                stopImuSessionPolling();
+            }
+        }
+
+        function setImuToolsPanelOpen(open) {
+            const body = document.getElementById('imu-tools-body');
+            const toggle = document.getElementById('imu-tools-toggle');
+            if (!body || !toggle) return;
+            body.hidden = !open;
+            body.style.display = open ? '' : 'none';
+            toggle.textContent = open ? 'Hide' : 'Show';
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+
+        function isImuToolsPanelOpen() {
+            const body = document.getElementById('imu-tools-body');
+            return body && !body.hidden;
+        }
+
+        function updateImuToolsFromStatus(data) {
+            const calBtn = document.getElementById('imu-cal-toggle-btn');
+            const verBtn = document.getElementById('imu-verify-toggle-btn');
+            const avail = data.imu_calibration_available === true;
+            if (data.imu_session_mode === 'calibrating') {
+                setImuCalSessionActive(true);
+                if (calBtn) calBtn.disabled = false;
+                if (verBtn) verBtn.disabled = true;
+                startImuSessionPolling();
+            } else if (data.imu_session_mode === 'verifying') {
+                setImuVerifySessionActive(true);
+                if (verBtn) verBtn.disabled = false;
+                if (calBtn) calBtn.disabled = true;
+                imuActiveTab = 'verify';
+                restartImuSessionPolling();
+            } else {
+                setImuCalSessionActive(false);
+                setImuVerifySessionActive(false);
+                if (calBtn) calBtn.disabled = !avail;
+                if (verBtn) verBtn.disabled = !avail;
+            }
+        }
+
+        const imuToolsToggle = document.getElementById('imu-tools-toggle');
+        const imuToolsBody = document.getElementById('imu-tools-body');
+        if (imuToolsToggle && imuToolsBody) {
+            imuToolsToggle.addEventListener('click', function() {
+                const willOpen = imuToolsBody.hidden;
+                if (!willOpen) {
+                    if (imuCalSessionActive) {
+                        alert('Finish calibration before hiding this panel (prevents a long run without guidance).');
+                        return;
+                    }
+                    if (imuVerifySessionActive) {
+                        this.disabled = true;
+                        stopImuVerifySession()
+                            .catch(e => alert('Could not stop verify: ' + e))
+                            .finally(() => {
+                                setImuToolsPanelOpen(false);
+                                this.disabled = false;
+                                updateImuToolsHideButton();
+                            });
+                        return;
+                    }
+                }
+                setImuToolsPanelOpen(willOpen);
+            });
+        }
+
+        document.querySelectorAll('.imu-tab').forEach(btn => {
+            btn.addEventListener('click', function() {
+                imuActiveTab = this.dataset.imuTab;
+                document.querySelectorAll('.imu-tab').forEach(t => t.classList.remove('active'));
+                this.classList.add('active');
+                document.getElementById('imu-panel-calibrate').hidden = imuActiveTab !== 'calibrate';
+                document.getElementById('imu-panel-verify').hidden = imuActiveTab !== 'verify';
+                restartImuSessionPolling();
+            });
+        });
+
+        document.getElementById('imu-cal-toggle-btn').addEventListener('click', function() {
+            const btn = this;
+            if (imuCalSessionActive) {
+                btn.disabled = true;
+                stopImuCalSession()
+                    .catch(e => alert('Error: ' + e))
+                    .finally(() => { btn.disabled = false; });
+                return;
+            }
+            if (!confirm('Start magnetometer calibration?\n\nMove the IMU through all orientations (figure-8). Data saves to IMU flash when you finish.')) {
+                return;
+            }
+            btn.disabled = true;
+            fetch('/api/imu/calibration/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ duration: 120 }),
+            })
+                .then(r => r.json().then(d => ({ ok: r.ok, d })))
+                .then(({ ok, d }) => {
+                    if (!ok) {
+                        alert(d.message || 'Failed to start calibration');
+                        return;
+                    }
+                    document.getElementById('imu-cal-report').hidden = true;
+                    setImuCalSessionActive(true);
+                    const verBtn = document.getElementById('imu-verify-toggle-btn');
+                    if (verBtn) verBtn.disabled = true;
+                    imuActiveTab = 'calibrate';
+                    if (!isImuToolsPanelOpen()) setImuToolsPanelOpen(true);
+                    startImuSessionPolling();
+                })
+                .catch(e => alert('Error: ' + e))
+                .finally(() => { btn.disabled = false; });
+        });
+
+        document.getElementById('imu-verify-toggle-btn').addEventListener('click', function() {
+            const btn = this;
+            if (imuVerifySessionActive) {
+                btn.disabled = true;
+                stopImuVerifySession()
+                    .catch(e => alert('Error: ' + e))
+                    .finally(() => { btn.disabled = false; });
+                return;
+            }
+            btn.disabled = true;
+            fetch('/api/imu/verify/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ duration: 0 }),
+            })
+                .then(r => r.json().then(d => ({ ok: r.ok, d })))
+                .then(({ ok, d }) => {
+                    if (!ok) {
+                        alert(d.message || 'Failed to start verify');
+                        return;
+                    }
+                    setImuVerifySessionActive(true);
+                    const calBtn = document.getElementById('imu-cal-toggle-btn');
+                    if (calBtn) calBtn.disabled = true;
+                    imuActiveTab = 'verify';
+                    if (!isImuToolsPanelOpen()) setImuToolsPanelOpen(true);
+                    startImuSessionPolling();
+                })
+                .catch(e => alert('Error: ' + e))
+                .finally(() => { btn.disabled = false; });
+        });
 
         // ==================== WiFi Management ====================
         function getSelectedSsid() {

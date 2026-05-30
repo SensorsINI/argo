@@ -19,4 +19,4 @@ bno08x_ros:
         rate: 1     # 1 Hz for magnetic field (compass heading)
       imu:
         enabled: true
-        rate: 5     # 5 Hz for IMU data (accel, gyro, orientation)
+        rate: 20    # 20 Hz fusion (was 5) — responsive compass/verify; restart argo_bno085.service

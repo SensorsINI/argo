@@ -88,6 +88,10 @@ Enhanced interactive calibration with visual feedback:
      bno085.py calibrate --duration 120
      # Interactive tool with visual range tracking
 
+  Web dashboard (phone-friendly, no SSH):
+     Open Argo Web Dashboard → IMU Compass Tools card
+     # Same calibration/verify logic via /api/imu/calibration/* and /api/imu/verify/*
+
 COMMANDS
 --------
   bridge       Run as data bridge (for launch files/lifecycle manager)
@@ -198,6 +202,7 @@ import subprocess
 from datetime import datetime
 import collections
 from pathlib import Path
+from typing import Optional
 import yaml
 
 # ruamel.yaml is REQUIRED for safe parameter persistence (preserves YAML comments)
@@ -766,298 +771,595 @@ class BNO085Bridge(Node):
 
 
 # ============================================================================
-# CALIBRATION MODE: Interactive sensor calibration
+# CALIBRATION / VERIFY: Shared trackers (CLI + web dashboard)
 # ============================================================================
 
-class BNO085Calibrator(Node):
-    """Interactive calibration tool with real-time guidance and visual feedback."""
-    
-    def __init__(self, duration=30, save_interval=30):
-        super().__init__('bno085_calibrator')
-        self.calibration_duration = duration
-        self.save_interval = save_interval
-        
-        # Calibration tracking
+ACCURACY_NAMES = ['UNRELIABLE', 'LOW', 'MEDIUM', 'HIGH']
+TARGET_MAG_SPAN_UT = 50.0
+TARGET_MAG_BAR_UT = 60.0
+
+
+def cov_to_accuracy(cov: float) -> int:
+    """Convert fusion covariance to accuracy level (0-3)."""
+    if cov <= 0:
+        return 0
+    if cov < 0.01:
+        return 3
+    if cov < 0.05:
+        return 2
+    if cov < 0.1:
+        return 1
+    return 0
+
+
+def _forward_axis_vector(mount_forward_axis: str):
+    """Unit bow vector in BNO085 sensor frame (matches BNO085Bridge)."""
+    axis = str(mount_forward_axis).strip().lower()
+    vectors = {
+        'x': (1.0, 0.0, 0.0),
+        'y': (0.0, 1.0, 0.0),
+        'neg_x': (-1.0, 0.0, 0.0),
+        'neg_y': (0.0, -1.0, 0.0),
+        '-x': (-1.0, 0.0, 0.0),
+        '-y': (0.0, -1.0, 0.0),
+    }
+    return vectors.get(axis, (0.0, 1.0, 0.0))
+
+
+def _quat_rotate_vector(w, x, y, z, vx, vy, vz):
+    """Rotate vector v by unit quaternion q (Hamilton, active rotation)."""
+    qx, qy, qz = float(x), float(y), float(z)
+    qw = float(w)
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    return (
+        vx + qw * tx + (qy * tz - qz * ty),
+        vy + qw * ty + (qz * tx - qx * tz),
+        vz + qw * tz + (qx * ty - qy * tx),
+    )
+
+
+def compass_heading_from_quaternion(
+    w,
+    x,
+    y,
+    z,
+    mount_forward_axis: str = 'y',
+    mount_yaw_deg: float = 0.0,
+    yaw_offset_deg: float = 0.0,
+    yaw_invert: bool = False,
+) -> float:
+    """
+    Compass heading (0=N, 90=E, CW) from fusion quaternion — same math as BNO085Bridge.
+    Use for low-latency verify UI directly from /imu (no /compass hop).
+    """
+    fx, fy, fz = _forward_axis_vector(mount_forward_axis)
+    if mount_yaw_deg != 0.0:
+        rad = math.radians(mount_yaw_deg)
+        c, s = math.cos(rad), math.sin(rad)
+        fx, fy = c * fx - s * fy, s * fx + c * fy
+    wx, wy, _wz = _quat_rotate_vector(w, x, y, z, fx, fy, fz)
+    heading = math.degrees(math.atan2(wx, wy))
+    if heading < 0.0:
+        heading += 360.0
+    if yaw_invert:
+        heading = (360.0 - heading) % 360.0
+    return (heading + yaw_offset_deg) % 360.0
+
+
+def _parse_yaml_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ('true', '1', 'yes', 'on')
+    return bool(value)
+
+
+def load_imu_heading_config(yaml_path=None) -> dict:
+    """Load imu mount/trim keys from nodes/argo.yaml."""
+    try:
+        path = Path(yaml_path) if yaml_path else Path(__file__).resolve().parent / 'argo.yaml'
+        if not path.exists():
+            return {}
+        with open(path, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        root = cfg.get('/**', {}).get('ros__parameters', {})
+        imu = root.get('imu', {}) or {}
+        return {
+            'mount_forward_axis': str(imu.get('mount_forward_axis', 'y')),
+            'mount_yaw_deg': float(imu.get('mount_yaw_deg', 0.0)),
+            'yaw_offset_deg': float(imu.get('yaw_offset_deg', 0.0)),
+            'yaw_invert': _parse_yaml_bool(imu.get('yaw_invert'), False),
+        }
+    except Exception:
+        return {}
+
+
+def quaternion_to_euler_deg(w, x, y, z):
+    """Convert quaternion to roll, pitch, yaw in degrees."""
+    sinr_cosp = 2 * (w * x + y * z)
+    cosr_cosp = 1 - 2 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2 * (w * y - z * x)
+    pitch = math.asin(max(-1.0, min(1.0, sinp)))
+
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    roll_deg = math.degrees(roll)
+    pitch_deg = math.degrees(pitch)
+    yaw_deg = math.degrees(yaw)
+    if yaw_deg < 0:
+        yaw_deg += 360.0
+    return roll_deg, pitch_deg, yaw_deg
+
+
+class ImuCalibrationTracker:
+    """Non-ROS magnetometer calibration state (shared by CLI and web dashboard)."""
+
+    def __init__(self, duration_s: int = 60, start_time: float = None):
+        self.duration_s = int(duration_s)
+        self.start_time = start_time if start_time is not None else time.time()
         self.mag_accuracy = self.accel_accuracy = self.gyro_accuracy = 0
         self.imu_sample_count = self.mag_sample_count = 0
         self.orientation_changes = 0
         self.last_orientation = None
-        self.last_accel = None
         self.motion_detected = False
-        self.last_save_time = time.time()
-        
-        # Magnetometer range tracking for visual feedback
-        self.mag_samples = []
         self.mag_min_x = self.mag_min_y = self.mag_min_z = float('inf')
         self.mag_max_x = self.mag_max_y = self.mag_max_z = float('-inf')
-        
-        # User control flags
-        self.user_wants_to_finish = False
-        self.manual_mode = False  # Set to True to enable user prompts
-        
-        # Subscribers
-        self.imu_sub = self.create_subscription(Imu, '/imu', self.imu_callback, 10)
-        self.mag_sub = self.create_subscription(MagneticField, '/magnetic_field', self.mag_callback, 10)
-        
-        # Timers
-        self.status_timer = self.create_timer(2.0, self.print_status)
-        if save_interval > 0:
-            self.save_timer = self.create_timer(float(save_interval), self.auto_save)
-        
-        self.print_header()
-        self.get_logger().info(f"Calibration started: {duration}s duration")
-        self.get_logger().info("Press Ctrl+C at any time to finish calibration early")
-        self.start_time = time.time()
-    
-    def print_header(self):
-        print("\n" + "=" * 80)
-        print("BNO085 INTERACTIVE CALIBRATION TOOL")
-        print("=" * 80)
-        print("\nCALIBRATION APPROACH:")
-        print("The BNO085 uses unified sensor fusion - all sensors calibrate together.")
-        print("\nINSTRUCTIONS:")
-        print("1. MAGNETOMETER (Most Important):")
-        print("   - Move sensor in figure-8 pattern through ALL orientations")
-        print("   - Rotate through roll, pitch, and yaw axes")
-        print("   - Watch the magnetometer ranges expand as you move")
-        print("   - Target: Cover full 3D space for best calibration")
-        print("\n2. ACCELEROMETER:")
-        print("   - Auto-calibrates during motion")
-        print("   - Benefits from varied orientations")
-        print("\n3. GYROSCOPE:")
-        print("   - Auto-calibrates during still and motion periods")
-        print("\nVISUAL FEEDBACK:")
-        print("   - Magnetometer ranges will show min/max values and progress bars")
-        print("   - Coverage Quality indicator: POOR → FAIR → GOOD → EXCELLENT")
-        print("   - Sensor Accuracy bars: UNRELIABLE → LOW → MEDIUM → HIGH")
-        print("\nTARGET: All sensors reach HIGH accuracy (green bars)")
-        print("TIP: Press Ctrl+C when satisfied with calibration quality")
-        print("=" * 80 + "\n")
-        
-        # Prompt user to read and confirm before starting
-        try:
-            input("Press ENTER to start calibration (or Ctrl+C to cancel)...")
-            print("\n🚀 Starting calibration...\n")
-        except KeyboardInterrupt:
-            print("\n\n❌ Calibration cancelled by user")
-            rclpy.shutdown()
-            raise SystemExit(0)
-    
-    def imu_callback(self, msg: Imu):
+
+    def on_imu(self, msg: Imu) -> None:
         self.imu_sample_count += 1
-        
-        # Estimate accuracy from covariance
-        self.mag_accuracy = self._cov_to_accuracy(msg.orientation_covariance[0])
-        self.accel_accuracy = self._cov_to_accuracy(msg.linear_acceleration_covariance[0])
-        self.gyro_accuracy = self._cov_to_accuracy(msg.angular_velocity_covariance[0])
-        
-        # Detect motion
+        self.mag_accuracy = cov_to_accuracy(msg.orientation_covariance[0])
+        self.accel_accuracy = cov_to_accuracy(msg.linear_acceleration_covariance[0])
+        self.gyro_accuracy = cov_to_accuracy(msg.angular_velocity_covariance[0])
         q = msg.orientation
         if self.last_orientation:
-            dq = math.sqrt(sum((a-b)**2 for a, b in zip(
+            dq = math.sqrt(sum((a - b) ** 2 for a, b in zip(
                 [q.w, q.x, q.y, q.z], self.last_orientation)))
             if dq > 0.1:
                 self.orientation_changes += 1
                 self.motion_detected = True
         self.last_orientation = [q.w, q.x, q.y, q.z]
-    
-    def mag_callback(self, msg: MagneticField):
+
+    def on_mag(self, msg: MagneticField) -> None:
         self.mag_sample_count += 1
-        
-        # Track magnetometer ranges for visual feedback
-        # Note: BNO08x driver outputs in µT directly (not standard Tesla)
-        mx = msg.magnetic_field.x  # Already in µT
+        mx = msg.magnetic_field.x
         my = msg.magnetic_field.y
         mz = msg.magnetic_field.z
-        
-        # Debug: Log first few samples to verify data is changing
-        if self.mag_sample_count <= 5:
-            self.get_logger().info(f"Mag sample #{self.mag_sample_count}: X={mx:.2f}, Y={my:.2f}, Z={mz:.2f} µT")
-        
-        # Update min/max ranges
         self.mag_min_x = min(self.mag_min_x, mx)
         self.mag_max_x = max(self.mag_max_x, mx)
         self.mag_min_y = min(self.mag_min_y, my)
         self.mag_max_y = max(self.mag_max_y, my)
         self.mag_min_z = min(self.mag_min_z, mz)
         self.mag_max_z = max(self.mag_max_z, mz)
-        
-        # Store sample for coverage calculation
-        self.mag_samples.append((mx, my, mz))
-    
-    def _cov_to_accuracy(self, cov):
-        """Convert covariance to accuracy level (0-3)."""
-        if cov <= 0:
-            return 0
-        elif cov < 0.01:
-            return 3
-        elif cov < 0.05:
-            return 2
-        elif cov < 0.1:
-            return 1
-        return 0
-    
+
+    def elapsed_s(self) -> float:
+        return time.time() - self.start_time
+
+    def remaining_s(self) -> float:
+        return max(0.0, self.duration_s - self.elapsed_s())
+
+    def is_timer_complete(self) -> bool:
+        return self.remaining_s() <= 0
+
+    def _mag_spans(self):
+        if self.mag_min_x == float('inf'):
+            return None
+        return {
+            'x': self.mag_max_x - self.mag_min_x,
+            'y': self.mag_max_y - self.mag_min_y,
+            'z': self.mag_max_z - self.mag_min_z,
+        }
+
+    def coverage_info(self) -> dict:
+        """Coverage tier and average percent for mag ellipsoid sampling."""
+        spans = self._mag_spans()
+        if not spans:
+            return {
+                'percent': 0.0,
+                'label': 'NO_DATA',
+                'display': 'NO DATA (0%)',
+            }
+        coverage_x = min(100.0, (spans['x'] / TARGET_MAG_SPAN_UT) * 100.0)
+        coverage_y = min(100.0, (spans['y'] / TARGET_MAG_SPAN_UT) * 100.0)
+        coverage_z = min(100.0, (spans['z'] / TARGET_MAG_SPAN_UT) * 100.0)
+        avg = (coverage_x + coverage_y + coverage_z) / 3.0
+        if avg >= 80:
+            label, display = 'EXCELLENT', f'EXCELLENT ({avg:.0f}%)'
+        elif avg >= 60:
+            label, display = 'GOOD', f'GOOD ({avg:.0f}%)'
+        elif avg >= 40:
+            label, display = 'FAIR', f'FAIR ({avg:.0f}%) — keep moving'
+        else:
+            label, display = 'POOR', f'POOR ({avg:.0f}%) — more movement needed'
+        return {
+            'percent': avg,
+            'label': label,
+            'display': display,
+            'per_axis_percent': {'x': coverage_x, 'y': coverage_y, 'z': coverage_z},
+        }
+
+    def guidance(self) -> str:
+        spans = self._mag_spans()
+        if not spans:
+            return 'Waiting for magnetometer data from /magnetic_field'
+        if self.mag_accuracy >= 3:
+            if self.accel_accuracy >= 2 and self.gyro_accuracy >= 2:
+                return 'All sensors calibrated — safe to finish'
+            return 'Magnetometer complete — continue briefly for accel/gyro'
+        if spans['x'] < 30 or spans['y'] < 30 or spans['z'] < 30:
+            return 'Insufficient coverage — rotate through more orientations (target ~40–60 µT per axis)'
+        if self.motion_detected:
+            return 'Motion detected — continue figure-8 through all axes'
+        return 'Keep moving — figure-8 pattern through roll, pitch, and yaw'
+
+    def consume_motion_flag(self) -> bool:
+        """Return and clear one-shot motion hint (for terminal print_status)."""
+        if self.motion_detected:
+            self.motion_detected = False
+            return True
+        return False
+
+    def snapshot(self) -> dict:
+        cov = self.coverage_info()
+        spans = self._mag_spans()
+        mag_ranges = None
+        if spans:
+            mag_ranges = {
+                'x': {'min': self.mag_min_x, 'max': self.mag_max_x, 'span': spans['x']},
+                'y': {'min': self.mag_min_y, 'max': self.mag_max_y, 'span': spans['y']},
+                'z': {'min': self.mag_min_z, 'max': self.mag_max_z, 'span': spans['z']},
+            }
+        return {
+            'elapsed_s': round(self.elapsed_s(), 1),
+            'remaining_s': round(self.remaining_s(), 1),
+            'duration_s': self.duration_s,
+            'accuracy': {
+                'magnetometer': {
+                    'level': self.mag_accuracy,
+                    'name': ACCURACY_NAMES[self.mag_accuracy],
+                },
+                'accelerometer': {
+                    'level': self.accel_accuracy,
+                    'name': ACCURACY_NAMES[self.accel_accuracy],
+                },
+                'gyroscope': {
+                    'level': self.gyro_accuracy,
+                    'name': ACCURACY_NAMES[self.gyro_accuracy],
+                },
+            },
+            'mag_ranges_uT': mag_ranges,
+            'coverage': cov,
+            'guidance': self.guidance(),
+            'samples': {
+                'imu': self.imu_sample_count,
+                'magnetometer': self.mag_sample_count,
+                'orientation_changes': self.orientation_changes,
+            },
+        }
+
+    def success_level(self) -> str:
+        if self.mag_accuracy >= 3 and self.accel_accuracy >= 2 and self.gyro_accuracy >= 2:
+            return 'EXCELLENT'
+        if self.mag_accuracy >= 2:
+            return 'ACCEPTABLE'
+        return 'INSUFFICIENT'
+
+    def final_report(self, interrupted: bool = False) -> dict:
+        snap = self.snapshot()
+        return {
+            'interrupted': interrupted,
+            'duration_s': round(self.elapsed_s(), 1),
+            'success_level': self.success_level(),
+            'accuracy': snap['accuracy'],
+            'mag_ranges_uT': snap['mag_ranges_uT'],
+            'coverage': snap['coverage'],
+            'samples': snap['samples'],
+            'storage_note': (
+                'Calibration is saved automatically to the BNO085 internal flash '
+                'and persists across power cycles.'
+            ),
+        }
+
+
+class ImuVerifySnapshot:
+    """Non-ROS verify state; compass heading should come from /compass (bridge)."""
+
+    def __init__(self, duration_s: int = 0, start_time: float = None):
+        self.duration_s = int(duration_s)
+        self.start_time = start_time if start_time is not None else time.time()
+        self.sample_count = 0
+        self.compass_heading = None
+        self.compass_history = collections.deque(maxlen=50)
+        self.has_imu = False
+        self.accel_g = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.gyro_dps = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.mag_uT = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.has_mag = False
+        self.roll_deg = self.pitch_deg = 0.0
+        self.quaternion = {'w': 0.0, 'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.quaternion_unit_ok = False
+        self.gravity_ok = False
+        self.accel_mag_mps2 = 0.0
+
+    def on_imu(self, msg: Imu) -> None:
+        self.sample_count += 1
+        self.has_imu = True
+        q = msg.orientation
+        self.quaternion = {'w': q.w, 'x': q.x, 'y': q.y, 'z': q.z}
+        self.quaternion_unit_ok = abs(math.sqrt(q.w ** 2 + q.x ** 2 + q.y ** 2 + q.z ** 2) - 1.0) < 0.01
+        self.roll_deg, self.pitch_deg, _yaw = quaternion_to_euler_deg(q.w, q.x, q.y, q.z)
+        ax = msg.linear_acceleration.x
+        ay = msg.linear_acceleration.y
+        az = msg.linear_acceleration.z
+        self.accel_g = {'x': ax / 9.81, 'y': ay / 9.81, 'z': az / 9.81}
+        self.accel_mag_mps2 = math.sqrt(ax * ax + ay * ay + az * az)
+        self.gravity_ok = abs(self.accel_mag_mps2 - 9.81) < 2.0
+        self.gyro_dps = {
+            'x': math.degrees(msg.angular_velocity.x),
+            'y': math.degrees(msg.angular_velocity.y),
+            'z': math.degrees(msg.angular_velocity.z),
+        }
+
+    def on_mag(self, msg: MagneticField) -> None:
+        self.has_mag = True
+        self.mag_uT = {
+            'x': msg.magnetic_field.x,
+            'y': msg.magnetic_field.y,
+            'z': msg.magnetic_field.z,
+        }
+
+    def on_compass(self, heading_deg: float) -> None:
+        self.compass_heading = float(heading_deg) % 360.0
+        self.compass_history.append(self.compass_heading)
+
+    def elapsed_s(self) -> float:
+        return time.time() - self.start_time
+
+    def remaining_s(self) -> float:
+        if self.duration_s <= 0:
+            return None
+        return max(0.0, self.duration_s - self.elapsed_s())
+
+    def is_timer_complete(self) -> bool:
+        if self.duration_s <= 0:
+            return False
+        return self.remaining_s() <= 0
+
+    def heading_stability_deg(self) -> Optional[float]:
+        n = len(self.compass_history)
+        if n < 2:
+            return None
+        rads = [math.radians(v) for v in self.compass_history]
+        sin_sum = sum(math.sin(r) for r in rads)
+        cos_sum = sum(math.cos(r) for r in rads)
+        r = math.hypot(sin_sum / n, cos_sum / n)
+        if r < 1e-9:
+            return None
+        circ_var = max(0.0, 1.0 - r)
+        return math.degrees(math.sqrt(circ_var))
+
+    def snapshot(self) -> dict:
+        return {
+            'elapsed_s': round(self.elapsed_s(), 1),
+            'remaining_s': (
+                round(self.remaining_s(), 1) if self.remaining_s() is not None else None
+            ),
+            'duration_s': self.duration_s,
+            'sample_count': self.sample_count,
+            'compass_heading': self.compass_heading,
+            'compass_samples': len(self.compass_history),
+            'heading_stability_deg': self.heading_stability_deg(),
+            'has_imu': self.has_imu,
+            'has_mag': self.has_mag,
+            'accel_g': self.accel_g,
+            'gyro_dps': self.gyro_dps,
+            'mag_uT': self.mag_uT,
+            'roll_deg': round(self.roll_deg, 1),
+            'pitch_deg': round(self.pitch_deg, 1),
+            'quaternion': self.quaternion,
+            'quaternion_unit_ok': self.quaternion_unit_ok,
+            'gravity_ok': self.gravity_ok,
+        }
+
+
+def print_calibration_header():
+    """Instructions printed for interactive CLI calibration."""
+    print("\n" + "=" * 80)
+    print("BNO085 INTERACTIVE CALIBRATION TOOL")
+    print("=" * 80)
+    print("\nCALIBRATION APPROACH:")
+    print("The BNO085 uses unified sensor fusion - all sensors calibrate together.")
+    print("\nINSTRUCTIONS:")
+    print("1. MAGNETOMETER (Most Important):")
+    print("   - Move sensor in figure-8 pattern through ALL orientations")
+    print("   - Rotate through roll, pitch, and yaw axes")
+    print("   - Watch the magnetometer ranges expand as you move")
+    print("   - Target: Cover full 3D space for best calibration")
+    print("\n2. ACCELEROMETER:")
+    print("   - Auto-calibrates during motion")
+    print("   - Benefits from varied orientations")
+    print("\n3. GYROSCOPE:")
+    print("   - Auto-calibrates during still and motion periods")
+    print("\nVISUAL FEEDBACK:")
+    print("   - Magnetometer ranges will show min/max values and progress bars")
+    print("   - Coverage Quality indicator: POOR → FAIR → GOOD → EXCELLENT")
+    print("   - Sensor Accuracy bars: UNRELIABLE → LOW → MEDIUM → HIGH")
+    print("\nTARGET: All sensors reach HIGH accuracy (green bars)")
+    print("TIP: Press Ctrl+C when satisfied with calibration quality")
+    print("=" * 80 + "\n")
+
+
+def print_calibration_report(report: dict) -> str:
+    """Print final calibration report; returns success_level."""
+    print("\n" + "=" * 80)
+    if report.get('interrupted'):
+        print("CALIBRATION INTERRUPTED BY USER")
+    else:
+        print("CALIBRATION COMPLETE")
+    print("=" * 80)
+    print(f"\nDuration: {report['duration_s']:.1f}s")
+    acc = report['accuracy']
+    print("\nFinal Sensor Accuracy:")
+    print(f"  Magnetometer:  {acc['magnetometer']['name']}")
+    print(f"  Accelerometer: {acc['accelerometer']['name']}")
+    print(f"  Gyroscope:     {acc['gyroscope']['name']}")
+    print("\nMagnetometer Coverage:")
+    mag = report.get('mag_ranges_uT')
+    if mag:
+        for axis in ('x', 'y', 'z'):
+            r = mag[axis]
+            print(
+                f"  {axis.upper()} Range: [{r['min']:+6.1f} .. {r['max']:+6.1f}] µT "
+                f"(span: {r['span']:5.1f} µT)"
+            )
+        print(f"  Coverage Quality: {report['coverage']['display']}")
+    else:
+        print("  No magnetometer data collected")
+    samples = report['samples']
+    print(f"\nSample Statistics:")
+    print(f"  IMU samples: {samples['imu']}")
+    print(f"  Magnetometer samples: {samples['magnetometer']}")
+    print(f"  Orientation changes: {samples['orientation_changes']}")
+    print(f"\nCalibration Storage:")
+    print(f"  {report['storage_note']}")
+    level = report['success_level']
+    if level == 'EXCELLENT':
+        print("\nSUCCESS! Sensor is well-calibrated and ready for use")
+    elif level == 'ACCEPTABLE':
+        print("\nPARTIAL SUCCESS: Acceptable calibration achieved")
+    else:
+        print("\nINCOMPLETE: Magnetometer calibration insufficient")
+    print("=" * 80)
+    return level
+
+
+# ============================================================================
+# CALIBRATION MODE: Interactive sensor calibration
+# ============================================================================
+
+class BNO085Calibrator(Node):
+    """Interactive calibration tool with real-time guidance and visual feedback."""
+
+    def __init__(self, duration=30, save_interval=30, interactive=True, no_prompt=False):
+        super().__init__('bno085_calibrator')
+        self.tracker = ImuCalibrationTracker(duration)
+        self.save_interval = save_interval
+        self.interactive = interactive
+
+        self.imu_sub = self.create_subscription(Imu, '/imu', self.imu_callback, 10)
+        self.mag_sub = self.create_subscription(
+            MagneticField, '/magnetic_field', self.mag_callback, 10)
+
+        if interactive:
+            self.status_timer = self.create_timer(2.0, self.print_status)
+            if save_interval > 0:
+                self.save_timer = self.create_timer(float(save_interval), self.auto_save)
+            print_calibration_header()
+            if not no_prompt:
+                try:
+                    input("Press ENTER to start calibration (or Ctrl+C to cancel)...")
+                    print("\nStarting calibration...\n")
+                except KeyboardInterrupt:
+                    print("\nCalibration cancelled by user")
+                    rclpy.shutdown()
+                    raise SystemExit(0)
+            self.tracker.start_time = time.time()
+
+        self.get_logger().info(f"Calibration started: {duration}s duration")
+        self.get_logger().info("Press Ctrl+C at any time to finish calibration early")
+
+    def imu_callback(self, msg: Imu):
+        self.tracker.on_imu(msg)
+
+    def mag_callback(self, msg: MagneticField):
+        self.tracker.on_mag(msg)
+        if self.tracker.mag_sample_count <= 5:
+            mx = msg.magnetic_field.x
+            my = msg.magnetic_field.y
+            mz = msg.magnetic_field.z
+            self.get_logger().info(
+                f"Mag sample #{self.tracker.mag_sample_count}: "
+                f"X={mx:.2f}, Y={my:.2f}, Z={mz:.2f} µT"
+            )
+
+    def _terminal_bar(self, acc):
+        return ["░░░░", "▓░░░", "▓▓░░", "▓▓▓░", "▓▓▓▓"][max(0, min(3, int(acc)))]
+
+    def _range_bar(self, span, width=50):
+        filled = int(min(1.0, span / TARGET_MAG_BAR_UT) * width)
+        bar = '█' * filled + '░' * (width - filled)
+        return f"|{bar}|"
+
     def print_status(self):
-        elapsed = time.time() - self.start_time
-        remaining = max(0, self.calibration_duration - elapsed)
-        
-        print("\033[2J\033[H", end='')  # Clear screen
+        t = self.tracker
+        elapsed = t.elapsed_s()
+        remaining = t.remaining_s()
+        snap = t.snapshot()
+
+        print("\033[2J\033[H", end='')
         print("=" * 80)
         print(f"BNO085 CALIBRATION - {datetime.now().strftime('%H:%M:%S')}")
         print("=" * 80)
-        print(f"\n⏱️  TIME: {elapsed:.1f}s / {self.calibration_duration}s (Ctrl+C to finish early)")
-        
-        # Calculate magnetometer coverage quality
-        coverage_quality = self._calculate_coverage_quality()
-        
-        print(f"\n📊 SENSOR ACCURACY:")
-        print(f"   Magnetometer:  {self._bar(self.mag_accuracy)} {self._name(self.mag_accuracy)}")
-        print(f"   Accelerometer: {self._bar(self.accel_accuracy)} {self._name(self.accel_accuracy)}")
-        print(f"   Gyroscope:     {self._bar(self.gyro_accuracy)} {self._name(self.gyro_accuracy)}")
-        
-        print(f"\n📏 MAGNETOMETER RANGES (µT):")
-        # Get terminal width for dynamic bar sizing
+        print(f"\nTIME: {elapsed:.1f}s / {t.duration_s}s (Ctrl+C to finish early)")
+
+        acc = snap['accuracy']
+        print("\nSENSOR ACCURACY:")
+        print(f"   Magnetometer:  {self._terminal_bar(acc['magnetometer']['level'])} "
+              f"{acc['magnetometer']['name']}")
+        print(f"   Accelerometer: {self._terminal_bar(acc['accelerometer']['level'])} "
+              f"{acc['accelerometer']['name']}")
+        print(f"   Gyroscope:     {self._terminal_bar(acc['gyroscope']['level'])} "
+              f"{acc['gyroscope']['name']}")
+
+        print("\nMAGNETOMETER RANGES (µT):")
         try:
             import shutil
             term_width = shutil.get_terminal_size().columns
-        except:
+        except Exception:
             term_width = 80
-        bar_width = min(50, term_width - 35)  # Reserve space for labels
-        
-        if self.mag_min_x != float('inf'):
-            span_x = self.mag_max_x - self.mag_min_x
-            span_y = self.mag_max_y - self.mag_min_y
-            span_z = self.mag_max_z - self.mag_min_z
-            
-            print(f"   X: [{self.mag_min_x:+6.1f} .. {self.mag_max_x:+6.1f}] {self._range_bar(span_x, bar_width)} span={span_x:5.1f}")
-            print(f"   Y: [{self.mag_min_y:+6.1f} .. {self.mag_max_y:+6.1f}] {self._range_bar(span_y, bar_width)} span={span_y:5.1f}")
-            print(f"   Z: [{self.mag_min_z:+6.1f} .. {self.mag_max_z:+6.1f}] {self._range_bar(span_z, bar_width)} span={span_z:5.1f}")
-            print(f"   Coverage Quality: {coverage_quality}")
-            
-            # Provide guidance based on calibration state
-            if self.mag_accuracy < 3:
-                if span_x < 30 or span_y < 30 or span_z < 30:
-                    print(f"\n💡 ⚠️  INSUFFICIENT COVERAGE: Rotate sensor through MORE orientations!")
-                    print("   → Need wider ranges on all 3 axes (target: ~40-60 µT each)")
-                elif self.motion_detected:
-                    print(f"\n💡 ✅ Motion detected! Continue rotating through all orientations...")
-                else:
-                    print(f"\n💡 ⚠️  Keep moving! Figure-8 pattern through all axes...")
-                self.motion_detected = False
-            else:
-                print("\n✅ MAGNETOMETER CALIBRATION COMPLETE! High accuracy achieved")
-                if self.accel_accuracy >= 2 and self.gyro_accuracy >= 2:
-                    print("✅ ALL SENSORS CALIBRATED! Safe to finish (Ctrl+C)")
+        bar_width = min(50, term_width - 35)
+
+        mag = snap['mag_ranges_uT']
+        if mag:
+            for axis in ('x', 'y', 'z'):
+                r = mag[axis]
+                print(
+                    f"   {axis.upper()}: [{r['min']:+6.1f} .. {r['max']:+6.1f}] "
+                    f"{self._range_bar(r['span'], bar_width)} span={r['span']:5.1f}"
+                )
+            print(f"   Coverage Quality: {snap['coverage']['display']}")
+            print(f"\n{snap['guidance']}")
+            t.consume_motion_flag()
         else:
             print("   Waiting for magnetometer data...")
-            print(f"\n💡 Waiting for sensor to start publishing data...")
-        
-        print(f"\n📈 SAMPLES: IMU={self.imu_sample_count}, Mag={self.mag_sample_count}, Movements={self.orientation_changes}")
-        
+
+        samples = snap['samples']
+        print(
+            f"\nSAMPLES: IMU={samples['imu']}, Mag={samples['magnetometer']}, "
+            f"Movements={samples['orientation_changes']}"
+        )
         print("=" * 80 + "\n")
-        
+
         if remaining <= 0:
-            # Timer expired - raise exception to trigger cleanup in main
             raise SystemExit("calibration_complete")
-    
-    def _range_bar(self, span, width=50):
-        """Create a visual bar showing magnetometer range span."""
-        target_span = 60.0  # Target span for good calibration (µT)
-        filled = int(min(1.0, span / target_span) * width)
-        bar = '█' * filled + '░' * (width - filled)
-        return f"|{bar}|"
-    
-    def _calculate_coverage_quality(self):
-        """Calculate magnetometer coverage quality percentage."""
-        if self.mag_min_x == float('inf'):
-            return "⚠️  NO DATA (0%)"
-        
-        span_x = self.mag_max_x - self.mag_min_x
-        span_y = self.mag_max_y - self.mag_min_y
-        span_z = self.mag_max_z - self.mag_min_z
-        
-        # Target spans for good calibration (typical Earth field ~40-60 µT range)
-        target_span = 50.0
-        
-        coverage_x = min(100, (span_x / target_span) * 100)
-        coverage_y = min(100, (span_y / target_span) * 100)
-        coverage_z = min(100, (span_z / target_span) * 100)
-        
-        avg_coverage = (coverage_x + coverage_y + coverage_z) / 3.0
-        
-        if avg_coverage >= 80:
-            return f"✅ EXCELLENT ({avg_coverage:.0f}%)"
-        elif avg_coverage >= 60:
-            return f"✓ GOOD ({avg_coverage:.0f}%)"
-        elif avg_coverage >= 40:
-            return f"⚠️  FAIR ({avg_coverage:.0f}%) - keep moving"
-        else:
-            return f"❌ POOR ({avg_coverage:.0f}%) - more movement needed"
-    
-    def _bar(self, acc):
-        return ["░░░░", "▓░░░", "▓▓░░", "▓▓▓░", "▓▓▓▓"][max(0, min(3, int(acc)))]
-    
-    def _name(self, acc):
-        return ["UNRELIABLE", "LOW      ", "MEDIUM   ", "HIGH     "][max(0, min(3, int(acc)))]
-    
+
     def auto_save(self):
-        print("💾 Calibration auto-saved by sensor")
-    
+        print("Calibration auto-saved by sensor")
+
     def final_report(self, interrupted=False):
-        """Display final calibration report with quality assessment."""
-        print("\n" + "=" * 80)
-        if interrupted:
-            print("CALIBRATION INTERRUPTED BY USER")
-        else:
-            print("CALIBRATION COMPLETE")
-        print("=" * 80)
-        print(f"\nDuration: {time.time() - self.start_time:.1f}s")
-        print(f"\nFinal Sensor Accuracy:")
-        print(f"  Magnetometer:  {self._name(self.mag_accuracy).strip()}")
-        print(f"  Accelerometer: {self._name(self.accel_accuracy).strip()}")
-        print(f"  Gyroscope:     {self._name(self.gyro_accuracy).strip()}")
-        
-        print(f"\nMagnetometer Coverage:")
-        if self.mag_min_x != float('inf'):
-            span_x = self.mag_max_x - self.mag_min_x
-            span_y = self.mag_max_y - self.mag_min_y
-            span_z = self.mag_max_z - self.mag_min_z
-            coverage_quality = self._calculate_coverage_quality()
-            
-            print(f"  X Range: [{self.mag_min_x:+6.1f} .. {self.mag_max_x:+6.1f}] µT (span: {span_x:5.1f} µT)")
-            print(f"  Y Range: [{self.mag_min_y:+6.1f} .. {self.mag_max_y:+6.1f}] µT (span: {span_y:5.1f} µT)")
-            print(f"  Z Range: [{self.mag_min_z:+6.1f} .. {self.mag_max_z:+6.1f}] µT (span: {span_z:5.1f} µT)")
-            print(f"  Coverage Quality: {coverage_quality}")
-        else:
-            print("  ⚠️  No magnetometer data collected")
-        
-        print(f"\nSample Statistics:")
-        print(f"  IMU samples: {self.imu_sample_count}")
-        print(f"  Magnetometer samples: {self.mag_sample_count}")
-        print(f"  Orientation changes: {self.orientation_changes}")
-        
-        print(f"\nCalibration Storage:")
-        print(f"  ✅ Calibration automatically saved to sensor's internal flash memory")
-        print(f"  ✅ Persists across power cycles and reboots")
-        print(f"  ℹ️  No external calibration file needed")
-        
-        # Quality assessment
-        success_level = ""
-        if self.mag_accuracy >= 3 and self.accel_accuracy >= 2 and self.gyro_accuracy >= 2:
-            success_level = "EXCELLENT"
-            print("\n✅ SUCCESS! Sensor is well-calibrated and ready for use")
-        elif self.mag_accuracy >= 2:
-            success_level = "ACCEPTABLE"
-            print("\n✓ PARTIAL SUCCESS: Acceptable calibration achieved")
-            print("  Consider running calibration again for better accuracy")
-        else:
-            success_level = "INSUFFICIENT"
-            print("\n⚠️  INCOMPLETE: Magnetometer calibration insufficient")
-            print("  Please run calibration again with more comprehensive movement")
-        
-        print("=" * 80)
-        
-        return success_level
+        report = self.tracker.final_report(interrupted=interrupted)
+        if self.interactive:
+            return print_calibration_report(report)
+        return report['success_level']
 
 
 # ============================================================================
@@ -1083,55 +1385,42 @@ def clear_screen_and_home():
 
 class RotationVectorVerifier(Node):
     """Interactive ASCII display for BNO085 sensor testing."""
-    
-    def __init__(self, duration=10):
+
+    def __init__(self, duration=10, interactive=True, no_prompt=False):
         """
         Args:
-            duration (int): Duration in seconds for verification mode.
-                - If duration > 0: Run verification for the specified number of seconds.
-                - If duration == 0: Run verification mode indefinitely (until interrupted).
+            duration (int): Seconds to run (0 = until interrupted).
+            interactive: Terminal UI when True.
+            no_prompt: Skip ENTER/auto-start prompt (web/automation).
         """
         super().__init__('rotation_vector_verifier')
+        self.snapshot_tracker = ImuVerifySnapshot(duration)
         self.duration = duration
-        self.start_time = time.time()
-        self.sample_count = 0
-        self.yaw_history = collections.deque(maxlen=20)
-        self.last_print_time = time.time()
-        
-        # ASCII display state
+        self.interactive = interactive
         self._vis_initialized = False
-        self._init_ascii_vis()
-        
-        # Subscribers
+        self.display_started = not interactive or no_prompt
+
         self.imu_sub = self.create_subscription(Imu, '/imu', self.imu_callback, 10)
-        self.mag_sub = self.create_subscription(MagneticField, '/magnetic_field', self.mag_callback, 10)
-        
-        # Display start flag (delayed until user ready)
-        self.display_started = False
-        
-        # Show introduction
-        print("\n" + "=" * 80)
-        print("BNO085 INTERACTIVE SENSOR DISPLAY")
-        print("=" * 80)
-        print("\nReal-time sensor data visualization:")
-        print("  • Accelerometer (g units) - shows X, Y, Z acceleration")
-        print("  • Gyroscope (deg/s) - shows X, Y, Z angular velocity")
-        print("  • Magnetometer (µT) - shows X, Y, Z magnetic field")
-        print("  • Compass heading (degrees) - 0°=N, 90°=E, 180°=S, 270°=W")
-        print("  • Quaternion orientation - rotation from sensor frame to world")
-        print("  • Euler angles (Roll, Pitch, Yaw) - for 3D visualization")
-        print("\nDISPLAY FEATURES:")
-        print("  • Visual progress bars for all sensor axes")
-        print("  • ASCII compass showing heading direction")
-        print("  • Real-time validation of sensor data quality")
-        print("\nWaiting for sensor data...")
-        print("=" * 80 + "\n")
-        
-        # Prompt with timeout
-        self._prompt_with_timeout()
-        
-        # Timer for display updates (starts after prompt)
-        self.display_timer = self.create_timer(0.1, self.update_display)  # 10 Hz
+        self.mag_sub = self.create_subscription(
+            MagneticField, '/magnetic_field', self.mag_callback, 10)
+        self.compass_sub = self.create_subscription(
+            Vector3, '/compass', self.compass_callback, 10)
+
+        if interactive:
+            self._init_ascii_vis()
+            print("\n" + "=" * 80)
+            print("BNO085 INTERACTIVE SENSOR DISPLAY")
+            print("=" * 80)
+            print("\nReal-time sensor data visualization:")
+            print("  • Accelerometer (g), gyroscope (deg/s), magnetometer (µT)")
+            print("  • Compass heading from /compass (0°=N, 90°=E)")
+            print("\nWaiting for sensor data...")
+            print("=" * 80 + "\n")
+            if not no_prompt:
+                self._prompt_with_timeout()
+            else:
+                self.snapshot_tracker.start_time = time.time()
+            self.display_timer = self.create_timer(0.1, self.update_display)
     
     def _prompt_with_timeout(self, timeout=10):
         """Prompt user with automatic timeout after specified seconds."""
@@ -1269,155 +1558,80 @@ class RotationVectorVerifier(Node):
         return [''.join(row) for row in grid]
     
     def imu_callback(self, msg: Imu):
-        """Process IMU message and store data for display."""
-        self.sample_count += 1
-        current_time = time.time()
-        
-        # Store current sensor data for display
-        self.current_quaternion = msg.orientation
-        self.current_accel = msg.linear_acceleration
-        self.current_gyro = msg.angular_velocity
-        self.current_time = current_time
-        
-        # Calculate derived values
-        q = msg.orientation
-        self.current_roll, self.current_pitch, self.current_yaw = self.quaternion_to_euler(q.w, q.x, q.y, q.z)
-        self.current_q_mag = math.sqrt(q.w**2 + q.x**2 + q.y**2 + q.z**2)
-        self.current_accel_mag = math.sqrt(sum(x**2 for x in [msg.linear_acceleration.x, 
-                                                              msg.linear_acceleration.y,
-                                                              msg.linear_acceleration.z]))
-        self.yaw_history.append(self.current_yaw)
-    
+        self.snapshot_tracker.on_imu(msg)
+
+    def compass_callback(self, msg: Vector3):
+        if msg.z is not None:
+            self.snapshot_tracker.on_compass(msg.z)
+
     def mag_callback(self, msg: MagneticField):
-        """Process magnetic field message."""
-        self.current_mag = msg.magnetic_field
+        self.snapshot_tracker.on_mag(msg)
     
     def update_display(self):
-        """Update the ASCII display with current sensor data."""
-        # Don't start updating display until user has had time to read intro
-        if not self.display_started:
+        if not self.display_started or not self.snapshot_tracker.has_imu:
             return
-        
-        if not hasattr(self, 'current_quaternion'):
-            return  # No data yet
-        
         try:
+            snap = self.snapshot_tracker.snapshot()
             clear_screen_and_home()
-            
-            # Get terminal size for dynamic sizing
             term_width, term_height = get_terminal_size()
-            bar_width = term_width - 20  # Reserve 20 chars for labels
-            
-            # Nominal limits for bars
-            a_lim = 2.0   # g
-            g_lim = 500.0  # deg/s
-            m_lim = 100.0  # µT
-            
-            # Convert accelerometer from m/s² to g
-            ax_g = self.current_accel.x / 9.81
-            ay_g = self.current_accel.y / 9.81
-            az_g = self.current_accel.z / 9.81
-            
-            # Convert gyroscope from rad/s to deg/s
-            gx_dps = math.degrees(self.current_gyro.x)
-            gy_dps = math.degrees(self.current_gyro.y)
-            gz_dps = math.degrees(self.current_gyro.z)
-            
-            # Get magnetometer data
-            if hasattr(self, 'current_mag'):
-                # Note: BNO08x driver outputs in µT directly (not standard Tesla)
-                mx_uT = self.current_mag.x  # Already in µT
-                my_uT = self.current_mag.y
-                mz_uT = self.current_mag.z
-            else:
-                mx_uT = my_uT = mz_uT = 0.0
-            
-            # Build sensor data lines
+            bar_width = term_width - 20
+            a_lim, g_lim, m_lim = 2.0, 500.0, 100.0
+            ag = snap['accel_g']
+            gd = snap['gyro_dps']
+            mg = snap['mag_uT']
+            heading = snap['compass_heading']
+            if heading is None:
+                heading = 0.0
+            q = snap['quaternion']
             sensor_lines = [
                 "=== BNO085 Sensor Data (Interactive Display) ===",
                 "",
                 "Accelerometer:",
-                f"Ax {ax_g:+7.3f} g   " + self._signed_bar(ax_g, a_lim, bar_width),
-                f"Ay {ay_g:+7.3f} g   " + self._signed_bar(ay_g, a_lim, bar_width),
-                f"Az {az_g:+7.3f} g   " + self._signed_bar(az_g, a_lim, bar_width),
+                f"Ax {ag['x']:+7.3f} g   " + self._signed_bar(ag['x'], a_lim, bar_width),
+                f"Ay {ag['y']:+7.3f} g   " + self._signed_bar(ag['y'], a_lim, bar_width),
+                f"Az {ag['z']:+7.3f} g   " + self._signed_bar(ag['z'], a_lim, bar_width),
                 "",
                 "Gyroscope:",
-                f"Gx {gx_dps:+7.1f} dps " + self._signed_bar(gx_dps, g_lim, bar_width),
-                f"Gy {gy_dps:+7.1f} dps " + self._signed_bar(gy_dps, g_lim, bar_width),
-                f"Gz {gz_dps:+7.1f} dps " + self._signed_bar(gz_dps, g_lim, bar_width),
+                f"Gx {gd['x']:+7.1f} dps " + self._signed_bar(gd['x'], g_lim, bar_width),
+                f"Gy {gd['y']:+7.1f} dps " + self._signed_bar(gd['y'], g_lim, bar_width),
+                f"Gz {gd['z']:+7.1f} dps " + self._signed_bar(gd['z'], g_lim, bar_width),
                 "",
                 "Magnetometer:",
-                f"Mx {mx_uT:+7.1f} µT  " + self._signed_bar(mx_uT, m_lim, bar_width),
-                f"My {my_uT:+7.1f} µT  " + self._signed_bar(my_uT, m_lim, bar_width),
-                f"Mz {mz_uT:+7.1f} µT  " + self._signed_bar(mz_uT, m_lim, bar_width),
+                f"Mx {mg['x']:+7.1f} uT  " + self._signed_bar(mg['x'], m_lim, bar_width),
+                f"My {mg['y']:+7.1f} uT  " + self._signed_bar(mg['y'], m_lim, bar_width),
+                f"Mz {mg['z']:+7.1f} uT  " + self._signed_bar(mg['z'], m_lim, bar_width),
                 "",
-                f"=== Compass Heading: {self.current_yaw:6.1f}° (0°=N, 90°=E, 180°=S, 270°=W) ===",
+                f"=== Compass (/compass): {heading:6.1f} deg (0=N, 90=E) ===",
                 "",
-                "=== Quaternion Orientation ===",
-                f"Qw {self.current_quaternion.w:+7.3f}  Qx {self.current_quaternion.x:+7.3f}  Qy {self.current_quaternion.y:+7.3f}  Qz {self.current_quaternion.z:+7.3f}",
-                f"Mag: {self.current_q_mag:.4f} {'✓' if abs(self.current_q_mag-1.0)<0.01 else '❌'} Unit quaternion",
+                "=== Quaternion ===",
+                f"Qw {q['w']:+7.3f}  Qx {q['x']:+7.3f}  Qy {q['y']:+7.3f}  Qz {q['z']:+7.3f}",
+                f"Unit quat: {'PASS' if snap['quaternion_unit_ok'] else 'FAIL'}",
                 "",
-                "=== Euler Angles ===",
-                f"Roll {self.current_roll:+7.1f}°  Pitch {self.current_pitch:+7.1f}°  Yaw {self.current_yaw:+7.1f}°",
+                f"Roll {snap['roll_deg']:+7.1f}  Pitch {snap['pitch_deg']:+7.1f}",
+                f"Gravity: {'PASS' if snap['gravity_ok'] else 'FAIL'}",
                 "",
-                "=== Validation ===",
-                f"✓ Quaternion: {'PASS' if abs(self.current_q_mag-1.0)<0.01 else 'FAIL'}",
-                f"✓ Mag North:  {'PASS' if 0<=self.current_yaw<=360 else 'FAIL'}",
-                f"✓ Gravity:    {'PASS' if abs(self.current_accel_mag-9.81)<2.0 else 'FAIL'}",
-                ""
             ]
-            
-            # Calculate available height for compass
-            sensor_lines_count = len(sensor_lines)
-            footer_lines_count = 3  # blank line + status + "Ctrl-C to exit"
-            available_height = term_height - sensor_lines_count - footer_lines_count
-            
-            # Generate compass display to fit available height
-            compass_width = term_width
-            compass_height = max(5, available_height)
-            compass_lines = self._render_compass(self.current_yaw, width=compass_width, height=compass_height)
-            
-            # Add status line
-            elapsed = time.time() - self.start_time
-            remaining = max(0, self.duration - elapsed)
-            status_line = f"Samples: {self.sample_count} | Elapsed: {elapsed:.1f}s | Remaining: {remaining:.1f}s"
-            
-            # Combine all lines
-            lines = sensor_lines + compass_lines + ["", status_line, "Ctrl-C to exit"]
-            
-            for ln in lines:
+            available_height = term_height - len(sensor_lines) - 3
+            compass_lines = self._render_compass(
+                heading, width=term_width, height=max(5, available_height))
+            elapsed = snap['elapsed_s']
+            rem = snap['remaining_s']
+            rem_s = f"{rem:.1f}" if rem is not None else "inf"
+            status_line = (
+                f"Samples: {snap['sample_count']} | Elapsed: {elapsed:.1f}s | "
+                f"Remaining: {rem_s}"
+            )
+            for ln in sensor_lines + compass_lines + ["", status_line, "Ctrl-C to exit"]:
                 sys.stdout.write(ln + '\n')
             sys.stdout.flush()
-            
-            # Check if duration has elapsed (duration==0 runs until Ctrl+C)
-            if self.duration > 0 and elapsed >= self.duration:
+            if self.snapshot_tracker.is_timer_complete():
                 self._teardown_ascii_vis()
-                print(f"\n✅ Verification complete after {elapsed:.1f}s")
-                print(f"Total samples: {self.sample_count}")
+                print(f"\nVerification complete after {elapsed:.1f}s")
                 raise SystemExit("verification_complete")
-                
-        except Exception as e:
-            # Display failed, but don't crash the node
+        except SystemExit:
+            raise
+        except Exception:
             pass
-    
-    def quaternion_to_euler(self, w, x, y, z):
-        """Convert quaternion to Euler angles in degrees."""
-        sinr_cosp = 2 * (w * x + y * z)
-        cosr_cosp = 1 - 2 * (x * x + y * y)
-        roll = math.atan2(sinr_cosp, cosr_cosp)
-        
-        sinp = 2 * (w * y - z * x)
-        pitch = math.asin(max(-1.0, min(1.0, sinp)))
-        
-        siny_cosp = 2 * (w * z + x * y)
-        cosy_cosp = 1 - 2 * (y * y + z * z)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
-        
-        yaw_deg = math.degrees(yaw)
-        if yaw_deg < 0:
-            yaw_deg += 360.0
-        
-        return math.degrees(roll), math.degrees(pitch), yaw_deg
 
 
 # ============================================================================
@@ -1522,6 +1736,8 @@ def main():
                         help='Duration in seconds for calibrate/verify (default: 60)')
     parser.add_argument('--save-interval', type=int, default=30,
                         help='Calibration auto-save interval (default: 30)')
+    parser.add_argument('--no-prompt', action='store_true',
+                        help='Skip ENTER prompt (automation / web subprocess)')
     
     # Enable bash completion for command-line arguments
     argcomplete.autocomplete(parser)
@@ -1536,9 +1752,10 @@ def main():
             if args.command == 'bridge':
                 node = BNO085Bridge()
             elif args.command == 'calibrate':
-                node = BNO085Calibrator(args.duration, args.save_interval)
+                node = BNO085Calibrator(
+                    args.duration, args.save_interval, no_prompt=args.no_prompt)
             else:  # verify
-                node = RotationVectorVerifier(args.duration)
+                node = RotationVectorVerifier(args.duration, no_prompt=args.no_prompt)
             
             rclpy.spin(node)
         except (KeyboardInterrupt, SystemExit) as e:
@@ -1561,7 +1778,7 @@ def main():
                         
                         
                         # Start verify node
-                        verify_node = RotationVectorVerifier(duration=0) # indefinite duration
+                        verify_node = RotationVectorVerifier(duration=0, no_prompt=True)
                         try:
                             rclpy.spin(verify_node)
                         except KeyboardInterrupt:

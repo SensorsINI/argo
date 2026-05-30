@@ -149,6 +149,35 @@ Note: Migrating to a production WSGI server like `gunicorn` would require refact
 - **Wind**: Speed, angle, temperature
 - **Controller**: Mode (human/robot), controller type
 - **Home Position**: Distance and bearing to home
+- **IMU**: Heading from `/compass`, health from `/imu_health`
+
+### IMU Compass Calibration & Verify
+
+On the main dashboard, open **IMU Compass Tools** (below the GPS card). No SSH or terminal is required.
+
+**Requirements**
+- `argo_bno085.service` running (C++ driver + bridge)
+- `/imu_health` true and fresh (shown as IMU Status on the dashboard)
+
+**Calibrate**
+1. Expand the card → **Calibrate** tab → **Start calibration**
+2. Move the boat/IMU in a figure-8 through all orientations, away from metal and electronics
+3. Watch magnetometer coverage and accuracy meters; press **Finish & save** when satisfied (or wait for the timer)
+4. Calibration is stored automatically in the BNO085 internal flash
+
+**Verify**
+1. **Verify** tab → **Start verify**
+2. Compare the compass rose and heading (from `/compass`, same as navigation) to a known reference
+3. Check stability (σ) when stationary; review accel/gyro/mag sanity lines
+
+**CLI equivalent** (still supported):
+```bash
+python3 ~/argo/nodes/bno085.py calibrate --duration 120
+python3 ~/argo/nodes/bno085.py verify
+python3 ~/argo/nodes/bno085.py calibrate --no-prompt   # skip ENTER prompt
+```
+
+**API** (for automation): `GET/POST /api/imu/calibration/*`, `GET/POST /api/imu/verify/*`
 
 ### Control Actions
 
@@ -179,7 +208,8 @@ The web dashboard integrates with existing Argo infrastructure:
 **Topics Subscribed:**
 - `/human_controlled`, `/battery_voltage`, `/battery_remaining_pct`
 - `/compass`, `/pose`, `/gps_cog`, `/gps_sog`, `/fix`
-- `/anem_speed_angle_temp`
+- `/anem_speed_angle_temp`, `/imu_health`
+- `/imu`, `/magnetic_field` (only during active IMU cal/verify sessions)
 - `/controller_state` (NEW - published by controller.py)
 
 **Services Called:**

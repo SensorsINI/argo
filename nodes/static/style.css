@@ -590,3 +590,197 @@ body {
     font-size: 14px;
     min-height: auto;
 }
+
+/* IMU calibration / verify tools */
+.imu-tools-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.imu-tools-header h2 {
+    margin: 0;
+}
+
+.imu-tools-hint {
+    font-size: 0.85em;
+    color: #6c757d;
+    margin: 8px 0 0;
+}
+
+.imu-tools-body {
+    margin-top: 12px;
+}
+
+.imu-btn-row .imu-session-toggle {
+    width: 100%;
+}
+
+.imu-session-toggle[aria-pressed="true"] {
+    background: #6c757d;
+    border-color: #6c757d;
+}
+
+.imu-session-toggle[aria-pressed="true"]:hover {
+    background: #5a6268;
+}
+
+#imu-tools-toggle:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.imu-tab-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.imu-tab {
+    flex: 1;
+    padding: 10px;
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    background: #f8f9fa;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.imu-tab.active {
+    border-color: #1e3c72;
+    background: #e8f0fe;
+    color: #1e3c72;
+}
+
+.imu-instructions {
+    font-size: 0.9em;
+    color: #495057;
+    margin-bottom: 12px;
+}
+
+.imu-progress-row {
+    display: flex;
+    justify-content: space-between;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.imu-meter-group {
+    margin-bottom: 10px;
+}
+
+.imu-meter-label {
+    font-size: 0.85em;
+    margin-bottom: 4px;
+}
+
+.imu-meter {
+    height: 10px;
+    background: #e9ecef;
+    border-radius: 5px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.imu-meter-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #ffc107, #28a745);
+    transition: width 0.3s ease;
+}
+
+.imu-coverage {
+    font-weight: 600;
+    margin: 8px 0;
+}
+
+.imu-axis-bars {
+    font-size: 0.8em;
+    font-family: ui-monospace, monospace;
+    margin-bottom: 8px;
+}
+
+.imu-axis-row {
+    margin: 4px 0;
+}
+
+.imu-axis-track {
+    display: inline-block;
+    width: 100%;
+    max-width: 220px;
+    height: 8px;
+    background: #e9ecef;
+    border-radius: 4px;
+    vertical-align: middle;
+    margin-left: 6px;
+}
+
+.imu-axis-fill {
+    height: 100%;
+    background: #1e3c72;
+    border-radius: 4px;
+}
+
+.imu-guidance {
+    font-size: 0.9em;
+    color: #856404;
+    background: #fff3cd;
+    padding: 8px;
+    border-radius: 6px;
+    margin-bottom: 10px;
+    min-height: 2.5em;
+}
+
+.imu-btn-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.imu-btn-row .btn {
+    flex: 1;
+    min-width: 140px;
+}
+
+.imu-report {
+    margin-top: 10px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    font-size: 0.8em;
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow: auto;
+}
+
+.imu-verify-heading {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+#imu-verify-compass {
+    border-radius: 50%;
+    background: #f0f4f8;
+    flex-shrink: 0;
+}
+
+.imu-heading-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #1e3c72;
+}
+
+.imu-heading-stability {
+    font-size: 0.9em;
+    color: #6c757d;
+}
+
+.imu-verify-sensors {
+    font-size: 0.85em;
+    margin-bottom: 12px;
+}

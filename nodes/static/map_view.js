@@ -471,7 +471,7 @@
         }
         if (targetState && displayState) {
             // Position: snap to latest /fix (no extra low-pass; receiver filtering is enough).
-            const angleAlpha = 0.35;
+            const angleAlpha = 0.65;
             displayState = {
                 x: targetState.x,
                 y: targetState.y,

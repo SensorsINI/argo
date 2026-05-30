@@ -27,6 +27,7 @@ import threading
 import argparse
 import logging
 import signal
+import queue
 import re
 import shutil
 import tempfile
@@ -42,13 +43,13 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, Float64, Float32, String, Int32, UInt8
 from geometry_msgs.msg import Vector3
-from sensor_msgs.msg import NavSatFix
+from sensor_msgs.msg import Imu, MagneticField, NavSatFix
 from std_srvs.srv import Trigger
 from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue, ParameterType
 
 # Flask web server
-from flask import Flask, render_template, jsonify, request, send_file, after_this_request
+from flask import Flask, render_template, jsonify, request, send_file, after_this_request, Response
 from flask_cors import CORS
 from werkzeug.serving import ThreadedWSGIServer
 
@@ -61,7 +62,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'support'))
 from argo_base_node import ArgoBaseNode
 from geofence_manager import GeofenceManager
 
+_nodes_dir = os.path.dirname(os.path.abspath(__file__))
+if _nodes_dir not in sys.path:
+    sys.path.insert(0, _nodes_dir)
+from bno085 import (
+    ImuCalibrationTracker,
+    ImuVerifySnapshot,
+    compass_heading_from_quaternion,
+    load_imu_heading_config,
+)
+
 UPDATE_RATE = .2  # Hz
+IMU_CAL_DURATION_DEFAULT_S = 120
+IMU_CAL_DURATION_MAX_S = 600
+IMU_VERIFY_CACHE_MIN_INTERVAL_S = 0.02  # 50 Hz max when driven by /compass state
 
 # Match temp_monitor.py thresholds for CPU temperature alerts
 CPU_TEMP_HIGH_THRESHOLD_C = 85.0
@@ -119,6 +133,21 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         # Initialize state storage (thread-safe with lock)
         self.state_lock = threading.Lock()
+
+        # IMU calibration / verify (web dashboard sessions)
+        self._imu_cal_tracker = None
+        self._imu_verify_tracker = None
+        self._imu_session_timer = None
+        self._imu_final_report = None
+        self._imu_verify_status_cache = None
+        self._imu_verify_cache_time = 0.0
+        self._imu_heading_cfg = {}
+        self._imu_cmd_lock = threading.Lock()
+        self._imu_cmd = None  # (op, duration_s, event, result_dict)
+        self._imu_auto_stop = None  # 'cal' | 'verify' — set by timer, handled on main loop
+        self._compass_sse_lock = threading.Lock()
+        self._compass_sse_clients: list = []
+        self._compass_heading_mono = 0.0
         self.state = {
             # System status
             'nodes_running': 0,
@@ -177,6 +206,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             'compass_heading': None,
             'imu_healthy': None,
             'imu_health_age': None,
+            'imu_calibration_available': False,
+            'imu_session_mode': 'idle',
             
             # Wind (/anem_speed_angle_temp y is relative CW from bow; fused with /compass)
             'wind_speed': None,
@@ -254,6 +285,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         # Initialize ArgoNodeManager for system status
         self.argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.argo_yaml_path = os.path.join(self.argo_dir, 'nodes', 'argo.yaml')
+        self._imu_heading_cfg = load_imu_heading_config(self.argo_yaml_path)
         self.available_geofence_maps = self._load_available_geofence_maps()
         self._map_geometry_cache: Dict[str, Dict[str, Any]] = {}
         self._earth_radius_m = 6378137.0
@@ -540,6 +572,14 @@ class ArgoWebDashboard(ArgoBaseNode):
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/imu_health', self.imu_health_cb, self.volatile_qos)
         )
+        # Raw IMU/mag for web cal/verify (always subscribed; callbacks no-op when idle)
+        self._topic_subscriptions.append(
+            self.create_subscription(Imu, '/imu', self._imu_session_imu_cb, self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(
+                MagneticField, '/magnetic_field', self._imu_session_mag_cb, self.volatile_qos)
+        )
         
         # LoRa sources (fallback when WiFi unavailable) - only subscribe if lora_node is enabled
         if 'lora_node' in self.physical_robot_nodes:
@@ -817,9 +857,42 @@ class ArgoWebDashboard(ArgoBaseNode):
             
             self._update_absolute_wind()
             self._update_data_age_indicators()
+            heading_for_verify = float(msg.z)
+
+        if self._imu_verify_tracker is not None:
+            self._imu_verify_tracker.on_compass(heading_for_verify)
+            self._refresh_imu_verify_cache()
+
+        self._push_compass_heading_event(heading_for_verify)
         
         # Update health status - compass heading is boat data
         self._update_boat_data_received(f"compass_{source}")
+
+    def _push_compass_heading_event(self, heading_deg: float) -> None:
+        """Notify SSE clients immediately when /compass updates (matches ros2 topic echo latency)."""
+        self._compass_heading_mono = time.monotonic()
+        payload = json.dumps({'heading': float(heading_deg) % 360.0, 't': time.time()})
+        with self._compass_sse_lock:
+            dead = []
+            for q in self._compass_sse_clients:
+                try:
+                    q.put_nowait(payload)
+                except queue.Full:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        q.put_nowait(payload)
+                    except queue.Full:
+                        pass
+                except Exception:
+                    dead.append(q)
+            for q in dead:
+                try:
+                    self._compass_sse_clients.remove(q)
+                except ValueError:
+                    pass
     
     def gps_cog_cb(self, msg, source='wifi'):
         """Unified callback that tracks source and timestamp"""
@@ -1116,7 +1189,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.state['imu_health_age'] = now - imu_health_ts
         else:
             self.state['imu_health_age'] = None
-        
+        self._set_imu_calibration_available_unlocked()
+
         # Determine overall data source status
         if self.state['wifi_data_age'] is not None and self.state['wifi_data_age'] < 5.0:
             self.state['data_source'] = 'WiFi'
@@ -2594,6 +2668,299 @@ class ArgoWebDashboard(ArgoBaseNode):
             pass
         return {"success": True, "message": f"Switched to '{ssid}'", "new_ip": new_ip}
     
+    # ==================== IMU calibration / verify sessions ====================
+
+    def _set_imu_calibration_available_unlocked(self) -> None:
+        """Update imu_calibration_available; caller must hold state_lock."""
+        healthy = self.state.get('imu_healthy') is True
+        age = self.state.get('imu_health_age')
+        stale = age is not None and age > 5.0
+        self.state['imu_calibration_available'] = healthy and not stale
+
+    def _update_imu_calibration_available(self) -> None:
+        with self.state_lock:
+            self._set_imu_calibration_available_unlocked()
+
+    def _imu_session_prerequisites(self) -> Dict[str, Any]:
+        self._update_imu_calibration_available()
+        with self.state_lock:
+            if not self.state.get('imu_calibration_available'):
+                return {
+                    'ok': False,
+                    'message': (
+                        'IMU not ready — ensure argo_bno085.service is running and '
+                        '/imu_health is healthy'
+                    ),
+                }
+            if self.state.get('imu_session_mode', 'idle') != 'idle':
+                return {'ok': False, 'message': 'An IMU session is already active'}
+        return {'ok': True, 'message': 'OK'}
+
+    def _imu_stop_session_timer(self) -> None:
+        if self._imu_session_timer is not None:
+            self.destroy_timer(self._imu_session_timer)
+            self._imu_session_timer = None
+
+    def _heading_from_imu_msg(self, msg: Imu) -> float:
+        """Boat compass heading from fusion quaternion (same as bno085 bridge)."""
+        q = msg.orientation
+        cfg = self._imu_heading_cfg
+        return compass_heading_from_quaternion(
+            q.w, q.x, q.y, q.z,
+            mount_forward_axis=cfg.get('mount_forward_axis', 'y'),
+            mount_yaw_deg=cfg.get('mount_yaw_deg', 0.0),
+            yaw_offset_deg=cfg.get('yaw_offset_deg', 0.0),
+            yaw_invert=cfg.get('yaw_invert', False),
+        )
+
+    def _imu_session_imu_cb(self, msg: Imu) -> None:
+        if self._imu_cal_tracker is not None:
+            self._imu_cal_tracker.on_imu(msg)
+        if self._imu_verify_tracker is not None:
+            self._imu_verify_tracker.on_imu(msg)
+            # Heading from /imu directly — avoids waiting for /compass + state_lock path
+            self._imu_verify_tracker.on_compass(self._heading_from_imu_msg(msg))
+            self._refresh_imu_verify_cache(force=True)
+
+    def _imu_session_mag_cb(self, msg: MagneticField) -> None:
+        if self._imu_cal_tracker is not None:
+            self._imu_cal_tracker.on_mag(msg)
+        if self._imu_verify_tracker is not None:
+            self._imu_verify_tracker.on_mag(msg)
+            self._refresh_imu_verify_cache()
+
+    def _refresh_imu_verify_cache(self, force: bool = False) -> None:
+        """Build verify JSON from live tracker (throttled unless force=True)."""
+        tracker = self._imu_verify_tracker
+        if tracker is None:
+            self._imu_verify_status_cache = None
+            return
+        now = time.time()
+        if not force and (now - self._imu_verify_cache_time) < IMU_VERIFY_CACHE_MIN_INTERVAL_S:
+            return
+        heading = tracker.compass_heading
+        self._imu_verify_status_cache = {
+            'active': True,
+            'mode': 'verifying',
+            'snapshot': tracker.snapshot(),
+            'compass_heading': heading,
+        }
+        self._imu_verify_cache_time = now
+
+    def _imu_session_tick(self) -> None:
+        """Check calibration timer expiry (timer thread — defer stop to main loop)."""
+        if self._imu_cal_tracker is None:
+            return
+        if self._imu_cal_tracker.is_timer_complete():
+            self.get_logger().info('IMU calibration duration reached — stopping session')
+            self._imu_auto_stop = 'cal'
+
+    def _enqueue_imu_command(
+        self, op: str, duration_s: int = 0, timeout_s: float = 8.0,
+    ) -> Dict[str, Any]:
+        """Run IMU start/stop on the ROS spin thread (safe for subscriptions/timers)."""
+        event = threading.Event()
+        result: Dict[str, Any] = {'response': None, 'error': None}
+        with self._imu_cmd_lock:
+            if self._imu_cmd is not None:
+                return {'success': False, 'message': 'IMU command already pending'}
+            self._imu_cmd = (op, int(duration_s), event, result)
+        if not event.wait(timeout_s):
+            with self._imu_cmd_lock:
+                if self._imu_cmd is not None and self._imu_cmd[2] is event:
+                    self._imu_cmd = None
+            return {
+                'success': False,
+                'message': 'IMU command timed out (ROS thread busy — retry)',
+            }
+        if result.get('error') is not None:
+            return {'success': False, 'message': str(result['error'])}
+        return result.get('response') or {'success': False, 'message': 'No response'}
+
+    def _process_imu_command(self) -> None:
+        """Execute one pending IMU command (main spin loop only)."""
+        with self._imu_cmd_lock:
+            cmd = self._imu_cmd
+            if cmd is None:
+                return
+            op, duration_s, event, result = cmd
+        try:
+            if op == 'start_calibrate':
+                result['response'] = self._imu_start_calibration_impl(duration_s)
+            elif op == 'stop_calibrate':
+                if self._imu_cal_tracker is None:
+                    with self.state_lock:
+                        report = self._imu_final_report
+                    result['response'] = {
+                        'success': True,
+                        'message': 'No active calibration',
+                        'final_report': report,
+                    }
+                else:
+                    report = self._imu_stop_calibration_impl(interrupted=True)
+                    result['response'] = {
+                        'success': True,
+                        'message': 'Calibration finished',
+                        'final_report': report,
+                    }
+            elif op == 'start_verify':
+                result['response'] = self._imu_start_verify_impl(duration_s)
+            elif op == 'stop_verify':
+                self._imu_stop_verify_impl()
+                result['response'] = {'success': True, 'message': 'Verification stopped'}
+            else:
+                result['error'] = ValueError(f'Unknown IMU command: {op}')
+        except Exception as exc:
+            result['error'] = exc
+            self.get_logger().error(f'IMU command {op} failed: {exc}')
+        finally:
+            with self._imu_cmd_lock:
+                if self._imu_cmd is not None and self._imu_cmd[2] is event:
+                    self._imu_cmd = None
+            event.set()
+
+    def _process_imu_auto_stop(self) -> None:
+        """Timer-driven session end (main spin loop only)."""
+        kind = self._imu_auto_stop
+        if kind is None:
+            return
+        self._imu_auto_stop = None
+        if kind == 'cal':
+            self._imu_stop_calibration_impl(interrupted=False)
+        elif kind == 'verify':
+            self._imu_stop_verify_impl()
+
+    def _process_imu_pending(self) -> None:
+        self._process_imu_command()
+        self._process_imu_auto_stop()
+
+    def _imu_stop_calibration_impl(self, interrupted: bool = True) -> dict:
+        report = {}
+        if self._imu_cal_tracker is not None:
+            report = self._imu_cal_tracker.final_report(interrupted=interrupted)
+        self._imu_cal_tracker = None
+        self._imu_stop_session_timer()
+        with self.state_lock:
+            self.state['imu_session_mode'] = 'idle'
+            self._imu_final_report = report
+        self._update_imu_calibration_available()
+        return report
+
+    def _imu_stop_calibration(self, interrupted: bool = True) -> dict:
+        resp = self._enqueue_imu_command('stop_calibrate')
+        if not resp.get('success'):
+            raise RuntimeError(resp.get('message', 'stop calibration failed'))
+        return resp.get('final_report') or {}
+
+    def _imu_stop_verify_impl(self) -> None:
+        self._imu_verify_tracker = None
+        self._imu_verify_status_cache = None
+        self._imu_stop_session_timer()
+        with self.state_lock:
+            self.state['imu_session_mode'] = 'idle'
+        self._update_imu_calibration_available()
+
+    def _imu_stop_verify(self) -> None:
+        resp = self._enqueue_imu_command('stop_verify')
+        if not resp.get('success'):
+            raise RuntimeError(resp.get('message', 'stop verify failed'))
+
+    def _imu_start_calibration(self, duration_s: int) -> Dict[str, Any]:
+        return self._enqueue_imu_command('start_calibrate', duration_s)
+
+    def _imu_start_calibration_impl(self, duration_s: int) -> Dict[str, Any]:
+        pre = self._imu_session_prerequisites()
+        if not pre['ok']:
+            return {'success': False, 'message': pre['message']}
+
+        duration_s = max(30, min(IMU_CAL_DURATION_MAX_S, int(duration_s)))
+        self._imu_final_report = None
+        self._imu_cal_tracker = ImuCalibrationTracker(duration_s)
+        self._imu_stop_session_timer()
+        self._imu_session_timer = self.create_timer(1.0, self._imu_session_tick)
+
+        with self.state_lock:
+            self.state['imu_session_mode'] = 'calibrating'
+
+        self.get_logger().info(f'IMU calibration session started ({duration_s}s)')
+        return {
+            'success': True,
+            'message': f'Calibration started ({duration_s}s)',
+            'duration_s': duration_s,
+        }
+
+    def _imu_calibration_status_payload(self) -> Dict[str, Any]:
+        with self.state_lock:
+            mode = self.state.get('imu_session_mode', 'idle')
+            final_report = self._imu_final_report
+        active = self._imu_cal_tracker is not None
+        snapshot = self._imu_cal_tracker.snapshot() if active else None
+        return {
+            'active': active,
+            'mode': mode,
+            'snapshot': snapshot,
+            'final_report': final_report if not active else None,
+        }
+
+    def _imu_start_verify(self, duration_s: int) -> Dict[str, Any]:
+        return self._enqueue_imu_command('start_verify', duration_s)
+
+    def _imu_start_verify_impl(self, duration_s: int) -> Dict[str, Any]:
+        pre = self._imu_session_prerequisites()
+        if not pre['ok']:
+            return {'success': False, 'message': pre['message']}
+
+        duration_s = max(0, int(duration_s))
+        if self.low_power_mode:
+            self._exit_low_power_mode()
+        self._imu_verify_tracker = ImuVerifySnapshot(duration_s)
+        self._imu_stop_session_timer()
+        if duration_s > 0:
+            self._imu_session_timer = self.create_timer(1.0, self._imu_verify_tick)
+
+        with self.state_lock:
+            self.state['imu_session_mode'] = 'verifying'
+            if self.state.get('compass_heading') is not None:
+                self._imu_verify_tracker.on_compass(self.state['compass_heading'])
+        self._refresh_imu_verify_cache(force=True)
+
+        self.get_logger().info(f'IMU verify session started (duration={duration_s})')
+        return {
+            'success': True,
+            'message': 'Verification started',
+            'duration_s': duration_s,
+        }
+
+    def _imu_verify_tick(self) -> None:
+        if self._imu_verify_tracker is None:
+            return
+        if self._imu_verify_tracker.is_timer_complete():
+            self.get_logger().info('IMU verify duration reached — stopping session')
+            self._imu_auto_stop = 'verify'
+
+    def _imu_verify_status_payload(self) -> Dict[str, Any]:
+        if self._imu_verify_tracker is None:
+            with self.state_lock:
+                mode = self.state.get('imu_session_mode', 'idle')
+            return {
+                'active': False,
+                'mode': mode,
+                'snapshot': None,
+                'compass_heading': None,
+            }
+        cache = self._imu_verify_status_cache
+        if cache is not None:
+            return dict(cache)
+        self._refresh_imu_verify_cache(force=True)
+        if self._imu_verify_status_cache is not None:
+            return dict(self._imu_verify_status_cache)
+        return {
+            'active': True,
+            'mode': 'verifying',
+            'snapshot': self._imu_verify_tracker.snapshot(),
+            'compass_heading': self._imu_verify_tracker.compass_heading,
+        }
+
     # ==================== Flask Routes ====================
     
     def setup_routes(self):
@@ -2613,17 +2980,22 @@ class ArgoWebDashboard(ArgoBaseNode):
         @self.app.route('/')
         def index():
             """Main dashboard page."""
-            return render_template(
+            resp = render_template(
                 'dashboard.html',
                 mac_id=self.mac_id,
                 ip_address=self._get_current_ip_address(),
                 current_wifi_ssid=self._get_active_wifi_connection() or '—',
                 geofence_map_name=self._get_current_geofence_map_name() or '—',
             )
+            return Response(
+                resp,
+                headers={'Cache-Control': 'no-store, no-cache, must-revalidate'},
+            )
         
         @self.app.route('/api/status')
         def get_status():
             """Get current system status as JSON."""
+            self._update_imu_calibration_available()
             STORAGE_RUNDOWN_FLAG = Path('/tmp/argo_battery_storage_rundown')
             with self.state_lock:
                 state_copy = self.state.copy()
@@ -2639,9 +3011,31 @@ class ArgoWebDashboard(ArgoBaseNode):
         
         @self.app.route('/api/status/critical')
         def get_critical_status():
-            """Get only critical status fields for fast polling."""
+            """Fast-poll fields: safety alerts + live compass/wind (see dashboard CRITICAL_POLL_MS)."""
+            payload = {
+                'human_controlled': None,
+                'recording': None,
+                'controller_type': None,
+                'i2c_failure': False,
+                'battery_low_alert': False,
+                'cpu_temp_high_alert': False,
+                'cpu_temp_critical_alert': False,
+                'cpu_temp': None,
+                'compass_heading': None,
+                'wind_speed': None,
+                'wind_angle': None,
+                'wind_from_compass': None,
+                'wind_flow_compass': None,
+                'gps_locked': False,
+                'gps_latitude': None,
+                'gps_longitude': None,
+                'gps_data_stale': False,
+                'gps_position_frozen': False,
+                'gps_cog': None,
+                'gps_sog': None,
+            }
             with self.state_lock:
-                return jsonify({
+                payload.update({
                     'human_controlled': self.state.get('human_controlled'),
                     'recording': self.state.get('recording'),
                     'controller_type': self.state.get('controller_type'),
@@ -2650,7 +3044,139 @@ class ArgoWebDashboard(ArgoBaseNode):
                     'cpu_temp_high_alert': self.state.get('cpu_temp_high_alert', False),
                     'cpu_temp_critical_alert': self.state.get('cpu_temp_critical_alert', False),
                     'cpu_temp': self.state.get('cpu_temp'),
+                    'compass_heading': self.state.get('compass_heading'),
+                    'wind_speed': self.state.get('wind_speed'),
+                    'wind_angle': self.state.get('wind_angle'),
+                    'wind_from_compass': self.state.get('wind_from_compass'),
+                    'wind_flow_compass': self.state.get('wind_flow_compass'),
+                    'gps_locked': self.state.get('gps_locked', False),
+                    'gps_latitude': self.state.get('gps_latitude'),
+                    'gps_longitude': self.state.get('gps_longitude'),
+                    'gps_data_stale': self.state.get('gps_data_stale', False),
+                    'gps_position_frozen': self.state.get('gps_position_frozen', False),
+                    'gps_cog': self.state.get('gps_cog'),
+                    'gps_sog': self.state.get('gps_sog'),
                 })
+            if self._imu_verify_tracker is not None:
+                cache = self._imu_verify_status_cache
+                if cache is not None:
+                    payload['imu_verify'] = {
+                        'active': True,
+                        'compass_heading': cache.get('compass_heading'),
+                        'snapshot': cache.get('snapshot'),
+                    }
+            return jsonify(payload)
+
+        @self.app.route('/api/compass/heading')
+        def compass_heading_live():
+            """Minimal compass read for fast polling fallback."""
+            with self.state_lock:
+                heading = self.state.get('compass_heading')
+            age_ms = None
+            if self._compass_heading_mono > 0:
+                age_ms = round((time.monotonic() - self._compass_heading_mono) * 1000.0, 1)
+            return jsonify({
+                'heading': heading,
+                'age_ms': age_ms,
+                't': time.time(),
+            })
+
+        @self.app.route('/api/compass/stream')
+        def compass_heading_stream():
+            """Server-Sent Events: push each /compass callback to the browser."""
+            client_q: queue.Queue = queue.Queue(maxsize=64)
+            with self._compass_sse_lock:
+                self._compass_sse_clients.append(client_q)
+
+            def generate():
+                try:
+                    with self.state_lock:
+                        heading = self.state.get('compass_heading')
+                    if heading is not None:
+                        yield (
+                            f"data: {json.dumps({'heading': heading, 't': time.time()})}\n\n"
+                        )
+                    while True:
+                        try:
+                            payload = client_q.get(timeout=20.0)
+                            self._record_viewer_activity()
+                            yield f"data: {payload}\n\n"
+                        except queue.Empty:
+                            # Keep /compass subscriptions alive while browser tab is open
+                            self._record_viewer_activity()
+                            yield ": heartbeat\n\n"
+                finally:
+                    with self._compass_sse_lock:
+                        try:
+                            self._compass_sse_clients.remove(client_q)
+                        except ValueError:
+                            pass
+
+            return Response(
+                generate(),
+                mimetype='text/event-stream',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                    'X-Accel-Buffering': 'no',
+                },
+            )
+
+        # ==================== IMU calibration / verify API ====================
+
+        @self.app.route('/api/imu/calibration/status', methods=['GET'])
+        def imu_calibration_status():
+            try:
+                return jsonify(self._imu_calibration_status_payload())
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)}), 500
+
+        @self.app.route('/api/imu/calibration/start', methods=['POST'])
+        def imu_calibration_start():
+            try:
+                payload = request.get_json(force=True, silent=True) or {}
+                duration = payload.get('duration', IMU_CAL_DURATION_DEFAULT_S)
+                result = self._imu_start_calibration(duration)
+                code = 200 if result.get('success') else 409
+                return jsonify(result), code
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)}), 500
+
+        @self.app.route('/api/imu/calibration/stop', methods=['POST'])
+        def imu_calibration_stop():
+            try:
+                result = self._enqueue_imu_command('stop_calibrate')
+                code = 200 if result.get('success') else 500
+                return jsonify(result), code
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)}), 500
+
+        @self.app.route('/api/imu/verify/status', methods=['GET'])
+        def imu_verify_status():
+            try:
+                return jsonify(self._imu_verify_status_payload())
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)}), 500
+
+        @self.app.route('/api/imu/verify/start', methods=['POST'])
+        def imu_verify_start():
+            try:
+                payload = request.get_json(force=True, silent=True) or {}
+                duration = payload.get('duration', 0)
+                result = self._imu_start_verify(duration)
+                code = 200 if result.get('success') else 409
+                return jsonify(result), code
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)}), 500
+
+        @self.app.route('/api/imu/verify/stop', methods=['POST'])
+        def imu_verify_stop():
+            try:
+                result = self._enqueue_imu_command('stop_verify')
+                code = 200 if result.get('success') else 500
+                return jsonify(result), code
+            except Exception as e:
+                return jsonify({'success': False, 'message': str(e)}), 500
 
         # ==================== WiFi Management API ====================
 
@@ -3258,6 +3784,9 @@ Troubleshooting:
         while rclpy.ok() and not node.signal_received:
             # Spin once with a short timeout to handle ROS callbacks
             executor.spin_once(timeout_sec=0.1)
+
+            # IMU cal/verify start/stop must run here (not on Flask threads)
+            node._process_imu_pending()
             
             # Check shutdown flag immediately after spin
             if node.signal_received:
