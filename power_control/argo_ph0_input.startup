@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# argo_ph0_input.startup
+# ----------------------
+# Early-boot helper: claim PH0 (GPIO line 224) as a high-impedance input so the
+# PB node is not driven by the UART0 TX mux left over from U-Boot.
+#
+# Installed to /usr/local/sbin/argo_ph0_input and run by argo_ph0_input.service
+# until argo_power_control.service stops this unit and takes over the line.
+
+set -euo pipefail
+
+exec /usr/bin/python3 -u <<'PY'
+import gpiod
+import logging
+import signal
+import sys
+
+GPIO_CHIP = "/dev/gpiochip0"
+POWER_BUTTON_LINE = 224  # PH0 (pin 8) - POW_BUT / PB node
+CONSUMER = "argo_ph0_input"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger(CONSUMER)
+
+shutdown_requested = False
+
+
+def _handle_signal(signum, _frame):
+    global shutdown_requested
+    log.info("Received signal %s; releasing PH0 and exiting", signum)
+    shutdown_requested = True
+
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
+
+chip = None
+line = None
+try:
+    chip = gpiod.Chip(GPIO_CHIP)
+    line = chip.get_line(POWER_BUTTON_LINE)
+    line.request(
+        consumer=CONSUMER,
+        type=gpiod.LINE_REQ_DIR_IN,
+        flags=gpiod.LINE_REQ_FLAG_BIAS_DISABLE,
+    )
+    value = line.get_value()
+    log.info(
+        "PH0 (line %s) configured as GPIO input (bias disabled); read value=%s",
+        POWER_BUTTON_LINE,
+        value,
+    )
+    while not shutdown_requested:
+        signal.pause()
+except Exception as exc:
+    log.error("Failed to configure PH0 input: %s", exc)
+    sys.exit(0)
+finally:
+    try:
+        if line is not None:
+            line.release()
+    except Exception:
+        pass
+    try:
+        if chip is not None:
+            chip.close()
+    except Exception:
+        pass
+
+log.info("PH0 early input holder stopped")
+PY

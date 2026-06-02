@@ -1,6 +1,6 @@
 [Unit]
 Description=Argo Power Control System
-After=network.target
+After=argo_ph0_input.service network.target
 Wants=argo_battery_water.service
 Documentation=file:///root/argo/launch/ARGO_POWER_CONTROL_README.md
 
@@ -10,6 +10,8 @@ User=orangepi
 Group=orangepi
 WorkingDirectory=/home/orangepi/argo/power_control
 Environment=PYTHONUNBUFFERED=1
+# Release early PH0 holder so this service can request GPIO 224 for button interrupts.
+ExecStartPre=+-/bin/systemctl stop argo_ph0_input.service
 ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
 # CRITICAL: Clear Python bytecode cache to prevent running stale code with syntax errors
 ExecStartPre=/bin/bash -c 'find /home/orangepi/argo/power_control -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true; find /home/orangepi/argo/power_control -name "*.pyc" -delete 2>/dev/null || true'

@@ -12,6 +12,25 @@ This document captures planned hardware and software migration items from Argo P
 
 - Move `!LORA_SEL` to `SPI1_CS0` (pin 24 / PH5).
 - Move `GPS_PPS` off pin 24 to `PI8` (where `!LORA_SEL` is currently used in v4).
+- Move power-button sense net **`PB` / `POW_BUT`** from **`PH0` (pin 8, GPIO 224)** to **`PI1` (pin 12, GPIO 257)**.
+
+### Power button (`PB`) move to PI1 (pin 12)
+
+**v4:** `PB` is wired to Orange Pi **`PH0` (pin 8, line 224)**. That pin is also UART0 TX. U-Boot and early boot UART activity can hold the `PB` node high and keep the relay ON coil energized until software releases the pin. v4 software mitigations:
+
+- HDMI-only kernel console (`console=none`, `extraargs=console=tty1` in `power_control/orangepiEnv.txt`)
+- Early `argo_ph0_input.service` (claims PH0 as GPIO input at sysinit, handoff to `argo_power_control`)
+
+**v5 plan:** Route **`PB` to `PI1` (pin 12, GPIO line 257)** instead. On v4 this pin is **unused** (testpoint only; blue LED no longer wired here). PI1 avoids the UART0 conflict entirely.
+
+**Software refactor required for v5** (remove PH0-specific workarounds after board change):
+
+- `power_control/argo_power_control.py` — `POWER_BUTTON_LINE`, comments, docs strings
+- `power_control/argo_ph0_input.service` / `argo_ph0_input.startup` — remove or replace with PI1 early holder if still needed
+- `power_control/argo_power_control.service` — ordering/handoff if early-input service remains
+- `power_control/Makefile` — `install_ph0_input_hook` target naming/install path
+- `docs/README-pins-i2c.md` and other pin tables / READMEs referencing PH0 as `POW_BUT`
+- `nodes/support/power-test-pins.py` and any scripts using line 224 for the button
 
 Rationale:
 
@@ -43,6 +62,7 @@ Status messages show `PPS=unavailable` while the system operates normally.
 
 - Update LoRa SPI/CS handling in `nodes/lora.py` to use hardware CS0 path.
 - Update GPS PPS line in `nodes/gps.py` to new v5 GPIO line.
+- Refactor power-button GPIO from PH0 (224) to PI1 (257); drop v4 PH0/UART mitigations once v5 PCB is in use.
 - Review `/boot/orangepiEnv.txt` overlays to ensure they match v5 wiring.
 - Update docs:
   - `docs/README-pins-i2c.md`

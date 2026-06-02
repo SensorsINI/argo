@@ -1,0 +1,16 @@
+[Unit]
+Description=Argo PH0 power button input (early UART mux release)
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target argo_power_control.service
+ConditionPathExists=/dev/gpiochip0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/argo_ph0_input
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=sysinit.target
