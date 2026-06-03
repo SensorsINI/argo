@@ -71,7 +71,7 @@ Adds **`/narration`** (`std_msgs/msg/String`) to a **copy** of a bag: one messag
 **Inputs**
 
 - Rosbag2 directory (`--bag`; resolves nested `.../argo_YYYYMMDD_HHMMSS/argo_YYYYMMDD_HHMMSS/` automatically)
-- SRT file (Whisper-style `Unknown speaker HH:MM:SS,mmm --> ...` or standard SRT)
+- SRT file (Whisper-style `Unknown speaker HH:MM:SS,mmm --> ...` or standard SRT), transcribed by Tobi's notta.ai account using SRT output.
 - Audio file (`.m4a`, etc.) for sync metadata via **exiftool**
 
 **Time sync**
