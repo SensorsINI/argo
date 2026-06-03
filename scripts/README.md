@@ -4,6 +4,8 @@ This directory contains scripts for setting up, launching, and debugging the Arg
 
 ## Bag recording and playback
 
+Full guide: **[`docs/README-bagfiles.md`](../docs/README-bagfiles.md)** (recording, Foxglove, narration merge, pose fix, re-record, backup, analysis).
+
 ### `argo_rerecord_bag.sh`
 Interactive wrapper to **re-record** an existing rosbag2 with visualization nodes (markers, transforms, sailing area). It invokes `ros2 launch` on **`argo_bag_rerecord.py`** in this directory.
 
@@ -16,6 +18,9 @@ By default (`exclude_recorded_markers:=true`), marker topics that those live nod
 
 ### `fix_rosbag_pose_legacy_compass.py`
 Offline bag copy that rewrites legacy **`/pose.z`** (compass duplicated on pose) to ENU math yaw. Does not regenerate markers or `/tf`.
+
+### `argo_bag_merge_narration.py`
+Merge SRT + audio into a bag as **`/narration`** (synced, filtered to bag time span). See **[`docs/README-bagfiles.md`](../docs/README-bagfiles.md#merge-narration-argo_bag_merge_narrationpy)**.
 
 ## Simulation Launch Scripts
 

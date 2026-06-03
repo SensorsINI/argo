@@ -200,7 +200,14 @@
     "RawMessages!2rsw630": {
       "defaultExpanded": false,
       "topicPath": "/controller/captains_log.data",
-      "diffEnabled": false
+      "diffEnabled": false,
+      "foxglovePanelTitle": "Captain's log"
+    },
+    "RawMessages!narration01": {
+      "defaultExpanded": false,
+      "topicPath": "/narration.data",
+      "diffEnabled": false,
+      "foxglovePanelTitle": "Narration"
     },
     "Plot!1xwevbn": {
       "paths": [
@@ -321,7 +328,11 @@
       "direction": "row",
       "first": {
         "first": "map!argo_sailing",
-        "second": "RawMessages!2rsw630",
+        "second": {
+          "first": "RawMessages!2rsw630",
+          "second": "RawMessages!narration01",
+          "direction": "column"
+        },
         "direction": "column"
       },
       "second": {
