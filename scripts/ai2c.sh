@@ -168,6 +168,125 @@ check_bus() {
     echo ""
 }
 
+# Start ros2 topic echo --once in the background; write output and exit code to temp files.
+ros2_topic_echo_once_async() {
+    local topic="$1"
+    local timeout_sec="${2:-10}"
+    local out_file="$3"
+    local ec_file="$4"
+    local -n _pid_ref="$5"
+
+    (
+        set +e
+        timeout "$timeout_sec" ros2 topic echo "$topic" --once >"$out_file" 2>&1
+        echo $? >"$ec_file"
+    ) &
+    _pid_ref=$!
+}
+
+# Wait for parallel topic echo jobs; print visible newline progress (no silent \r-only wait).
+# Args: timeout_sec topic pid out_file ec_file [topic pid out_file ec_file ...]
+wait_parallel_ros2_topic_echo() {
+    local timeout_sec="$1"
+    shift
+
+    local -a topics=() pids=() out_files=() ec_files=() elapsed=() done_flags=()
+    local topic pid out_file ec_file
+    local count=0 any_running=1 i
+
+    while [ $# -gt 0 ]; do
+        topic="$1"
+        pid="$2"
+        out_file="$3"
+        ec_file="$4"
+        topics+=("$topic")
+        pids+=("$pid")
+        out_files+=("$out_file")
+        ec_files+=("$ec_file")
+        elapsed+=(0)
+        done_flags+=(0)
+        count=$((count + 1))
+        shift 4
+    done
+
+    if [ "$count" -eq 0 ]; then
+        return 0
+    fi
+
+    while [ "$any_running" -eq 1 ]; do
+        any_running=0
+        for i in $(seq 0 $((count - 1))); do
+            if [ "${done_flags[$i]}" -eq 1 ]; then
+                continue
+            fi
+            if kill -0 "${pids[$i]}" 2>/dev/null; then
+                any_running=1
+            else
+                done_flags[$i]=1
+                wait "${pids[$i]}" 2>/dev/null || true
+                printf '   %s: done (%ds)\n' "${topics[$i]}" "${elapsed[$i]}" >&2
+            fi
+        done
+        if [ "$any_running" -eq 0 ]; then
+            break
+        fi
+        sleep 1
+        for i in $(seq 0 $((count - 1))); do
+            if [ "${done_flags[$i]}" -eq 0 ] && kill -0 "${pids[$i]}" 2>/dev/null; then
+                elapsed[$i]=$((${elapsed[$i]} + 1))
+                printf '   %s: waiting for message... %ds / %ds\n' \
+                    "${topics[$i]}" "${elapsed[$i]}" "$timeout_sec" >&2
+            fi
+        done
+    done
+}
+
+report_imu_health_echo() {
+    local health_out="$1"
+    local health_ec="$2"
+
+    if echo "$health_out" | grep -qiE 'does not exist|not found|Unable to find|no topic'; then
+        echo "🔴 /imu_health: no message (topic missing or no publisher)."
+        echo "   Start: sudo systemctl start argo_bno085.service"
+        return 1
+    fi
+
+    if echo "$health_out" | grep -qiE '^data:\s*true\b'; then
+        echo "🟢 /imu_health: HEALTHY (bridge reports recent driver data)"
+    elif echo "$health_out" | grep -qiE '^data:\s*false\b'; then
+        echo "🔴 /imu_health: UNHEALTHY (no recent /imu from driver — see journalctl -u argo_bno085.service)"
+    else
+        if [ "$health_ec" -eq 124 ]; then
+            echo "🔴 /imu_health: timed out (no Bool within 10s)."
+        else
+            echo "⚠️  /imu_health: unexpected output (exit ${health_ec}):"
+            echo "$health_out" | head -n 5
+        fi
+    fi
+    return 0
+}
+
+report_imu_echo() {
+    local imu_out="$1"
+    local imu_ec="$2"
+
+    if echo "$imu_out" | grep -qiE 'does not exist|not found|Unable to find|no topic'; then
+        echo "🔴 /imu: no message (driver not streaming)."
+        return 0
+    fi
+
+    if echo "$imu_out" | grep -qiE 'header:|linear_acceleration:|angular_velocity:'; then
+        echo "🟢 /imu: received sensor message (driver streaming)"
+    else
+        if [ "$imu_ec" -eq 124 ]; then
+            echo "🔴 /imu: timed out (no SensorMessage within 10s)."
+        else
+            echo "⚠️  /imu: no recognizable sensor fields (exit ${imu_ec})."
+        fi
+    fi
+    return 0
+}
+
 # When I2C sees the IMU, optionally verify the ROS bridge is publishing real health + IMU data.
 check_imu_ros_live() {
     echo "--- IMU (BNO085) live stack (ROS) ---"
@@ -189,53 +308,66 @@ check_imu_ros_live() {
     local svc_active
     svc_active="$(systemctl show -p ActiveState --value argo_bno085.service 2>/dev/null || echo unknown)"
     echo "   argo_bno085.service: ${svc_active}"
-    echo "checking for IMU topics, please wait..."
-    
-    local health_out health_ec imu_out imu_ec
-    set +e
-    health_out="$(timeout 10 bash -c "source ${humble} && command -v ros2 >/dev/null && ros2 topic echo /imu_health --once" 2>&1)"
-    health_ec=$?
-    imu_out="$(timeout 10 bash -c "source ${humble} && command -v ros2 >/dev/null && ros2 topic echo /imu --once" 2>&1)"
-    imu_ec=$?
-    set -e
 
-    if [ "$health_ec" -eq 127 ] || echo "$health_out" | grep -qi 'command not found'; then
+    # Source ROS once here (not per subprocess) so topic checks start faster.
+    set +u
+    # shellcheck disable=SC1090
+    source "$humble"
+    set -u
+
+    if ! command -v ros2 >/dev/null 2>&1; then
         echo "⚠️  ros2 not available after sourcing Humble — install ros-humble-* CLI or skip this check."
         echo ""
         return 0
     fi
 
-    if echo "$health_out" | grep -qiE 'does not exist|not found|Unable to find|no topic|Waiting for'; then
-        echo "🔴 /imu_health: no message (topic missing or no publisher)."
-        echo "   Start: sudo systemctl start argo_bno085.service"
-        echo ""
-        return 0
+    # Fast registration check before blocking on echo --once.
+    echo "   Checking ROS topic registration..."
+    local topic_list topic_list_ec
+    set +e
+    topic_list="$(timeout 5 ros2 topic list 2>&1)"
+    topic_list_ec=$?
+    set -e
+    if [ "$topic_list_ec" -eq 124 ]; then
+        echo "⚠️  ros2 topic list timed out (5s) — continuing with echo checks."
+    elif [ "$topic_list_ec" -ne 0 ]; then
+        echo "⚠️  ros2 topic list failed (exit ${topic_list_ec}) — continuing with echo checks."
+    else
+        for topic in /imu_health /imu; do
+            if echo "$topic_list" | grep -qx "$topic"; then
+                echo "   🟢 ${topic}: registered"
+            else
+                echo "   🔴 ${topic}: not listed"
+            fi
+        done
     fi
 
-    if echo "$health_out" | grep -qiE '^data:\s*true\b'; then
-        echo "🟢 /imu_health: HEALTHY (bridge reports recent driver data)"
-    elif echo "$health_out" | grep -qiE '^data:\s*false\b'; then
-        echo "🔴 /imu_health: UNHEALTHY (no recent /imu from driver — see journalctl -u argo_bno085.service)"
-    else
-        if [ "$health_ec" -eq 124 ]; then
-            echo "🔴 /imu_health: timed out (no Bool within 10s)."
-        else
-            echo "⚠️  /imu_health: unexpected output (exit ${health_ec}):"
-            echo "$health_out" | head -n 5
-        fi
-    fi
+    local health_out_file health_ec_file imu_out_file imu_ec_file
+    local health_pid imu_pid health_out health_ec imu_out imu_ec
+    health_out_file="$(mktemp)"
+    health_ec_file="$(mktemp)"
+    imu_out_file="$(mktemp)"
+    imu_ec_file="$(mktemp)"
 
-    if echo "$imu_out" | grep -qiE 'does not exist|not found|Unable to find|no topic|Waiting for'; then
-        echo "🔴 /imu: no message (driver not streaming)."
-    elif echo "$imu_out" | grep -qiE 'header:|linear_acceleration:|angular_velocity:'; then
-        echo "🟢 /imu: received sensor message (driver streaming)"
-    else
-        if [ "$imu_ec" -eq 124 ]; then
-            echo "🔴 /imu: timed out (no SensorMessage within 10s)."
-        else
-            echo "⚠️  /imu: no recognizable sensor fields (exit ${imu_ec})."
-        fi
-    fi
+    set +e
+    for topic in /imu_health /imu; do
+        printf '   %s: waiting for message... 0s / 10s\n' "$topic" >&2
+    done
+    ros2_topic_echo_once_async /imu_health 10 "$health_out_file" "$health_ec_file" health_pid
+    ros2_topic_echo_once_async /imu 10 "$imu_out_file" "$imu_ec_file" imu_pid
+    wait_parallel_ros2_topic_echo 10 \
+        /imu_health "$health_pid" "$health_out_file" "$health_ec_file" \
+        /imu "$imu_pid" "$imu_out_file" "$imu_ec_file"
+
+    health_out="$(cat "$health_out_file")"
+    health_ec="$(cat "$health_ec_file")"
+    imu_out="$(cat "$imu_out_file")"
+    imu_ec="$(cat "$imu_ec_file")"
+    rm -f "$health_out_file" "$health_ec_file" "$imu_out_file" "$imu_ec_file"
+
+    report_imu_health_echo "$health_out" "$health_ec" || { echo ""; return 0; }
+    report_imu_echo "$imu_out" "$imu_ec"
+    set -e
     echo ""
 }
 
