@@ -1,0 +1,64 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "home",
+        "type": "waypoint"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          8.7676267,
+          47.2344143,
+          0.0
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "sailing_area",
+        "type": "sailing_area"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              8.7673551,
+              47.2342978,
+              0.0
+            ],
+            [
+              8.7673739,
+              47.2340236,
+              0.0
+            ],
+            [
+              8.7676803,
+              47.2340161,
+              0.0
+            ],
+            [
+              8.7679801,
+              47.2340259,
+              0.0
+            ],
+            [
+              8.7679687,
+              47.234311,
+              0.0
+            ],
+            [
+              8.7673551,
+              47.2342978,
+              0.0
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
