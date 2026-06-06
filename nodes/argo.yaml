@@ -7,7 +7,8 @@
 /**:
   ros__parameters:
     # Map configuration (used by sailing_area_publisher, argo_transform_publisher, controllers)
-    geofence_map_name: behind INI  # Argo Irchel North pond sailing area | Argo Irchel pond sailing area | Argo Pool Hotel dek Pini | Hotel dei Pini | Hotel dei Pini close to shore
+    # See https://www.google.com/maps/d/ for the source maps. See docs/README-adding-sailing-maps.md for more information.
+    geofence_map_name: Argo Irchel North pond sailing area  # Risi | Argo Irchel pond sailing area | Argo Pool Hotel dek Pini | behind INI | Hotel dei Pini | Hotel dei Pini close to shore
     gps_spike_max_speed_mps: 3.0  # argo_transform_publisher: reject /fix jumps implying speed above this (m/s)
     # Controller parameters (used by controller.py and crosser controller)
     p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
