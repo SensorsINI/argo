@@ -14454,6 +14454,18 @@
 		)
 		(uuid "113242b9-fc69-4ff0-8fc2-1dbfc08970a5")
 	)
+	(text "Move PB to PI1 so that it does\nnot conflict with UART_TX boot serial\nconsole that ties PB idle high"
+		(exclude_from_sim no)
+		(at 171.958 102.108 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+			(justify left)
+		)
+		(uuid "1632f8ad-0614-46ec-91b2-fb3c3b289744")
+	)
 	(text "requires custom overlay to free up CS0 for GPS_PPS"
 		(exclude_from_sim no)
 		(at 201.168 123.444 0)
@@ -14556,9 +14568,9 @@
 		)
 		(uuid "312a5bc5-e2d9-4401-83ee-bedc3c1f50ab")
 	)
-	(text "pushing power\nbutton pulls POW_BUT high\nenergizes relay via FET,  \nlights RED LED, and \nthrough voltage divider tells OPi \nbutton is pressed"
+	(text "pushing power\nbutton pulls POW_ON high to FUSE (battery)\nenergizes relay via FET,  \nlights RED LED, and \nthrough voltage divider tells OPi \nbutton is pressed via PB pin 8 PH0 input to OPi"
 		(exclude_from_sim no)
-		(at 265.176 168.656 0)
+		(at 256.032 169.672 0)
 		(effects
 			(font
 				(size 1.016 1.016)
@@ -14695,6 +14707,18 @@
 			(justify left)
 		)
 		(uuid "53d719d5-cfc3-4647-88ec-37688d584b64")
+	)
+	(text "Change i2c headers and \nservo/radio headers\nto JST"
+		(exclude_from_sim no)
+		(at 185.166 72.644 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+			(justify right)
+		)
+		(uuid "57dc341c-84ad-43b4-8913-74595b37b445")
 	)
 	(text "I2C address 0x48=72d\nbut will not show up\nin this standalone\nconfig (see CV pin function)"
 		(exclude_from_sim no)
@@ -14833,6 +14857,17 @@
 		)
 		(uuid "8acde61e-06d6-45ad-893b-fd9ed3931658")
 	)
+	(text "BLUE LED does not light while charging\nif power relay is disconnected because 5V\nis absent. Add diode path to USB power so both sources\ncan power LED 5V."
+		(exclude_from_sim no)
+		(at 304.292 184.404 0)
+		(effects
+			(font
+				(size 0.635 0.635)
+				(color 255 0 0 1)
+			)
+		)
+		(uuid "8b737188-975f-4230-b1e2-9e7ededf1e68")
+	)
 	(text "R32: Solder for host controlled,\ndo not solder for standalone\nHost-controlled does not work with OPi can be off.\nSee https://forum.monolithicpower.com/t/mp2672-i2c-comms-with-power-disconnected/1952/11"
 		(exclude_from_sim no)
 		(at 353.822 108.966 0)
@@ -14896,6 +14931,18 @@
 			)
 		)
 		(uuid "974ea476-0907-4726-beb5-1b6f63f773dc")
+	)
+	(text "Figure out why charging\nlimited to .7A max now no\nmatter how we reduce R_ILIM"
+		(exclude_from_sim no)
+		(at 262.89 101.092 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+				(color 255 0 0 1)
+			)
+			(justify right)
+		)
+		(uuid "977bf669-1da1-4902-bbb9-660125368544")
 	)
 	(text "WindSensor is on separate \nI2C bus 1 for security \nin case water shorts it"
 		(exclude_from_sim no)
@@ -37487,7 +37534,7 @@
 			(uuid "1bf94ba5-555f-4698-b559-d08b60933070")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "Q2")
 					(unit 1)
@@ -37580,7 +37627,7 @@
 			(uuid "1bf94ba5-555f-4698-b559-d08b60933071")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "Q2")
 					(unit 2)
@@ -37649,7 +37696,7 @@
 			(uuid "ea0079a1-6cf1-4617-8bdf-39b1c936d999")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R14")
 					(unit 1)
@@ -37793,7 +37840,7 @@
 			(uuid "2dc1b6e1-cf96-467b-97cc-6f267aceb407")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "3v3v1")
 					(unit 1)
@@ -37866,7 +37913,7 @@
 			(uuid "a8c59860-5009-4059-a903-ae5b7e27f15e")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "RADIO_SAIL1")
 					(unit 1)
@@ -38070,7 +38117,7 @@
 			(uuid "70ebbe46-8cc9-4bae-8201-c93b785f5360")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R19")
 					(unit 1)
@@ -38214,7 +38261,7 @@
 			(uuid "466eefeb-fb57-4737-ad1d-eb43b0048197")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "5V1")
 					(unit 1)
@@ -38347,7 +38394,7 @@
 			(uuid "9ba684b0-88a2-43e5-8366-5d7c3e7b978b")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R30")
 					(unit 1)
@@ -38452,7 +38499,7 @@
 			(uuid "b0a686bd-3a8f-40a1-96ab-0311832dd0a4")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "U7")
 					(unit 1)
@@ -38717,7 +38764,7 @@
 			(uuid "e2ef00f7-e6b1-417a-8b51-b85fee3cd2df")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R34")
 					(unit 1)
@@ -38846,7 +38893,7 @@
 			(uuid "68ed6f86-48bd-4f8d-b015-3a2a2265690d")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "D3")
 					(unit 1)
@@ -39044,7 +39091,7 @@
 			(uuid "4d25d989-86c1-436b-a33b-9d053b6be6f1")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C4")
 					(unit 1)
@@ -39111,7 +39158,7 @@
 			(uuid "5b2b6594-253e-4f76-97e4-412b86d34038")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R3")
 					(unit 1)
@@ -39280,7 +39327,7 @@
 			(uuid "2254ad80-64f7-4ae6-90f8-a7d965c51d8d")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "U6")
 					(unit 1)
@@ -39347,7 +39394,7 @@
 			(uuid "c7074a0c-41b8-4212-bdee-3f2c35726352")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R11")
 					(unit 1)
@@ -39416,7 +39463,7 @@
 			(uuid "d274a655-d2f8-478c-b09e-28f4923f60f0")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R33")
 					(unit 1)
@@ -39506,7 +39553,7 @@
 			(uuid "44c2dafd-5ffb-4cb1-b442-b72b8f272452")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "J3")
 					(unit 1)
@@ -39576,7 +39623,7 @@
 			(uuid "12a67332-2c73-4971-9052-725322793433")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C3")
 					(unit 1)
@@ -39709,7 +39756,7 @@
 			(uuid "4812b5fd-5b3c-42ba-b4d3-6f408da2969c")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R7")
 					(unit 1)
@@ -39775,7 +39822,7 @@
 			(uuid "1c12240e-cc05-40ee-a4c6-21c431a38d49")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP14")
 					(unit 1)
@@ -39842,7 +39889,7 @@
 			(uuid "b61ca759-1594-4463-8f1e-f165c530bce1")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R10")
 					(unit 1)
@@ -39909,7 +39956,7 @@
 			(uuid "9e46223e-a404-49a3-b44e-dce65a0a0ee2")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP11")
 					(unit 1)
@@ -40017,7 +40064,7 @@
 			(uuid "bb65421b-d101-46bf-bc0f-d44bb06eba4f")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "J1")
 					(unit 1)
@@ -40084,7 +40131,7 @@
 			(uuid "897f5678-8674-48c1-b2db-5063705a056f")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C_{BST}1")
 					(unit 1)
@@ -40217,7 +40264,7 @@
 			(uuid "032feb79-6584-41a6-b835-9b209f97dae4")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R_{221K}1")
 					(unit 1)
@@ -40352,7 +40399,7 @@
 			(uuid "8bf9c53d-4727-4de2-9a29-f55d440ef173")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R28")
 					(unit 1)
@@ -40419,7 +40466,7 @@
 			(uuid "a3eb04cd-8699-43a4-b246-6aa8eb537b4c")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R21")
 					(unit 1)
@@ -40492,7 +40539,7 @@
 			(uuid "e9ad5709-4f48-4fa8-8a55-aab841a8f7cb")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "BAT_BAL1")
 					(unit 1)
@@ -40559,7 +40606,7 @@
 			(uuid "43169f3c-375f-4377-90d9-502ef8646a73")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R13")
 					(unit 1)
@@ -40637,7 +40684,7 @@
 			(uuid "3f8773b8-66f1-4626-888f-6657d3d0349b")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "PB1")
 					(unit 1)
@@ -40704,7 +40751,7 @@
 			(uuid "d9f58250-989a-4f11-9092-6b7c34fffcd3")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R_{CC1}1")
 					(unit 1)
@@ -40915,7 +40962,7 @@
 			(uuid "235a5532-6481-4280-b518-440f1076d071")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "BAT1")
 					(unit 1)
@@ -40982,7 +41029,7 @@
 			(uuid "7ba8718b-612b-4749-849a-0dc53c6d4b7d")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C7")
 					(unit 1)
@@ -41074,7 +41121,7 @@
 			(uuid "daca9f84-751c-4427-86b1-23a97f7944e0")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "U3")
 					(unit 1)
@@ -41216,7 +41263,7 @@
 			(uuid "ac89c8c3-9923-4a56-b570-5e8b15ccb1ce")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R_{CC2}1")
 					(unit 1)
@@ -41292,7 +41339,7 @@
 			(uuid "375a3f61-8b1e-437c-aefb-037d419c48bb")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C_{SYS}2")
 					(unit 1)
@@ -41528,7 +41575,7 @@
 			(uuid "96159e59-4ad4-4cfd-a3e9-c9c788eb9780")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "IC2")
 					(unit 1)
@@ -41593,7 +41640,7 @@
 			(uuid "5fdf5fdf-0db5-4481-92e7-cfba779fa9b6")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "GND1")
 					(unit 1)
@@ -41661,7 +41708,7 @@
 			(uuid "ac0c5706-4627-47fc-9eb5-550f225b8e3f")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R29")
 					(unit 1)
@@ -41872,7 +41919,7 @@
 			(uuid "14f6b755-3bf9-4145-a414-66379a3e9f98")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "U1")
 					(unit 1)
@@ -41939,7 +41986,7 @@
 			(uuid "bee261ee-0a33-4293-8b61-c5a69eb44f1d")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R_{221K}2")
 					(unit 1)
@@ -42007,7 +42054,7 @@
 			(uuid "d003fc34-92f8-47d7-b388-5bc4a2a96d8b")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP5")
 					(unit 1)
@@ -42080,7 +42127,7 @@
 			(uuid "af0856c7-f453-4d63-8288-f04fdd7cb4bb")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "SERVO_RUDDER1")
 					(unit 1)
@@ -42375,7 +42422,7 @@
 			(uuid "09a2339d-7c73-4e25-9393-f29fbbdfb809")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "K1")
 					(unit 1)
@@ -42440,7 +42487,7 @@
 			(uuid "10ca378e-1448-4e6c-a25b-f3b8bc9e5564")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "#PWR06")
 					(unit 1)
@@ -42513,7 +42560,7 @@
 			(uuid "cf84315f-c694-4c1d-b3a9-68c5127d4a39")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "RADIO_RUDDER1")
 					(unit 1)
@@ -42589,7 +42636,7 @@
 			(uuid "2efac4e2-c7aa-4ef3-8320-7df94830a53e")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C_{BAT}1")
 					(unit 1)
@@ -42789,7 +42836,7 @@
 			(uuid "d9288ff8-cf20-48d6-ba1d-364f455d248e")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "LS1")
 					(unit 1)
@@ -42854,7 +42901,7 @@
 			(uuid "98317f91-b477-4447-9aed-3fbb8894318b")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP3")
 					(unit 1)
@@ -42920,7 +42967,7 @@
 			(uuid "3db03836-c065-448a-8fab-143069ecb443")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "#PWR01")
 					(unit 1)
@@ -43014,7 +43061,7 @@
 			(uuid "55ae952f-db15-4f25-9364-246e2d04664c")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "Q1")
 					(unit 2)
@@ -43252,7 +43299,7 @@
 			(uuid "36d56325-fc3e-4b4c-b0c6-d7ef0395b817")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R2")
 					(unit 1)
@@ -43385,7 +43432,7 @@
 			(uuid "26f949c4-1771-4d10-901f-df525d77c4f9")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C5")
 					(unit 1)
@@ -43454,7 +43501,7 @@
 			(uuid "0b4705c2-c428-4329-9587-8a8b8c73aa60")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R17")
 					(unit 1)
@@ -43521,7 +43568,7 @@
 			(uuid "7abfc041-01ce-45bb-a765-4fbf77052408")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R27")
 					(unit 1)
@@ -43591,7 +43638,7 @@
 			(uuid "3d0dd126-6d33-43f5-8797-87e884b582bc")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R1")
 					(unit 1)
@@ -43778,7 +43825,7 @@
 			(uuid "3ad5f282-b9dd-44a9-9401-df97799112bf")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "J5")
 					(unit 1)
@@ -43854,7 +43901,7 @@
 			(uuid "feaa776e-ca87-4573-8a1c-673703a96bf7")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "F2")
 					(unit 1)
@@ -43932,7 +43979,7 @@
 			(uuid "ed68c1cc-aa66-430c-9eeb-c2f7dd98935d")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "CHG1")
 					(unit 1)
@@ -44000,7 +44047,7 @@
 			(uuid "e8ce50a3-2dc8-40f8-bcb4-e9c11e897f49")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "SALTWATER1")
 					(unit 1)
@@ -44132,7 +44179,7 @@
 			(uuid "29dd2efe-f0aa-422c-9f34-812a396c5c35")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "#PWR02")
 					(unit 1)
@@ -44265,7 +44312,7 @@
 			(uuid "3a420dde-64b2-421f-bafb-647f4a07177d")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "SW1")
 					(unit 1)
@@ -44338,7 +44385,7 @@
 			(uuid "be3ccaad-a000-4e69-aa69-5e92ce8d5bdb")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "SERVO_SAIL1")
 					(unit 1)
@@ -44405,7 +44452,7 @@
 			(uuid "5e632c17-4fba-4850-92ec-fc98ab6194b5")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP7")
 					(unit 1)
@@ -44534,7 +44581,7 @@
 			(uuid "5b7dfd7f-175b-4923-b659-1aaa59aca6f4")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "D2")
 					(unit 1)
@@ -44601,7 +44648,7 @@
 			(uuid "3f477e0a-8313-42d0-90c6-bc187bbff5f3")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R9")
 					(unit 1)
@@ -44670,7 +44717,7 @@
 			(uuid "cf4582a3-2af7-4013-aa3c-5106277075e0")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "D1")
 					(unit 1)
@@ -44790,7 +44837,7 @@
 			(uuid "bb0664e1-b1ad-4b26-a664-04ae11fe9b5e")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "J4")
 					(unit 1)
@@ -44923,7 +44970,7 @@
 			(uuid "9d9ee4b3-8cb1-4aac-a913-280f97322c34")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R12")
 					(unit 1)
@@ -45057,7 +45104,7 @@
 			(uuid "f3d8e481-2cba-48c8-97b1-30175879819c")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP10")
 					(unit 1)
@@ -45192,7 +45239,7 @@
 			(uuid "93fef857-bc00-42b4-8f2f-75a9412966be")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R32")
 					(unit 1)
@@ -45261,7 +45308,7 @@
 			(uuid "89f4f899-ef5b-4943-b685-f2427c35b8da")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R20")
 					(unit 1)
@@ -45406,7 +45453,7 @@
 			(uuid "d1f8eb2e-f587-4917-bd3d-484a29eb34d2")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C_{SYS}1")
 					(unit 1)
@@ -45471,7 +45518,7 @@
 			(uuid "349f8c75-f18b-4a40-a493-798f21862de9")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP4")
 					(unit 1)
@@ -45676,7 +45723,7 @@
 			(uuid "c309a86e-24ba-4638-82e4-cc32775f4e97")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "U8")
 					(unit 1)
@@ -45746,7 +45793,7 @@
 			(uuid "2d1e9c1d-e873-435b-b0e8-5b20c45e5183")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R6")
 					(unit 1)
@@ -45813,7 +45860,7 @@
 			(uuid "e1c4dc48-76fb-410e-964f-644d18cbf420")
 		)
 		(instances
-			(project "argo-v9-stable-rev3"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP2")
 					(unit 1)
@@ -45880,7 +45927,7 @@
 			(uuid "9c86f4e1-3471-4a46-989d-2d5c6206fecd")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "TP1")
 					(unit 1)
@@ -46011,7 +46058,7 @@
 			(uuid "c008f68b-b0fa-4bf6-b7a0-733ebcc582c3")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "#PWR03")
 					(unit 1)
@@ -46109,7 +46156,7 @@
 			(uuid "32ca9f1f-e8a5-4282-ad4e-b4ae74ad0d3c")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "U2")
 					(unit 1)
@@ -46203,7 +46250,7 @@
 			(uuid "17e5d5c2-7c9e-4831-9378-ae332c0c94c3")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "Q1")
 					(unit 1)
@@ -46280,7 +46327,7 @@
 			(uuid "1c974f7b-0bbb-48fa-afbd-e23dd27d71e6")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "L1")
 					(unit 1)
@@ -46490,7 +46537,7 @@
 			(uuid "60351822-d216-432f-8854-c9b0b6cee29e")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "VBUS1")
 					(unit 1)
@@ -46559,7 +46606,7 @@
 			(uuid "54d7db91-5069-4fe7-9d6d-1d842d3f016e")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R15")
 					(unit 1)
@@ -46629,7 +46676,7 @@
 			(uuid "7a311567-1544-4868-9115-dfe41ccbc857")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R5")
 					(unit 1)
@@ -46696,7 +46743,7 @@
 			(uuid "cc7fb4b5-a788-44bd-b1fc-b2da236caca8")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "#FLG01")
 					(unit 1)
@@ -46763,7 +46810,7 @@
 			(uuid "7638f4b6-ebfd-4ea2-a2a9-6b4831259506")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R8")
 					(unit 1)
@@ -46830,7 +46877,7 @@
 			(uuid "ead6bd2b-1d1f-44f5-9a86-9e2ae2ce2ee1")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C_{VCC}1")
 					(unit 1)
@@ -46897,7 +46944,7 @@
 			(uuid "fc8890de-ec14-483b-be5f-076c38518a96")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R25")
 					(unit 1)
@@ -46966,7 +47013,7 @@
 			(uuid "1a9c6340-04db-4c4a-afc9-88e8e7bbb9cd")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R18")
 					(unit 1)
@@ -47101,7 +47148,7 @@
 			(uuid "dbfb1eb9-eee0-4899-b604-6d6f7a29b164")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R7A1")
 					(unit 1)
@@ -47312,7 +47359,7 @@
 			(uuid "7b83ab98-ebe0-48df-875d-f9ab2207eec7")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R26")
 					(unit 1)
@@ -47379,7 +47426,7 @@
 			(uuid "23baae5b-bf74-4ee8-b752-a00d3e7c23f7")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C6")
 					(unit 1)
@@ -47446,7 +47493,7 @@
 			(uuid "1084ae25-6e2e-4efd-b479-21c50425a1df")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R23")
 					(unit 1)
@@ -47513,7 +47560,7 @@
 			(uuid "cc7f5a57-72c7-43b4-b7c3-dc452d21f93b")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R16")
 					(unit 1)
@@ -47803,7 +47850,7 @@
 			(uuid "77f7c103-5020-402b-a93b-cf1a6d7675da")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "J2")
 					(unit 1)
@@ -48013,7 +48060,7 @@
 			(uuid "cfe76f22-db9f-4785-bff4-94ffa1a677b0")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C_{IN}1")
 					(unit 1)
@@ -48080,7 +48127,7 @@
 			(uuid "c21b916e-9710-4e22-9509-b962c66c8c37")
 		)
 		(instances
-			(project "argo-v9-stable-rev2"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "R31")
 					(unit 1)
@@ -48157,7 +48204,7 @@
 			(uuid "26405da4-37ea-42b7-9a7b-73ffc52eb76e")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C_{5V}1")
 					(unit 1)
@@ -48244,7 +48291,7 @@
 			(uuid "0f96f29a-9f5f-47f6-a89f-9408c18bd056")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "U5")
 					(unit 1)
@@ -48330,7 +48377,7 @@
 			(uuid "5f7e686f-8d25-410e-9886-3caef2c8ac2c")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C8")
 					(unit 1)
@@ -48402,7 +48449,7 @@
 			(uuid "350901db-ec7b-4608-a2b9-8e46e5169c8e")
 		)
 		(instances
-			(project ""
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "BATTERY1")
 					(unit 1)
@@ -48471,7 +48518,7 @@
 			(uuid "bf5642c9-244a-40a8-863b-defd1983cf24")
 		)
 		(instances
-			(project "argo-v9-stable"
+			(project "argo-v9-stable-rev4"
 				(path "/94ef8c18-8f4d-4fb8-af3c-a2b214cf3496"
 					(reference "C1")
 					(unit 1)

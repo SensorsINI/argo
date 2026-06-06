@@ -339,6 +339,8 @@ To **re-record** playback with live visualization and transforms into a new bag,
 `ros2 launch ./scripts/argo_bag_rerecord.py input_bag:=bags/your_bag output_bag:=your_bag_with_viz`  
 or run **`scripts/argo_rerecord_bag.sh`**, which calls that launch file for you.
 
+See **[README-bagfiles.md](README-bagfiles.md)** for all bag tools (narration merge, backup, Foxglove playback, etc.).
+
 ## Health Monitoring
 
 The bridge publishes `/imu_health` (std_msgs/Bool) for lifecycle management:
