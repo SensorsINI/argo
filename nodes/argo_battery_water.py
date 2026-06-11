@@ -285,6 +285,8 @@ class BatteryWaterNode(ArgoBaseNode):
         self._charging_fault_frequency = None  # Calculated frequency if fault detected
         self._charging_fault_log_interval = 30.0  # Log fault status every 30 seconds
         self._last_charging_fault_log_time = 0.0
+        self._gpio_ac_power_raw_prev = None  # Track AC transitions for fault-buffer reset
+        self._charging_fault_stale_edge_s = 3.0  # No edges this long => pin stable, not fault blinking
         
         # AC power plug-in/plug-out tracking for MP2672 CHG timer monitoring
         # Track when AC power is plugged in to monitor 20-hour safety timer
@@ -2665,26 +2667,44 @@ class BatteryWaterNode(ArgoBaseNode):
                 
                 # Only treat blinking as charging fault when AC power is present (charger plugged in).
                 # When no charger is present, !CHARGING/STAT may toggle or float -> false positive "battery missing" fault.
-                if not ac_power_raw:
+                ac_power_changed = (
+                    self._gpio_ac_power_raw_prev is not None and
+                    ac_power_raw != self._gpio_ac_power_raw_prev
+                )
+                if ac_power_changed or not ac_power_raw:
+                    # Discard transitions from floating/unpowered STAT line or from before plug-in.
+                    self._charging_gpio_transitions.clear()
+                    self._last_charging_gpio_change_time = None
                     self._charging_fault_detected = False
                     self._charging_fault_frequency = None
                 elif len(self._charging_gpio_transitions) >= 4:
-                    # AC present: analyze transitions for fault pattern (1-2 Hz blinking)
-                    recent_periods = list(self._charging_gpio_transitions)[-8:]  # Use last 8 transitions
-                    avg_period = sum(recent_periods) / len(recent_periods)
-                    frequency = 1.0 / avg_period if avg_period > 0 else 0.0
-                    
-                    # MP2672 fault pattern: 1Hz blinking (datasheet), but we see ~2 Hz in practice
-                    if 0.8 <= frequency <= 2.5:
-                        self._charging_fault_detected = True
-                        self._charging_fault_frequency = frequency
+                    # Require recent edges: a steady STAT line must not keep a stale buffer latched.
+                    time_since_last_edge = (
+                        current_time - self._last_charging_gpio_change_time
+                        if self._last_charging_gpio_change_time is not None else float('inf')
+                    )
+                    if time_since_last_edge > self._charging_fault_stale_edge_s:
+                        self._charging_gpio_transitions.clear()
+                        self._charging_fault_detected = False
+                        self._charging_fault_frequency = None
                     else:
-                        self._charging_fault_detected = False
-                        self._charging_fault_frequency = None
+                        # AC present: analyze transitions for fault pattern (1-2 Hz edge rate)
+                        recent_periods = list(self._charging_gpio_transitions)[-8:]  # Use last 8 transitions
+                        avg_period = sum(recent_periods) / len(recent_periods)
+                        frequency = 1.0 / avg_period if avg_period > 0 else 0.0
+
+                        # MP2672 fault pattern: 1Hz blink ~= 2Hz edge rate (datasheet 1Hz full cycle)
+                        if 0.8 <= frequency <= 2.5:
+                            self._charging_fault_detected = True
+                            self._charging_fault_frequency = frequency
+                        else:
+                            self._charging_fault_detected = False
+                            self._charging_fault_frequency = None
                 else:
-                    if len(self._charging_gpio_transitions) < 2:
-                        self._charging_fault_detected = False
-                        self._charging_fault_frequency = None
+                    self._charging_fault_detected = False
+                    self._charging_fault_frequency = None
+
+                self._gpio_ac_power_raw_prev = ac_power_raw
                 
                 # Update last-seen time when charging is active
                 if charging_raw:
