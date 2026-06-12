@@ -3,10 +3,9 @@
 Merge SRT narration into a rosbag2 as /narration (std_msgs/String).
 
 Syncs SRT relative timestamps to bag log time. Each SRT cue is stamped at
-wall-clock time = audio_start + cue.start_sec. audio_start comes from (by default)
-a ``_YYMMDD_HHMMSS`` token in the audio filename (local time), else exiftool
-CreateDate interpreted as UTC (typical for Android 3GP; see Samsung UTC offset).
-Bag start comes from metadata.yaml starting_time (epoch).
+sync_anchor + cue.start_sec. Default sync anchor is a ``_YYMMDD_HHMMSS`` token in
+the SRT or audio filename (local time). exiftool CreateDate (UTC on Android) is
+shown for reference only — it is usually not the record-button time.
 
 Usage
 -----
@@ -396,32 +395,75 @@ def _audio_start_ns_exiftool_utc(exif: dict) -> tuple[int, str]:
     )
 
 
-def _resolve_audio_start_ns(
+def _is_cropped_srt(srt_path: Optional[str]) -> bool:
+    if not srt_path:
+        return False
+    return "cropped" in os.path.basename(srt_path).lower()
+
+
+def _resolve_sync_anchor_ns(
     audio_path: str,
+    srt_path: Optional[str],
     exif: dict,
     tz_name: str,
     anchor: str,
     audio_start_override: Optional[str],
+    bag_start_ns: int,
+    bag_dir: str,
 ) -> tuple[int, str]:
+    """Wall-clock time for SRT t=0."""
     if audio_start_override:
         ns = _parse_wall_time_to_ns(audio_start_override, tz_name)
         return ns, f"--audio-start ({tz_name})"
 
-    from_filename = _audio_start_from_filename(audio_path, tz_name)
+    from_srt = _audio_start_from_filename(srt_path, tz_name) if srt_path else None
+    from_audio = _audio_start_from_filename(audio_path, tz_name)
+    from_filename = from_srt or from_audio
     from_exif = _audio_start_ns_exiftool_utc(exif)
+    from_bag_folder = _bag_start_from_folder_name(bag_dir, tz_name)
 
+    if anchor == "bag-start":
+        return bag_start_ns, f"bag metadata first message ({bag_start_ns})"
+    if anchor == "bag-folder":
+        if from_bag_folder is None:
+            raise ValueError(
+                f"--audio-anchor bag-folder but bag directory is not argo_YYYYMMDD_HHMMSS: {bag_dir!r}"
+            )
+        return from_bag_folder, "bag folder name argo_YYYYMMDD_HHMMSS (record button time)"
+    if anchor == "exiftool":
+        return from_exif
     if anchor == "filename":
         if from_filename is None:
             raise ValueError(
-                f"--audio-anchor filename but no YYMMDD_HHMMSS token in {audio_path!r}."
+                "No YYMMDD_HHMMSS token in --srt or --audio basename. "
+                "Add a timestamp to the filename, pass --audio-start, or use --audio-anchor bag-start."
             )
         return from_filename
-    if anchor == "exiftool":
-        return from_exif
-    # auto: filename matches phone record button time; exiftool UTC is fallback
+    # auto: cropped SRT timestamps are relative to the crop (≈ bag start), not phone record start
+    if _is_cropped_srt(srt_path):
+        return (
+            bag_start_ns,
+            "bag metadata first message (auto: *_cropped.srt → SRT t=0 at bag start)",
+        )
     if from_filename is not None:
         return from_filename
     return from_exif
+
+
+def _cue_log_time_ns(audio_start_ns: int, cue_start_sec: float, offset_sec: float) -> int:
+    return audio_start_ns + int((cue_start_sec + offset_sec) * 1e9)
+
+
+def _window_bounds_ns(
+    time_window: str,
+    audio_start_ns: int,
+    bag_start_ns: int,
+    bag_end_ns: Optional[int],
+) -> tuple[int, Optional[int], str]:
+    if time_window == "bag":
+        return bag_start_ns, bag_end_ns, "bag start → bag end"
+    # session: phone narration from t=0 through end of rosbag recording
+    return audio_start_ns, bag_end_ns, "audio/SRT t=0 → bag end"
 
 
 def _open_reader(bag_dir: str, storage_id: str) -> SequentialReader:
@@ -445,16 +487,17 @@ def _iter_bag_messages(reader: SequentialReader) -> Iterator[tuple[str, bytes, i
 
 def _build_narration_messages(
     cues: list[SrtCue],
-    bag_start_ns: int,
+    audio_start_ns: int,
     offset_sec: float,
-    bag_end_ns: Optional[int],
+    window_start_ns: int,
+    window_end_ns: Optional[int],
 ) -> tuple[list[tuple[int, bytes]], int]:
-    """Build /narration messages; only cues with log time in [bag_start_ns, bag_end_ns]."""
+    """Build /narration messages; only cues with log time inside the selected window."""
     out: list[tuple[int, bytes]] = []
     skipped = 0
     for cue in cues:
-        ts_ns = bag_start_ns + int((cue.start_sec + offset_sec) * 1e9)
-        if bag_end_ns is not None and (ts_ns < bag_start_ns or ts_ns > bag_end_ns):
+        ts_ns = _cue_log_time_ns(audio_start_ns, cue.start_sec, offset_sec)
+        if window_end_ns is not None and (ts_ns < window_start_ns or ts_ns > window_end_ns):
             skipped += 1
             continue
         msg = String(data=cue.text)
@@ -504,41 +547,63 @@ def _print_sync_report(
     bag_start_source: str,
     bag_dur_ns: Optional[int],
     audio_path: str,
-    audio_start_ns: int,
-    audio_start_key: str,
+    srt_path: str,
+    sync_anchor_ns: int,
+    sync_anchor_key: str,
+    phone_filename_ns: Optional[int],
+    bag_folder_ns: Optional[int],
     audio_duration_sec: Optional[float],
     offset_sec: float,
     cues: list[SrtCue],
     tz_name: str,
     exif: dict,
+    time_window: str,
 ) -> None:
-    computed_offset = (audio_start_ns - bag_start_ns) / 1e9
-    total_offset = computed_offset + offset_sec
+    bag_end_ns = (bag_start_ns + bag_dur_ns) if bag_dur_ns is not None else None
+    window_start_ns, window_end_ns, window_label = _window_bounds_ns(
+        time_window, sync_anchor_ns, bag_start_ns, bag_end_ns
+    )
     srt_span = cues[-1].end_sec - cues[0].start_sec if cues else 0.0
 
     print(f"Bag:           {bag_dir}")
     print(f"Bag start:     {_ns_to_local_str(bag_start_ns, tz_name)} ({bag_start_source})")
-    if bag_dur_ns is not None:
-        bag_end_ns = bag_start_ns + bag_dur_ns
+    print("  (first message in mcap — not the dashboard button instant)")
+    if bag_end_ns is not None:
         print(f"Bag end:       {_ns_to_local_str(bag_end_ns, tz_name)}  ({bag_dur_ns / 1e9:.3f} s)")
+    if bag_folder_ns is not None:
+        delta = (bag_start_ns - bag_folder_ns) / 1e9
+        print(
+            f"Bag folder:    {_ns_to_local_str(bag_folder_ns, tz_name)} "
+            f"(argo_* name when record.py started ros2 bag record; {delta:+.1f} s before first message)"
+        )
+    if phone_filename_ns is not None:
+        delta = (bag_start_ns - phone_filename_ns) / 1e9
+        print(
+            f"Phone file:    {_ns_to_local_str(phone_filename_ns, tz_name)} "
+            f"(YYMMDD_HHMMSS on .m4a; {delta:+.1f} s before first bag message)"
+        )
     print(f"Audio:         {audio_path}")
-    print(f"Audio anchor:  {_ns_to_local_str(audio_start_ns, tz_name)} ({audio_start_key})")
+    print(f"SRT:           {srt_path}")
+    if _is_cropped_srt(srt_path):
+        print("  (*_cropped.srt → SRT t=0 is crop start, usually ≈ bag start, not phone file token)")
+    print(f"SRT t=0 anchor: {_ns_to_local_str(sync_anchor_ns, tz_name)} ({sync_anchor_key})")
     try:
         exif_utc_ns, exif_key = _audio_start_ns_exiftool_utc(exif)
         offset_h = _parse_samsung_utc_offset_hours(exif)
         print(
-            f"Exiftool UTC:  {_ns_to_local_str(exif_utc_ns, 'UTC')} UTC  "
+            f"Exiftool (ref): {_ns_to_local_str(exif_utc_ns, 'UTC')} UTC  "
             f"({_ns_to_local_str(exif_utc_ns, tz_name)} {tz_name})  [{exif_key}]"
         )
+        print(
+            "  Not used for sync when a filename YYMMDD_HHMMSS token is present "
+            "(CreateDate is often container/export time, not record-button time)."
+        )
         if offset_h is not None:
-            print(f"  Samsung UTC offset: {offset_h:+.1f} h (File Modification ≈ CreateDate + offset)")
+            print(f"  Samsung UTC offset: {offset_h:+.1f} h")
     except ValueError:
         pass
-    fn = _audio_start_from_filename(audio_path, tz_name)
-    if fn is not None and fn[0] != audio_start_ns:
-        print(f"Filename:      {_ns_to_local_str(fn[0], tz_name)} ({fn[1]})")
-    if audio_duration_sec is not None:
-        audio_end_ns = audio_start_ns + int(audio_duration_sec * 1e9)
+    if audio_duration_sec is not None and phone_filename_ns is not None:
+        audio_end_ns = phone_filename_ns + int(audio_duration_sec * 1e9)
         print(
             f"Audio span:    {audio_duration_sec:.1f} s → ends "
             f"{_ns_to_local_str(audio_end_ns, tz_name)}"
@@ -546,31 +611,28 @@ def _print_sync_report(
     print(f"SRT cues:      {len(cues)}")
     print(f"SRT span:      {srt_span:.3f} s (first cue start → last cue end)")
     print()
-    print("Merge logic: each cue log time = audio_anchor + cue.start_sec (+ --offset-sec).")
-    print("  Only cues inside the bag recording span are written to /narration.")
-    print(f"Computed offset (audio − bag): {computed_offset:+.3f} s")
+    print("Merge logic: cue log time = sync_anchor + cue.start_sec (+ --offset-sec).")
+    print(f"  Write window ({time_window}): {window_label}.")
     if offset_sec:
-        print(f"Manual --offset-sec:           {offset_sec:+.3f} s")
-    print(f"Total offset applied:          {total_offset:+.3f} s")
+        print(f"Manual --offset-sec: {offset_sec:+.3f} s")
     print()
     print("Sample cue mapping (first 5):")
     for cue in cues[:5]:
-        ts_ns = bag_start_ns + int((cue.start_sec + total_offset) * 1e9)
-        rel = cue.start_sec + total_offset
+        ts_ns = _cue_log_time_ns(sync_anchor_ns, cue.start_sec, offset_sec)
+        rel = (ts_ns - bag_start_ns) / 1e9
         preview = cue.text if len(cue.text) <= 72 else cue.text[:69] + "..."
         print(
             f"  #{cue.index:3d}  t={cue.start_sec:8.3f}s  "
             f"bag+{rel:8.3f}s  {_ns_to_local_str(ts_ns, tz_name)}  {preview!r}"
         )
 
-    if bag_dur_ns is not None and cues:
-        bag_end_ns = bag_start_ns + bag_dur_ns
+    if window_end_ns is not None and cues:
         in_window = 0
         first_in: Optional[SrtCue] = None
         last_in: Optional[SrtCue] = None
         for cue in cues:
-            ts_ns = bag_start_ns + int((cue.start_sec + total_offset) * 1e9)
-            if bag_start_ns <= ts_ns <= bag_end_ns:
+            ts_ns = _cue_log_time_ns(sync_anchor_ns, cue.start_sec, offset_sec)
+            if window_start_ns <= ts_ns <= window_end_ns:
                 in_window += 1
                 if first_in is None:
                     first_in = cue
@@ -578,22 +640,22 @@ def _print_sync_report(
         print()
         if in_window == 0:
             print(
-                "Warning: no SRT cues fall within the bag time window. "
-                "Try --audio-anchor filename|exiftool, --audio-start, or --offset-sec."
+                "Warning: no SRT cues fall within the write window. "
+                "Try --time-window session, --audio-start, or --offset-sec."
             )
         else:
-            print(f"Cues within bag window: {in_window}/{len(cues)} (only these are written to the bag)")
+            print(f"Cues to write: {in_window}/{len(cues)} ({window_label})")
             if first_in and last_in:
                 print(
-                    f"  First in bag: #{first_in.index} at SRT t={first_in.start_sec:.1f}s  "
+                    f"  First: #{first_in.index} at SRT t={first_in.start_sec:.1f}s  "
                     f"{first_in.text[:60]!r}..."
                 )
                 print(
-                    f"  Last in bag:  #{last_in.index} at SRT t={last_in.start_sec:.1f}s  "
+                    f"  Last:  #{last_in.index} at SRT t={last_in.start_sec:.1f}s  "
                     f"{last_in.text[:60]!r}..."
                 )
         if in_window < len(cues):
-            print(f"  Skipped outside bag: {len(cues) - in_window} cues")
+            print(f"  Omitted: {len(cues) - in_window} cues outside write window")
 
 
 def main() -> int:
@@ -630,11 +692,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--audio-anchor",
-        choices=("auto", "filename", "exiftool"),
+        choices=("auto", "filename", "exiftool", "bag-start", "bag-folder"),
         default="auto",
         help=(
-            "audio_start source: auto=filename YYMMDD_HHMMSS if present else exiftool UTC; "
-            "filename=local time token in name; exiftool=CreateDate as UTC"
+            "SRT t=0 wall time: auto=cropped SRT→bag first message, else filename token; "
+            "filename=YYMMDD_HHMMSS; bag-start=metadata.yaml; bag-folder=argo_* dirname; "
+            "exiftool=CreateDate UTC"
+        ),
+    )
+    parser.add_argument(
+        "--time-window",
+        choices=("session", "bag"),
+        default="session",
+        help=(
+            "Which cues to write: session=audio/SRT t=0 through bag end (keeps pre-bag "
+            "phone narration); bag=only between bag start and bag end"
         ),
     )
     parser.add_argument(
@@ -688,13 +760,6 @@ def main() -> int:
     try:
         cues = parse_srt(srt_path)
         exif = _exiftool_audio_metadata(audio_path)
-        audio_start_ns, audio_start_key = _resolve_audio_start_ns(
-            audio_path,
-            exif,
-            args.timezone,
-            args.audio_anchor,
-            args.audio_start,
-        )
     except (ValueError, RuntimeError, json.JSONDecodeError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
@@ -713,8 +778,30 @@ def main() -> int:
         )
         return 2
 
-    computed_offset = (audio_start_ns - bag_start_ns) / 1e9
-    total_offset = computed_offset + args.offset_sec
+    try:
+        sync_anchor_ns, sync_anchor_key = _resolve_sync_anchor_ns(
+            audio_path,
+            srt_path,
+            exif,
+            args.timezone,
+            args.audio_anchor,
+            args.audio_start,
+            bag_start_ns,
+            bag_dir,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    phone_filename_ns = _audio_start_from_filename(audio_path, args.timezone)
+    if phone_filename_ns is not None:
+        phone_filename_ns = phone_filename_ns[0]
+    bag_folder_ns = _bag_start_from_folder_name(bag_dir, args.timezone)
+
+    bag_end_ns = (bag_start_ns + bag_dur_ns) if bag_dur_ns is not None else None
+    window_start_ns, window_end_ns, _ = _window_bounds_ns(
+        args.time_window, sync_anchor_ns, bag_start_ns, bag_end_ns
+    )
 
     _print_sync_report(
         bag_dir=bag_dir,
@@ -722,13 +809,17 @@ def main() -> int:
         bag_start_source=bag_start_source,
         bag_dur_ns=bag_dur_ns,
         audio_path=audio_path,
-        audio_start_ns=audio_start_ns,
-        audio_start_key=audio_start_key,
+        srt_path=srt_path,
+        sync_anchor_ns=sync_anchor_ns,
+        sync_anchor_key=sync_anchor_key,
+        phone_filename_ns=phone_filename_ns,
+        bag_folder_ns=bag_folder_ns,
         audio_duration_sec=audio_duration_sec,
         offset_sec=args.offset_sec,
         cues=cues,
         tz_name=args.timezone,
         exif=exif,
+        time_window=args.time_window,
     )
 
     if args.dry_run:
@@ -758,17 +849,20 @@ def main() -> int:
         input_serialization_format="cdr",
         output_serialization_format="cdr",
     )
-    bag_end_ns = (bag_start_ns + bag_dur_ns) if bag_dur_ns is not None else None
     if bag_end_ns is None:
         print(
             "Warning: bag duration unknown; all SRT cues will be written (no time filter).",
             file=sys.stderr,
         )
     narration, skipped_cues = _build_narration_messages(
-        cues, bag_start_ns, total_offset, bag_end_ns
+        cues,
+        sync_anchor_ns,
+        args.offset_sec,
+        window_start_ns,
+        window_end_ns,
     )
     if skipped_cues:
-        print(f"Filtered out {skipped_cues} cues outside bag recording span.")
+        print(f"Omitted {skipped_cues} cues outside {args.time_window} write window.")
 
     reader = _open_reader(bag_dir, storage_id)
     topics = reader.get_all_topics_and_types()
@@ -797,7 +891,7 @@ def main() -> int:
     print(f"Output: {output_dir}")
     print(
         f"Wrote {bag_count} original messages and {narr_count} /narration messages "
-        f"({len(cues)} SRT cues parsed, {skipped_cues} outside bag span omitted)."
+        f"({len(cues)} SRT cues parsed, {skipped_cues} outside {args.time_window} window omitted)."
     )
     return 0
 
