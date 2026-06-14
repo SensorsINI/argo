@@ -224,6 +224,10 @@ class BNO085Bridge(Node):
     """Bridge node that converts BNO08x driver topics to Argo format with I2C error recovery."""
 
     _HEALTH_STALE_S = 3.0
+    # At 20 Hz, gaps >1s indicate driver watchdog/reset cycles — do not flip healthy on one message.
+    _HEALTH_GAP_S = 1.0
+    _HEALTH_STABLE_S = 5.0
+    _INSTABILITY_COOLDOWN_S = 15.0
     _STARTUP_GRACE_S = 45.0
     _RESTART_IF_STALE_S = 15.0
     _MIN_RESTART_INTERVAL_S = 45.0
@@ -247,9 +251,12 @@ class BNO085Bridge(Node):
         self.sub_imu = self.create_subscription(Imu, '/imu', self.imu_callback, 10)
         self.sub_mag = self.create_subscription(MagneticField, '/magnetic_field', self.mag_callback, 10)
         
-        # Health monitoring - simple KISS approach
+        # Health monitoring - require sustained /imu before reporting healthy
         self.health_status = False  # Start unhealthy until we get driver data
         self.last_imu_time = None
+        self._prev_imu_time = None
+        self._healthy_candidate_since = None
+        self._instability_cooldown_until = 0.0
         self.health_check_timer = self.create_timer(1.0, self._check_health)
         
         # Publish initial health status
@@ -552,13 +559,20 @@ class BNO085Bridge(Node):
     def imu_callback(self, msg: Imu):
         """Process IMU message: extract heading, gyro, accel."""
         current_time = time.time()
-        
-        # Update health tracking - simple KISS approach
+
+        if self._prev_imu_time is not None:
+            gap_s = current_time - self._prev_imu_time
+            if gap_s > self._HEALTH_GAP_S:
+                self._instability_cooldown_until = (
+                    current_time + self._INSTABILITY_COOLDOWN_S
+                )
+                self._healthy_candidate_since = None
+
+        self._prev_imu_time = current_time
         self.last_imu_time = current_time
-        
-        # Set health to true when we get driver data
-        if not self.health_status:
-            self._publish_health_status(True)
+        if self._healthy_candidate_since is None:
+            self._healthy_candidate_since = current_time
+
         # Fresh /imu after recovery — reset so logs stay readable
         self.recovery_attempt_count = 0
         self.last_recovery_attempt_time = 0.0
@@ -605,20 +619,32 @@ class BNO085Bridge(Node):
         """Process magnetic field message (currently unused)."""
         pass
     
+    def _imu_stream_looks_healthy(self, current_time: float) -> bool:
+        """True only when /imu is fresh, stable long enough, and not in post-gap cooldown."""
+        if self.last_imu_time is None:
+            return False
+        if (current_time - self.last_imu_time) > self._HEALTH_STALE_S:
+            return False
+        if current_time < self._instability_cooldown_until:
+            return False
+        if self._healthy_candidate_since is None:
+            return False
+        return (current_time - self._healthy_candidate_since) >= self._HEALTH_STABLE_S
+
     def _check_health(self):
-        """Simple health check - timeout if no driver data; restart unit if /imu dies long enough."""
+        """Health check: sustained /imu required; restart unit if /imu dies long enough."""
         current_time = time.time()
-        
-        # If we have no IMU data or it's stale, mark unhealthy
-        if self.last_imu_time is None or (
-            current_time - self.last_imu_time
-        ) > self._HEALTH_STALE_S:
-            if self.health_status:
-                self._publish_health_status(False)
-        else:
-            # We have recent data, ensure we're healthy
+
+        if self._imu_stream_looks_healthy(current_time):
             if not self.health_status:
                 self._publish_health_status(True)
+        else:
+            if self.health_status:
+                self._publish_health_status(False)
+            if self.last_imu_time is None or (
+                current_time - self.last_imu_time
+            ) > self._HEALTH_STALE_S:
+                self._healthy_candidate_since = None
 
         # Heartbeat /imu_health every timer tick so volatile late subscribers get state.
         # Heading streams on each /imu; health was only emitted on transitions, so nodes
