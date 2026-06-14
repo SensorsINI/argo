@@ -76,12 +76,10 @@ Adds **`/narration`** (`std_msgs/msg/String`) to a **copy** of a bag: one messag
 
 **Time sync**
 
-- Each cue log time = **audio_start + cue.start_sec** (+ optional `--offset-sec`)
-- **audio_start** (`--audio-anchor auto`, default):
-  - **`filename`**: `_YYMMDD_HHMMSS` in the audio name (local time, `--timezone`, default `Europe/Zurich`) — e.g. `260602_152344` → 2026-06-02 15:23:44
-  - **`exiftool`**: `CreateDate` / `MediaCreateDate` as **UTC** (typical Android 3GP; matches `File Modification` ≈ Create + Samsung UTC offset)
-- **Bag span**: `metadata.yaml` `starting_time` + `duration`
-- **Only cues inside the bag recording window** are written (pre/post narration is dropped)
+- Each cue log time = **sync_anchor + cue.start_sec** (+ optional `--offset-sec`)
+- **sync_anchor** (`--audio-anchor filename`, default): `_YYMMDD_HHMMSS` in **`--srt` or `--audio` basename** (local `--timezone`, default `Europe/Zurich`) — e.g. `260611_134827` → 2026-06-11 13:48:27
+- **exiftool** `CreateDate` is printed for reference only. On Samsung/Android it is **UTC without a suffix** and usually reflects container/export metadata, **not** when you pressed record (often differs from the filename by minutes or hours). Use `--audio-anchor exiftool` only if you have no filename token.
+- **Write window** (`--time-window`, default **`session`**): cues from SRT t=0 through **bag end** — includes phone narration spoken before `ros2 bag record` started. Use `--time-window bag` to keep only cues between bag start and bag end.
 
 **Dependencies**
 
