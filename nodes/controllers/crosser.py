@@ -18,7 +18,7 @@ from std_msgs.msg import Bool, Float64
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'support'))
 
 # 4) Local imports
-from .base import BaseController, BoatState, ControlCommand, signed_angle_difference_degrees
+from .base import BaseController, BoatState, ControlCommand, relative_wind_angle_to_sail_cmd, signed_angle_difference_degrees
 
 # Local/support utilities
 from safe_publish import safe_publish
@@ -1175,8 +1175,7 @@ class CrosserController(BaseController):
         cmd_sail = 0.0
         sail_reason = "no wind data"
         if state.wind_angle is not None:
-            wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
-            wind_sail_cmd = float(np.clip(wind_sail_cmd, -1.0, 1.0))
+            wind_sail_cmd = relative_wind_angle_to_sail_cmd(state.wind_angle)
             cmd_sail = self.sail_wind_gain * wind_sail_cmd
             sail_reason = f"wind_angle={state.wind_angle:.1f}° (wind-based control, gain={self.sail_wind_gain:.2f})"
         
