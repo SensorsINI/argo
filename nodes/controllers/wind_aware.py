@@ -4,14 +4,17 @@
 import os
 import sys
 
-# 2) Third-party
-import numpy as np
-
 # 3) Path modifications
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'support'))
 
 # 4) Local imports
-from .base import BaseController, BoatState, ControlCommand, signed_angle_difference_degrees
+from .base import (
+    BaseController,
+    BoatState,
+    ControlCommand,
+    relative_wind_angle_to_sail_cmd,
+    signed_angle_difference_degrees,
+)
 
 
 class WindAwareController(BaseController):
@@ -22,7 +25,6 @@ class WindAwareController(BaseController):
         self.name = 'WindAwareController'
         self.rudder_gain = config.get('rudder_gain', 1.0)
         self.rudder_full_scale_deg = config.get('rudder_full_scale_deg', 60.0)
-        self.sail_wind_gain = config.get('sail_wind_gain', 0.5)
 
     def generate_control(self, state: BoatState) -> ControlCommand:
         """Generate control commands considering wind conditions."""
@@ -38,14 +40,10 @@ class WindAwareController(BaseController):
         cmd_rudder = self.rudder_gain * (compass_err / self.rudder_full_scale_deg)
         cmd_rudder = self.clip_rudder(cmd_rudder)
 
-        # Wind-aware sail control
-        cmd_sail = state.radio_sail if state.radio_sail is not None else 0.0
+        # Wind-only sail control (generate_control runs only when robot has authority)
+        cmd_sail = 0.0
         if state.wind_angle is not None:
-            # Simple sail control based on wind angle
-            wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
-            wind_sail_cmd = float(np.clip(wind_sail_cmd, -1.0, 1.0))
-            # Blend radio command with wind-based command
-            cmd_sail = (1 - self.sail_wind_gain) * cmd_sail + self.sail_wind_gain * wind_sail_cmd
+            cmd_sail = relative_wind_angle_to_sail_cmd(state.wind_angle)
 
         return ControlCommand(
             rudder=cmd_rudder,

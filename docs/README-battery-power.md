@@ -48,40 +48,56 @@ soc% = S - S / (1 + (v / V0)^A)^B
 
 ### Battery Lifetime Estimation
 
-The node estimates time to full charge or depletion using linear regression on recent voltage samples:
+The node estimates time-to-full (TTF) or time-to-empty (TTE) using a **power-state machine** with **per-regime slopes**, extrapolated in **SOC space** (%/h rather than V/h, which linearizes the flat LiPo mid-range).
 
-**Key Features**:
-- **Persistent slopes**: Charging/discharging slopes saved to `battery_slopes.json`
-- **Early estimates**: Uses saved slopes immediately after startup (no waiting for min samples)
-- **Dynamic updates**: Updates slopes when sufficient data is available (≥15 samples, ~75s window)
-- **Slope validation**: Saves slopes in range (>0.3 V/h charging; discharging between -2 V/h and -0.05 V/h). Gentler discharge is not "meaningful"; steeper is rejected as quantization noise.
+**Power states** (the measured voltage trend is authoritative; charger GPIO/I2C status is only a hint):
 
-**Estimation Logic**:
-```python
-# Priority 1: Use persistent slopes (immediate estimates)
-if charging:
-    slope = self._charging_slope_v_per_s
-else:
-    slope = self._discharging_slope_v_per_s
+| State | Condition | Estimate |
+|-------|-----------|----------|
+| `discharging` | AC absent | TTE from idle or sailing slope |
+| `plugged_drain` | AC present, but net battery drain (charger insufficient or faulted) | TTE + charging anomaly warning; **never TTF** |
+| `plugged_charge` | AC present with sustained positive voltage trend (≥ +0.05 V/h) | TTF |
 
-# Priority 2: Update from linear regression on recent samples
-fit_result = self._linear_least_squares(self._voltage_samples)
-if fit_result and sufficient_samples:
-    regression_slope = fit_result[0]
-    # Update persistent slope if valid
-    if charging and regression_slope > MIN_CHARGING_SLOPE:
-        self._charging_slope_v_per_s = regression_slope
-```
+A charger fault (MP2672 STAT blinking 1–2 Hz) forces `plugged_drain` regardless of GPIO claims.
+
+**Slope-learning regimes** persisted in `battery_slopes.json` (schema 2, both V/h and %SOC/h):
+
+| Regime | When learned | Default | Sanity band (V/h) |
+|--------|--------------|---------|--------------------|
+| `discharge_idle` | AC absent, sail winch idle | -0.12 V/h (-7.5 %/h) | -0.30 … -0.05 |
+| `discharge_sailing` | AC absent, sail winch active | -0.25 V/h (-15 %/h) | -1.00 … -0.10 |
+| `plugged_net` | AC present, net drain | -0.04 V/h (-2.5 %/h) | -0.30 … +0.30 |
+| `charging` | AC present, net charge | none | +0.10 … +1.00 |
+
+Fresh regressions outside their regime band are not persisted. Idle vs sailing is classified by a ~5-min EMA of |sail current| (threshold 0.05 A).
+
+**Transition hygiene**: regression buffers are **cleared on AC plug-in/plug-out and idle↔sailing transitions**, so every regression window covers a single regime. This eliminates the IR-step artifact at plug-in (instant voltage jump from charge current × internal resistance) that previously produced bogus positive "charging" slopes.
+
+**Conservative on-water floor**: when `discharging` + `sailing`, TTE never assumes a drain gentler than `SAILING_TTE_FLOOR_SOC_PCT_PER_H = 30 %/h` (≈ -0.5 V/h). Idle estimates use measured slopes with **no floor**, so lab TTE is honest (e.g. ~9 h at 70% SOC idle instead of a pessimistic 1.9 h).
 
 **Configuration**:
-- `battery_lifetime_sample_window = 360` - Number of samples for regression (5s interval → 30 min window)
-- `battery_lifetime_min_samples = 15` - Minimum samples for slope (~75s); reduces quantization noise
-- `MAX_DISCHARGING_SLOPE_VPH = 2.0` - Discharge slope steeper than this is rejected (ADC quantization ~2.5mV/step, 5s → ~1.8 V/h per step)
-- `MIN_DISCHARGING_SLOPE_VPH = 0.05` - Discharge gentler than -0.05 V/h is not "meaningful"
-- `BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2V` - Target voltage for "full"
+- `BATTERY_LIFETIME_SAMPLE_WINDOW = 180` - Samples for regression (5s interval → 15 min window)
+- `BATTERY_LIFETIME_MIN_SAMPLES = 15` - Minimum samples for slope (~75s); reduces quantization noise
+- `PLUGGED_CHARGE_MIN_SLOPE_VPH = 0.05` - Sustained trend required to classify true net charging
+- `SAILING_TTE_FLOOR_SOC_PCT_PER_H = 30.0` - On-water conservative TTE floor (sailing only)
+- `BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2V` - TTF target (≈91% SOC)
+- TTE target: `BATTERY_CRITICAL_THRESHOLD_V = 7.2V` (≈2% SOC), or `STORAGE_VOLTAGE_V = 7.6V` (≈38% SOC) during storage rundown
 
 **Observed battery (Absima Greenhorn Line Vol2)**  
-Fresh 6000 mAh 2S LiPo. Storage rundown (8.3 V → 7.6 V) over ~11 h yields discharge slope ~-0.063 to -0.067 V/h by eye; regression from CSV in same ballpark. Measured slope can run ~20–25% higher over short windows (e.g. ~-0.08 V/h). Slope thresholds and 30 min moving window are tuned for this pack.
+Fresh 6000 mAh 2S LiPo. Storage rundown (8.3 V → 7.6 V) over ~11 h yields discharge slope ~-0.063 to -0.067 V/h by eye; regression from CSV in same ballpark. Measured slope can run ~20–25% higher over short windows (e.g. ~-0.08 V/h). Slope thresholds and 15 min moving window are tuned for this pack.
+
+**Discharge rate: idle vs sailing vs plugged-in (Jun 2026 field data)**  
+Persistent `battery-monitor-*.csv` files are pruned after 2 days; older sessions must be recovered from ROS bags in `bags/`.
+
+| Condition | Source | Discharge slope |
+|-----------|--------|-----------------|
+| Idle on desk (nodes running) | CSV Jun 9 | ~-0.12 V/h (-7.5 %SOC/h) |
+| Idle, charger plugged in | CSV Jun 9-10 plot | slow net drain (charger faulted/insufficient) |
+| Storage rundown (light load) | README baseline | ~-0.06 V/h |
+| Active sailing | `argo_20260507_144034` bag (31 min) | ~-0.25 V/h (~-20 %SOC/h) |
+| Active sailing | `argo_20260602_153051` bag (5 min) | ~-0.53 V/h (short window; noisy) |
+
+Sailing draws roughly **2–4×** faster than idle. Key insight from the Jun 9-10 plot: **even with the charger plugged in, supply can be insufficient to run Argo at idle** - the battery keeps discharging, just more slowly. That is why "AC present" is never treated as "battery charging"; only a sustained positive voltage trend earns the `plugged_charge` state and a TTF estimate.
 
 ### Charging Status Detection
 
@@ -417,62 +433,38 @@ pip3 install pandas matplotlib
 
 ### Battery Slope Estimation
 
-```1151:1251:nodes/argo_battery_water.py
-    def _estimate_battery_lifetime(self, voltage: float, charging: bool) -> Optional[float]:
-        """
-        Estimate time to full charge or depletion in hours.
+Power-state classification (voltage trend authoritative, GPIO is a hint):
+
+```1277:1302:nodes/argo_battery_water.py
+    def _classify_power_state(self, ac_power_present: Optional[bool]) -> str:
+        """Classify power state. The measured voltage trend is authoritative;
+        charger GPIO/I2C status is only a hint.
         
-        Args:
-            voltage: Current battery voltage
-            charging: True if charging, False if discharging
-        
-        Returns:
-            Time in hours, or None if estimation not possible
+        - AC absent (or unknown): discharging (safe assumption)
+        - AC present + charger fault blinking: plugged_drain (charger not delivering)
+        - AC present + sustained positive trend: plugged_charge
+        - AC present otherwise: plugged_drain (charger insufficient for load)
         """
-        try:
-            # Priority 1: Use persistent slopes immediately if available (no need to wait for 5 samples)
-            # This allows estimates to be provided right after startup if we have saved slopes
-            slope_v_per_s = None
-            if charging:
-                slope_v_per_s = self._charging_slope_v_per_s
-            else:
-                slope_v_per_s = self._discharging_slope_v_per_s
-            
-            # Priority 2: Try linear regression on recent samples to update persistent slopes
-            # This provides more accurate estimates when we have sufficient recent data
-            fit_result = self._linear_least_squares(self._voltage_samples)
-            
-            if fit_result is not None:
-                regression_slope_v_per_s, intercept = fit_result
-                
-                # Minimum slope thresholds to avoid saving near-zero slopes when battery is stable
-                MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -MIN_DISCHARGING_SLOPE_VPH / 3600.0  # minimum magnitude for discharge
-                
-                # Also check that battery is not already fully charged to avoid capturing voltage float near full
-                is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)  # Within 0.1V of full
-                is_near_empty = voltage <= 6.5  # Within 0.5V of empty
-                
-                # Update persistent slopes if we have good data, sufficient samples, and proper charging state
-                if (charging and 
-                    regression_slope_v_per_s > MIN_CHARGING_SLOPE_V_PER_S and  # Significant positive slope
-                    len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
-                    self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
-                    not is_fully_charged):  # Don't update slope when already fully charged
-                    self._charging_slope_v_per_s = regression_slope_v_per_s
-                    self.get_logger().debug(f"Updated charging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
-                    # Use the updated slope for this estimation
-                    slope_v_per_s = regression_slope_v_per_s
-                elif (not charging and 
-                      regression_slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and  # Significant negative slope
-                      len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
-                      self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
-                      not is_near_empty):  # Don't update slope when already near empty
-                    self._discharging_slope_v_per_s = regression_slope_v_per_s
-                    self.get_logger().debug(f"Updated discharging slope: {regression_slope_v_per_s:.6f} V/s from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
-                    # Use the updated slope for this estimation
-                    slope_v_per_s = regression_slope_v_per_s
+        if ac_power_present is not True:
+            return POWER_STATE_DISCHARGING
+        if self._charging_fault_detected:
+            return POWER_STATE_PLUGGED_DRAIN
+        if (self._latest_voltage_slope_vph is not None and
+                len(self._voltage_samples) >= self.battery_lifetime_min_samples and
+                self._latest_voltage_slope_vph >= PLUGGED_CHARGE_MIN_SLOPE_VPH):
+            return POWER_STATE_PLUGGED_CHARGE
+        return POWER_STATE_PLUGGED_DRAIN
+
+    def _regime_for_state(self, power_state: str, activity: str) -> str:
+        """Map (power state, activity) to a slope-learning regime."""
+        if power_state == POWER_STATE_PLUGGED_CHARGE:
+            return REGIME_CHARGING
+        if power_state == POWER_STATE_PLUGGED_DRAIN:
+            return REGIME_PLUGGED_NET
+        return REGIME_DISCHARGE_SAILING if activity == 'sailing' else REGIME_DISCHARGE_IDLE
 ```
+
+SOC-based lifetime estimates live in `_compute_lifetime_estimates()` (`nodes/argo_battery_water.py`): fresh in-regime regression is preferred, persisted per-regime slopes (validated against sanity bands) provide estimates right after startup or transitions, and the sailing TTE floor is applied only when discharging under sail.
 
 ### Charging Status Detection
 

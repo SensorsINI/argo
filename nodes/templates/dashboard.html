@@ -118,7 +118,7 @@
 
         <!-- GPS Status Card -->
         <div class="card">
-            <h2>GPS & Navigation</h2>
+            <h2>GPS / IMU / Wind</h2>
             <div class="status-grid">
                 <!-- Row 1: GPS Lock, Position -->
                 <div class="status-item">
@@ -146,23 +146,22 @@
                     <span class="label">Speed / COG:</span>
                     <span class="value" id="gps-speed-course">-.-- kts @ ---°</span>
                 </div>
-                <!-- Row 3: IMU heading, IMU Status, Wind -->
-                <div class="status-item">
-                    <span class="label">IMU heading:</span>
-                    <span class="value" id="compass-heading">--- °</span>
+            </div>
+            <div class="sensor-status-row">
+                <div class="status-item status-item-stacked">
+                    <span class="label">IMU</span>
+                    <span class="value" id="imu-health">❓ UNKNOWN</span>
+                    <span class="value value-detail" id="imu-pose">---° · tilt -- · roll --</span>
                 </div>
-                <div class="status-item">
-                    <span class="label">IMU Status:</span>
-                    <span class="value" id="imu-status">❓ UNKNOWN</span>
-                </div>
-                <div class="status-item">
-                    <span class="label">Wind from:</span>
-                    <span class="value" id="wind-status">-.-- m/s @ ---°</span>
+                <div class="status-item status-item-stacked">
+                    <span class="label">Wind from</span>
+                    <span class="value" id="wind-health">❓ UNKNOWN</span>
+                    <span class="value value-detail" id="wind-reading">-.-- m/s @ ---°</span>
                 </div>
             </div>
             <p class="nav-angle-legend">
                 <strong>Angle conventions</strong> (true compass, top-down): 0° = North, 90° = East, increasing clockwise.<br>
-                IMU heading &amp; GPS COG: direction the bow moves or points.<br>
+                IMU heading &amp; GPS COG: direction the bow moves or points. Tilt &amp; roll: degrees from upright.<br>
                 Wind sensor: relative to bow (0° = from ahead, CW). Map green arrow: absolute flow (N-up), fused with IMU heading.
             </p>
         </div>
@@ -466,6 +465,62 @@
             controller_type: null
         };
 
+        const SENSOR_STALE_SEC = 5.0;
+
+        function formatSignedDeg(value) {
+            const n = Number(value);
+            if (Number.isNaN(n)) return '--';
+            const sign = n >= 0 ? '+' : '';
+            return `${sign}${n.toFixed(1)}°`;
+        }
+
+        function formatImuHealthIndicator(data) {
+            const healthStale = data.imu_health_age != null && data.imu_health_age > SENSOR_STALE_SEC;
+            const poseStale = data.imu_pose_age != null && data.imu_pose_age > SENSOR_STALE_SEC;
+            if (healthStale || poseStale) return '🟡 STALE';
+            if (data.imu_healthy === true) return '🟢 HEALTHY';
+            if (data.imu_healthy === false) return '🔴 UNHEALTHY';
+            return '❓ UNKNOWN';
+        }
+
+        function formatAnemHealthIndicator(data) {
+            if (data.anem_healthy === true) return '🟢 HEALTHY';
+            if (data.anem_healthy === false) return '🔴 UNHEALTHY';
+            return '❓ UNKNOWN';
+        }
+
+        function formatImuPoseText(data) {
+            const hdg = data.compass_heading != null ? `${Math.round(data.compass_heading)}°` : '---°';
+            const tilt = data.imu_tilt_deg != null ? `tilt ${formatSignedDeg(data.imu_tilt_deg)}` : 'tilt --';
+            const roll = data.imu_roll_deg != null ? `roll ${formatSignedDeg(data.imu_roll_deg)}` : 'roll --';
+            return `${hdg} · ${tilt} · ${roll}`;
+        }
+
+        function updateImuPanel(data) {
+            if (!data) return;
+            const healthEl = document.getElementById('imu-health');
+            const poseEl = document.getElementById('imu-pose');
+            if (healthEl) healthEl.textContent = formatImuHealthIndicator(data);
+            if (poseEl) poseEl.textContent = formatImuPoseText(data);
+        }
+
+        function updateWindPanel(data) {
+            if (!data) return;
+            const healthEl = document.getElementById('wind-health');
+            const readingEl = document.getElementById('wind-reading');
+            let windText;
+            if (data.wind_speed != null && data.wind_angle != null) {
+                windText = `${data.wind_speed.toFixed(2)} m/s, ${Math.round(data.wind_angle)}° rel`;
+                if (data.wind_from_compass != null) {
+                    windText += ` (${Math.round(data.wind_from_compass)}° from N)`;
+                }
+            } else {
+                windText = '-.-- m/s @ ---°';
+            }
+            if (healthEl) healthEl.textContent = formatAnemHealthIndicator(data);
+            if (readingEl) readingEl.textContent = windText;
+        }
+
         // Format elapsed time for display
         function formatElapsedTime(seconds) {
             if (seconds < 60) {
@@ -580,18 +635,19 @@
         // Live compass/wind/map (fast poll); full /api/status still runs every 2s for the rest
         function updateLiveSensorElements(data) {
             if (!data) return;
-            const compassEl = document.getElementById('compass-heading');
-            if (compassEl) {
-                compassEl.textContent =
-                    data.compass_heading != null ? `${Math.round(data.compass_heading)}°` : '--- °';
-            }
-            if (data.wind_speed != null && data.wind_angle != null) {
-                let windText = `${data.wind_speed.toFixed(2)} m/s, ${Math.round(data.wind_angle)}° rel`;
-                if (data.wind_from_compass != null) {
-                    windText += ` (${Math.round(data.wind_from_compass)}° from N)`;
-                }
-                document.getElementById('wind-status').textContent = windText;
-            }
+            if (!statusData) statusData = {};
+            if (data.compass_heading !== undefined) statusData.compass_heading = data.compass_heading;
+            if (data.imu_tilt_deg !== undefined) statusData.imu_tilt_deg = data.imu_tilt_deg;
+            if (data.imu_roll_deg !== undefined) statusData.imu_roll_deg = data.imu_roll_deg;
+            if (data.imu_healthy !== undefined) statusData.imu_healthy = data.imu_healthy;
+            if (data.imu_health_age !== undefined) statusData.imu_health_age = data.imu_health_age;
+            if (data.imu_pose_age !== undefined) statusData.imu_pose_age = data.imu_pose_age;
+            if (data.anem_healthy !== undefined) statusData.anem_healthy = data.anem_healthy;
+            if (data.wind_speed !== undefined) statusData.wind_speed = data.wind_speed;
+            if (data.wind_angle !== undefined) statusData.wind_angle = data.wind_angle;
+            if (data.wind_from_compass !== undefined) statusData.wind_from_compass = data.wind_from_compass;
+            updateImuPanel(statusData);
+            updateWindPanel(statusData);
             const mapPayload = statusData ? { ...statusData, ...data } : data;
             if (window.ArgoMapView) {
                 ArgoMapView.updateFromStatus(mapPayload);
@@ -715,10 +771,9 @@
         function applyCompassHeading(heading) {
             if (heading == null || Number.isNaN(Number(heading))) return;
             const h = Number(heading);
-            const el = document.getElementById('compass-heading');
-            if (el) el.textContent = `${Math.round(h)}°`;
             if (!statusData) statusData = {};
             statusData.compass_heading = h;
+            updateImuPanel(statusData);
             if (window.ArgoMapView) {
                 ArgoMapView.updateFromStatus(statusData);
             }
@@ -1244,21 +1299,8 @@
                 document.getElementById('gps-speed-course').style.color = '';
             }
             
-            // IMU Bearing (Heading)
-            document.getElementById('compass-heading').textContent = 
-                data.compass_heading ? `${Math.round(data.compass_heading)}°` : '--- °';
-
-            // IMU health status (explicitly show IMU failures even when system is otherwise healthy)
-            let imuStatusText = '❓ UNKNOWN';
-            if (data.imu_healthy === true) {
-                imuStatusText = '🟢 HEALTHY';
-            } else if (data.imu_healthy === false) {
-                imuStatusText = '🔴 UNHEALTHY';
-            }
-            if (data.imu_health_age !== null && data.imu_health_age !== undefined && data.imu_health_age > 5.0) {
-                imuStatusText = '🔴 STALE';
-            }
-            document.getElementById('imu-status').textContent = imuStatusText;
+            // IMU: health + heading + tilt + roll
+            updateImuPanel(data);
 
             const imuHint = document.getElementById('imu-tools-hint');
             if (imuHint) {
@@ -1274,16 +1316,8 @@
                 updateImuToolsFromStatus(data);
             }
             
-            // Wind: sensor relative; absolute from when compass + anem are both available
-            if (data.wind_speed !== null && data.wind_angle !== null) {
-                let windText = `${data.wind_speed.toFixed(2)} m/s, ${Math.round(data.wind_angle)}° rel`;
-                if (data.wind_from_compass != null) {
-                    windText += ` (${Math.round(data.wind_from_compass)}° from N)`;
-                }
-                document.getElementById('wind-status').textContent = windText;
-            } else {
-                document.getElementById('wind-status').textContent = '-.-- m/s @ ---°';
-            }
+            // Wind: health indicator + sensor relative; absolute when compass + anem are both available
+            updateWindPanel(data);
             
             // Home position
             if (data.distance_to_home !== null) {

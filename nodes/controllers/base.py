@@ -26,6 +26,25 @@ def signed_angle_difference_degrees(angle1_deg: float, angle2_deg: float) -> flo
     return (diff_deg + 180.0) % 360.0 - 180.0
 
 
+# Max normalized sail command from wind trim at close-hauled (-) and broad reach (+).
+SAIL_WIND_EXTREME_LIMIT = 0.7
+
+
+def relative_wind_angle_to_sail_cmd(wind_angle_deg: float) -> float:
+    """
+    Map relative wind angle to normalized sail command (-1 in, +1 out).
+
+    wind_angle_deg: degrees CW from bow, where wind comes FROM (anem convention).
+    Folds port-side angles (180-360) so beam reach on either tack maps to neutral sail.
+    Close-hauled and broad reach are capped at ±SAIL_WIND_EXTREME_LIMIT (default 0.7).
+    """
+    angle_from_bow = float(wind_angle_deg) % 360.0
+    if angle_from_bow > 180.0:
+        angle_from_bow = 360.0 - angle_from_bow
+    sail_cmd = (angle_from_bow - 90.0) / 90.0 * SAIL_WIND_EXTREME_LIMIT
+    return max(-SAIL_WIND_EXTREME_LIMIT, min(SAIL_WIND_EXTREME_LIMIT, sail_cmd))
+
+
 @dataclass
 class BoatState:
     """Complete state representation of the boat from all sensors."""

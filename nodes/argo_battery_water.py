@@ -121,13 +121,55 @@ BATTERY_FULLY_CHARGED_THRESHOLD_V = 8.2  # V, fully charged, by observation with
 # Battery lifetime estimation configuration
 # Quantization: 12-bit ADC, Vref=4.096V, 27k/18k divider (2.5x) -> ~2.5mV per count at battery.
 # Sampling every 5s; a single step over 5s gives ~1.8 V/h apparent slope. Use more samples and
-# cap discharge slope magnitude to avoid noise-dominated estimates.
+# regime sanity bands to avoid noise-dominated estimates.
 BATTERY_LIFETIME_SAMPLE_WINDOW = 180  # Samples for linear regression (5s interval -> 15 min window)
 BATTERY_LIFETIME_MIN_SAMPLES = 15   # Minimum samples for slope (75s window); reduces quantization noise
-MAX_DISCHARGING_SLOPE_VPH = 2.0     # V/h; steeper magnitude is rejected (likely quantization/noise)
-MIN_DISCHARGING_SLOPE_VPH = 0.05    # V/h; discharge gentler than this is not "meaningful"
-MIN_DISCHARGING_SLOPE_LOW_V_VPH = 0.10  # V/h when V <= BATTERY_LOW_THRESHOLD_V (flat LiPo tail / ADC noise)
-BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for charge/discharge slopes
+BATTERY_SLOPES_FILE = "battery_slopes.json"  # Persistent storage for per-regime slopes (schema 2)
+
+# Power-state model (voltage trend is authoritative; charger GPIO/I2C is only a hint):
+#   discharging    - AC absent: battery powers everything
+#   plugged_drain  - AC present but net battery drain (charger insufficient or faulted)
+#   plugged_charge - AC present with sustained positive voltage trend (true net charging)
+POWER_STATE_DISCHARGING = 'discharging'
+POWER_STATE_PLUGGED_DRAIN = 'plugged_drain'
+POWER_STATE_PLUGGED_CHARGE = 'plugged_charge'
+
+# Slope-learning regimes. Discharging splits into idle/sailing by sail-winch activity.
+REGIME_DISCHARGE_IDLE = 'discharge_idle'
+REGIME_DISCHARGE_SAILING = 'discharge_sailing'
+REGIME_PLUGGED_NET = 'plugged_net'
+REGIME_CHARGING = 'charging'
+
+# Default slopes from field data (Jun 2026, see docs/README-battery-power.md):
+# idle desk ~-0.12 V/h (-7.5 %SOC/h), sailing bags ~-0.25 V/h (-15 %SOC/h),
+# plugged-in idle: slow net drain observed with faulted/insufficient charger.
+DEFAULT_REGIME_SLOPES = {
+    REGIME_DISCHARGE_IDLE:    {'vph': -0.12, 'soc_pct_per_h': -7.5},
+    REGIME_DISCHARGE_SAILING: {'vph': -0.25, 'soc_pct_per_h': -15.0},
+    REGIME_PLUGGED_NET:       {'vph': -0.04, 'soc_pct_per_h': -2.5},
+    REGIME_CHARGING:          {'vph': None,  'soc_pct_per_h': None},
+}
+
+# Per-regime sanity bands (V/h); fresh regression outside its band is not persisted
+REGIME_SLOPE_BANDS_VPH = {
+    REGIME_DISCHARGE_IDLE:    (-0.30, -0.05),
+    REGIME_DISCHARGE_SAILING: (-1.00, -0.10),
+    REGIME_PLUGGED_NET:       (-0.30,  0.30),
+    REGIME_CHARGING:          ( 0.10,  1.00),
+}
+
+# Idle vs sailing classification: slow EMA of |sail current| above threshold -> sailing
+SAILING_SAIL_CURRENT_THRESHOLD_A = 0.05
+SAIL_ACTIVITY_EMA_TAU_S = 300.0  # ~5 min time constant
+
+# AC present is classified plugged_charge only with a sustained positive trend
+PLUGGED_CHARGE_MIN_SLOPE_VPH = 0.05
+
+# Conservative on-water TTE floor (SOC space). ~-0.5 V/h equivalent at mid-pack.
+# Applied ONLY when discharging AND sailing; idle estimates use measured slopes.
+SAILING_TTE_FLOOR_SOC_PCT_PER_H = 30.0
+# Fresh SOC slope gentler than this is treated as "flat" -> fall back to persisted regime slope
+MIN_MEANINGFUL_SOC_SLOPE_PCT_PER_H = 1.0
 # Storage rundown: flag file set by astore; discharge to 7.6V then shut down (cleared on reboot)
 STORAGE_RUNDOWN_FLAG_FILE = '/tmp/argo_battery_storage_rundown'
 STORAGE_VOLTAGE_V = 7.6  # Target voltage for storage; time-to-empty uses this when storage mode active
@@ -243,6 +285,8 @@ class BatteryWaterNode(ArgoBaseNode):
         self._charging_fault_frequency = None  # Calculated frequency if fault detected
         self._charging_fault_log_interval = 30.0  # Log fault status every 30 seconds
         self._last_charging_fault_log_time = 0.0
+        self._gpio_ac_power_raw_prev = None  # Track AC transitions for fault-buffer reset
+        self._charging_fault_stale_edge_s = 3.0  # No edges this long => pin stable, not fault blinking
         
         # AC power plug-in/plug-out tracking for MP2672 CHG timer monitoring
         # Track when AC power is plugged in to monitor 20-hour safety timer
@@ -338,12 +382,24 @@ class BatteryWaterNode(ArgoBaseNode):
         self.battery_lifetime_min_samples = int(
             self.declare_parameter('battery_lifetime_min_samples', BATTERY_LIFETIME_MIN_SAMPLES).value)
         
-        # Voltage sample history (timestamp, voltage) for lifetime estimation
+        # Sample history (timestamp, value) for lifetime estimation.
+        # Buffers are cleared on AC plug/unplug and idle<->sailing transitions so each
+        # regression window covers a single power regime (avoids IR-step artifacts).
         self._voltage_samples = deque(maxlen=self.battery_lifetime_sample_window)
+        self._soc_samples = deque(maxlen=self.battery_lifetime_sample_window)
         
-        # Persistent charging/discharging slopes (V/s) for early estimates
-        self._charging_slope_v_per_s = None  # V/s when charging
-        self._discharging_slope_v_per_s = None  # V/s when discharging
+        # Power-state / activity classification state
+        self._latest_power_state = None    # POWER_STATE_* string
+        self._prev_power_state = None
+        self._latest_activity_state = None  # 'idle' | 'sailing'
+        self._latest_soc_slope_pct_per_h = None  # fresh SOC regression over current buffer
+        self._sail_current_ema = None      # slow EMA of |sail current| for activity classification
+        self._sail_ema_last_time = None
+        
+        # Persistent per-regime slopes for early estimates (loaded below)
+        self._regime_slopes = {r: dict(v) for r, v in DEFAULT_REGIME_SLOPES.items()}
+        self._slopes_dirty = False
+        self._last_slope_save_time = 0.0
         self._slopes_file_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), BATTERY_SLOPES_FILE)
         self._load_battery_slopes()
@@ -1015,250 +1071,148 @@ class BatteryWaterNode(ArgoBaseNode):
             return response
     
     def _load_battery_slopes(self):
-        """Load persistent battery charging/discharging slopes and AC power plug-in time from file"""
+        """Load persistent per-regime battery slopes and AC power plug-in time from file.
+        
+        Supports legacy schema (charging_slope_v_per_s / discharging_slope_v_per_s) by
+        mapping it onto the regime store. Values outside their regime sanity band are
+        ignored in favor of defaults.
+        """
         try:
-            if os.path.exists(self._slopes_file_path):
-                with open(self._slopes_file_path, 'r') as f:
-                    slopes_data = json.load(f)
-                    self._charging_slope_v_per_s = slopes_data.get('charging_slope_v_per_s')
-                    self._discharging_slope_v_per_s = slopes_data.get('discharging_slope_v_per_s')
-                    
-                    # Load AC power plug-in time (for persistence across reboots)
-                    ac_plug_in_iso = slopes_data.get('ac_power_plug_in_time')
-                    if ac_plug_in_iso:
-                        try:
-                            from datetime import datetime
-                            plug_in_dt = datetime.fromisoformat(ac_plug_in_iso)
-                            # Convert to monotonic time reference (approximate - use current time as reference)
-                            # This is an approximation since we can't convert wall clock to monotonic directly
-                            # We'll use the stored time to calculate elapsed time if AC is still present
-                            self._ac_power_plug_in_time_persistent = plug_in_dt.timestamp()
-                            self.get_logger().info(f"Loaded AC power plug-in time: {ac_plug_in_iso}")
-                        except Exception as e:
-                            self.get_logger().warning(f"Failed to parse AC power plug-in time: {e}")
-                    
-                    self.get_logger().info(
-                        f"Loaded battery slopes: charging={self._charging_slope_v_per_s:.6f} V/s, "
-                        f"discharging={self._discharging_slope_v_per_s:.6f} V/s" if self._charging_slope_v_per_s and self._discharging_slope_v_per_s else
-                        "Loaded partial battery slopes from persistent storage"
-                    )
+            if not os.path.exists(self._slopes_file_path):
+                return
+            with open(self._slopes_file_path, 'r') as f:
+                slopes_data = json.load(f)
+            
+            def accept(regime, vph, soc_pct_per_h=None):
+                lo, hi = REGIME_SLOPE_BANDS_VPH[regime]
+                if vph is not None and lo <= vph <= hi:
+                    self._regime_slopes[regime]['vph'] = float(vph)
+                    if soc_pct_per_h is not None:
+                        self._regime_slopes[regime]['soc_pct_per_h'] = float(soc_pct_per_h)
+            
+            regimes = slopes_data.get('regimes')
+            if isinstance(regimes, dict):
+                for regime, entry in regimes.items():
+                    if regime in self._regime_slopes and isinstance(entry, dict):
+                        accept(regime, entry.get('vph'), entry.get('soc_pct_per_h'))
+            else:
+                # Legacy schema: map old single charge/discharge slopes (V/s)
+                chg = slopes_data.get('charging_slope_v_per_s')
+                dch = slopes_data.get('discharging_slope_v_per_s')
+                if chg is not None:
+                    accept(REGIME_CHARGING, chg * 3600.0)
+                if dch is not None:
+                    accept(REGIME_DISCHARGE_IDLE, dch * 3600.0)
+                self.get_logger().info("Migrated legacy battery slopes file to regime schema")
+            
+            # Load AC power plug-in time (for CHG timer persistence across reboots)
+            ac_plug_in_iso = slopes_data.get('ac_power_plug_in_time')
+            if ac_plug_in_iso:
+                try:
+                    plug_in_dt = datetime.fromisoformat(ac_plug_in_iso)
+                    self._ac_power_plug_in_time_persistent = plug_in_dt.timestamp()
+                    self.get_logger().info(f"Loaded AC power plug-in time: {ac_plug_in_iso}")
+                except Exception as e:
+                    self.get_logger().warning(f"Failed to parse AC power plug-in time: {e}")
+            
+            self.get_logger().info(
+                "Loaded battery regime slopes: " + self._format_regime_slopes())
         except Exception as e:
             self.get_logger().warning(f"Failed to load battery slopes: {e}")
     
+    def _format_regime_slopes(self) -> str:
+        """Human-readable one-line summary of regime slopes in V/h."""
+        parts = []
+        for regime, label in ((REGIME_DISCHARGE_IDLE, 'idle'),
+                              (REGIME_DISCHARGE_SAILING, 'sailing'),
+                              (REGIME_PLUGGED_NET, 'plugged'),
+                              (REGIME_CHARGING, 'charging')):
+            vph = self._regime_slopes[regime].get('vph')
+            soc = self._regime_slopes[regime].get('soc_pct_per_h')
+            if vph is not None:
+                soc_str = f"/{soc:+.1f}%SOC/h" if soc is not None else ""
+                parts.append(f"{label}={vph:+.3f}V/h{soc_str}")
+            else:
+                parts.append(f"{label}=n/a")
+        return ", ".join(parts)
+    
     def _save_battery_slopes(self):
-        """Save current battery charging/discharging slopes to persistent storage
-        Only writes if there's an actual change in slope values or if this is the first time."""
+        """Persist per-regime slopes and AC power plug-in time (schema 2).
+        
+        Writes only when a regime slope changed (_slopes_dirty), the AC plug-in
+        time changed (required for MP2672 CHG timer tracking across reboots), or
+        the file doesn't exist / uses the legacy schema.
+        """
         try:
-            # Check if slopes file already exists
-            file_exists = os.path.exists(self._slopes_file_path)
-            
-            # Load existing slopes and AC power plug-in time to preserve valid data
-            existing_charging_slope = None
-            existing_discharging_slope = None
-            existing_ac_plug_in_time = None
-            if file_exists:
+            existing = {}
+            if os.path.exists(self._slopes_file_path):
                 try:
                     with open(self._slopes_file_path, 'r') as f:
-                        existing_data = json.load(f)
-                        existing_charging_slope = existing_data.get('charging_slope_v_per_s')
-                        existing_discharging_slope = existing_data.get('discharging_slope_v_per_s')
-                        # Load existing AC power plug-in time for comparison
-                        existing_ac_plug_in_iso = existing_data.get('ac_power_plug_in_time')
-                        if existing_ac_plug_in_iso:
-                            try:
-                                existing_ac_plug_in_time = datetime.fromisoformat(existing_ac_plug_in_iso).timestamp()
-                            except Exception:
-                                pass
-                except Exception as e:
-                    self.get_logger().warning(f"Failed to load existing slopes: {e}")
+                        existing = json.load(f)
+                except Exception:
+                    existing = {}
             
-            # Check if AC power plug-in time has changed (always save if it has, regardless of slopes)
-            ac_plug_in_time_changed = False
-            if self._ac_power_plug_in_time_persistent is None:
-                # AC power is not present - check if it was present before
-                if existing_ac_plug_in_time is not None:
-                    ac_plug_in_time_changed = True
-            else:
-                # AC power is present - check if plug-in time is different
-                if existing_ac_plug_in_time is None:
-                    ac_plug_in_time_changed = True
-                elif abs(self._ac_power_plug_in_time_persistent - existing_ac_plug_in_time) > 1.0:  # More than 1 second difference
-                    ac_plug_in_time_changed = True
+            ac_plug_in_iso = None
+            if self._ac_power_plug_in_time_persistent is not None:
+                try:
+                    ac_plug_in_iso = datetime.fromtimestamp(
+                        self._ac_power_plug_in_time_persistent).isoformat()
+                except Exception:
+                    pass
+            ac_changed = (ac_plug_in_iso or None) != (existing.get('ac_power_plug_in_time') or None)
+            needs_migration = existing.get('schema') != 2
             
-            # Only save if file doesn't exist OR we have at least minimum samples OR AC power plug-in time changed
-            # AC power plug-in time changes must always be saved for CHG timer tracking
-            should_save = not file_exists or len(self._voltage_samples) >= self.battery_lifetime_min_samples or ac_plug_in_time_changed
-            
-            if not should_save:
-                self.get_logger().info(f"Skipping slope save - file exists and insufficient samples (< {self.battery_lifetime_min_samples})")
+            if not self._slopes_dirty and not ac_changed and not needs_migration:
                 return
             
-            # Validate that slopes are meaningful (not None, not zero, within reasonable range)
-            MIN_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h minimum for charging
-            MAX_DISCHARGING_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0
-            has_meaningful_charging = (self._charging_slope_v_per_s is not None and 
-                                      self._charging_slope_v_per_s > MIN_SLOPE_V_PER_S and 
-                                      abs(self._charging_slope_v_per_s) < 1.0)
-            has_meaningful_discharging = (
-                self._discharging_slope_v_per_s is not None and
-                self._discharge_slope_is_meaningful(
-                    self._discharging_slope_v_per_s,
-                    self._latest_battery_voltage if not math.isnan(self._latest_battery_voltage) else BATTERY_LOW_THRESHOLD_V) and
-                abs(self._discharging_slope_v_per_s) < 1.0)
+            json_data = {
+                "schema": 2,
+                "regimes": {r: dict(e) for r, e in self._regime_slopes.items()},
+                "timestamp": datetime.now().isoformat(),
+                "sample_count": len(self._voltage_samples),
+            }
+            if ac_plug_in_iso:
+                # Top-level key consumed by power_control/argo_power_control.py
+                json_data["ac_power_plug_in_time"] = ac_plug_in_iso
             
-            # Additional validation: slopes should only be saved if they represent
-            # proper charging/discharging periods (not mixed or uncertain states)
-            valid_charging_slope = False
-            valid_discharging_slope = False
+            with open(self._slopes_file_path, 'w') as f:
+                json.dump(json_data, f, indent=2)
             
-            if has_meaningful_charging:
-                # Only save charging slope if it's positive (voltage increasing)
-                valid_charging_slope = self._charging_slope_v_per_s > 0
-            
-            if has_meaningful_discharging:
-                # Only save discharging slope if it's negative (voltage decreasing)
-                valid_discharging_slope = self._discharging_slope_v_per_s < 0
-            
-            # Determine final slopes to save (preserve existing valid slopes if new ones aren't valid)
-            final_charging_slope = self._charging_slope_v_per_s if valid_charging_slope else existing_charging_slope
-            final_discharging_slope = self._discharging_slope_v_per_s if valid_discharging_slope else existing_discharging_slope
-            
-            # Only proceed if we have at least one valid slope (new or existing) OR AC power plug-in time changed
-            # AC power plug-in time changes must always be saved for CHG timer tracking
-            if final_charging_slope is None and final_discharging_slope is None and not ac_plug_in_time_changed:
-                self.get_logger().info("No valid battery slopes to save (insufficient data or mixed charging states)")
-                return
-            
-            # Check if slopes have actually changed (using floating-point comparison with tolerance)
-            # Tolerance: 1% relative change or 1e-6 absolute change (whichever is larger)
-            SLOPE_CHANGE_TOLERANCE = 1e-6  # Absolute tolerance for very small slopes
-            SLOPE_CHANGE_RELATIVE = 0.01    # 1% relative change threshold
-            
-            def slopes_equal(new_val, old_val):
-                """Check if two slope values are effectively equal"""
-                if new_val is None and old_val is None:
-                    return True
-                if new_val is None or old_val is None:
-                    return False
-                # Use relative comparison for larger values, absolute for very small values
-                abs_diff = abs(new_val - old_val)
-                if abs(new_val) < 1e-5:
-                    return abs_diff < SLOPE_CHANGE_TOLERANCE
-                else:
-                    return abs_diff < max(SLOPE_CHANGE_TOLERANCE, abs(new_val) * SLOPE_CHANGE_RELATIVE)
-            
-            # Check if either slope has changed
-            charging_changed = not slopes_equal(final_charging_slope, existing_charging_slope)
-            discharging_changed = not slopes_equal(final_discharging_slope, existing_discharging_slope)
-            
-            # Only write file if there's an actual change OR if this is the first time (file doesn't exist)
-            # OR if AC power plug-in time changed (must always save for CHG timer tracking)
-            if not file_exists or charging_changed or discharging_changed or ac_plug_in_time_changed:
-                # Format slope values to 3 significant digits in scientific notation
-                def format_slope_3_sig_digits(value):
-                    """Format a slope value to exactly 3 significant digits in scientific notation"""
-                    if value is None:
-                        return None
-                    try:
-                        num_val = float(value)
-                        if num_val == 0.0:
-                            return '0.0'
-                        
-                        # Use Python's built-in scientific notation with 2 decimal places (3 sig digits: X.XX)
-                        formatted = f'{num_val:.2e}'
-                        
-                        # Remove leading zero from exponent (e.g., e-05 -> e-5, e+03 -> e+3)
-                        if 'e' in formatted:
-                            base, exp_part = formatted.split('e')
-                            # Parse exponent and reformat without leading zero
-                            exp_val = int(exp_part)
-                            exp_str = str(exp_val) if exp_val >= 0 else f'-{abs(exp_val)}'
-                            return f'{base}e{exp_str}'
-                        
-                        return formatted
-                    except (ValueError, AttributeError, OverflowError, ZeroDivisionError):
-                        return str(value) if value is not None else None
-                
-                # Format slope values to strings with 3 significant digits
-                charging_str = format_slope_3_sig_digits(final_charging_slope) if final_charging_slope is not None else None
-                discharging_str = format_slope_3_sig_digits(final_discharging_slope) if final_discharging_slope is not None else None
-                
-                # Build JSON data structure (use json.dump for proper formatting)
-                # Include AC power plug-in time for persistence across reboots
-                ac_plug_in_iso = None
-                if self._ac_power_plug_in_time_persistent is not None:
-                    try:
-                        ac_plug_in_iso = datetime.fromtimestamp(self._ac_power_plug_in_time_persistent).isoformat()
-                    except Exception:
-                        pass
-                
-                # Build data dictionary with formatted slope strings
-                json_data = {
-                    "charging_slope_v_per_s": float(charging_str) if charging_str is not None else None,
-                    "discharging_slope_v_per_s": float(discharging_str) if discharging_str is not None else None,
-                    "timestamp": datetime.now().isoformat(),
-                    "sample_count": len(self._voltage_samples)
-                }
-                if ac_plug_in_iso:
-                    json_data["ac_power_plug_in_time"] = ac_plug_in_iso
-                
-                # Write JSON with proper formatting using json.dump (avoids manual string building errors)
-                with open(self._slopes_file_path, 'w') as f:
-                    json.dump(json_data, f, indent=2)
-                
-                # Build descriptive log message
-                slope_info = []
-                if valid_charging_slope:
-                    slope_info.append(f"charging={self._charging_slope_v_per_s:.6f} V/s (updated)")
-                elif final_charging_slope is not None:
-                    slope_info.append(f"charging={final_charging_slope:.6f} V/s (preserved)")
-                
-                if valid_discharging_slope:
-                    slope_info.append(f"discharging={self._discharging_slope_v_per_s:.6f} V/s (updated)")
-                elif final_discharging_slope is not None:
-                    slope_info.append(f"discharging={final_discharging_slope:.6f} V/s (preserved)")
-                
-                change_info = []
-                if charging_changed:
-                    change_info.append("charging changed")
-                if discharging_changed:
-                    change_info.append("discharging changed")
-                
-                change_str = f" ({', '.join(change_info)})" if change_info else " (first write)"
-                self.get_logger().info(f"Saved battery slopes ({len(self._voltage_samples)} samples): {', '.join(slope_info)}{change_str}")
-            else:
-                # Slopes haven't changed, skip writing to avoid unnecessary timestamp updates
-                self.get_logger().debug(f"Skipping slope save - no change in slopes (charging={final_charging_slope:.6f}, discharging={final_discharging_slope:.6f})")
+            self._slopes_dirty = False
+            self._last_slope_save_time = time.monotonic()
+            self.get_logger().info(
+                f"Saved battery regime slopes ({len(self._voltage_samples)} samples): "
+                + self._format_regime_slopes())
         except Exception as e:
             self.get_logger().error(f"Failed to save battery slopes: {e}")
     
-    def _is_proper_charging_state(self, charging_status: Optional[bool], voltage_samples: deque) -> bool:
+    def _update_regime_slope(self, regime: str, vph: float, soc_pct_per_h: float):
+        """Update a persisted regime slope from a fresh in-band regression.
+        
+        Saves at most once per minute to limit flash writes (shutdown handler
+        flushes any pending change).
         """
-        Check if we're in a proper charging state for slope calculation.
-        Returns True if we have a clear charging state (charging=True) or if charging status
-        is unknown but we have sufficient samples to determine the trend.
-        """
-        if charging_status is True:
-            return True  # Definitely charging
-        
-        if charging_status is False:
-            return True  # Definitely discharging (not charging)
-        
-        # If charging status is unknown, check if we have enough samples to determine trend
-        if len(voltage_samples) >= self.battery_lifetime_min_samples * 6:  # Need more samples when status is unknown
-            return True
-        
-        return False
+        entry = self._regime_slopes[regime]
+        old_vph = entry.get('vph')
+        # Skip churn: ignore changes within 2% relative or 0.002 V/h absolute
+        if old_vph is not None and abs(vph - old_vph) <= max(0.002, abs(old_vph) * 0.02):
+            return
+        entry['vph'] = round(float(vph), 4)
+        entry['soc_pct_per_h'] = round(float(soc_pct_per_h), 3)
+        self._slopes_dirty = True
+        if time.monotonic() - self._last_slope_save_time >= 60.0:
+            self._save_battery_slopes()
     
     def _linear_least_squares(self, samples: deque) -> Optional[Tuple[float, float]]:
         """
-        Compute linear least squares fit for voltage samples.
+        Compute linear least squares fit for (timestamp, value) samples.
+        Used for both voltage (V) and SOC (%) series.
         
         Args:
-            samples: deque of (timestamp, voltage) tuples
+            samples: deque of (timestamp, value) tuples
         
         Returns:
-            Tuple of (slope, intercept) in V/s and V, or None if insufficient samples
+            Tuple of (slope, intercept) in value/s and value, or None if insufficient samples
         """
         if len(samples) < self.battery_lifetime_min_samples:
             return None
@@ -1296,132 +1250,131 @@ class BatteryWaterNode(ArgoBaseNode):
             self.get_logger().error(f"Linear least squares fit failed: {e}")
             return None
 
-    def _min_discharging_slope_vph(self, voltage: float) -> float:
-        """Minimum |discharge slope| (V/h) required for TTE and slope persistence."""
-        if voltage <= BATTERY_LOW_THRESHOLD_V:
-            return MIN_DISCHARGING_SLOPE_LOW_V_VPH
-        return MIN_DISCHARGING_SLOPE_VPH
-
     def _discharge_target_voltage_v(self) -> float:
         """Voltage target for time-to-empty (critical unless storage rundown)."""
         if os.path.exists(STORAGE_RUNDOWN_FLAG_FILE):
             return STORAGE_VOLTAGE_V
         return BATTERY_CRITICAL_THRESHOLD_V
 
-    def _discharge_slope_is_meaningful(self, slope_v_per_s: float, voltage: float) -> bool:
-        if slope_v_per_s is None or slope_v_per_s >= -1e-6:
-            return False
-        slope_vph = abs(slope_v_per_s) * 3600.0
-        if slope_vph < self._min_discharging_slope_vph(voltage):
-            return False
-        if slope_v_per_s < -MAX_DISCHARGING_SLOPE_VPH / 3600.0:
-            return False
-        return True
-    
-    def _estimate_battery_lifetime(self, voltage: float, charging: bool) -> Optional[float]:
-        """
-        Estimate time to full charge or depletion in hours.
+    def _soc_from_voltage(self, voltage: float) -> Optional[float]:
+        """Battery state-of-charge (%) from pack voltage via per-cell LiPo curve."""
+        try:
+            if voltage is None or math.isnan(voltage) or voltage <= 0:
+                return None
+            cells = max(1, int(self.batt_series_cells))
+            v_cell = voltage / float(cells)
+            base = 1.0 + (max(0.0, v_cell) / max(1e-9, self.soc_V0)) ** self.soc_A
+            soc = self.soc_S - (self.soc_S / (base ** self.soc_B))
+            return float(max(0.0, min(100.0, soc)))
+        except Exception:
+            return None
+
+    def _classify_activity(self) -> str:
+        """'sailing' when the slow EMA of |sail current| shows sustained winch activity."""
+        if (self._sail_current_ema is not None and
+                self._sail_current_ema > SAILING_SAIL_CURRENT_THRESHOLD_A):
+            return 'sailing'
+        return 'idle'
+
+    def _classify_power_state(self, ac_power_present: Optional[bool]) -> str:
+        """Classify power state. The measured voltage trend is authoritative;
+        charger GPIO/I2C status is only a hint.
         
-        Args:
-            voltage: Current battery voltage
-            charging: True if charging, False if discharging
+        - AC absent (or unknown): discharging (safe assumption)
+        - AC present + charger fault blinking: plugged_drain (charger not delivering)
+        - AC present + sustained positive trend: plugged_charge
+        - AC present otherwise: plugged_drain (charger insufficient for load)
+        """
+        if ac_power_present is not True:
+            return POWER_STATE_DISCHARGING
+        if self._charging_fault_detected:
+            return POWER_STATE_PLUGGED_DRAIN
+        if (self._latest_voltage_slope_vph is not None and
+                len(self._voltage_samples) >= self.battery_lifetime_min_samples and
+                self._latest_voltage_slope_vph >= PLUGGED_CHARGE_MIN_SLOPE_VPH):
+            return POWER_STATE_PLUGGED_CHARGE
+        return POWER_STATE_PLUGGED_DRAIN
+
+    def _regime_for_state(self, power_state: str, activity: str) -> str:
+        """Map (power state, activity) to a slope-learning regime."""
+        if power_state == POWER_STATE_PLUGGED_CHARGE:
+            return REGIME_CHARGING
+        if power_state == POWER_STATE_PLUGGED_DRAIN:
+            return REGIME_PLUGGED_NET
+        return REGIME_DISCHARGE_SAILING if activity == 'sailing' else REGIME_DISCHARGE_IDLE
+
+    def _compute_lifetime_estimates(self, voltage: float, soc: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
+        """
+        SOC-based lifetime estimates for the current power state.
+        
+        Extrapolates SOC %/h to a target SOC (linearizes the flat LiPo mid-range
+        that distorts V/h extrapolation). Fresh in-regime regression is preferred;
+        persisted regime slopes provide estimates right after startup/transitions.
         
         Returns:
-            Time in hours, or None if estimation not possible
+            (time_to_full_hours, time_to_empty_hours) - exactly one is set, or
+            (None, None) when no meaningful estimate is possible.
         """
-        # Handle NaN values (I2C failure)
-        if math.isnan(voltage):
-            return None
-        
         try:
-            slope_v_per_s = None
-            regression_slope_v_per_s = None
-            fit_result = self._linear_least_squares(self._voltage_samples)
+            if soc is None or math.isnan(voltage):
+                return None, None
             
-            if fit_result is not None:
-                regression_slope_v_per_s, intercept = fit_result
-                
-                MIN_CHARGING_SLOPE_V_PER_S = 8.33e-5  # ~0.3 V/h
-                MIN_DISCHARGING_SLOPE_V_PER_S = -self._min_discharging_slope_vph(voltage) / 3600.0
-                MAX_DISCHARGING_SLOPE_V_PER_S = -MAX_DISCHARGING_SLOPE_VPH / 3600.0
-                
-                is_fully_charged = voltage >= (BATTERY_FULLY_CHARGED_THRESHOLD_V - 0.1)
-                is_near_empty = voltage <= BATTERY_CRITICAL_THRESHOLD_V
-                
-                if (charging and 
-                    regression_slope_v_per_s > MIN_CHARGING_SLOPE_V_PER_S and
-                    len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
-                    self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
-                    not is_fully_charged):
-                    self._charging_slope_v_per_s = regression_slope_v_per_s
-                    self.get_logger().debug(
-                        f"Updated charging slope: {regression_slope_v_per_s:.6f} V/s "
-                        f"from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
-                    self._save_battery_slopes()
-                    slope_v_per_s = regression_slope_v_per_s
-                elif (not charging and 
-                      regression_slope_v_per_s < MIN_DISCHARGING_SLOPE_V_PER_S and
-                      regression_slope_v_per_s > MAX_DISCHARGING_SLOPE_V_PER_S and
-                      len(self._voltage_samples) >= self.battery_lifetime_min_samples and 
-                      self._is_proper_charging_state(self._latest_charging_status, self._voltage_samples) and
-                      not is_near_empty):
-                    self._discharging_slope_v_per_s = regression_slope_v_per_s
-                    self.get_logger().debug(
-                        f"Updated discharging slope: {regression_slope_v_per_s:.6f} V/s "
-                        f"from {len(self._voltage_samples)} samples (voltage: {voltage:.2f}V)")
-                    self._save_battery_slopes()
+            state = self._latest_power_state
+            activity = self._latest_activity_state or 'idle'
+            regime = self._regime_for_state(state, activity)
             
-            # Prefer recent regression for discharge TTE; fall back to persisted slope at startup
-            if charging:
-                if (regression_slope_v_per_s is not None and regression_slope_v_per_s > 1e-6 and
-                        len(self._voltage_samples) >= self.battery_lifetime_min_samples):
-                    slope_v_per_s = regression_slope_v_per_s
-                elif slope_v_per_s is None:
-                    slope_v_per_s = self._charging_slope_v_per_s
+            # Fresh regressions over the current (single-regime) buffer
+            v_fit = self._linear_least_squares(self._voltage_samples)
+            soc_fit = self._linear_least_squares(self._soc_samples)
+            fresh_vph = v_fit[0] * 3600.0 if v_fit is not None else None
+            fresh_soc_per_h = soc_fit[0] * 3600.0 if soc_fit is not None else None
+            self._latest_soc_slope_pct_per_h = fresh_soc_per_h
+            
+            # Learn: persist fresh slope when it falls inside its regime sanity band
+            if fresh_vph is not None and fresh_soc_per_h is not None:
+                band_lo, band_hi = REGIME_SLOPE_BANDS_VPH[regime]
+                if band_lo <= fresh_vph <= band_hi:
+                    self._update_regime_slope(regime, fresh_vph, fresh_soc_per_h)
+            
+            # Choose slope for the estimate: fresh if meaningful and correct sign,
+            # else persisted regime slope (also sign-checked)
+            want_positive = (state == POWER_STATE_PLUGGED_CHARGE)
+            slope_soc_per_h = None
+            if (fresh_soc_per_h is not None and
+                    abs(fresh_soc_per_h) >= MIN_MEANINGFUL_SOC_SLOPE_PCT_PER_H and
+                    (fresh_soc_per_h > 0) == want_positive):
+                slope_soc_per_h = fresh_soc_per_h
             else:
-                max_discharge_v_per_s = -MAX_DISCHARGING_SLOPE_VPH / 3600.0
-                if (regression_slope_v_per_s is not None and
-                        len(self._voltage_samples) >= self.battery_lifetime_min_samples and
-                        self._discharge_slope_is_meaningful(regression_slope_v_per_s, voltage)):
-                    slope_v_per_s = max(regression_slope_v_per_s, max_discharge_v_per_s)
-                elif self._discharge_slope_is_meaningful(self._discharging_slope_v_per_s, voltage):
-                    slope_v_per_s = self._discharging_slope_v_per_s
+                persisted = self._regime_slopes[regime].get('soc_pct_per_h')
+                if persisted is not None and (persisted > 0) == want_positive:
+                    slope_soc_per_h = persisted
             
-            if slope_v_per_s is None:
-                return None
+            if state == POWER_STATE_PLUGGED_CHARGE:
+                if slope_soc_per_h is None or slope_soc_per_h <= 0:
+                    return None, None
+                target_soc = self._soc_from_voltage(BATTERY_FULLY_CHARGED_THRESHOLD_V) or 91.0
+                if soc >= target_soc:
+                    return 0.0, None
+                ttf = (target_soc - soc) / slope_soc_per_h
+                return (ttf if 0 <= ttf <= 1000 else None), None
             
-            # CRITICAL: Validate slope sign matches charging state
-            # Charging requires positive slope, discharging requires negative slope
-            if charging and slope_v_per_s <= 1e-6:
-                # Charging but slope is not positive - invalid
-                return None
-            if not charging and slope_v_per_s >= -1e-6:
-                # Discharging but slope is not negative - invalid
-                return None
-            
-            # Compute time to target voltage
-            if charging:
-                # Time to BATTERY_FULLY_CHARGED_THRESHOLD_V
-                target_voltage = BATTERY_FULLY_CHARGED_THRESHOLD_V
-                if voltage >= target_voltage:
-                    return 0.0  # Already at target - check this FIRST
-                time_seconds = (target_voltage - voltage) / slope_v_per_s
-            else:
-                target_voltage = self._discharge_target_voltage_v()
-                if voltage <= target_voltage:
-                    return 0.0  # Already at or below target - check this FIRST
-                time_seconds = (target_voltage - voltage) / slope_v_per_s
-            
-            # Convert to hours and clamp to reasonable range
-            time_hours = time_seconds / 3600.0
-            if time_hours < 0 or time_hours > 1000:  # Sanity check
-                return None
-            
-            return time_hours
+            # Discharging (on battery, or plugged in but net drain)
+            eff_slope = slope_soc_per_h
+            if state == POWER_STATE_DISCHARGING and activity == 'sailing':
+                # Conservative on-water floor: never assume slower than this while sailing
+                floor = -SAILING_TTE_FLOOR_SOC_PCT_PER_H
+                eff_slope = floor if eff_slope is None else min(eff_slope, floor)
+            if eff_slope is None or eff_slope >= 0:
+                return None, None
+            target_soc = self._soc_from_voltage(self._discharge_target_voltage_v()) or 2.0
+            if soc <= target_soc:
+                return None, 0.0
+            tte = (soc - target_soc) / abs(eff_slope)
+            return None, (tte if 0 <= tte <= 1000 else None)
         
         except Exception as e:
             self.get_logger().error(f"Battery lifetime estimation failed: {e}")
-            return None
+            return None, None
 
     # ---------- I2C helpers ----------
     def _i2c_write(self, addr: int, byte_val: int) -> None:
@@ -2517,25 +2470,20 @@ class BatteryWaterNode(ArgoBaseNode):
                              self._bar(self._latest_battery_remaining_pct, 100.0))
             
             # Add lifetime estimates
-            if self._latest_battery_lifetime_hours is not None:
-                if self._latest_charging_status:
-                    lines.append(f"T2Full {self._latest_battery_lifetime_hours:7.1f}h")
-                else:
-                    lines.append(f"T2Empty {self._latest_battery_lifetime_hours:7.1f}h")
+            if self._latest_time_to_full_hours is not None:
+                lines.append(f"T2Full {self._latest_time_to_full_hours:7.1f}h")
+            elif self._latest_time_to_empty_hours is not None:
+                lines.append(f"T2Empty {self._latest_time_to_empty_hours:7.1f}h")
             else:
                 lines.append("T2Full/Empty: N/A")
             
-            # Add slope information
-            slope_info = []
-            if self._charging_slope_v_per_s is not None:
-                slope_info.append(f"Chg:{self._charging_slope_v_per_s*3600:.3f} V/h")
-            if self._discharging_slope_v_per_s is not None:
-                slope_info.append(f"Dch:{self._discharging_slope_v_per_s*3600:.3f} V/h")
-            
-            if slope_info:
-                lines.append(f"Slopes: {' '.join(slope_info)}")
-            else:
-                lines.append("Slopes: Collecting data...")
+            # Power state and per-regime slope information
+            if self._latest_power_state is not None:
+                state_line = f"Power: {self._latest_power_state}"
+                if self._latest_activity_state:
+                    state_line += f" ({self._latest_activity_state})"
+                lines.append(state_line)
+            lines.append(f"Slopes: {self._format_regime_slopes()}")
             
             # Add charging status
             if self._latest_charging_status is not None and self._latest_ac_power_present is not None:
@@ -2719,26 +2667,44 @@ class BatteryWaterNode(ArgoBaseNode):
                 
                 # Only treat blinking as charging fault when AC power is present (charger plugged in).
                 # When no charger is present, !CHARGING/STAT may toggle or float -> false positive "battery missing" fault.
-                if not ac_power_raw:
+                ac_power_changed = (
+                    self._gpio_ac_power_raw_prev is not None and
+                    ac_power_raw != self._gpio_ac_power_raw_prev
+                )
+                if ac_power_changed or not ac_power_raw:
+                    # Discard transitions from floating/unpowered STAT line or from before plug-in.
+                    self._charging_gpio_transitions.clear()
+                    self._last_charging_gpio_change_time = None
                     self._charging_fault_detected = False
                     self._charging_fault_frequency = None
                 elif len(self._charging_gpio_transitions) >= 4:
-                    # AC present: analyze transitions for fault pattern (1-2 Hz blinking)
-                    recent_periods = list(self._charging_gpio_transitions)[-8:]  # Use last 8 transitions
-                    avg_period = sum(recent_periods) / len(recent_periods)
-                    frequency = 1.0 / avg_period if avg_period > 0 else 0.0
-                    
-                    # MP2672 fault pattern: 1Hz blinking (datasheet), but we see ~2 Hz in practice
-                    if 0.8 <= frequency <= 2.5:
-                        self._charging_fault_detected = True
-                        self._charging_fault_frequency = frequency
+                    # Require recent edges: a steady STAT line must not keep a stale buffer latched.
+                    time_since_last_edge = (
+                        current_time - self._last_charging_gpio_change_time
+                        if self._last_charging_gpio_change_time is not None else float('inf')
+                    )
+                    if time_since_last_edge > self._charging_fault_stale_edge_s:
+                        self._charging_gpio_transitions.clear()
+                        self._charging_fault_detected = False
+                        self._charging_fault_frequency = None
                     else:
-                        self._charging_fault_detected = False
-                        self._charging_fault_frequency = None
+                        # AC present: analyze transitions for fault pattern (1-2 Hz edge rate)
+                        recent_periods = list(self._charging_gpio_transitions)[-8:]  # Use last 8 transitions
+                        avg_period = sum(recent_periods) / len(recent_periods)
+                        frequency = 1.0 / avg_period if avg_period > 0 else 0.0
+
+                        # MP2672 fault pattern: 1Hz blink ~= 2Hz edge rate (datasheet 1Hz full cycle)
+                        if 0.8 <= frequency <= 2.5:
+                            self._charging_fault_detected = True
+                            self._charging_fault_frequency = frequency
+                        else:
+                            self._charging_fault_detected = False
+                            self._charging_fault_frequency = None
                 else:
-                    if len(self._charging_gpio_transitions) < 2:
-                        self._charging_fault_detected = False
-                        self._charging_fault_frequency = None
+                    self._charging_fault_detected = False
+                    self._charging_fault_frequency = None
+
+                self._gpio_ac_power_raw_prev = ac_power_raw
                 
                 # Update last-seen time when charging is active
                 if charging_raw:
@@ -2825,6 +2791,16 @@ class BatteryWaterNode(ArgoBaseNode):
                 self.get_logger().info("Automatic recovery: successful reads restored, switching back to normal mode")
             
             self._latest_sail_current = sail_current
+            
+            # Slow EMA of |sail current| for idle/sailing activity classification
+            now_mono = time.monotonic()
+            if self._sail_ema_last_time is None or self._sail_current_ema is None:
+                self._sail_current_ema = abs(sail_current)
+            else:
+                dt = max(1e-3, now_mono - self._sail_ema_last_time)
+                alpha = min(1.0, dt / SAIL_ACTIVITY_EMA_TAU_S)
+                self._sail_current_ema += alpha * (abs(sail_current) - self._sail_current_ema)
+            self._sail_ema_last_time = now_mono
             
             if rclpy.ok():
                 try:
@@ -2957,17 +2933,10 @@ class BatteryWaterNode(ArgoBaseNode):
 
         # Calculate battery remaining percentage (only if we have valid voltage reading)
         battery_remaining_pct = None
-        if adc_read_successful and not math.isnan(battery_voltage) and battery_voltage > 0:
-            try:
-                cells = max(1, int(self.batt_series_cells))
-                v_cell = battery_voltage / float(cells) if cells > 0 else battery_voltage
-                base = 1.0 + (max(0.0, v_cell) / max(1e-9, self.soc_V0)) ** self.soc_A
-                soc = self.soc_S - (self.soc_S / (base ** self.soc_B))
-                battery_remaining_pct = float(max(0.0, min(100.0, soc)))
-            except Exception:
-                pass
+        if adc_read_successful:
+            battery_remaining_pct = self._soc_from_voltage(battery_voltage)
         # Use last known percentage if ADC read failed
-        elif not adc_read_successful and self._latest_battery_remaining_pct is not None:
+        elif self._latest_battery_remaining_pct is not None:
             battery_remaining_pct = self._latest_battery_remaining_pct
         self._latest_battery_remaining_pct = battery_remaining_pct
 
@@ -3109,6 +3078,27 @@ class BatteryWaterNode(ArgoBaseNode):
         # Periodically republish I2C failure state if in failure (uses existing timer)
         self._maybe_republish_i2c_failure()
 
+        # Reset regression buffers on AC presence change: the IR step at plug-in/out
+        # makes any window spanning the transition meaningless, and keeping the
+        # buffer single-regime is what makes slope learning trustworthy.
+        if (self._prev_ac_power_present is not None and ac_power_present is not None and
+                ac_power_present != self._prev_ac_power_present):
+            self._voltage_samples.clear()
+            self._soc_samples.clear()
+            self.get_logger().info(
+                f"AC power transition ({self._prev_ac_power_present} -> {ac_power_present}): "
+                f"cleared slope regression buffers")
+        
+        # Same reset on idle<->sailing transitions (different load regime)
+        activity = self._classify_activity()
+        if self._latest_activity_state is not None and activity != self._latest_activity_state:
+            self._voltage_samples.clear()
+            self._soc_samples.clear()
+            self.get_logger().info(
+                f"Activity transition ({self._latest_activity_state} -> {activity}): "
+                f"cleared slope regression buffers")
+        self._latest_activity_state = activity
+
         # Update previous values
         self._prev_battery_voltage = battery_voltage
         self._prev_saltwater_voltage = saltwater_voltage
@@ -3118,111 +3108,61 @@ class BatteryWaterNode(ArgoBaseNode):
         self._prev_charging_status = charging_status
         self._prev_ac_power_present = ac_power_present
 
-        # Add battery voltage sample for lifetime estimation
+        # Add battery voltage + SOC samples for lifetime estimation
         self._voltage_samples.append((current_time, battery_voltage))
-        
-        # Compute battery lifetime estimates
-        if charging_status is not None:
-            if charging_status:
-                # Charging: estimate time to full
-                self._latest_time_to_full_hours = self._estimate_battery_lifetime(
-                    battery_voltage, charging=True)
-                self._latest_time_to_empty_hours = None
-                self._latest_battery_lifetime_hours = self._latest_time_to_full_hours
-            else:
-                # Discharging: estimate time to empty
-                # CRITICAL: Always clear TTF when discharging to prevent stale values
-                self._latest_time_to_full_hours = None
-                self._latest_time_to_empty_hours = self._estimate_battery_lifetime(
-                    battery_voltage, charging=False)
-                self._latest_battery_lifetime_hours = self._latest_time_to_empty_hours
-            
-            # Publish battery lifetime hours topic
-            if self._latest_battery_lifetime_hours is not None and rclpy.ok():
-                try:
-                    self.pub_battery_lifetime_hours.publish(
-                        Float32(data=self._latest_battery_lifetime_hours))
-                except Exception:
-                    pass
-        else:
-            # If charging status is unknown, try to estimate based on voltage trend
-            # This helps provide estimates even when GPIO is not available
-            # Prefer TTE (time to empty) as it's safer when status is unknown
-            self._latest_time_to_full_hours = self._estimate_battery_lifetime(
-                battery_voltage, charging=True)
-            self._latest_time_to_empty_hours = self._estimate_battery_lifetime(
-                battery_voltage, charging=False)
-            
-            # When charging status is unknown, prefer TTE for safety (batteries typically discharge)
-            # Only use TTF if we have clear evidence of charging (voltage increasing)
-            if self._latest_time_to_empty_hours is not None:
-                # Prefer TTE when available (safer assumption)
-                self._latest_battery_lifetime_hours = self._latest_time_to_empty_hours
-                self._latest_time_to_full_hours = None  # Keep service/API from exposing stale TTF
-            elif self._latest_time_to_full_hours is not None:
-                # Only use TTF if TTE is not available
-                # Check voltage trend to validate: if voltage is near full (>= 8.0V), TTF might be valid
-                if battery_voltage >= 8.0:
-                    self._latest_battery_lifetime_hours = self._latest_time_to_full_hours
-                else:
-                    # Voltage is not near full, so TTF is likely incorrect - don't use it
-                    self._latest_time_to_full_hours = None
-                    self._latest_battery_lifetime_hours = None
-            else:
-                self._latest_battery_lifetime_hours = None
+        self._soc_samples.append((
+            current_time,
+            battery_remaining_pct if battery_remaining_pct is not None else float('nan')))
 
-        # Derive voltage slope (V/h) over recent samples and detect anomaly:
-        # "charging" asserted while voltage slope is significantly negative.
-        #
-        # CHARGING ANOMALY DETECTION:
-        # This detects when the charger reports "charging" status (via GPIO or I2C) but the
-        # battery voltage is actually decreasing. This indicates a fault condition where:
-        # - Charger reports charging but is not delivering power, OR
-        # - System load exceeds charger capability, OR
-        # - USB power supply is insufficient (poor connection, weak USB port), OR
-        # - Charger hardware fault (when USB present, check MP2672 fault register)
-        #
-        # When USB power is present (MP2672 accessible via I2C):
-        #   - Check mp2672_faults for specific fault conditions (Input OVP, Thermal shutdown, etc.)
-        #   - Check mp2672_status for BATTFLOAT_STAT (battery missing/balance cable fault)
-        #   - Fault register provides detailed diagnostics (REG 04H)
-        #
-        # When USB power is NOT present (normal robot operation):
-        #   - MP2672 not accessible via I2C (powered by USB)
-        #   - Charging anomaly detection via voltage slope is primary fault indicator
-        #   - GPIO status with time-window filtering is used for charging status
+        # Voltage trend over the current (single-regime) buffer
         self._latest_voltage_slope_vph = None
-        self._latest_charging_anomaly = False
-        self._latest_anomaly_code = None
-        self._latest_anomaly_reason = None
         try:
             fit = self._linear_least_squares(self._voltage_samples)
             if fit is not None:
-                slope_v_per_s, _ = fit
-                self._latest_voltage_slope_vph = slope_v_per_s * 3600.0
+                self._latest_voltage_slope_vph = fit[0] * 3600.0
         except Exception:
             self._latest_voltage_slope_vph = None
 
-        if (self._latest_charging_status is True and
+        # Classify power state (voltage trend authoritative; charger GPIO only a hint)
+        self._latest_power_state = self._classify_power_state(ac_power_present)
+        if self._latest_power_state != self._prev_power_state:
+            if self._prev_power_state is not None:
+                trend_str = (f", trend={self._latest_voltage_slope_vph:+.3f} V/h"
+                             if self._latest_voltage_slope_vph is not None else "")
+                self.get_logger().info(
+                    f"Power state: {self._prev_power_state} -> {self._latest_power_state} "
+                    f"(activity={activity}{trend_str})")
+            self._prev_power_state = self._latest_power_state
+
+        # SOC-based lifetime estimates for the current state
+        ttf, tte = self._compute_lifetime_estimates(battery_voltage, battery_remaining_pct)
+        self._latest_time_to_full_hours = ttf
+        self._latest_time_to_empty_hours = tte
+        self._latest_battery_lifetime_hours = ttf if ttf is not None else tte
+        if self._latest_battery_lifetime_hours is not None and rclpy.ok():
+            try:
+                self.pub_battery_lifetime_hours.publish(
+                    Float32(data=self._latest_battery_lifetime_hours))
+            except Exception:
+                pass
+
+        # CHARGING ANOMALY: AC present (and/or charger claims charging) but the battery
+        # is net-draining. Causes: insufficient USB supply, charger fault (check MP2672
+        # fault register / STAT blinking), or load exceeding charger capability.
+        self._latest_charging_anomaly = False
+        self._latest_anomaly_code = None
+        self._latest_anomaly_reason = None
+        if (self._latest_power_state == POWER_STATE_PLUGGED_DRAIN and
                 self._latest_voltage_slope_vph is not None and
                 len(self._voltage_samples) >= self.battery_lifetime_min_samples and
                 self._latest_voltage_slope_vph <= MIN_DISCHARGING_SLOPE_FOR_ANOMALY_VPH):
-            # Charging asserted but voltage is falling noticeably -> anomaly
-            # This indicates charger is not delivering power despite reporting charging status
             self._latest_charging_anomaly = True
             self._latest_anomaly_code = "charger_power_fault"
             self._latest_anomaly_reason = (
-                f"Charging active but voltage falling (slope {self._latest_voltage_slope_vph:.2f} V/h). "
+                f"AC power present but battery draining (trend {self._latest_voltage_slope_vph:.2f} V/h). "
                 f"Possible causes: insufficient USB power, charger fault, or excessive load. "
                 f"{'Check MP2672 fault register for details.' if self.mp2672_available else 'MP2672 not accessible (USB power not present).'}"
             )
-            # Prefer time-to-empty estimate; clear time-to-full as it's misleading
-            self._latest_time_to_full_hours = None
-            # Compute TTE if not present
-            if self._latest_time_to_empty_hours is None:
-                self._latest_time_to_empty_hours = self._estimate_battery_lifetime(
-                    battery_voltage, charging=False)
-            self._latest_battery_lifetime_hours = self._latest_time_to_empty_hours
 
         self._process_alerts(battery_voltage, saltwater_voltage, humidity)
         
@@ -3336,26 +3276,24 @@ class BatteryWaterNode(ArgoBaseNode):
             battery_pct_str = f"{battery_remaining_pct:.1f}%" if battery_remaining_pct is not None else "N/A"
             temp_humid_str = f"PCB_Temp={temperature:.2f}C, Humidity={humidity:.1f}%" if temperature is not None and humidity is not None else "PCB_Temp/Humidity unavailable"
             
-            # Determine slope information (convert to V/h for readability)
-            charging_slope_vph = self._charging_slope_v_per_s * 3600.0 if self._charging_slope_v_per_s is not None else None
-            discharging_slope_vph = self._discharging_slope_v_per_s * 3600.0 if self._discharging_slope_v_per_s is not None else None
+            # Power state + measured trend (state machine output, not GPIO claims)
+            state = self._latest_power_state or 'unknown'
+            power_str = f", Power={state}"
+            if state == POWER_STATE_DISCHARGING and self._latest_activity_state:
+                power_str += f"/{self._latest_activity_state}"
 
             slope_str = ""
-            if charging_status is True and charging_slope_vph is not None:
-                slope_str = f", ChargingSlope={charging_slope_vph:.3f} V/h"
-            elif charging_status is False and discharging_slope_vph is not None:
-                slope_str = f", DischargingSlope={discharging_slope_vph:.3f} V/h"
-            elif charging_slope_vph is not None or discharging_slope_vph is not None:
-                slope_str = ", Slope=unknown-state"
+            if self._latest_voltage_slope_vph is not None:
+                soc_part = (f" ({self._latest_soc_slope_pct_per_h:+.1f} %SOC/h)"
+                            if self._latest_soc_slope_pct_per_h is not None else "")
+                slope_str = f", Trend={self._latest_voltage_slope_vph:+.3f} V/h{soc_part}"
 
-            # Determine lifetime information
+            # Lifetime: TTF only in true net-charge state, otherwise TTE
             lifetime_str = ""
-            if charging_status is True and self._latest_time_to_full_hours is not None:
+            if self._latest_time_to_full_hours is not None:
                 lifetime_str = f", TTF={self._latest_time_to_full_hours:.2f}h"
-            elif charging_status is False and self._latest_time_to_empty_hours is not None:
+            elif self._latest_time_to_empty_hours is not None:
                 lifetime_str = f", TTE={self._latest_time_to_empty_hours:.2f}h"
-            elif self._latest_battery_lifetime_hours is not None:
-                lifetime_str = f", Lifetime≈{self._latest_battery_lifetime_hours:.2f}h"
 
             charging_str = ""
             if charging_status is not None and ac_power_present is not None:
@@ -3383,7 +3321,7 @@ class BatteryWaterNode(ArgoBaseNode):
             self.get_logger().info(
                 f"Status: Battery={battery_voltage_str} ({battery_pct_str}), "
                 f"Saltwater={saltwater_voltage_str}, Sail_current={sail_current:.3f}A, "
-                f"{temp_humid_str}{charging_str}{slope_str}{lifetime_str}{health_status_str}"
+                f"{temp_humid_str}{charging_str}{power_str}{slope_str}{lifetime_str}{health_status_str}"
             )
             self._last_log_time = current_time
 

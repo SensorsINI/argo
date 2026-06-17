@@ -1451,6 +1451,19 @@ class RudderSailRadioNode(ArgoBaseNode):
         # Now release servo pins
         self._ensure_safe_exit()
 
+    def _publish_human_controlled(self, value: bool) -> None:
+        """Publish /human_controlled; on value change, emit previous then new for square-wave plots."""
+        is_transition = (
+            self.prev_published_human_controlled is not None
+            and value != self.prev_published_human_controlled
+        )
+        if is_transition:
+            self._human_msg_cache.data = self.prev_published_human_controlled
+            self.pub_human_controlled.publish(self._human_msg_cache)
+        self._human_msg_cache.data = value
+        self.pub_human_controlled.publish(self._human_msg_cache)
+        self.prev_published_human_controlled = value
+
     def publish_status(self):
         """Publish control status for other nodes (only on change or timeout)."""
         current_time = time.time()
@@ -1469,9 +1482,7 @@ class RudderSailRadioNode(ArgoBaseNode):
         )
         
         if human_changed:
-            self._human_msg_cache.data = self.human_controlled
-            self.pub_human_controlled.publish(self._human_msg_cache)
-            self.prev_published_human_controlled = self.human_controlled
+            self._publish_human_controlled(self.human_controlled)
             self.last_status_publish_time = current_time  # Update timestamp for timeout tracking
 
         # Publish detailed control authority info (only on change or timeout)

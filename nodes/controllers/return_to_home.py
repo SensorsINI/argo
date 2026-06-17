@@ -16,7 +16,7 @@ import numpy as np
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'support'))
 
 # 4) Local imports
-from .base import BaseController, BoatState, ControlCommand, signed_angle_difference_degrees
+from .base import BaseController, BoatState, ControlCommand, relative_wind_angle_to_sail_cmd, signed_angle_difference_degrees
 
 
 class ReturnToHomeController(BaseController):
@@ -182,8 +182,7 @@ class ReturnToHomeController(BaseController):
                     cmd_rudder = self.clip_rudder(cmd_rudder)
                     cmd_sail = 0.0
                     if state.wind_angle is not None:
-                        wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
-                        wind_sail_cmd = float(np.clip(wind_sail_cmd, -1.0, 1.0))
+                        wind_sail_cmd = relative_wind_angle_to_sail_cmd(state.wind_angle)
                         cmd_sail = self.sail_wind_gain * wind_sail_cmd
                     return ControlCommand(
                         rudder=cmd_rudder, sail=cmd_sail, timestamp=state.timestamp
@@ -219,8 +218,7 @@ class ReturnToHomeController(BaseController):
         # Wind-aware sail control
         cmd_sail = 0.0
         if state.wind_angle is not None:
-            wind_sail_cmd = (state.wind_angle - 90.0) / 90.0
-            wind_sail_cmd = float(np.clip(wind_sail_cmd, -1.0, 1.0))
+            wind_sail_cmd = relative_wind_angle_to_sail_cmd(state.wind_angle)
             cmd_sail = self.sail_wind_gain * wind_sail_cmd
 
         return ControlCommand(rudder=cmd_rudder, sail=cmd_sail, timestamp=state.timestamp)

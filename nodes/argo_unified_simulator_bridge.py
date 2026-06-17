@@ -560,9 +560,10 @@ class ArgoUnifiedSimulatorBridge(Node):
                 )
             self._last_arbitration_log_time = current_time
         
-        # Publish human control status
-        human_msg = Bool(data=self.human_controlled)
-        self.pub_human_controlled.publish(human_msg)
+        # Publish human control status (previous then new on transition for square-wave plots)
+        if old_human_controlled != self.human_controlled:
+            self.pub_human_controlled.publish(Bool(data=old_human_controlled))
+        self.pub_human_controlled.publish(Bool(data=self.human_controlled))
         
         # Publish detailed control authority info
         authority_msg = Vector3(

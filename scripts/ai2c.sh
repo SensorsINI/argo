@@ -168,6 +168,39 @@ check_bus() {
     echo ""
 }
 
+HUMBLE_SETUP='/opt/ros/humble/setup.bash'
+
+# Run ros2 in a fresh bash with Humble sourced (matches bno085.py status checks).
+run_ros2_cmd() {
+    local timeout_sec="$1"
+    shift
+    local cmd="$*"
+    timeout "$timeout_sec" bash -c "source '${HUMBLE_SETUP}' && ${cmd}" 2>&1
+}
+
+ros2_cli_broken() {
+    local output="$1"
+    echo "$output" | grep -qiE '!rclpy\.ok\(\)|rclpy\.ok\(\)'
+}
+
+ensure_ros2_daemon() {
+    local probe
+    probe="$(run_ros2_cmd 5 'ros2 topic list' || true)"
+    if ros2_cli_broken "$probe"; then
+        echo "   Restarting ros2 daemon (stale !rclpy.ok())..."
+        run_ros2_cmd 5 'ros2 daemon stop' >/dev/null 2>&1 || true
+        run_ros2_cmd 5 'ros2 daemon start' >/dev/null 2>&1 || true
+        sleep 1
+        probe="$(run_ros2_cmd 5 'ros2 topic list' || true)"
+        if ros2_cli_broken "$probe"; then
+            echo "🔴 ros2 CLI still broken after daemon restart — ROS topic checks unreliable."
+            return 1
+        fi
+        echo "   🟢 ros2 daemon recovered"
+    fi
+    return 0
+}
+
 # Start ros2 topic echo --once in the background; write output and exit code to temp files.
 ros2_topic_echo_once_async() {
     local topic="$1"
@@ -178,7 +211,8 @@ ros2_topic_echo_once_async() {
 
     (
         set +e
-        timeout "$timeout_sec" ros2 topic echo "$topic" --once >"$out_file" 2>&1
+        timeout "$timeout_sec" bash -c "source '${HUMBLE_SETUP}' && ros2 topic echo '${topic}' --once" \
+            >"$out_file" 2>&1
         echo $? >"$ec_file"
     ) &
     _pid_ref=$!
@@ -245,6 +279,11 @@ report_imu_health_echo() {
     local health_out="$1"
     local health_ec="$2"
 
+    if ros2_cli_broken "$health_out"; then
+        echo "🔴 /imu_health: ros2 CLI broken (!rclpy.ok) — run: ros2 daemon stop && ros2 daemon start"
+        return 1
+    fi
+
     if echo "$health_out" | grep -qiE 'does not exist|not found|Unable to find|no topic'; then
         echo "🔴 /imu_health: no message (topic missing or no publisher)."
         echo "   Start: sudo systemctl start argo_bno085.service"
@@ -252,9 +291,9 @@ report_imu_health_echo() {
     fi
 
     if echo "$health_out" | grep -qiE '^data:\s*true\b'; then
-        echo "🟢 /imu_health: HEALTHY (bridge reports recent driver data)"
+        echo "🟢 /imu_health: HEALTHY (sustained /imu from driver)"
     elif echo "$health_out" | grep -qiE '^data:\s*false\b'; then
-        echo "🔴 /imu_health: UNHEALTHY (no recent /imu from driver — see journalctl -u argo_bno085.service)"
+        echo "🔴 /imu_health: UNHEALTHY (stale/unstable /imu — see journalctl -u argo_bno085.service)"
     else
         if [ "$health_ec" -eq 124 ]; then
             echo "🔴 /imu_health: timed out (no Bool within 10s)."
@@ -269,6 +308,11 @@ report_imu_health_echo() {
 report_imu_echo() {
     local imu_out="$1"
     local imu_ec="$2"
+
+    if ros2_cli_broken "$imu_out"; then
+        echo "🔴 /imu: ros2 CLI broken (!rclpy.ok) — run: ros2 daemon stop && ros2 daemon start"
+        return 0
+    fi
 
     if echo "$imu_out" | grep -qiE 'does not exist|not found|Unable to find|no topic'; then
         echo "🔴 /imu: no message (driver not streaming)."
@@ -287,6 +331,26 @@ report_imu_echo() {
     return 0
 }
 
+report_imu_journal_recent() {
+    local health_claimed_healthy="${1:-}"
+    local journal_out watchdog_count unhealthy_count
+    journal_out="$(journalctl -u argo_bno085.service --since "2 min ago" --no-pager 2>/dev/null || true)"
+    if [ -z "$journal_out" ]; then
+        return 0
+    fi
+    watchdog_count="$(echo "$journal_out" | grep -c 'Watchdog timeout' || true)"
+    unhealthy_count="$(echo "$journal_out" | grep -c 'BNO085 health: UNHEALTHY' || true)"
+    if [ "$watchdog_count" -gt 0 ]; then
+        echo "🔴 Driver watchdog: ${watchdog_count} reset(s) in last 2 min (I2C/sensor unstable)"
+    fi
+    if [ "$unhealthy_count" -gt 0 ]; then
+        echo "🔴 Bridge health: ${unhealthy_count} UNHEALTHY event(s) in last 2 min"
+    fi
+    if [ "$health_claimed_healthy" = "true" ] && { [ "$watchdog_count" -gt 0 ] || [ "$unhealthy_count" -gt 0 ]; }; then
+        echo "⚠️  /imu_health says HEALTHY but journal shows instability — restart argo_bno085.service after bridge update"
+    fi
+}
+
 # When I2C sees the IMU, optionally verify the ROS bridge is publishing real health + IMU data.
 check_imu_ros_live() {
     echo "--- IMU (BNO085) live stack (ROS) ---"
@@ -297,9 +361,9 @@ check_imu_ros_live() {
     fi
     echo "🟢 I2C: BNO085 present at 0x4a on bus 0"
 
-    local humble=/opt/ros/humble/setup.bash
-    if [ ! -f "$humble" ]; then
-        echo "⚠️  ROS Humble not at ${humble} — cannot verify /imu_health or /imu."
+    if [ ! -f "$HUMBLE_SETUP" ]; then
+        echo "⚠️  ROS Humble not at ${HUMBLE_SETUP} — cannot verify /imu_health or /imu."
+        report_imu_journal_recent
         echo ""
         return 0
     fi
@@ -309,26 +373,25 @@ check_imu_ros_live() {
     svc_active="$(systemctl show -p ActiveState --value argo_bno085.service 2>/dev/null || echo unknown)"
     echo "   argo_bno085.service: ${svc_active}"
 
-    # Source ROS once here (not per subprocess) so topic checks start faster.
-    set +u
-    # shellcheck disable=SC1090
-    source "$humble"
-    set -u
-
-    if ! command -v ros2 >/dev/null 2>&1; then
+    if ! timeout 2 bash -c "source '${HUMBLE_SETUP}' && command -v ros2" >/dev/null 2>&1; then
         echo "⚠️  ros2 not available after sourcing Humble — install ros-humble-* CLI or skip this check."
+        report_imu_journal_recent
         echo ""
         return 0
     fi
+
+    ensure_ros2_daemon || true
 
     # Fast registration check before blocking on echo --once.
     echo "   Checking ROS topic registration..."
     local topic_list topic_list_ec
     set +e
-    topic_list="$(timeout 5 ros2 topic list 2>&1)"
+    topic_list="$(run_ros2_cmd 5 'ros2 topic list')"
     topic_list_ec=$?
     set -e
-    if [ "$topic_list_ec" -eq 124 ]; then
+    if ros2_cli_broken "$topic_list"; then
+        echo "🔴 ros2 topic list: CLI broken (!rclpy.ok) — journal check below."
+    elif [ "$topic_list_ec" -eq 124 ]; then
         echo "⚠️  ros2 topic list timed out (5s) — continuing with echo checks."
     elif [ "$topic_list_ec" -ne 0 ]; then
         echo "⚠️  ros2 topic list failed (exit ${topic_list_ec}) — continuing with echo checks."
@@ -365,8 +428,18 @@ check_imu_ros_live() {
     imu_ec="$(cat "$imu_ec_file")"
     rm -f "$health_out_file" "$health_ec_file" "$imu_out_file" "$imu_ec_file"
 
-    report_imu_health_echo "$health_out" "$health_ec" || { echo ""; return 0; }
+    local health_claimed_healthy="false"
+    if report_imu_health_echo "$health_out" "$health_ec"; then
+        if echo "$health_out" | grep -qiE '^data:\s*true\b'; then
+            health_claimed_healthy="true"
+        fi
+    else
+        report_imu_journal_recent
+        echo ""
+        return 0
+    fi
     report_imu_echo "$imu_out" "$imu_ec"
+    report_imu_journal_recent "$health_claimed_healthy"
     set -e
     echo ""
 }

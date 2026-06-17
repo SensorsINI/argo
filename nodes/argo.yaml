@@ -8,7 +8,7 @@
   ros__parameters:
     # Map configuration (used by sailing_area_publisher, argo_transform_publisher, controllers)
     # See https://www.google.com/maps/d/ for the source maps. See docs/README-adding-sailing-maps.md for more information.
-    geofence_map_name: Argo Irchel North pond sailing area  # Risi | Argo Irchel pond sailing area | Argo Pool Hotel dek Pini | behind INI | Hotel dei Pini | Hotel dei Pini close to shore
+    geofence_map_name: Argo Irchel North pond sailing area  # Argo Irchel pond sailing area | Argo Pool Hotel dek Pini | behind INI | Hotel dei Pini | Hotel dei Pini close to shore | Risi
     gps_spike_max_speed_mps: 3.0  # argo_transform_publisher: reject /fix jumps implying speed above this (m/s)
     # Controller parameters (used by controller.py and crosser controller)
     p_heading_gain: 0.8  # Proportional gain for heading control (P controller, can be extended to PID)
@@ -147,7 +147,7 @@ gps_node:
 
 rudder_sail_radio_node:
   ros__parameters:
-    human_override_timeout: 8.0      # Seconds after last human activity before robot can take control
+    human_override_timeout: 4.0      # Seconds after last human activity before robot can take control
     deadband_threshold: 0.25          # Rudder: |pos|>threshold; Sail: only Δsail>threshold (2 reads) — see rudder_sail_radio.py
     # Rudder: measure radio endpoints at full stick (watch radio_rudder_pw_us). cmd -1/+1 uses these;
     # crosser/human PWM output maps cmd -1/+1 to servo_* endpoints (amplifies throw vs radio).
