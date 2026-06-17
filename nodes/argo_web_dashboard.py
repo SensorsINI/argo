@@ -70,6 +70,7 @@ from bno085 import (
     ImuVerifySnapshot,
     compass_heading_from_quaternion,
     load_imu_heading_config,
+    quaternion_to_euler_deg,
 )
 
 UPDATE_RATE = .2  # Hz
@@ -206,6 +207,9 @@ class ArgoWebDashboard(ArgoBaseNode):
             'compass_heading': None,
             'imu_healthy': None,
             'imu_health_age': None,
+            'imu_roll_deg': None,
+            'imu_tilt_deg': None,
+            'imu_pose_age': None,
             'imu_calibration_available': False,
             'imu_session_mode': 'idle',
             
@@ -213,6 +217,8 @@ class ArgoWebDashboard(ArgoBaseNode):
             'wind_speed': None,
             'wind_angle': None,
             'wind_temp': None,
+            'anem_healthy': None,
+            'anem_health_age': None,
             'wind_from_compass': None,   # absolute, where wind comes from (true compass)
             'wind_flow_compass': None,   # absolute, where wind blows to (for map arrow)
             
@@ -571,6 +577,9 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
         self._topic_subscriptions.append(
             self.create_subscription(Bool, '/imu_health', self.imu_health_cb, self.volatile_qos)
+        )
+        self._topic_subscriptions.append(
+            self.create_subscription(Bool, '/anem_node_health', self.anem_health_cb, self.volatile_qos)
         )
         # Raw IMU/mag for web cal/verify (always subscribed; callbacks no-op when idle)
         self._topic_subscriptions.append(
@@ -1166,6 +1175,17 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.state['imu_healthy'] = bool(msg.data)
             self.last_wifi_update['imu_health'] = now
             self._update_data_age_indicators()
+
+    def anem_health_cb(self, msg):
+        """Track anemometer node health for dashboard wind sensor indicator."""
+        if self.low_power_mode:
+            return
+
+        now = time.time()
+        with self.state_lock:
+            self.state['anem_healthy'] = bool(msg.data)
+            self.last_wifi_update['anem_health'] = now
+            self._update_data_age_indicators()
     
     def _update_data_age_indicators(self):
         """Update data age indicators for both WiFi and LoRa sources"""
@@ -1189,6 +1209,19 @@ class ArgoWebDashboard(ArgoBaseNode):
             self.state['imu_health_age'] = now - imu_health_ts
         else:
             self.state['imu_health_age'] = None
+
+        imu_pose_ts = self.last_wifi_update.get('imu_pose')
+        if imu_pose_ts:
+            self.state['imu_pose_age'] = now - imu_pose_ts
+        else:
+            self.state['imu_pose_age'] = None
+
+        anem_health_ts = self.last_wifi_update.get('anem_health')
+        if anem_health_ts:
+            self.state['anem_health_age'] = now - anem_health_ts
+        else:
+            self.state['anem_health_age'] = None
+
         self._set_imu_calibration_available_unlocked()
 
         # Determine overall data source status
@@ -2714,6 +2747,13 @@ class ArgoWebDashboard(ArgoBaseNode):
         )
 
     def _imu_session_imu_cb(self, msg: Imu) -> None:
+        q = msg.orientation
+        roll_deg, pitch_deg, _yaw = quaternion_to_euler_deg(q.w, q.x, q.y, q.z)
+        with self.state_lock:
+            self.state['imu_roll_deg'] = round(roll_deg, 1)
+            self.state['imu_tilt_deg'] = round(pitch_deg, 1)
+            self.last_wifi_update['imu_pose'] = time.time()
+
         if self._imu_cal_tracker is not None:
             self._imu_cal_tracker.on_imu(msg)
         if self._imu_verify_tracker is not None:
@@ -2998,6 +3038,7 @@ class ArgoWebDashboard(ArgoBaseNode):
             self._update_imu_calibration_available()
             STORAGE_RUNDOWN_FLAG = Path('/tmp/argo_battery_storage_rundown')
             with self.state_lock:
+                self._update_data_age_indicators()
                 state_copy = self.state.copy()
                 # Storage rundown is toggled via astore or dashboard; reflect current file so UI updates without battery service poll
                 state_copy['storage_rundown_active'] = STORAGE_RUNDOWN_FLAG.exists()
