@@ -67,19 +67,19 @@ The `argo_bno085.service` systemd service is **required for production use** and
 
 - **Sensor**: [Adafruit BNO085](https://www.adafruit.com/product/4754) 9-DOF Orientation IMU
 - **Interface**: I2C bus 0 at address 0x4a
-- **Protocol**: SH-2 (Sensor Hub Transport Protocol)
+- **Protocol**: SHTP (Sensor Hub Transport Protocol) over I2C, carrying SH-2 sensor-hub commands
 - **Fusion**: CEVA Hillcrest Labs SH-2 firmware for on-chip sensor fusion
 
 ## Software Components
 
 ### 1. C++ Driver (`bno08x_driver`)
-- **Source**: [bno08x-ros2-driver](https://github.com/bnbhat/bno08x-ros2-driver) (git submodule)
-- **Location**: `nodes/vendor/bno08x_driver/`
-- **Function**: Direct hardware communication via I2C
+- **Upstream**: [bnbhat/bno08x-ros2-driver](https://github.com/bnbhat/bno08x-ros2-driver)
+- **Argo fork**: [tobidelbruck/bno08x_ros2_driver](https://github.com/tobidelbruck/bno08x_ros2_driver) (git submodule at `nodes/vendor/bno08x_driver/`)
+- **Function**: Direct hardware communication via I2C and SHTP/SH-2 stack (`include/sh2/`)
 - **Topics Published**:
   - `/imu` (sensor_msgs/Imu) - Quaternion orientation, gyro, accel
   - `/magnetic_field` (sensor_msgs/MagneticField) - Magnetometer data
-- Launched by bno085_driver_launcher.sh shell script
+- Launched by `bno085_driver_launcher.sh` (used by `argo_bno085.service`)
 
 ### 2. Python Bridge (`bno085.py`)
 - **Location**: `nodes/bno085.py`
@@ -145,7 +145,7 @@ make bno08x-launch-full
 
 # Or manually:
 bash -c "source /opt/ros/humble/setup.bash && \
-         source ~/argo_bno08x_ws/install/setup.bash && \
+         source ~/argo/nodes/argo_bno08x_driver_workspace/install/setup.bash && \
          ros2 run bno08x_driver bno08x_driver --ros-args --params-file vendor/bno085_i2c_argo.yaml &"
 sleep 3
 python3 bno085.py bridge
@@ -242,11 +242,12 @@ bno08x_ros:  # ⚠️ IMPORTANT: Namespace must match node name (not bno08x_driv
 ```
 
 **Configuration Options:**
-- **`frame_id`**: ROS2 frame ID for the IMU (default: "imu_link")
-- **`i2c.bus`**: I2C device path (default: "/dev/i2c-0" for Orange Pi Zero 2W)
-- **`i2c.address`**: BNO085 I2C address (default: "0x4A")
-- **`publish.magnetic_field.rate`**: Magnetometer publish rate in Hz (1-100, default: 1)
-- **`publish.imu.rate`**: IMU data publish rate in Hz (1-400, default: 5)
+- **`frame_id`**: ROS2 frame ID for the IMU (Argo default: `"bno085"`)
+- **`i2c.bus`**: I2C device path (default: `/dev/i2c-0` for Orange Pi Zero 2W)
+- **`i2c.address`**: BNO085 I2C address (default: `"0x4A"`)
+- **`publish.magnetic_field.rate`**: Magnetometer publish rate in Hz (1–100, default: 1)
+- **`publish.imu.rate`**: IMU data publish rate in Hz (1–400, default: 5 for shared bus 0)
+- **`watchdog.timeout_ms`**: C++ driver reset if no sensor reports (optional; see yaml comments)
 
 **⚠️ CRITICAL: YAML Namespace Configuration**
 
@@ -332,14 +333,14 @@ See **[README-bagfiles.md](README-bagfiles.md)** for all bag tools (narration me
 The bridge publishes `/imu_health` (std_msgs/Bool) for lifecycle management:
 
 ### Health States
-- **✅ HEALTHY (`data: true`)**: Receiving data from C++ driver, data is fresh (< 3 seconds old)
-- **❌ UNHEALTHY (`data: false`)**: No data received or data is stale (> 3 seconds old)
+- **✅ HEALTHY (`data: true`)**: Sustained `/imu` stream — not stale, past post-gap cooldown, stable for ~5 s (see tuning constants in `bno085.py`)
+- **❌ UNHEALTHY (`data: false`)**: No data, stale stream, post-gap cooldown, or stream not yet stable
 
 ### Implementation
-- **Initialization**: Starts unhealthy until first data received
-- **Data Reception**: Updates health status when IMU data arrives
-- **Periodic Check**: 1-second timer monitors data freshness
-- **Auto-Recovery**: Automatically recovers when data resumes
+- **Initialization**: Starts unhealthy until stream meets stability criteria
+- **Data Reception**: Updates on each `/imu` message from C++ driver
+- **Periodic Check**: 1 Hz timer monitors freshness, gaps, and stability
+- **Auto-Recovery**: After startup grace, may run `sudo systemctl restart argo_bno085.service` if `/imu` stays absent (~15 s, throttled)
 
 ### Monitoring Health
 ```bash
@@ -450,8 +451,11 @@ The `nodes/Makefile` provides convenient shortcuts and automatically uses the co
 # Build the driver
 make bno08x-build
 
-# Test hardware
-make bno08x-test
+# Quick I2C address scan (not a full SHTP test)
+make bno08x-i2c-test
+
+# Full hardware bench test (recommended)
+python3 ~/argo/tests/test_bno085.py --skip-ros
 
 # Launch full system (uses bno085_i2c_argo.yaml)
 make bno08x-launch-full
@@ -465,14 +469,108 @@ make bno08x-calibrate
 - **Launch targets**: Automatically load the configuration file
 - **Build targets**: Use the configuration for driver setup
 
-## Advantages Over ICM-20948
+### Boot ordering on shared I2C bus 0
 
-1. **Better Sensor Fusion**: On-chip SH-2 firmware from CEVA Hillcrest Labs
-2. **Automatic Calibration**: Built-in magnetometer, accelerometer, and gyroscope calibration
-3. **Higher Accuracy**: Gyro-corrected compass heading with magnetic north reference
-4. **Standard Driver**: Well-maintained ROS2 C++ driver
-5. **Lower CPU Usage**: Sensor fusion performed on BNO085 chip
-6. **Backward Compatible**: Existing Argo code works without changes
+The IMU shares **i2c-0** with `argo_battery_water.service` (ADC 0x34, SHT45 0x44). BNO085 SHTP init is sensitive to concurrent bus traffic.
+
+- `argo_bno085.service` starts **before** battery/water (`Before=argo_battery_water.service`)
+- Battery/water **ExecStartPre** waits until `bno08x_driver` has been stable for 3 s (`scripts/wait_for_bno085_ready.sh`)
+
+See **[README-i2c.md](README-i2c.md)** for bus map, lock recovery, and service install targets (`make -C nodes battery-water-install`, `make -C nodes bno085-service-install`).
+
+## SHTP and SH-2 protocol handling
+
+The BNO085 does **not** use SMBus register reads. It speaks **SHTP** (Sensor Hub Transport Protocol) on plain I2C `read()`/`write()` via `/dev/i2c-0`.
+
+### Protocol layers
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  ROS2 bno08x_driver  →  sh2.c / shtp.c (vendor C++)     │  SH-2 commands, adverts, sensor reports
+├─────────────────────────────────────────────────────────┤
+│  I2CInterface::read/write  (i2c_interface.hpp)          │  SHTP framing, 32-byte chunks
+├─────────────────────────────────────────────────────────┤
+│  Linux i2c-dev  (/dev/i2c-0, address 0x4A)              │  Raw bus access
+└─────────────────────────────────────────────────────────┘
+```
+
+**SHTP packet layout** (each logical transfer):
+
+| Bytes | Field |
+|-------|--------|
+| 0–1 | Length (LSB, MSB with continuation bit in bit 15) |
+| 2 | Channel (0=command, 1=executable, 2=SH-2 control, 3=reports, …) |
+| 3 | Sequence |
+| 4+ | Payload (SH-2 commands/responses or sensor reports) |
+
+**I2C read algorithm** (Argo fork, `i2c_interface.hpp::read()`):
+
+1. Read 4-byte header (length only; idle FIFO returns `[0,0,0,0]` → no data).
+2. Read **`packet_size`** bytes into the HAL buffer in ≤32-byte chunks; continuation reads pull **+4** extra wire bytes per chunk and discard the first 4 (Hillcrest SHTP rule).
+3. Pass the full buffer to `shtp.c` `rxAssemble()` for multi-fragment assembly.
+
+**SH-2 bring-up** (`sh2_open()`): after soft reset `[5,0,1,0,1]` and 1 s wait, the stack polls reads until executable reset-complete and sensor-hub **advertisements** arrive (Argo fork waits for adverts before treating channel numbers as valid). Failure here surfaces as `SH2_ERR_TIMEOUT` in the journal.
+
+### Argo fork vs stock upstream driver
+
+Submodule path: `nodes/vendor/bno08x_driver/`  
+**Upstream reference**: [bnbhat/bno08x-ros2-driver](https://github.com/bnbhat/bno08x-ros2-driver)  
+**Argo fork** (pushed to `tobidelbruck/bno08x_ros2_driver`): Orange Pi / shared-bus fixes not in upstream.
+
+| Area | Stock upstream (typical) | Argo fork |
+|------|-------------------------|-----------|
+| I2C bus default | Often `/dev/i2c-7` in C++ | Patched to `/dev/i2c-0`; **authoritative** bus in `nodes/vendor/bno085_i2c_argo.yaml` |
+| `I2CInterface::read()` | Header peek + `memcpy` to buffer + read `packet_size − 4` cargo | **Peek header for length only**, then read **`packet_size`** bytes into buffer (required on Orange Pi `i2c-dev`; upstream-style read desynchronizes the FIFO → `SH2_ERR_TIMEOUT`) |
+| Partial reads | Single `read()`; fail on short count | **`readExact_()`** retries `EAGAIN`/`EINTR` (matches bench test behavior) |
+| Idle FIFO | May log invalid length | **`packet_size == 0` returns silently** (poll loop during `sh2_open`) |
+| Soft reset | 5-byte reset packet | Same packet + **1 s** post-reset delay; **5** write retries |
+| `sh2_open()` | Earlier races on adverts | **Wait for reset + sensor-hub adverts** before control traffic |
+| I2C errors | Verbose per-read logs | Quiet by default; one-line summary on SH-2 failure (`BNO08X_I2C_VERBOSE=1` for traces) |
+| Driver params | Packaged `config/bno085_i2c.yaml` | **Removed from submodule**; Argo uses `nodes/vendor/bno085_i2c_argo.yaml` only |
+| Watchdog | Default 5 s | Configurable via yaml (`watchdog.timeout_ms`) |
+
+After changing the submodule, rebuild: `make -C nodes bno08x-build`, then `make -C nodes bno085-service-restart`.
+
+### Standalone hardware test (no ROS)
+
+**`tests/test_bno085.py`** exercises the **same I2C/SHTP path** as the C++ driver but does **not** import or run `bno08x_driver`. It reimplements the HAL read and `shtp.c`-style `rxAssemble` in Python (used to debug bus issues when ROS is irrelevant).
+
+**When to use:**
+
+- Bench check after wiring, resolder, or I2C recovery
+- Confirm chip responds before debugging systemd/ROS
+- Compare against failing `ros2 run bno08x_driver …` (passing test + failing driver → rebuild driver submodule)
+
+**Stop other i2c-0 users first:**
+
+```bash
+sudo systemctl stop argo_bno085.service argo_battery_water.service
+```
+
+**Commands** (from repo root):
+
+```bash
+# Full hardware path: soft reset, SHTP drain, Product ID vote
+python3 tests/test_bno085.py --skip-ros
+
+# Verbose HAL read / rxAssemble traces
+python3 tests/test_bno085.py --skip-ros --debug
+
+# Lock part number to Argo BOM (optional)
+python3 tests/test_bno085.py --skip-ros --expect-part 0x0098A6B4
+
+# Live accel reports only (skip flaky Product ID path)
+python3 tests/test_bno085.py --skip-ros --skip-product-id
+
+# Also require /imu streaming when ROS stack is up
+python3 tests/test_bno085.py
+```
+
+**Pass criteria:** soft reset + first SHTP packet + Product ID (or accelerometer reports with `--skip-product-id`); optionally non-zero `/imu` rate without `--skip-ros`.
+
+**Note:** `make -C nodes bno08x-i2c-test` only runs `i2cdetect` (address visible). It does **not** validate SHTP; use `test_bno085.py` for that.
+
+**Important:** `smbus2` can leave the fd non-blocking; the test clears `O_NONBLOCK` before `os.read()`, same requirement as reliable blocking reads on this kernel.
 
 ## I2C Error Recovery and Reliability
 
@@ -512,29 +610,26 @@ The `argo_bno085.service` provides robust process management:
 
 ```ini
 [Unit]
-Description=Argo BNO085 IMU Driver and Bridge
+Description=Argo BNO085 IMU Driver Service
 After=network.target
+Before=argo_battery_water.service argo_launch_standard.service
 
 [Service]
 ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
 ExecStart=/home/orangepi/argo/nodes/bno085_driver_launcher.sh
 WorkingDirectory=/home/orangepi/argo/nodes
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log.hdd/persistent/argo-bno085.log
+StandardError=append:/var/log.hdd/persistent/argo-bno085.log
 Restart=always
 RestartSec=5
 User=orangepi
-
-[Install]
-WantedBy=multi-user.target
 ```
 
 **Key Features:**
-- **Auto-Restart**: Restarts both processes on failure (5-second delay)
-- **Environment Sourcing**: Proper ROS2 environment for both C++ and Python
-- **Journal Logging**: All output captured in systemd journal
-- **User Context**: Runs as `orangepi` user (not root)
-- **Boot Integration**: Starts automatically on system boot
+- **Auto-Restart**: Restarts driver + bridge on failure (5-second delay)
+- **Launcher script**: Starts C++ driver, then Python bridge; exits non-zero if either child dies (systemd restarts whole unit)
+- **Persistent log**: `/var/log.hdd/persistent/argo-bno085.log` (no `tee` pipeline — allows clean SIGTERM on stop)
+- **Journal**: Use `journalctl -u argo_bno085.service` for systemd metadata
 
 ### Why Systemd Service is Required
 
@@ -648,8 +743,12 @@ To disable debug output and improve performance:
 
 ### Common Issues
 
-**Issue**: "Failed to get product IDs" at startup  
-**Solution**: This is a transient error during initialization. The driver recovers and works correctly.
+**Issue**: `Failed to get product IDs` or `SH2_ERR_TIMEOUT` at startup  
+**Solution**:
+1. Run bench test: `python3 tests/test_bno085.py --skip-ros` (see [Standalone hardware test](#standalone-hardware-test-no-ros))
+2. Stop bus contention: `sudo systemctl stop argo_battery_water.service` during IMU-only debug
+3. Rebuild driver after submodule updates: `make -C nodes bno08x-build && make -C nodes bno085-service-restart`
+4. If `i2cdetect` sees `0x4a` but both fail: check wiring and [README-i2c.md](README-i2c.md) bus lock recovery
 
 **Issue**: "Failed to open the I2C bus" - Bus `/dev/i2c-7` not found  
 **Solution**: The `make bno085-service-install` and `make bno08x-build` targets automatically patch the I2C bus from i2c-7 to i2c-0 for Orange Pi Zero 2W. This happens automatically on fresh installs.
@@ -689,6 +788,9 @@ ros2 node list
 
 ### Debug Commands
 ```bash
+# Standalone I2C/SHTP test (no ROS)
+python3 ~/argo/tests/test_bno085.py --skip-ros --debug
+
 # Check system status
 python3 bno085.py status
 
@@ -717,27 +819,34 @@ ros2 node info /bno08x_driver
 
 ```
 nodes/
-├── bno085.py                           ← Unified tool (all functionality)
+├── bno085.py                           ← Unified tool (bridge, calibrate, verify)
+├── bno085_driver_launcher.sh           ← Starts C++ driver + bridge (systemd)
 ├── vendor/
-│   ├── bno08x_driver/                  ← C++ driver (git submodule)
-│   └── bno085_i2c_argo.yaml          ← Driver configuration (ACTIVE)
+│   ├── bno08x_driver/                  ← C++ driver submodule (Argo fork)
+│   └── bno085_i2c_argo.yaml            ← Driver configuration (ACTIVE)
 └── Makefile                            ← Build and launch shortcuts
 
+tests/
+└── test_bno085.py                      ← Standalone I2C/SHTP hardware test (no ROS)
+
 docs/
-└── README-imu-bno085.md                ← This guide
+├── README-imu-bno085.md                ← This guide
+└── README-i2c.md                       ← Bus 0 map, boot order, lock recovery
 ```
 
 **Key Files:**
 - **`nodes/bno085.py`**: Main unified tool with all functionality
 - **`nodes/vendor/bno085_i2c_argo.yaml`**: **Active configuration file** (systemd, Makefile, launch)
+- **`tests/test_bno085.py`**: Bench validation without ROS
 - **`nodes/Makefile`**: Convenient build and launch shortcuts
 
 ## References
 
 - [Adafruit BNO085 Product Page](https://www.adafruit.com/product/4754)
-- [BNO08x ROS2 Driver Documentation](https://docs.ros.org/en/humble/p/bno08x_driver/)
-- [GitHub Repository](https://github.com/bnbhat/bno08x-ros2-driver)
+- [BNO08x ROS2 Driver (upstream)](https://github.com/bnbhat/bno08x-ros2-driver)
+- [Argo BNO08x fork](https://github.com/tobidelbruck/bno08x_ros2_driver)
 - [BNO080 Datasheet](../BNO080_Datasheet_v1.3 selectable 2017.pdf)
+- [I2C bus configuration and recovery](README-i2c.md)
 
 ## Development History
 
@@ -745,7 +854,7 @@ docs/
 The BNO085 integration was completed through a systematic approach:
 
 1. **Hardware Verification**: Confirmed BNO085 communication via I2C bus 0 at address 0x4a
-2. **Driver Integration**: Added [bno08x-ros2-driver](https://github.com/bnbhat/bno08x-ros2-driver) as git submodule
+2. **Driver Integration**: Added [bno08x-ros2-driver](https://github.com/bnbhat/bno08x-ros2-driver) as git submodule; Argo-specific I2C/SHTP fixes maintained in [fork](https://github.com/tobidelbruck/bno08x_ros2_driver)
 3. **Rotation Vector Validation**: Verified datasheet section 2.2.4 Rotation Vector output
 4. **I2C Compatibility**: Tested with other nodes accessing the same I2C bus
 5. **Calibration Tool**: Developed interactive calibration CLI with real-time guidance
@@ -763,5 +872,5 @@ The BNO085 integration was completed through a systematic approach:
 ---
 
 **Status**: ✅ **FULLY OPERATIONAL**  
-**Last Updated**: 2025-01-19  
-**Version**: 2.0 (Consolidated)
+**Last Updated**: 2026-06-20  
+**Version**: 2.1 (SHTP/I2C fork documentation, standalone test)
