@@ -19,11 +19,11 @@ Environment=ROS_DOMAIN_ID=0
 Environment=PYTHONUNBUFFERED=1
 # Environment=BNO08X_I2C_VERBOSE=1 # uncomment to to turn on more verbose i2c logging. 
 ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
-ExecStart=/bin/bash -c 'set -eo pipefail; exec /home/orangepi/argo/nodes/bno085_driver_launcher.sh |& tee -a /var/log.hdd/persistent/argo-bno085.log'
+ExecStart=/home/orangepi/argo/nodes/bno085_driver_launcher.sh
 Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log.hdd/persistent/argo-bno085.log
+StandardError=append:/var/log.hdd/persistent/argo-bno085.log
 TimeoutStopSec=10
 KillMode=control-group
 KillSignal=SIGTERM
