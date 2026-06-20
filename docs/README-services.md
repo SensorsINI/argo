@@ -108,14 +108,14 @@ argo_thermal_monitor.service
     │  - Starts LED heartbeat (slow = booting)
     │  - Requests battery_water to start (Wants)
     │
-    ├─ argo_battery_water.service starts
-    │  - Monitors battery voltage
-    │  - Detects water intrusion
-    │  - Publishes status for power_control
-    │
     ├─ argo_bno085.service starts
-    │  - Initializes BNO085 IMU via I2C
-    │  - Blocks launch_standard from starting
+    │  - Initializes BNO085 IMU via I2C (must complete before battery/water polls bus 0)
+    │  - Blocks argo_battery_water.service and launch_standard from starting
+    │
+    ├─ argo_battery_water.service starts (After/Wants argo_bno085)
+    │  - ExecStartPre waits for stable bno08x_driver (scripts/wait_for_bno085_ready.sh)
+    │  - Monitors battery voltage and SHT45 on i2c-0
+    │  - Publishes status for power_control
     │
     ├─ argo_health_monitor.service starts
     │  - Initializes health monitoring ROS2 node
@@ -296,12 +296,13 @@ WantedBy=multi-user.target
 ```ini
 [Unit]
 Description=Argo Battery and Water Monitoring Service
-After=network.target
-# Normal shutdown timing (removed Before=shutdown.target to fix 60-90s hangs)
+After=network.target argo_bno085.service
+Wants=argo_bno085.service
 
 [Service]
 Type=simple
 User=orangepi
+ExecStartPre=/bin/bash /home/orangepi/argo/scripts/wait_for_bno085_ready.sh
 ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && python3 /home/orangepi/argo/nodes/argo_battery_water.py'
 Restart=always
 RestartSec=5
@@ -319,6 +320,7 @@ WantedBy=multi-user.target
 
 **Dependencies**:
 - Requires: network.target
+- After/Wants: argo_bno085.service (IMU init on shared i2c-0 before ADC/SHT45 polling)
 - Normal shutdown timing (stops early in shutdown sequence)
 - Started by: multi-user.target
 - Wanted by: argo_power_control.service
@@ -336,8 +338,7 @@ WantedBy=multi-user.target
 [Unit]
 Description=Argo BNO085 IMU Driver Service
 After=network.target
-Before=argo_launch_standard.service shutdown.target
-DefaultDependencies=no
+Before=argo_battery_water.service argo_launch_standard.service
 
 [Service]
 Type=simple

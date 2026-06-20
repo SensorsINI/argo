@@ -1,7 +1,8 @@
 [Unit]
 Description=Argo Battery and Water Monitoring Service
 Documentation=file://%h/argo/nodes/argo_battery_water.py
-After=network.target
+After=network.target argo_bno085.service
+Wants=argo_bno085.service
 # REMOVED: DefaultDependencies=no and Before=shutdown.target
 # These caused 60-90 second shutdown hangs because the service tried to
 # shut down gracefully after ROS2 infrastructure was already dead.
@@ -15,6 +16,7 @@ WorkingDirectory=/home/orangepi/argo/nodes
 Environment=ROS_DOMAIN_ID=0
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
+ExecStartPre=/bin/bash /home/orangepi/argo/scripts/wait_for_bno085_ready.sh
 # CRITICAL: Clear Python bytecode cache to prevent running stale code with syntax errors
 ExecStartPre=/bin/bash -c 'find /home/orangepi/argo/nodes -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true; find /home/orangepi/argo/nodes -name "*.pyc" -delete 2>/dev/null || true'
 # CRITICAL: Validate Python syntax before starting - fail fast if syntax is invalid

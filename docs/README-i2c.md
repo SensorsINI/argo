@@ -79,9 +79,22 @@ The `pi-i2c0` overlay enables I2C bus 0 on pins PI5/PI6.
 ### I2C Services
 
 These systemd services actively use I2C:
-- `argo_battery_water.service` - Battery/water monitoring
-- `argo_bno085.service` - IMU sensor fusion
+- `argo_bno085.service` - IMU sensor fusion (**starts first** on bus 0)
+- `argo_battery_water.service` - Battery/water monitoring (starts after IMU init)
 - `argo_launch_standard.service` - Main ROS2 launch (includes `anem.py` on bus 2)
+
+**Boot ordering (bus 0):** Both services share i2c-0. The BNO085 needs uninterrupted
+SHTP traffic during init (`sh2_getProdIds`); concurrent MAX11612/SHT45 polls from
+battery/water cause init failures. At boot:
+
+1. `argo_bno085.service` starts (`Before=argo_battery_water.service`)
+2. `argo_battery_water.service` waits in `ExecStartPre` until `bno08x_driver` has been
+   running stably for 3 seconds (`scripts/wait_for_bno085_ready.sh`, 45 s timeout)
+3. After IMU init, short ADC/humidity reads can interleave with the driver's streaming
+
+This does **not** fix an already electrically locked bus (see [I2C Bus Lock Issue](#i2c-bus-lock-issue))
+or IMU restarts that race with battery/water mid-init. Reinstall services after changing
+unit files: `make -C nodes battery-water-install` and `make -C nodes bno085-service-install`.
 
 ## I2C Bus Lock Issue
 

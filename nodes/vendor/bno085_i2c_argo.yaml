@@ -1,0 +1,31 @@
+# Argo BNO085 driver parameters — single source of truth for bno08x_ros (C++ driver).
+#
+# Loaded by:
+#   - argo_bno085.service  → bno085_driver_launcher.sh
+#   - make bno08x-launch / bno08x-launch-full  (nodes/Makefile BNO08X_CONFIG)
+#   - ros2 launch bno08x_driver bno085_i2c.launch.py
+#
+# Namespace must be bno08x_ros (matches the ROS node name). After edits:
+#   sudo systemctl restart argo_bno085.service
+#
+bno08x_ros:
+  ros__parameters:
+
+    frame_id: "bno085"  # ROS frame for sensor_msgs from the C++ driver
+
+    i2c:
+      enabled: true
+      bus: "/dev/i2c-0"   # Orange Pi Zero 2W TWI0 (battery/water + IMU)
+      address: "0x4A"
+
+    publish:
+      magnetic_field:
+        enabled: true
+        rate: 1     # Hz — magnetometer / compass reference
+      imu:
+        enabled: true
+        rate: 5     # Hz — fusion IMU (5 Hz stable on bus 0; raise only if needed)
+
+    # Optional: increase if watchdog resets fire during slow I2C re-init (default 5000)
+    # watchdog:
+    timeout_ms: 20000

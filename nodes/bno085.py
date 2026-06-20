@@ -146,12 +146,16 @@ EXAMPLES
 
 HEALTH MONITORING
 -----------------
-The bridge publishes /imu_health for lifecycle management:
-  • Healthy (true):  Receiving data from C++ driver
-  • Unhealthy (false): No data for 3+ seconds
-  • Auto-recovery: after ~15s without fresh /imu (and ~45s since bridge start),
-    the bridge runs ``sudo systemctl restart argo_bno085.service`` (throttled,
-    min interval ~45s). Requires passwordless sudo for that command under the service user.
+The bridge publishes /imu_health for lifecycle management (see BNO085Bridge class
+constants for full tuning notes):
+  • Healthy (true):  Sustained /imu stream — not stale, past post-gap cooldown,
+    and stable for _HEALTH_STABLE_S (default 5 s)
+  • Unhealthy (false): Stale /imu, post-gap cooldown, or stream not yet stable
+  • Driver watchdog: separate C++ param watchdog.timeout_ms (default 5 s) — see
+    vendor/bno08x_driver; journal "Watchdog timeout! No data received from sensor"
+  • Auto-recovery: after startup grace, if no /imu for _RESTART_IF_STALE_S (~15 s),
+    bridge runs ``sudo systemctl restart argo_bno085.service`` (throttled by
+    _MIN_RESTART_INTERVAL_S ~45 s). Requires passwordless sudo for that command.
 
 TROUBLESHOOTING
 ---------------
@@ -223,8 +227,56 @@ except ImportError as e:
 class BNO085Bridge(Node):
     """Bridge node that converts BNO08x driver topics to Argo format with I2C error recovery."""
 
+    # ---- Bridge health & recovery tuning (Python bno085_bridge only) ----
+    #
+    # NOT the C++ driver watchdog. That lives in bno08x_ros (vendor/bno08x_driver):
+    #   watchdog.timeout_ms  default 5000 ms — fires when the hub sends no sensor
+    #   reports; driver calls reset(). Override in the launch yaml (e.g.
+    #   nodes/vendor/bno085_i2c_argo.yaml) if resets fire during slow I2C re-init.
+    #   Journal line: "Watchdog timeout! No data received from sensor. Resetting..."
+    #
+    # Bridge logic runs on a 1 Hz timer (_check_health) plus imu_callback on each
+    # /imu from the driver. Rough state flow:
+    #   start UNHEALTHY → stream stable → HEALTHY → gap/stale → UNHEALTHY → cooldown → …
+    #
+    # _HEALTH_STALE_S — "no recent data"
+    #   If time since last /imu exceeds this, bridge marks UNHEALTHY and clears the
+    #   stable-period timer. At 20 Hz, nominal gap is ~50 ms; 3 s allows DDS jitter
+    #   but still catches a dead stream quickly. Checked in _imu_stream_looks_healthy.
+    #
+    # _HEALTH_GAP_S — "stream broke" detector
+    #   If gap between consecutive /imu messages exceeds this, treat as instability
+    #   (driver watchdog reset, I2C stall, brief dropout). Starts cooldown and resets
+    #   _healthy_candidate_since so one lucky message cannot flip HEALTHY immediately.
+    #   Set above normal inter-message period (1/20 Hz = 0.05 s); 1 s is conservative.
+    #
+    # _HEALTH_STABLE_S — "sustained good stream" before HEALTHY
+    #   After stream resumes (or on first boot), require this many seconds of continuous
+    #   /imu before publishing healthy. Stops dashboard/ai2c showing HEALTHY while
+    #   journal still logs repeated driver watchdog resets (~50 ms flip before 2026-06).
+    #
+    # _INSTABILITY_COOLDOWN_S — "don't trust recovery yet"
+    #   After a gap > _HEALTH_GAP_S, block HEALTHY until this many seconds after the
+    #   gap (wall clock). Messages during cooldown still update last_imu_time and feed
+    #   _healthy_candidate_since, but _imu_stream_looks_healthy returns false until
+    #   cooldown expires AND _HEALTH_STABLE_S of stable data has elapsed.
+    #
+    # _STARTUP_GRACE_S — "don't restart systemd during bring-up"
+    #   Suppress sudo systemctl restart argo_bno085.service until bridge has been up
+    #   this long (driver init + first reports can take tens of seconds).
+    #
+    # _RESTART_IF_STALE_S — "escalate to full service restart"
+    #   After startup grace, if no /imu for this long, _attempt_recovery restarts the
+    #   whole argo_bno085 unit (C++ driver + bridge). Works with _MIN_RESTART_INTERVAL_S.
+    #
+    # _MIN_RESTART_INTERVAL_S — restart throttle
+    #   Minimum time between systemd restart attempts to avoid flapping on bad I2C.
+    #
+    # Inspection notes (2026-06): gap/cooldown/stable logic is newer; field-tested on
+    # flaky BNO085 where driver watchdog still fires every ~15–90 s. imu_callback still
+    # resets recovery_attempt_count on every /imu, so sporadic messages can delay systemd
+    # restarts even when watchdog keeps firing — separate from /imu_health display logic.
     _HEALTH_STALE_S = 3.0
-    # At 20 Hz, gaps >1s indicate driver watchdog/reset cycles — do not flip healthy on one message.
     _HEALTH_GAP_S = 1.0
     _HEALTH_STABLE_S = 5.0
     _INSTABILITY_COOLDOWN_S = 15.0

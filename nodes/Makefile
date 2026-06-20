@@ -97,6 +97,7 @@ battery-water-install:
 		echo "⚠️  Service is currently running. Stopping it..."; \
 		sudo systemctl stop argo_battery_water.service; \
 	fi
+	@chmod +x ../scripts/wait_for_bno085_ready.sh
 	@echo "📝 Installing service file..."
 	@sudo cp $(BATTERY_WATER_SERVICE_FILE) $(SYSTEMD_SYSTEM_DIR)/$(BATTERY_WATER_SERVICE_FILE)
 	@sudo chmod 644 $(SYSTEMD_SYSTEM_DIR)/$(BATTERY_WATER_SERVICE_FILE)
@@ -191,11 +192,11 @@ battery-water-logs-follow:
 # BNO08x driver paths and configuration
 # - BNO08X_SUBMODULE_DIR: where the bno08x_driver source submodule is located
 # - BNO08X_BUILD_DIR: where the bno08x_driver build workspace is located  
-# - BNO08X_CONFIG: where the bno08x_driver configuration file is located, important for the I2C bus configuration
+# - BNO08X_CONFIG: Argo driver params (single yaml: vendor/bno085_i2c_argo.yaml)
 # Note: see also the build target and BNO85_README.md for more details about patch applied to the source code
 BNO08X_SUBMODULE_DIR := vendor/bno08x_driver
 BNO08X_BUILD_DIR := argo_bno08x_driver_workspace
-BNO08X_CONFIG := vendor/bno08x_driver_argo.yaml
+BNO08X_CONFIG := vendor/bno085_i2c_argo.yaml
 
 .PHONY: bno08x-help bno08x-init bno08x-build bno08x-test bno08x-launch bno08x-calibrate bno08x-clean
 
@@ -244,14 +245,7 @@ bno08x-build: bno08x-init
 		echo "Creating symlink to submodule..."; \
 		ln -sf $(PWD)/$(BNO08X_SUBMODULE_DIR) $(BNO08X_BUILD_DIR)/src/bno08x_driver; \
 	fi
-	@echo "Applying Argo-specific configuration (I2C bus fix)..."
-	@if grep -q '"/dev/i2c-7"' $(BNO08X_SUBMODULE_DIR)/config/bno085_i2c.yaml 2>/dev/null; then \
-		echo "⚠️  Patching YAML config: I2C bus i2c-7 → i2c-0..."; \
-		sed -i 's|bus: "/dev/i2c-7"|bus: "/dev/i2c-0"|g' $(BNO08X_SUBMODULE_DIR)/config/bno085_i2c.yaml; \
-		echo "✅ YAML config patched"; \
-	else \
-		echo "✅ YAML config already patched"; \
-	fi
+	@echo "Applying Argo-specific configuration (I2C bus default in C++ if needed)..."
 	@if grep -q '"/dev/i2c-7"' $(BNO08X_SUBMODULE_DIR)/src/bno08x_ros.cpp 2>/dev/null; then \
 		echo "⚠️  Patching C++ source: I2C bus default i2c-7 → i2c-0..."; \
 		sed -i 's|"/dev/i2c-7"|"/dev/i2c-0"|g' $(BNO08X_SUBMODULE_DIR)/src/bno08x_ros.cpp; \
@@ -350,8 +344,9 @@ bno085-service-install: bno08x-build
 		echo "⏸️  Stopping existing service..."; \
 		sudo systemctl stop argo_bno085.service; \
 	fi
+	@chmod +x ../scripts/wait_for_bno085_ready.sh
 	@echo "📝 Installing service file with symbolic link to source file..."
-	@sudo ln -sf $(PWD)/$(BNO085_SERVICE_FILE) $(BNO085_SERVICE_DEST)
+	@sudo ln -sf $(CURDIR)/$(BNO085_SERVICE_FILE) $(BNO085_SERVICE_DEST)
 	@sudo systemctl daemon-reload
 	@echo "✅ Argo BNO085 service installed successfully"
 

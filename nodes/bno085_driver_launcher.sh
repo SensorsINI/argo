@@ -35,9 +35,11 @@ export ROS_LOCALHOST_ONLY
 export ROS_PYTHON_VERSION
 export ROS_VERSION
 
+BNO085_PARAMS="$ARGO_DIR/nodes/vendor/bno085_i2c_argo.yaml"
+
 # Start the C++ driver in background
 echo "Starting BNO08x C++ driver..."
-ros2 run bno08x_driver bno08x_driver --ros-args --params-file "$ARGO_DIR/nodes/vendor/bno085_i2c_5hz.yaml" &
+ros2 run bno08x_driver bno08x_driver --ros-args --params-file "$BNO085_PARAMS" &
 DRIVER_PID=$!
 
 # Wait a moment for driver to initialize

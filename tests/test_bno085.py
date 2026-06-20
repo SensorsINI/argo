@@ -28,7 +28,7 @@ Usage (from repo root):
     python3 tests/test_bno085.py --expect-part 0x0098A6B4   # optional BOM lock
     python3 tests/test_bno085.py --skip-ros --skip-product-id   # bench: live accel only
 
-Bus number matches ai2c "Bus 0" (i2cdetect -y 0) and bno08x_driver_argo.yaml
+Bus number matches ai2c "Bus 0" (i2cdetect -y 0) and bno085_i2c_argo.yaml
 i2c.bus /dev/i2c-0 on Orange Pi Zero 2W.
 """
 
@@ -323,12 +323,21 @@ class BNO085Test:
         self._i2c_write_raw([5, 0, 1, 0, 1])
         time.sleep(1.0)
 
+    def _drain_first_shtp_packet(self, drain_attempts: int = 40) -> Optional[bytes]:
+        """After soft reset, poll until the first non-idle SHTP packet or timeout."""
+        for _ in range(drain_attempts):
+            raw = self._hal_read_full_transfer()
+            if raw:
+                return raw
+            time.sleep(0.05)
+        return None
+
     def test_basic_i2c(self):
         """Test raw I2C + SHTP path used by the ROS driver (not SMBus register reads)."""
         print(f"I2C bus {self.bus_num} → /dev/i2c-{self.bus_num}")
         print(
             "  Align with: ai2c \"Bus 0\" = i2cdetect -y 0; "
-            "nodes/vendor/bno08x_driver_argo.yaml → i2c.bus /dev/i2c-0"
+            "nodes/vendor/bno085_i2c_argo.yaml → i2c.bus /dev/i2c-0"
         )
         print(f"Probing BNO085 at 0x{self.addr:02x} (SHTP soft reset + drain first packet)...")
 
@@ -339,21 +348,27 @@ class BNO085Test:
                     f"/dev/i2c-{self.bus_num} (check wiring/power/bus selection)"
                 )
                 return False
-            self._rx_init_state()
-            self._shtp_soft_reset()
-            # First read can be [0,0,0,0] briefly (FIFO not ready). Another common cause
-            # of all-zero headers is a second process holding /dev/i2c-* (e.g. ros2 bno08x_driver).
+            # TWI0 can stay electrically stuck after a failed driver init or bus
+            # contention; re-init + soft reset between rounds matches get_product_id().
             raw: Optional[bytes] = None
-            for attempt in range(40):
-                raw = self._hal_read_full_transfer()
+            for round_idx in range(3):
+                if round_idx > 0:
+                    print(
+                        f"   Retry {round_idx + 1}/3 after re-init + soft reset "
+                        "(TWI0 glitch recovery)..."
+                    )
+                self._rx_init_state()
+                self._shtp_soft_reset()
+                raw = self._drain_first_shtp_packet()
                 if raw:
                     break
-                time.sleep(0.05)
             if not raw:
                 print(
                     "❌ No SHTP packet after reset (FIFO idle / zeros). "
                     "Stop other I²C users: pgrep -af bno08x_driver; "
-                    "sudo systemctl stop argo_bno085.service"
+                    "sudo systemctl stop argo_bno085.service argo_battery_water.service; "
+                    "then: sudo bash ~/argo/scripts/reset_i2c_bus.sh --force "
+                    "(or replug I2C cable if still stuck — see docs/README-i2c.md)."
                 )
                 return False
             h = raw[:4]

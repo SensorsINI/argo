@@ -146,7 +146,7 @@ make bno08x-launch-full
 # Or manually:
 bash -c "source /opt/ros/humble/setup.bash && \
          source ~/argo_bno08x_ws/install/setup.bash && \
-         ros2 run bno08x_driver bno08x_driver --ros-args --params-file vendor/bno08x_driver_argo.yaml &"
+         ros2 run bno08x_driver bno08x_driver --ros-args --params-file vendor/bno085_i2c_argo.yaml &"
 sleep 3
 python3 bno085.py bridge
 ```
@@ -201,58 +201,44 @@ eval "$(register-python-argcomplete bno085.py)"
 
 ### Automatic I2C Bus Configuration
 
-**IMPORTANT**: The BNO08x driver submodule defaults to `/dev/i2c-7`, but Orange Pi Zero 2W uses `/dev/i2c-0`. The Makefile **automatically patches** this during the build process.
-
-**How it works:**
-1. **Fresh clone**: Submodule has `bus: "/dev/i2c-7"` (upstream default)
-2. **Run build**: `make bno08x-build` or `make bno085-service-install`
-3. **Auto-patch**: Makefile detects i2c-7 and changes to i2c-0
-4. **Build proceeds**: Correct I2C bus configuration is used
+**IMPORTANT**: The BNO08x driver submodule C++ source may default to `/dev/i2c-7`, but Orange Pi Zero 2W uses `/dev/i2c-0`. Argo sets the bus in **`nodes/vendor/bno085_i2c_argo.yaml`** (`i2c.bus: "/dev/i2c-0"`). The Makefile **patches the C++ default** to i2c-0 during `make bno08x-build` if upstream still ships i2c-7.
 
 **Manual verification:**
 ```bash
-# Check if patch is needed
-grep 'bus:' vendor/bno08x_driver/config/bno085_i2c.yaml
+grep 'bus:' vendor/bno085_i2c_argo.yaml
 # Should show: bus: "/dev/i2c-0"
-
-# If it shows i2c-7, run:
-make bno08x-build  # Will auto-patch
 ```
 
-**Why automatic patching?**
+**Why C++ patching?**
 - **Submodule is upstream**: Can't commit hardware-specific changes without forking
-- **Hardware-specific**: Orange Pi Zero 2W requires i2c-0 (not i2c-7)
-- **Fresh install support**: Ensures new clones work immediately after `make bno085-service-install`
-- **Maintainability**: No need to remember manual configuration steps
+- **YAML is authoritative for Argo**: Single file `bno085_i2c_argo.yaml` used by systemd, Makefile, and launch
+- **Fresh install support**: Ensures new clones work after `make bno085-service-install`
 
 ### Driver Configuration
 
-The BNO08x C++ driver is configured via `nodes/vendor/bno08x_driver_argo.yaml`. This file is automatically loaded by both launch files.
+The BNO08x C++ driver is configured via **`nodes/vendor/bno085_i2c_argo.yaml`** (single source of truth).
 
-**File Location:** `nodes/vendor/bno08x_driver_argo.yaml`
+**File Location:** `nodes/vendor/bno085_i2c_argo.yaml`
 
 **Current Configuration:**
 ```yaml
 bno08x_ros:  # ⚠️ IMPORTANT: Namespace must match node name (not bno08x_driver)
   ros__parameters:
 
-    frame_id: "imu_link"  # Frame ID for Argo sailboat IMU
+    frame_id: "bno085"
 
-    # Communication Interface
-    # I2C bus 0 on Orange Pi Zero 2W
     i2c:
       enabled: true
-      bus: "/dev/i2c-0"  # Orange Pi Zero 2W uses i2c-0
-      address: "0x4A"    # BNO085 default I2C address
+      bus: "/dev/i2c-0"
+      address: "0x4A"
 
     publish:
-      magnetic_field: 
+      magnetic_field:
         enabled: true
-        rate: 1    # 1 Hz for magnetic field (compass heading)
+        rate: 1    # 1 Hz
       imu:
         enabled: true
-        rate: 5    # 5 Hz for IMU data (accel, gyro, orientation)
-                   # Sailboat dynamics are slow - 5Hz is sufficient
+        rate: 5    # 5 Hz — stable on shared bus 0; increase only if needed
 ```
 
 **Configuration Options:**
@@ -288,7 +274,7 @@ This configuration file is automatically loaded by:
 
 **Customization:**
 To change publish rates or other settings:
-1. Edit `vendor/bno08x_driver_argo.yaml` (ensure `bno08x_ros:` namespace)
+1. Edit `vendor/bno085_i2c_argo.yaml` (ensure `bno08x_ros:` namespace)
 2. Restart the service: `make bno085-service-restart`
 3. Verify rates in logs: Look for "IMU Rate: 5" and "Magnetic Field Rate: 1"
 
@@ -467,7 +453,7 @@ make bno08x-build
 # Test hardware
 make bno08x-test
 
-# Launch full system (uses bno08x_driver_argo.yaml)
+# Launch full system (uses bno085_i2c_argo.yaml)
 make bno08x-launch-full
 
 # Run calibration
@@ -475,7 +461,7 @@ make bno08x-calibrate
 ```
 
 **Makefile Configuration:**
-- **`BNO08X_CONFIG`**: Points to `vendor/bno08x_driver_argo.yaml`
+- **`BNO08X_CONFIG`**: Points to `vendor/bno085_i2c_argo.yaml`
 - **Launch targets**: Automatically load the configuration file
 - **Build targets**: Use the configuration for driver setup
 
@@ -530,12 +516,12 @@ Description=Argo BNO085 IMU Driver and Bridge
 After=network.target
 
 [Service]
-ExecStartPre=/bin/bash -c "source /opt/ros/humble/setup.bash && source ~/argo_bno08x_ws/install/setup.bash"
-ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && source ~/argo_bno08x_ws/install/setup.bash && ros2 run bno08x_driver bno08x_driver --ros-args --params-file ~/argo/nodes/vendor/bno08x_driver/config/bno085_i2c.yaml & python3 ~/argo/nodes/bno085.py bridge"
-WorkingDirectory=~/argo/nodes
+ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
+ExecStart=/home/orangepi/argo/nodes/bno085_driver_launcher.sh
+WorkingDirectory=/home/orangepi/argo/nodes
 StandardOutput=journal
 StandardError=journal
-Restart=on-failure
+Restart=always
 RestartSec=5
 User=orangepi
 
@@ -734,7 +720,7 @@ nodes/
 ├── bno085.py                           ← Unified tool (all functionality)
 ├── vendor/
 │   ├── bno08x_driver/                  ← C++ driver (git submodule)
-│   └── bno08x_driver_argo.yaml         ← Driver configuration (ACTIVE)
+│   └── bno085_i2c_argo.yaml          ← Driver configuration (ACTIVE)
 └── Makefile                            ← Build and launch shortcuts
 
 docs/
@@ -743,7 +729,7 @@ docs/
 
 **Key Files:**
 - **`nodes/bno085.py`**: Main unified tool with all functionality
-- **`nodes/vendor/bno08x_driver_argo.yaml`**: **Active configuration file** used by Makefile and direct commands
+- **`nodes/vendor/bno085_i2c_argo.yaml`**: **Active configuration file** (systemd, Makefile, launch)
 - **`nodes/Makefile`**: Convenient build and launch shortcuts
 
 ## References

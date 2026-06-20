@@ -2,7 +2,8 @@
 Description=Argo BNO085 IMU Driver Service
 Documentation=file://%h/argo/docs/README-imu-bno085.md
 After=network.target
-Before=argo_launch_standard.service
+Before=argo_battery_water.service argo_launch_standard.service
+# IMU must finish SHTP init on i2c-0 before battery/water polls 0x34/0x44.
 # REMOVED: DefaultDependencies=no and Before=shutdown.target
 # These caused 60-90 second shutdown hangs because the service tried to
 # shut down gracefully after ROS2 infrastructure was already dead.
@@ -16,6 +17,7 @@ Group=orangepi
 WorkingDirectory=/home/orangepi/argo/nodes
 Environment=ROS_DOMAIN_ID=0
 Environment=PYTHONUNBUFFERED=1
+# Environment=BNO08X_I2C_VERBOSE=1 # uncomment to to turn on more verbose i2c logging. 
 ExecStartPre=/bin/mkdir -p /var/log.hdd/persistent
 ExecStart=/bin/bash -c 'set -eo pipefail; exec /home/orangepi/argo/nodes/bno085_driver_launcher.sh |& tee -a /var/log.hdd/persistent/argo-bno085.log'
 Restart=always
