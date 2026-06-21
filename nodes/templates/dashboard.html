@@ -151,7 +151,7 @@
                 <div class="status-item status-item-stacked">
                     <span class="label">IMU</span>
                     <span class="value" id="imu-health">❓ UNKNOWN</span>
-                    <span class="value value-detail" id="imu-pose">---° · tilt -- · roll --</span>
+                    <span class="value value-detail" id="imu-pose">heading --° · tilt -- · roll --</span>
                 </div>
                 <div class="status-item status-item-stacked">
                     <span class="label">Wind from</span>
@@ -490,7 +490,9 @@
         }
 
         function formatImuPoseText(data) {
-            const hdg = data.compass_heading != null ? `${Math.round(data.compass_heading)}°` : '---°';
+            const hdg = data.compass_heading != null
+                ? `heading ${Math.round(data.compass_heading)}°`
+                : 'heading --°';
             const tilt = data.imu_tilt_deg != null ? `tilt ${formatSignedDeg(data.imu_tilt_deg)}` : 'tilt --';
             const roll = data.imu_roll_deg != null ? `roll ${formatSignedDeg(data.imu_roll_deg)}` : 'roll --';
             return `${hdg} · ${tilt} · ${roll}`;
