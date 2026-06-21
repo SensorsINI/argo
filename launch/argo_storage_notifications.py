@@ -19,6 +19,9 @@ RECORDING_RATE_GB_PER_HOUR = RECORDING_RATE_MB_PER_HOUR / 1024.0
 CRITICAL_HOURS = 10.0  # Critical warning below 10 hours
 WARNING_HOURS = 24.0   # Warning below 24 hours
 
+# Desktop GUI notifications disabled — Argo no longer uses a desktop session.
+DESKTOP_NOTIFICATIONS_ENABLED = False
+
 def get_disk_usage(path="/"):
     """Get disk usage statistics for the given path"""
     try:
@@ -41,10 +44,13 @@ def calculate_recording_hours(free_space_gb):
 
 def send_notification(title, message, urgency="normal", icon="dialog-information"):
     """Send a desktop notification using notify-send"""
+    if not DESKTOP_NOTIFICATIONS_ENABLED:
+        return False
+
     try:
         # Check if notify-send is available
         subprocess.run(["which", "notify-send"], check=True, capture_output=True)
-        
+
         # Send notification
         cmd = [
             "notify-send",
@@ -54,7 +60,7 @@ def send_notification(title, message, urgency="normal", icon="dialog-information
             title,
             message
         ]
-        
+
         subprocess.run(cmd, check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):

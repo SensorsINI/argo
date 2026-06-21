@@ -331,6 +331,8 @@ LED_SERVICE_WAIT_DUTY_CYCLE = 0.5       # 50% duty cycle for R+G flashing
 TEST_MODE_SHUTDOWN_DELAY_S = 5
 
 # Notification Timeouts
+# Desktop GUI notifications disabled — Argo no longer uses a desktop session.
+DESKTOP_NOTIFICATIONS_ENABLED = False
 # Desktop notification timeout (seconds)
 DESKTOP_NOTIFICATION_TIMEOUT_S = 5
 # Minimum interval between desktop user re-detection attempts (seconds)
@@ -3025,6 +3027,11 @@ class PowerController(ArgoBaseNode):
         are skipped until we re-detect (throttled to DESKTOP_REDETECT_INTERVAL_S). On send
         failure we re-detect once and retry before setting the sticky failure flag.
         """
+        if not DESKTOP_NOTIFICATIONS_ENABLED:
+            self.get_logger().debug(
+                f"Desktop notifications disabled - skipping: {title}: {message}")
+            return
+
         # If we previously failed, try re-detecting desktop user (throttled) so notifications can recover
         if self.desktop_user_detection_failed:
             now = time.time()
