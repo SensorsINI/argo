@@ -32,6 +32,7 @@ import re
 import shutil
 import tempfile
 import yaml
+import psutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -170,8 +171,11 @@ class ArgoWebDashboard(ArgoBaseNode):
             
             # Temperature
             'cpu_temp': None,
+            'cpu_load_1': None,  # 1-min load average (active mode only)
+            'cpu_percent': None,  # CPU utilization % (active mode only)
             'cpu_temp_high_alert': False,  # High CPU temp warning from temp_monitor
             'cpu_temp_critical_alert': False,  # Critical CPU temp warning from temp_monitor
+            'low_power_mode': False,
             'pcb_temp': None,
             'air_temp': None,
             
@@ -257,6 +261,7 @@ class ArgoWebDashboard(ArgoBaseNode):
         self.last_viewer_request_time = time.time()  # Track last HTTP request
         self.viewer_timeout = 30.0  # Enter low-power mode after 30s of no requests
         self.low_power_mode = False  # Start in high power mode, but if no queries for some time, we unsubscribe aagin
+        self._cpu_percent_primed = False
         
         # QoS profile for subscriptions that should not receive stale data from transient_local publishers
         self.volatile_qos = QoSProfile(
@@ -1275,7 +1280,11 @@ class ArgoWebDashboard(ArgoBaseNode):
     def _enter_low_power_mode(self):
         """Enter low-power mode: unsubscribe from all topics and reduce timer frequencies."""
         self.low_power_mode = True
-        
+        with self.state_lock:
+            self.state['low_power_mode'] = True
+            self.state['cpu_load_1'] = None
+            self.state['cpu_percent'] = None
+
         # Destroy all subscriptions to eliminate callback overhead (if they exist)
         if self._topic_subscriptions:
             subscription_count = len(self._topic_subscriptions)
@@ -1294,7 +1303,9 @@ class ArgoWebDashboard(ArgoBaseNode):
     def _exit_low_power_mode(self, source_ip=None):
         """Exit low-power mode: subscribe/resubscribe to all topics and restore normal timer frequencies."""
         self.low_power_mode = False
-        
+        with self.state_lock:
+            self.state['low_power_mode'] = False
+
         # Log exit with source IP if available
         if source_ip:
             self.get_logger().info(f"👁️  Exiting low-power mode (viewer activity detected from {source_ip})")
@@ -1591,8 +1602,9 @@ class ArgoWebDashboard(ArgoBaseNode):
                     )
                 self._update_data_age_indicators()
             
-            # Get CPU temperature (file I/O - skip in low-power mode)
+            # Get CPU temperature and load (file I/O - skip in low-power mode)
             self._update_cpu_temp()
+            self._update_cpu_stats()
 
             # Update node status (expensive operation - skip in low-power mode)
             node_status = self.node_manager.get_node_status()
@@ -1651,7 +1663,21 @@ class ArgoWebDashboard(ArgoBaseNode):
                             self.state['cpu_temp_high_alert'] = True
         except Exception as e:
             self.get_logger().error(f"Error reading CPU temperature: {e}")
-    
+
+    def _update_cpu_stats(self):
+        """Read 1-min load average and CPU utilization (active mode only)."""
+        try:
+            if not self._cpu_percent_primed:
+                psutil.cpu_percent(interval=None)
+                self._cpu_percent_primed = True
+            load_1, _, _ = os.getloadavg()
+            cpu_pct = psutil.cpu_percent(interval=None)
+            with self.state_lock:
+                self.state['cpu_load_1'] = round(load_1, 2)
+                self.state['cpu_percent'] = round(cpu_pct, 1)
+        except Exception as e:
+            self.get_logger().error(f"Error reading CPU load stats: {e}")
+
     def _load_node_lists_from_yaml(self) -> (list, list, list):
         """Load the list of nodes for the physical robot from argo_nodes.yaml.
 

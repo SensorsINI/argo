@@ -92,9 +92,10 @@
                     <span class="value" id="usb-power">???</span>
                 </div>
                 <!-- Row 3: Temperatures -->
-                <div class="status-item">
-                    <span class="label">CPU Temp:</span>
-                    <span class="value" id="cpu-temp">-- °C</span>
+                <div class="status-item status-item-stacked">
+                    <span class="value value-detail" id="cpu-temp">CPU Temp -- °C</span>
+                    <span class="value value-detail" id="cpu-load">Load --</span>
+                    <span class="value value-detail" id="cpu-percent">CPU --%</span>
                 </div>
                 <div class="status-item">
                     <span class="label">PCB Temp:</span>
@@ -104,7 +105,8 @@
                     <span class="label">WindSensor Temp:</span>
                     <span class="value" id="air-temp">-- °C</span>
                 </div>
-                <!-- Row 4: Humidity and Saltwater Sensor -->
+                <!-- Row 4: Humidity and Saltwater (cols 2–3) -->
+                <div class="status-item status-grid-spacer" aria-hidden="true"></div>
                 <div class="status-item">
                     <span class="label">Humidity:</span>
                     <span class="value" id="humidity-status">-- %</span>
@@ -1178,7 +1180,7 @@
             
             // Temperatures
             const cpuTempEl = document.getElementById('cpu-temp');
-            cpuTempEl.textContent = data.cpu_temp ? `${data.cpu_temp} °C` : '-- °C';
+            cpuTempEl.textContent = data.cpu_temp ? `CPU Temp ${data.cpu_temp} °C` : 'CPU Temp -- °C';
             if (data.cpu_temp_critical_alert) {
                 cpuTempEl.style.color = '#ff4444';
             } else if (data.cpu_temp_high_alert) {
@@ -1190,6 +1192,14 @@
                 data.pcb_temp !== null && data.pcb_temp !== undefined ? `${data.pcb_temp.toFixed(1)} °C` : '-- °C';
             document.getElementById('air-temp').textContent = 
                 data.air_temp !== null && data.air_temp !== undefined ? `${data.air_temp.toFixed(1)} °C` : '-- °C';
+
+            const cpuStatsActive = !data.low_power_mode;
+            document.getElementById('cpu-load').textContent =
+                cpuStatsActive && data.cpu_load_1 !== null && data.cpu_load_1 !== undefined
+                    ? `Load ${data.cpu_load_1}` : 'Load --';
+            document.getElementById('cpu-percent').textContent =
+                cpuStatsActive && data.cpu_percent !== null && data.cpu_percent !== undefined
+                    ? `CPU ${data.cpu_percent}%` : 'CPU --%';
             
             // Humidity and Saltwater Sensor
             document.getElementById('humidity-status').textContent = 

@@ -247,6 +247,14 @@ body {
     color: #495057;
 }
 
+.status-grid-spacer {
+    visibility: hidden;
+    border: none;
+    background: transparent;
+    min-height: 0;
+    padding: 0;
+}
+
 @media (max-width: 640px) {
     .sensor-status-row {
         grid-template-columns: 1fr;
