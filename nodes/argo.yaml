@@ -22,7 +22,7 @@
     simulation:
       publish_rate: 2.0         # Standard publishing rate for sensors, transforms, and visualization (Hz)
       simulation_rate: 10.0     # Simulation step rate (Hz) - higher than publish_rate for accurate physics
-      heading_trail_limit: 200  # Number (roughly) of historical heading markers to display in visualization
+      heading_trail_limit: 50  # Number (roughly) of historical heading markers to display in visualization
       grounding_behavior: reset # Behavior on grounding in local simulation: reset|terminate|continue
       # Sensor noise modeling for sim-to-real gap reduction
       # Set all noise parameters to 0.0 to disable noise (perfect sensors)
