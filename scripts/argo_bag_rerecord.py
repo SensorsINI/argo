@@ -749,7 +749,7 @@ After installation, try the re-recording again.
                     mcap_config_file = temp_path
                     with os.fdopen(fd, 'w') as f:
                         yaml.dump(mcap_config, f, default_flow_style=False)
-                    record_base_cmd += f' --storage-config-file {mcap_config_file}'
+                    record_base_cmd += f' --storage-config-file {shlex.quote(mcap_config_file)}'
                     # Register cleanup function for this file
                     def cleanup_config_file():
                         if os.path.exists(mcap_config_file):
