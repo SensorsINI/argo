@@ -90,8 +90,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self._gps_offset_base_y = 0.0
         self._gps_offset_base_z = 0.05  # meters up (+Z in base_link) - unused for 2D translation
         
-        # GPS timestamp tracking - store the timestamp of the GPS message that provided current position
-        # This ensures transforms use the correct timestamp to match GPS data, preventing backwards movement
+        # Last accepted /fix header stamp (debug tracing; not used for dynamic TF stamping).
         self.last_gps_timestamp = None
         self._last_gps_wall_time = None
         
@@ -283,8 +282,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         self.current_lat = msg.latitude
         self.current_lon = msg.longitude
         
-        # Store the GPS message timestamp - this is critical for correct transform ordering
-        # Transforms that use this GPS position should use this timestamp, not the current clock time
+        # Store the GPS message timestamp for debug tracing.
         self.last_gps_timestamp = msg.header.stamp
         self._last_gps_wall_time = time.time()
         
@@ -399,13 +397,11 @@ class ArgoTransformPublisher(ArgoBaseNode):
                 self.get_logger().debug(f"[TF_TRACE:{tf_id}] TF_PUBLISH_START")
             
             # map->odom is static (see publish_static_transforms). Only odom->base_link here.
-            # Timestamping:
-            # - Prefer GPS message timestamp when available so TF aligns with /fix during bag playback.
-            # - Otherwise fall back to /clock (if present) or node time.
-            if self.last_gps_timestamp is not None:
-                stamp = self.last_gps_timestamp
-            else:
-                stamp = self.get_current_time()
+            # Stamp with node (or /clock) time so dynamic TF aligns with visualization markers
+            # and bag log time. Do not reuse last_gps_timestamp: the timer republishes faster than
+            # GPS updates, and a frozen GPS stamp after spike-filter rejections caused multi-second
+            # Foxglove 3D desync and gaps in recorded bags.
+            stamp = self.get_current_time()
 
             # Odom to base_link transform (boat position and orientation)
             # For now, assume boat is at map origin (0,0,0) and only rotates
