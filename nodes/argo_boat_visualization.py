@@ -156,7 +156,9 @@ class ArgoBoatVisualization(ArgoBaseNode):
         
         # Declare parameters
         self.declare_parameter('visualization_scale', 3.0)
+        self.declare_parameter('visualization.rerecord_mode', False)
         self.visualization_scale = self.get_parameter('visualization_scale').get_parameter_value().double_value
+        self.rerecord_mode = self.get_parameter('visualization.rerecord_mode').get_parameter_value().bool_value
         
         # Read update rate from shared simulation parameters (argo.yaml)
         # Uses simulation.publish_rate to match transform publisher and simulator rate
@@ -719,8 +721,8 @@ class ArgoBoatVisualization(ArgoBaseNode):
             Tuple of (seconds, nanoseconds) for marker lifetime.
             If heading_trail_limit is 0, returns (0, 0) for persistent markers.
         """
-        if self.heading_trail_limit == 0:
-            return (0, 0)  # Persistent markers
+        if self.heading_trail_limit == 0 or self.rerecord_mode:
+            return (0, 0)  # Persistent markers (rerecord bags need trail to survive playback)
         
         # Calculate lifetime to show approximately heading_trail_limit markers
         # Use the time spacing as the basis, with a conservative multiplier
@@ -1828,15 +1830,20 @@ class ArgoBoatVisualization(ArgoBaseNode):
             # marker_array.markers.append(self.create_velocity_vector_marker())
             marker_array.markers.append(self.create_heading_arrow_marker())
 
-            # Add NEW historical heading markers only (efficiency optimization)
-            # Markers have finite lifetimes and expire naturally, so we only need to publish new ones
+            # Heading trail: incremental live publish; full trail each tick when rerecording bags
             if self.heading_trail_limit > 0 and self.heading_trail:
-                num_trail_markers = len(self.heading_trail)
-                if num_trail_markers > self._published_trail_count:
-                    # Only create markers for new entries
-                    new_markers = self._create_heading_trail_markers(start_idx=self._published_trail_count)
-                    marker_array.markers.extend(new_markers)
-                    self._published_trail_count = num_trail_markers
+                if self.rerecord_mode:
+                    marker_array.markers.extend(
+                        self._create_heading_trail_markers(start_idx=0)
+                    )
+                else:
+                    num_trail_markers = len(self.heading_trail)
+                    if num_trail_markers > self._published_trail_count:
+                        new_markers = self._create_heading_trail_markers(
+                            start_idx=self._published_trail_count
+                        )
+                        marker_array.markers.extend(new_markers)
+                        self._published_trail_count = num_trail_markers
 
             # Add overlay markers (e.g., top-down indicators) and clear buffer
             if self.overlay_markers:

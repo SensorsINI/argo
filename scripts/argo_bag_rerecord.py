@@ -93,7 +93,7 @@ Launch arguments (pass as name:=value):
   use_sailing_area  true|false - sailing_area_publisher (default: true)
   use_visualization true|false - argo_boat_visualization (default: true)
   use_transform     true|false - argo_transform_publisher (default: true)
-  playback_rate     Bag play rate multiplier, e.g. 100.0 (default: 100.0)
+  playback_rate     Bag play rate multiplier, e.g. 10.0 (default) or 100.0 for speed
   storage_format      mcap|sqlite3 (default: from nodes/record.yaml)
 
   exclude_recorded_markers true|false - omit bag topics re-published live (default: true)
@@ -159,6 +159,13 @@ SAILING_MARKER_TOPICS_RECORDED = frozenset({
     '/sailing_waypoints',
     '/sailing_boundaries',
     '/sailing_hazards',
+})
+
+# Original-bag TF topics must not play when transform publisher is live; stale stamps
+# cause TF_OLD_DATA warnings and break visualization TF lookups during re-record.
+TF_TOPICS_RECORDED = frozenset({
+    '/tf',
+    '/tf_static',
 })
 
 
@@ -503,6 +510,54 @@ def check_mcap_plugin_available():
         return False
 
 
+def _rerecord_output_path(context) -> str:
+    """Absolute path to the output bag directory from launch context."""
+    output_bag = str(context.launch_configurations.get('output_bag', '') or '').strip()
+    argo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bags_dir = os.path.join(argo_dir, 'bags')
+    return os.path.join(bags_dir, output_bag)
+
+
+def print_final_summary(context):
+    """Print output bag location last so it is not buried in verbose launch output."""
+    try:
+        output_path = _rerecord_output_path(context)
+        meta_path = os.path.join(output_path, 'metadata.yaml')
+        divider = '━' * 76
+
+        print(f'\n{divider}', flush=True)
+        print('📦 Re-recording summary', flush=True)
+        print(divider, flush=True)
+
+        if os.path.isdir(output_path) and os.path.isfile(meta_path):
+            try:
+                size = subprocess.check_output(
+                    ['du', '-sh', output_path], text=True, stderr=subprocess.DEVNULL
+                ).split()[0]
+            except (subprocess.SubprocessError, IndexError, FileNotFoundError):
+                size = 'unknown'
+            print(f'   ✅ Output bag: {output_path}', flush=True)
+            print(f'      Size: {size}', flush=True)
+            mcap_files = glob.glob(os.path.join(output_path, '**', '*.mcap'), recursive=True)
+            if not mcap_files:
+                mcap_files = glob.glob(os.path.join(output_path, '*.mcap'))
+            if mcap_files:
+                print(f'      MCAP: {mcap_files[0]}', flush=True)
+            print('   Foxglove: Open data source → Local file → select the output bag folder', flush=True)
+        elif os.path.isdir(output_path):
+            print(f'   ⚠️  Output folder exists but metadata.yaml is missing:', flush=True)
+            print(f'      {output_path}', flush=True)
+        else:
+            print(f'   ❌ Output bag was NOT created:', flush=True)
+            print(f'      {output_path}', flush=True)
+            print('      Check errors above (e.g. bag_recording exited with a syntax error).', flush=True)
+
+        print(f'{divider}\n', flush=True)
+    except Exception as e:
+        print(f'Could not print re-recording summary: {e}', file=sys.stderr, flush=True)
+    return []
+
+
 def validate_and_print_paths(context):
     """Validate paths and print output bag location"""
     try:
@@ -637,8 +692,11 @@ After installation, try the re-recording again.
         
         playback_rate_arg = DeclareLaunchArgument(
             'playback_rate',
-            default_value='100.0',
-            description='Playback rate multiplier (1.0 = realtime, higher = faster). Maximum rate for fastest processing.'
+            default_value='10.0',
+            description=(
+                'Playback rate multiplier (1.0 = realtime). Default 10x balances speed with '
+                'visualization density; 100x often leaves sparse markers in the output bag.'
+            ),
         )
         
         storage_format_arg = DeclareLaunchArgument(
@@ -794,7 +852,11 @@ After installation, try the re-recording again.
         # geofence_map_name from nodes/argo.yaml (launch_ros temp dict becomes its own --params-file).
         _sim_time_ros_args = ['-p', 'use_sim_time:=true']
         # Boat viz emits INFO trace lines (e.g. VIS_SAILING_MERGE_TRACE); quiet for re-record.
-        _boat_viz_ros_args = _sim_time_ros_args + ['--log-level', 'warn']
+        # rerecord_mode: publish full heading trail each tick with persistent lifetime for bag playback.
+        _boat_viz_ros_args = _sim_time_ros_args + [
+            '-p', 'visualization.rerecord_mode:=true',
+            '--log-level', 'warn',
+        ]
 
         # Visualization node - recreates markers from source topics in the bag
         # Use simulated time to preserve original timestamps from playback
@@ -915,21 +977,29 @@ After installation, try the re-recording again.
             cleanup_trimmed_temp(context)
             _remove_empty_trim_workdirs(bags_dir)
 
+        def shutdown_with_summary(context):
+            cleanup_all_artifacts(context)
+            print_final_summary(context)
+            return []
+
         def add_bag_playback_actions(context):
             """Build ros2 bag play with --topics so recorded markers are not replayed when live nodes replace them."""
             input_bag_raw = context.launch_configurations.get('input_bag', '')
-            playback_rate = context.launch_configurations.get('playback_rate', '100.0')
+            playback_rate = context.launch_configurations.get('playback_rate', '10.0')
             input_bag = _resolve_input_bag_path(input_bag_raw, argo_dir, bags_dir)
             exclude_markers = _launch_truthy(
                 context.launch_configurations.get('exclude_recorded_markers', 'true'))
             use_viz = _launch_truthy(context.launch_configurations.get('use_visualization', 'true'))
             use_sail = _launch_truthy(context.launch_configurations.get('use_sailing_area', 'true'))
+            use_transform = _launch_truthy(context.launch_configurations.get('use_transform', 'true'))
             to_exclude = set()
             if exclude_markers:
                 if use_viz:
                     to_exclude.update(BOAT_VIZ_TOPICS_RECORDED)
                 if use_sail:
                     to_exclude.update(SAILING_MARKER_TOPICS_RECORDED)
+                if use_transform:
+                    to_exclude.update(TF_TOPICS_RECORDED)
             all_topics = _list_bag_topic_names(input_bag)
             topics_suffix = ''
             if to_exclude and all_topics:
@@ -989,7 +1059,6 @@ After installation, try the re-recording again.
                         TimerAction(
                             period=15.0,
                             actions=[
-                                OpaqueFunction(function=cleanup_all_artifacts),
                                 Shutdown(reason='Bag playback completed'),
                             ],
                         ),
@@ -998,11 +1067,11 @@ After installation, try the re-recording again.
             )
             return [bag_play, start_recording_handler, stop_all_handler]
         
-        # Cleanup handler for any shutdown (Ctrl+C, errors, etc.)
+        # Cleanup handler for any shutdown (Ctrl+C, errors, normal completion)
         cleanup_on_shutdown = RegisterEventHandler(
             OnShutdown(
             on_shutdown=[
-                OpaqueFunction(function=cleanup_all_artifacts)
+                OpaqueFunction(function=shutdown_with_summary)
             ]
         )
         )
@@ -1026,7 +1095,7 @@ After installation, try the re-recording again.
         LogInfo(msg=['Input bag: ', LaunchConfiguration('input_bag')]),
         LogInfo(msg=['Output bag: ', LaunchConfiguration('output_bag')]),
         LogInfo(msg=['Storage format: ', storage_format, ' (from record.yaml config)']),
-        LogInfo(msg=['Playback rate: ', LaunchConfiguration('playback_rate'), 'x (maximum speed)']),
+        LogInfo(msg=['Playback rate: ', LaunchConfiguration('playback_rate'), 'x']),
         LogInfo(msg=[
             'Geofence map (nodes/argo.yaml geofence_map_name): ',
             geofence_map_name if geofence_map_name else 'unset (node default; transform may use first GPS for origin)',

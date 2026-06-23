@@ -162,7 +162,7 @@ fi
 USE_SAILING_AREA="true"
 USE_VISUALIZATION="true"
 USE_TRANSFORM="true"
-PLAYBACK_RATE="100.0"  # Default to 100x speed for maximum throughput
+PLAYBACK_RATE="10.0"  # Default 10x; use --rate 100.0 for speed (sparse visualization in output)
 SKIP_CONFIRMATION="false"
 
 while [[ $# -gt 0 ]]; do

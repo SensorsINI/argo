@@ -93,6 +93,8 @@ class ArgoTransformPublisher(ArgoBaseNode):
         # Last accepted /fix header stamp (debug tracing; not used for dynamic TF stamping).
         self.last_gps_timestamp = None
         self._last_gps_wall_time = None
+        self._last_gps_message_time_s = None  # header stamp of last accepted fix (speed filter)
+        self._last_spike_warn_wall_time = 0.0
         
         # Debug tracing
         self.debug_trace = self.declare_parameter('debug_trace', False).get_parameter_value().bool_value
@@ -232,6 +234,10 @@ class ArgoTransformPublisher(ArgoBaseNode):
         y = (math.radians(lat) - math.radians(self.map_origin_lat)) * self.earth_radius
         return x, y
     
+    @staticmethod
+    def _fix_stamp_to_sec(stamp) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+    
     def gps_callback(self, msg):
         """Update current position from GPS fix. Map origin is set from config if available, otherwise from first GPS fix."""
         if math.isnan(msg.latitude) or math.isnan(msg.longitude):
@@ -266,17 +272,29 @@ class ArgoTransformPublisher(ArgoBaseNode):
                 self.get_logger().info(
                     f"Detected position reset near map origin: jump {distance:.1f}m "
                     f"(distance to origin {distance_to_origin:.1f}m)")
-            elif distance > 0.0 and self._last_gps_wall_time is not None:
-                # Implied speed check (multipath flyaways), not a distance cap on real motion
-                max_speed_mps = self._max_gps_speed_mps
-                dt = time.time() - self._last_gps_wall_time
-                if 0.05 < dt < 30.0 and (distance / dt) > max_speed_mps:
-                    self.get_logger().warn(
-                        f"Ignoring implausible GPS spike: {distance:.1f}m in {dt:.2f}s "
-                        f"({distance / dt:.1f} m/s > {max_speed_mps:.1f} m/s)")
-                    if self.debug_trace:
-                        self.get_logger().debug("[TF_TRACE:GPS] Spike rejected by speed check")
-                    return
+            elif distance > 0.0:
+                # Speed filter: use /fix header stamps so bag replay bursts (many messages
+                # in milliseconds of wall time) are not treated as instantaneous jumps.
+                msg_time_s = self._fix_stamp_to_sec(msg.header.stamp)
+                dt = None
+                if self._last_gps_message_time_s is not None:
+                    dt = msg_time_s - self._last_gps_message_time_s
+                if dt is None or dt <= 0.0:
+                    if self._last_gps_wall_time is not None:
+                        dt = time.time() - self._last_gps_wall_time
+                if dt is not None and 0.05 < dt < 30.0:
+                    max_speed_mps = self._max_gps_speed_mps
+                    implied_speed = distance / dt
+                    if implied_speed > max_speed_mps:
+                        now = time.time()
+                        if now - self._last_spike_warn_wall_time >= 1.0:
+                            self._last_spike_warn_wall_time = now
+                            self.get_logger().warn(
+                                f"Ignoring implausible GPS spike: {distance:.1f}m in {dt:.2f}s "
+                                f"({implied_speed:.1f} m/s > {max_speed_mps:.1f} m/s)")
+                        if self.debug_trace:
+                            self.get_logger().debug("[TF_TRACE:GPS] Spike rejected by speed check")
+                        return
         
         old_lat, old_lon = self.current_lat, self.current_lon
         self.current_lat = msg.latitude
@@ -284,6 +302,7 @@ class ArgoTransformPublisher(ArgoBaseNode):
         
         # Store the GPS message timestamp for debug tracing.
         self.last_gps_timestamp = msg.header.stamp
+        self._last_gps_message_time_s = self._fix_stamp_to_sec(msg.header.stamp)
         self._last_gps_wall_time = time.time()
         
         if self.debug_trace:
